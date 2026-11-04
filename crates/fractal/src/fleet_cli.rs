@@ -1,6 +1,7 @@
 use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
+mod rekey;
 
 // Some fleet commands historically print prose even with --json. Keep those bytes
 // stable for callers; only the human rendering uses the installed fractal command.
@@ -534,6 +535,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             FleetTransportsCommand::Add { no_service, .. }
             | FleetTransportsCommand::Remove { no_service, .. }
             | FleetTransportsCommand::Prefer { no_service, .. } => !*no_service,
+            FleetTransportsCommand::Rekey { .. } => false,
         },
         _ => false,
     };
@@ -1151,6 +1153,9 @@ async fn run_fleet_transports(
     json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    if matches!(command, FleetTransportsCommand::Rekey { .. }) {
+        return rekey::run(client, config, json_output).await;
+    }
     let lock = lock_fleet_settings(&config.state_dir).await?;
     let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
         .context("this machine is not a fleet member")?;
@@ -1161,7 +1166,8 @@ async fn run_fleet_transports(
     let transport = match &command {
         FleetTransportsCommand::Add { transport, .. }
         | FleetTransportsCommand::Remove { transport, .. }
-        | FleetTransportsCommand::Prefer { transport, .. } => transport,
+        | FleetTransportsCommand::Prefer { transport, .. }
+        | FleetTransportsCommand::Rekey { transport } => transport,
     };
     let enabled = file
         .transports
@@ -1209,6 +1215,7 @@ async fn run_fleet_transports(
         .clone()
         .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
     let no_service = match command {
+        FleetTransportsCommand::Rekey { .. } => unreachable!("rekey dispatched before settings edits"),
         FleetTransportsCommand::Prefer {
             transport,
             no_service,
