@@ -53,6 +53,11 @@ pub trait Runtime: Send + Sync {
     fn writer_observer(&self) -> Option<std::sync::Arc<dyn crate::sqlite::WriterObserver>> {
         None
     }
+    /// Authority-bearing replication requires a keyed writer, including restored sources.
+    /// Trusted-local appends do not pass through this predicate.
+    fn replicated_claim_requires_keyed_writer(&self, _kind: &str) -> bool {
+        false
+    }
     /// A completed local response still names live work. Cleanup extends its retry window;
     /// the runtime checks only the bounded candidate, never its complete history.
     fn idempotency_response_in_use(
