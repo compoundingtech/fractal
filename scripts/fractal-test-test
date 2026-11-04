@@ -363,7 +363,7 @@ class TreeOrphansTest(unittest.TestCase):
 
     def test_a_live_st_test_or_its_process_in_a_free_tree_is_never_signalled_and_the_tree_is_left(self):
         # A live run's processes in a tree free by its lock are never signalled (2026-11-04: two seats' runs died of SIGTERM, cause unconfirmed).
-        self.process(300, cwd='/', argv=[sys.executable, '/home/u/src/repo/scripts/st-test', '--all', '--push', 'origin'], ppid=1)
+        self.process(300, cwd='/', argv=[sys.executable, '/opt/repo/scripts/st-test', '--all', '--push', 'origin'], ppid=1)
         self.process(301, cwd=self.tree, argv=['bash', 'scripts/ci-local', 'tests'], ppid=300)  # its child, in the tree
         self.process(302, cwd=self.tree, argv=['cargo', 'nextest', 'run'], ppid=301)  # and a grandchild
         for live in ((300, 301, 302), (301, 302)):  # the st-test itself in the tree too, or only its descendants
