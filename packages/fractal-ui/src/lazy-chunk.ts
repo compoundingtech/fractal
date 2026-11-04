@@ -52,12 +52,16 @@ export const createLazyChunk = <TModule>({ load: importer, assets = () => [] }: 
   readonly assets?: () => readonly string[]
 }): LazyChunk<TModule> => {
   let request: Promise<TModule> | undefined
+  let retryRequest: Promise<TModule> | undefined
   let failures = 0
   const attempt = (retry: boolean): Promise<TModule> => (retry ? repairStylesheets(assets()) : Promise.resolve())
     .then(importer).catch(error => { failures += 1; throw error })
   return {
     load: () => request ??= attempt(false),
-    retry: () => request = attempt(true),
+    retry: () => {
+      retryRequest ??= attempt(true).finally(() => { retryRequest = undefined })
+      return request = retryRequest
+    },
     get recovery() { return failures >= 2 ? 'reload' : 'retry' },
     reload: async () => {
       // WebKit can retain failed modulepreload resources across reload. Ordinary fetch
