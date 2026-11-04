@@ -588,6 +588,14 @@ read or computed.
 **Inputs:** the agent row's runtime, harness observation, delivery, fault and queue, which the
 roster refresher already folds.
 
+An agent root without a primary member reduces only its currently declared, owned exec/PTY
+children. Unsuccessful exits are failures; failed or unknown children cannot be hidden by a
+running sibling. It is stopped only when all children have ended successfully or stopped.
+Its `runtime_ids` contains observed runtime resources, never unobserved declarations, ordered
+with terminal-capable runtimes first and then by runtime ID within each class. Clients may use
+the first resource to discover an available terminal. Root host/workspace come from root
+placement, not an arbitrary child's override; unresolved host placement remains unknown.
+
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
