@@ -18,6 +18,10 @@ client files conflict in a merge, resolve the schema and template files, take ei
 generated file (`git checkout --theirs -- clients crates/fractal-client/src/contract.rs
 crates/fractal-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
+Generated Effect string length checks count Unicode code points, matching JSON Schema
+`minLength`/`maxLength`, not UTF-16 code units. Separate admission byte limits still apply.
+URI-reference format checks validate RFC3986 syntax, including relative references,
+without URL-constructor normalization of malformed input.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.

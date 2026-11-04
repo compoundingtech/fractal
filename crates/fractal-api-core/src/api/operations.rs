@@ -297,6 +297,8 @@ fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
         "could not prove the legacy runtime start is closed",
     );
     if let Some(procfs) = error.downcast_ref::<fractal_runtime::ProcfsHidesProcesses>() {
+        tracing::warn!(stage = "procfs-visibility", reason = procfs.detail,
+            mount_options = ?procfs.mount_options, "legacy start closure proof refused");
         refusal = refusal.with_detail("stage", "procfs-visibility")
             .with_detail("reason", procfs.detail);
         if let Some(options) = &procfs.mount_options {
@@ -305,11 +307,16 @@ fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
         return refusal;
     }
     if let Some(process) = error.downcast_ref::<fractal_runtime::LegacyStartProofUnavailable>() {
-        refusal = refusal.with_detail("stage", process.stage).with_detail("pid", process.pid);
+        tracing::warn!(stage = process.stage, pid = ?process.pid, unit = ?process.unit,
+            errno = ?process.errno, "legacy start closure proof refused");
+        refusal = refusal.with_detail("stage", process.stage);
+        if let Some(pid) = process.pid { refusal = refusal.with_detail("pid", pid); }
+        if let Some(unit) = &process.unit { refusal = refusal.with_detail("unit", unit.as_str()); }
         if let Some(errno) = process.errno {
             refusal = refusal.with_detail("errno", errno);
         }
     } else {
+        tracing::warn!(stage = "native-capture", "legacy start closure proof refused");
         refusal = refusal.with_detail("stage", "native-capture");
         if let Some(errno) = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) {
             refusal = refusal.with_detail("errno", errno);
@@ -819,10 +826,23 @@ mod legacy_proof_refusal_tests {
         legacy_start_proof_error(anyhow::Error::new(
             fractal_runtime::LegacyStartProofUnavailable {
                 stage: "proc-environ",
-                pid: 123,
+                pid: Some(123),
+                unit: None,
                 errno: Some(13), // Linux EACCES; no raw environment or path is exposed.
             },
         ).context("PRIVATE_TOKEN=must-not-appear"))
+    }
+
+    #[test]
+    fn unit_query_refusal_identifies_stage_and_unit() {
+        let refusal = legacy_start_proof_error(anyhow::Error::new(
+            fractal_runtime::LegacyStartProofUnavailable {
+                stage: "recorded-scope", pid: None,
+                unit: Some("st3-repo.worker-42-1.scope".into()), errno: None,
+            },
+        ));
+        assert_eq!(refusal.details.get("stage"), Some(&json!("recorded-scope")));
+        assert_eq!(refusal.details.get("unit"), Some(&json!("st3-repo.worker-42-1.scope")));
     }
 
     fn assert_refusal(error: ApiError) {

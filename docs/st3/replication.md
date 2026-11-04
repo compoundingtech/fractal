@@ -432,6 +432,8 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
   every message on a member whose shard did not open, is appended to the graph as a legacy
   claim, so none is lost. In this build nothing queues messages and the drainer is idle; a
   later release queues them, and a rollback from it to this build still drains what it left.
+- **Backups.** A claim backup carries the shard once it holds a stream item or a lifecycle
+  row, as archive version `5`; see [claim backups](backups.md#the-messages-shard).
 
 ## Rolling upgrades and waiting claims
 
