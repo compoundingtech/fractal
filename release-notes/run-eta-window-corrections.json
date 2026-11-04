@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refill corrected mission duration windows without hydrating all historical claims",
+  "replay": {"status": "changed", "detail": "Dirty runs recompute only affected definition-hash and step-path windows, restoring previously evicted valid samples after deletion, failure or completion-time correction."},
+  "schema": {"status": "changed", "detail": "Advance the local ETA initialization marker to version 2 so existing stores refill retained windows. Historical candidates are traversed newest-first using terminal timestamp metadata; claim bodies are loaded only until older candidates cannot enter the latest 64 samples."},
+  "rules": {"status": "none", "detail": "Selected-attempt timing and advisory-only estimates remain unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire fields, claim kinds or serving schemas change."},
+  "downtime": {"status": "none", "detail": "Initialization runs during normal store opening without a destructive migration."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Derived samples can be rebuilt from retained claims; original data is unchanged."}
+}
