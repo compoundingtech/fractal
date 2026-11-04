@@ -5,7 +5,7 @@ import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
-import { storyIdsFromIndex } from './kit-play-index.mjs'
+import { storyIdsFromIndex, playSetIdsFromIndex } from './kit-play-index.mjs'
 import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
@@ -116,13 +116,14 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     // Validate the complete index; fullIds is the selected set's inventory, which the union gate
     // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
     const index = await response.json()
+    const playSets = playSetIdsFromIndex(index)
     fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
     validateCaseOverrides(index.entries, overrides)
     storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
     if (set === 'commit') {
-      const selection = commitSetCases(ids, { overrides })
+      const selection = commitSetCases(ids, { ...playSets, overrides })
       ;({ ids, cases } = selection)
       omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
     } else {

@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, KIT_CASE_OVERRIDES, APP_CASE_OVERRIDES, APP_MODULE_SUITE_IDS, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
+import { storyIdsFromIndex, playSetIdsFromIndex } from './kit-play-index.mjs'
+import { commitSetCases, diagonalCase, fullCases, KIT_CASE_OVERRIDES, APP_CASE_OVERRIDES, APP_MODULE_SUITE_IDS, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
+import mainBaseline from './kit-play-main-baseline.json' with { type: 'json' }
 import { aggregateShards, shardStories } from './kit-play-shards.mjs'
+
+const { MERGE_ONLY, BOTH_WIDTHS } = mainBaseline
 
 const story = { type: 'story', id: 'kit--sample', importPath: './Sample.stories.tsx' }
 const docs = { type: 'docs', id: 'kit--docs', importPath: './Sample.mdx' }
@@ -113,6 +116,21 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
   assert.throws(() => commitSetCases(['a--one'], { mergeOnlyIds: ['a--renamed'], bothWidthsIds: [] }), /a--renamed, which is not a critical story/)
   assert.throws(() => commitSetCases(['a--one'], { mergeOnlyIds: [], bothWidthsIds: ['a--gone'] }), /a--gone, which is not a critical story/)
   assert.equal(new Set([...MERGE_ONLY, ...BOTH_WIDTHS]).size, MERGE_ONLY.length + BOTH_WIDTHS.length, 'a story is merge-only or both-widths, not both')
+})
+
+test('policy tags fail closed even before critical selection, and a new app folder gets both widths', () => {
+  const wide = { ...story, id: 'fractal-app-new-folder--layout', importPath: './new-folder/Layout.stories.tsx', tags: ['critical', 'both-widths'] }
+  const heavy = { ...story, id: 'kit--heavy', tags: ['critical', 'merge-only'] }
+  const index = { entries: { wide, heavy } }
+  const policy = playSetIdsFromIndex(index)
+  assert.deepEqual(policy, { mergeOnlyIds: [heavy.id], bothWidthsIds: [wide.id] })
+  assert.deepEqual(commitSetCases(storyIdsFromIndex(index, { tag: 'critical' }), policy).cases, [
+    { id: wide.id, scheme: 'dark', width: 440 }, { id: wide.id, scheme: 'dark', width: 1440 },
+  ])
+  for (const tag of ['both-widths', 'merge-only']) {
+    assert.throws(() => playSetIdsFromIndex({ entries: { wide: { ...wide, tags: [tag] } } }), /not a critical story/)
+  }
+  assert.throws(() => playSetIdsFromIndex({ entries: { wide: { ...wide, tags: ['critical', 'both-widths', 'merge-only'] } } }), /both merge-only and both-widths/)
 })
 
 test('transcript image contracts batch per commit without dropping the individual merge matrix', () => {

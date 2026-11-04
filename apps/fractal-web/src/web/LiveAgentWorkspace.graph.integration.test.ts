@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -211,10 +211,9 @@ const assertAppStoryCoverage = ({ entry, stories, required }: {
 
 describe('lazy-inclusive canonical App story identity', () => {
   it('covers the required production surfaces in both directions without changing the eager proof', () => {
-    // Kit Storybook loads app stories only by explicit file entries; those are the deployed suites.
     const app = resolve(web, '../..')
-    const stories = storyGlobs.map(glob => resolve(kit, '.storybook', glob)).filter(file => file.startsWith(`${app}${sep}`))
-    expect(stories.filter(file => /[*?[\]{}]/.test(file)), 'App story entries must name files').toEqual([])
+    const stories = storyGlobs.flatMap(glob => globSync(glob, { cwd: resolve(kit, '.storybook') }))
+      .map(file => resolve(kit, '.storybook', file)).filter(file => file.startsWith(`${app}${sep}`))
     const required = [resolve(web, 'LiveAgentWorkspace.tsx'), resolve(web, 'ConversationPane.tsx')]
     assertAppStoryCoverage({ entry: resolve(web, 'main.tsx'), stories, required })
     expect(stories).toContain(resolve(web, 'LiveAgentWorkspace.stories.tsx'))

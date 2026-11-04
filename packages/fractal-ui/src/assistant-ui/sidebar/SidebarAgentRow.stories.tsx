@@ -337,7 +337,7 @@ export const AllStates: Story = { tags: ['critical'], render: () => <main {...st
   probe.removeAttribute('title')
   await assertRowNames(canvasElement)
 } }
-export const DensitiesAndChildren: Story = { tags: ['critical'], name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
+export const DensitiesAndChildren: Story = { tags: ['critical', 'both-widths'], name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
   const toggle = within(canvasElement).getByRole('button', { name: 'Expand 2 subagents' })

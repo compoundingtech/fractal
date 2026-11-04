@@ -205,7 +205,7 @@ export const UploadCancelled: Story = {
     await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
   },
 }
-export const SeveralImages: Story = { tags: ['critical'], play: async ({ canvasElement }) => showSeveralImages(canvasElement) }
+export const SeveralImages: Story = { tags: ['critical', 'both-widths'], play: async ({ canvasElement }) => showSeveralImages(canvasElement) }
 export const SentImage: Story = {
   tags: ['critical'],
   play: async ({ canvasElement }) => showSentImage(canvasElement),
