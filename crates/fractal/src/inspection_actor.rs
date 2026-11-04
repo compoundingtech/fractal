@@ -13,7 +13,6 @@ const PATHS: &[&[&str]] = &[
     &["fleet", "anchor", "show"],
     &["gate", "ci-passed"],
     &["gate", "merged"],
-    &["launch", "preview"],
     &["missions", "blocked"],
     &["missions", "waiting-on"],
     &["missions", "rename-id", "proof", "export"],
@@ -87,7 +86,7 @@ mod tests {
             &["proof.json", "--fleet-anchor", "anchor"],
             &["--repository", "demo"], &["change", "--repository", "demo"],
             &["mailbox"], &[], &["check", "--repo", "example/demo", "--ref", "main"],
-            &["example/demo#1"], &["launch/demo"], &[], &["mission-run/demo"],
+            &["example/demo#1"], &[], &["mission-run/demo"],
             &["mission/demo"], &["proof.json", "--fleet-anchor", "anchor"],
             &[], &[], &["agent/subject"], &["terminal/demo"], &["agent/subject"], &["input.kdl"],
         ];
@@ -132,6 +131,7 @@ mod tests {
         for path in [
             &["fleet", "anchor"][..], &["replication", "checkpoint", "status"],
             &["subject", "basis"], &["agents", "ls"],
+            &["launch", "preview"],
         ] {
             let mut argv = vec!["fractal"];
             argv.extend_from_slice(path);

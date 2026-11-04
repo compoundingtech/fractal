@@ -24,7 +24,7 @@ first: actor: none means no --as syntax.
 Operational reads accept optional leading `--as ACTOR` immediately after these
 leaf paths: `actor-contract`, `agents lane`, `agents rename-id proof export`,
 `agents rename-id proof verify`, `changes list`, `changes show`, `conversations export`,
-`fleet anchor show`, `gate ci-passed`, `gate merged`, `launch preview`,
+`fleet anchor show`, `gate ci-passed`, `gate merged`,
 `missions blocked`, `missions waiting-on`, `missions rename-id proof export`,
 `missions rename-id proof verify`, `recorder report`, `replication checkpoint plan`,
 `subject history`, `terminals peek`, `trace show`, and `validate`.
