@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-skip-report counts a check that CI passed without running, because nothing it reads changed, as not run instead of as an unsigned push: fractal-web on a pull request with no web-relevant change, which st-test does not sign. It is a new column, not_relevant, and such pull requests are no longer listed as not signed.",
+  "replay": {"status": "none", "detail": "No stored data is read or written differently."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination version change."},
+  "compatibility": {"status": "changed", "detail": "The report's JSON gains a not_relevant count for every check, and its markdown table gains a column after skipped. Readers that index the table's columns by position need updating."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "Nothing to do."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

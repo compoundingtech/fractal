@@ -9968,6 +9968,8 @@ async fn roster_resilience_fresh_idle_and_new_attempt_after_failure_wait_for_wri
 
 
 async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
+    // The unpolled seat's delivery reason reads the daemon's uptime; both pages read the same one.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
     state.store = Arc::new(roster_followup_store());
@@ -11101,6 +11103,8 @@ mission "agent-human" state="ready" {
 
 #[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
+    // This unpolled seat is assessed during the daemon's startup grace.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();

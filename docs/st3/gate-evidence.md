@@ -1353,7 +1353,9 @@ requests skip CI entirely; the merge queue's full run is the comparison). Each f
 ### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
 
 `scripts/evidence-skip-report [--hours 24] [--actor LOGIN]... [--receipts FILE]... [--markdown]` counts, for the pull request runs in the
-window (started by the given accounts), each check as `skipped` or as run, and why it ran: `lane_edit` (the pull request changes a file
+window (started by the given accounts), each check as `skipped`, as `not_relevant` (no note covered the tree, but the check's own job
+passed with its `<check>-execution` job skipped, because nothing it reads changed: fractal-web, which st-test does not sign then), or as
+run, and why it ran: `lane_edit` (the pull request changes a file
 of the check's lane, so a local run could not sign it), `merge_tree` (the gate asked about the merge tree, `tree_of=merge`, because a
 protected file changed since the branch point, an author is not listed or the branch is too far behind, and no note covered it), `not_signed` (no note covered the tree although the lane is untouched: pushed
 unsigned), `failed` (the note recorded a failure), `protected` (a file that decides skipping changed), `sampled` (the one-in-five canary),

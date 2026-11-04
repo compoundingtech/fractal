@@ -1,5 +1,5 @@
 /** Shared Storybook play helpers for kit stories. */
-import { expect, getConfig, waitFor, within } from 'storybook/test'
+import { expect, getConfig, within } from 'storybook/test'
 
 /**
  * The anchor's tooltip, resolved through the anchor's own aria-describedby and asserted to have
@@ -9,13 +9,55 @@ import { expect, getConfig, waitFor, within } from 'storybook/test'
  * missed a tooltip that was already mounted. The anchor lookup does not depend on page size.
  */
 export async function tooltipFor(anchor: HTMLElement, name: string): Promise<HTMLElement> {
-  return waitFor(() => {
+  return renderedWithin(() => {
     const tooltip = anchor.getAttribute('aria-describedby')?.split(/\s+/).map(id => anchor.ownerDocument.getElementById(id)).find(node => node?.getAttribute('role') === 'tooltip')
     if (tooltip === undefined || tooltip === null) throw new Error(`Missing tooltip for ${name}`)
     expect(tooltip).toHaveAccessibleName(name)
     expect(tooltip).toBeVisible()
     return tooltip
   })
+}
+
+/**
+ * `check`'s value once it stops throwing, re-run on every page mutation, frame and 50ms, like waitFor. It fails with
+ * the last error once the configured async deadline has passed and five frames have rendered since. A loaded host can
+ * pause the compositor for a second while page timers still run, and a disclosure opened from a frame callback (the
+ * tab strip's keyboard tooltip) cannot appear until frames resume: the first frame after the pause opens it, RAC
+ * places the hidden overlay within the next frame or two, and a later frame observes it. Frames from before the
+ * deadline do not count.
+ */
+export async function renderedWithin<T>(check: () => T): Promise<T> {
+  let observer: MutationObserver | undefined
+  let deadline: number | undefined
+  let poll: number | undefined
+  let frame: number | undefined
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      let expired = false
+      let frames = 0
+      let failure: unknown
+      const attempt = () => {
+        try { resolve(check()); return true } catch (error) { failure = error; return false }
+      }
+      const countFrame = () => {
+        frames++
+        if (attempt()) return
+        if (expired && frames >= 5) reject(failure)
+        else frame = window.requestAnimationFrame(countFrame)
+      }
+      if (attempt()) return
+      deadline = window.setTimeout(() => { expired = true; frames = 0 }, getConfig().asyncUtilTimeout)
+      poll = window.setInterval(attempt, 50)
+      frame = window.requestAnimationFrame(countFrame)
+      observer = new MutationObserver(attempt)
+      observer.observe(document.documentElement, { attributes: true, childList: true, characterData: true, subtree: true })
+    })
+  } finally {
+    observer?.disconnect()
+    window.clearTimeout(deadline)
+    window.clearInterval(poll)
+    if (frame !== undefined) window.cancelAnimationFrame(frame)
+  }
 }
 
 /**
