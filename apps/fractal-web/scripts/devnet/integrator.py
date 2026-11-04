@@ -953,7 +953,7 @@ def tick():
     except Exception as e:
         row['error']=str(e)
         if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
-            row.update(build='error', reason='capacity-refused', retryable=True,
+            row.update(build='capacity-refused', reason='capacity-refused', retryable=True,
                        error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
@@ -963,6 +963,9 @@ def tick():
     finally:
         SELECTION_DEADLINE = None
         observe_served(row)
+        if not capacity_prechecked and row.get('reason') == 'capacity-refused':
+            # Served identity is known, but no candidate was selected to compare.
+            row['current']=None
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
         # A refused precheck has no new selection to publish. Preserve the last

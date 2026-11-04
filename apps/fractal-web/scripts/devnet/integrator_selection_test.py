@@ -2,6 +2,7 @@
 """Filesystem/API-boundary coverage for bounded, cached PR selection."""
 import contextlib
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -115,7 +116,7 @@ class SelectionTest(unittest.TestCase):
 
     def capacity_row(self):
         row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
-        self.assertEqual(row['build'], 'error')
+        self.assertEqual(row['build'], 'capacity-refused')
         self.assertEqual(row['reason'], 'capacity-refused')
         self.assertTrue(row['retryable'])
         self.assertIn('previous build retained', row['error'])
@@ -147,8 +148,9 @@ class SelectionTest(unittest.TestCase):
         row = self.capacity_row()
         self.assertEqual(row['servedSha'], 'b' * 40)
         self.assertEqual(row['localServedSha'], 'b' * 40)
-        self.assertFalse(row['current'])
+        self.assertIsNone(row['current'])
         self.assertIsNone(row['sha'])
+        self.assertIsNone(row['main'])
         self.assertEqual(row['selection'], [])
         for operation in (configuration, run, git, prepare, publish):
             operation.assert_not_called()
@@ -158,6 +160,74 @@ class SelectionTest(unittest.TestCase):
                          {self.module.L / 'live-r3.lock', self.module.L / 'live-r3.jsonl'})
         self.assertEqual({path: after[path] for path in before}, before)
         self.assertEqual(after[self.module.L / 'live-r3.lock'], b'')
+
+    def test_healthy_unchanged_build_followed_by_repeated_precheck_refusals(self):
+        self.activation_builds()
+        sha = 'b' * 40
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        signature = hashlib.sha256(json.dumps([
+            self.module.INTEGRATOR_VERSION, sha, [], 'overlay', [], None, None,
+        ]).encode()).hexdigest()
+        self.module.atomic_json(self.module.L / 'live-r3-state.json', {
+            'signature': signature, 'sha': sha, 'included': [], 'skipped': [],
+            'pinnedBase': None,
+        })
+        error = subprocess.CalledProcessError(75, ['nix', 'eval', '--expr', 'null'])
+        responses = [
+            subprocess.CompletedProcess([], 0, 'https://example.test', ''),
+            self.response({'rev': sha}),
+        ] * 8  # recovery_previous also observes both served identities.
+        with patch.object(self.module.candidate_sandbox, 'capacity_precheck',
+                          side_effect=[None, error, error]), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'prepare_clone'), \
+                patch.object(self.module, 'text', return_value=sha), \
+                patch.object(self.module, 'digest', return_value='overlay'), \
+                patch.object(self.module, 'activate', return_value='https://example.test'), \
+                patch.object(self.module.subprocess, 'run', side_effect=responses), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(3):
+                self.module.tick()
+        rows = [json.loads(line) for line in
+                (self.module.L / 'live-r3.jsonl').read_text().splitlines()]
+        self.assertEqual(rows[0]['reason'], 'unchanged')
+        self.assertTrue(rows[0]['current'])
+        self.assertEqual(rows[0]['sha'], sha)
+        for row in rows[1:]:
+            self.assertEqual(row['build'], 'capacity-refused')
+            self.assertEqual(row['reason'], 'capacity-refused')
+            self.assertTrue(row['retryable'])
+            self.assertIsNone(row['sha'])
+            self.assertIsNone(row['main'])
+            self.assertIsNone(row['current'])
+            self.assertEqual(row['servedSha'], sha)
+            self.assertEqual(row['localServedSha'], sha)
+
+    def test_in_build_refusal_preserves_observed_current(self):
+        observe = self.module.observe_served
+
+        def observe_candidate(row):
+            # capacity_tick runs the candidate on a separate row at prepare_clone.
+            row['sha'] = self.candidate_row['sha']
+            observe(row)
+
+        responses = [
+            subprocess.CompletedProcess([], 0, 'https://example.test', ''),
+            self.response({'rev': 'b' * 40}),
+        ] * 2
+        with self.capacity_tick([75]), \
+                patch.object(self.module, 'observe_served', side_effect=observe_candidate), \
+                patch.object(self.module.subprocess, 'run', side_effect=responses):
+            self.module.tick()
+        row = self.capacity_row()
+        self.assertIs(row['current'], False)
+        self.assertEqual(row['sha'], 'b' * 40)
+        self.assertEqual(row['servedSha'], 'b' * 40)
+        self.assertEqual(row['localServedSha'], 'b' * 40)
 
     def test_capacity_precheck_pass_preserves_candidate_build_path(self):
         with self.capacity_tick([0]) as commands, \
