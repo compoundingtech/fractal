@@ -6,13 +6,43 @@ pub async fn fleet_publish_endpoints(
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let written = blocking_store(move || {
-        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"))
+        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"), None)
     })
     .await?;
     if written {
         signal_changed(&state);
     }
     Ok(Json(json!({ "published": written })))
+}
+
+#[derive(Deserialize)]
+pub struct FleetTransportChange {
+    actor: String,
+    mutation_id: String,
+    mode: String,
+    endpoints: Vec<Value>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+pub async fn change_transports(
+    State(state): State<AppState>,
+    Json(request): Json<FleetTransportChange>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "invalid-transport-actor")?;
+    if request.mutation_id.is_empty() {
+        return Err(ApiError::bad(St3Error::new("invalid-transport-mutation", "mutation_id is required")));
+    }
+    if request.dry_run {
+        return Ok(Json(json!({"authorized": true})));
+    }
+    let store = state.store.clone();
+    let written = blocking_store(move || store.publish_fleet_endpoints(
+        &request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"),
+        Some((&actor, &request.mutation_id)),
+    )).await?;
+    signal_changed(&state);
+    Ok(Json(json!({"published": written})))
 }
 
 /// Publish the configured trust root, not an exporter's proposed replacement key.

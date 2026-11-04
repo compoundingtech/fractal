@@ -4025,7 +4025,7 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     let barrier = root.path().join("prefer-lock");
     fs::create_dir(&barrier).unwrap();
     let mut prefer = node
-        .command(&["fleet", "transports", "prefer", "fabric", "--no-service"])
+        .command(&["fleet", "transports", "prefer", "--as", "agent/example", "fabric", "--no-service"])
         .env("ST3_TEST_REMOVAL_WRITE_BARRIER", &barrier)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4077,6 +4077,14 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     assert_eq!(configured_file(&node).fabric_protocol, before.fabric_protocol);
     assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
     assert_eq!(fs::read(registry.join("calls")).unwrap(), calls);
+    node.stop();
+    let store = fractal_daemon::store::Store::open(
+        &node.state_dir().join("claims.sqlite3"), &node.name,
+    ).unwrap();
+    let claim = store.latest_claim(
+        &format!("host/{}", node.name), Some("fleet.member-endpoints"),
+    ).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("agent/example"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
