@@ -93,7 +93,7 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
                     <span {...stylex.props(styles.name)}>{account.name}</span>
                     <span {...stylex.props(styles.meta)}>{[account.provider, account.plan, account.kind].filter(Boolean).join(' · ')}</span>
                     <span {...stylex.props(styles.second, styles.wide)}>
-                      {account.credits ? <span {...stylex.props(styles.budget)}>{creditsText(account.credits)}</span> : null}
+                      {account.credits ? <span {...stylex.props(styles.budget)}>{creditsText(account.credits, accounts.value.until_ms)}</span> : null}
                       {rows.filter(row => row.kind === 'budget' && row.account === (account.account ?? account.name)).map(row => <span key={row.id} {...stylex.props(styles.budget)}><span aria-hidden="true" {...stylex.props(tones[toneOf(row)])}>● </span>{row.id} {leftText(row)}</span>)}
                     </span>
                   </li>

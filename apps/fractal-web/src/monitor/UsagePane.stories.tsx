@@ -90,7 +90,7 @@ export const Populated: Story = {
     expect(row.getAttribute('aria-expanded')).toBe('false')
     await expect(usage.getByText('No readings in this period yet.')).toBeVisible()
     await expect(usage.getByText('error budget left, last 24 hours')).toBeVisible()
-    await expect(usage.getByText('credits $128 of $200 this month')).toBeVisible()
+    await expect(usage.getByText(/^credits \$128 of \$200 · .* UTC$/)).toBeVisible()
     expect(body.scrollWidth).toBeLessThanOrEqual(body.clientWidth)
     canvasElement.dataset.proof = 'passed'
   },
