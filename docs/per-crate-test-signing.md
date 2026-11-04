@@ -200,6 +200,10 @@ A full run once sat 30 minutes in the megarepo member step (`mr apply`, whose `g
 the network was fine). The step now has a limit (`ST_TEST_MEMBERS_LIMIT`, default 1200 s), writes its output to a file, and is killed with
 everything it started when the limit passes; the run then reports "NOT RUN" with the reason. The `ST_TEST_*` settings are read before the seat
 environment scrub, which would otherwise remove them.
+The limit counts the step's own running, not its wait in the host's build admission (#5068): `nix run` goes through the gate, which once held
+it for the whole 1200 s on a crowded host before it ran anything. The nix shim runs it as `exec build-admission start CLASS LABEL -- nix …`,
+and the gate execs nix once it is admitted, so the step waits exactly while its own process is the gate; st-test reads that every half second.
+The waits are bounded by `--queue-limit` instead, and a run that ends either way says how long it waited.
 
 ## 10. Step 5a: rust-tests in the default suite, signed from linux-gate's own run
 

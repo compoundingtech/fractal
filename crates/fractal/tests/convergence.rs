@@ -147,22 +147,63 @@ fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
     }
 }
 
-/// Kinds a checkpoint rule may drop, read from the retention policy so the oracle follows every
-/// rule it adds: each kind a slotted rule names, and a seat's status sources, which the status
-/// history rule trims. Every other kind is kept on every node.
-fn rule_kinds() -> &'static BTreeSet<String> {
-    static KINDS: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
-        let mut kinds = BTreeSet::new();
-        for rule in &fractal_schema::retention::policy().rules {
-            if rule.kind == "seat.status-history" {
-                kinds.extend(checkpoint::STATUS_SOURCE_KINDS.map(str::to_owned));
-            } else if rule.slot.is_some() {
-                kinds.insert(rule.kind.clone());
-            }
+/// Kinds a checkpoint rule may drop. Every other kind is kept on every node. The oracle keeps
+/// its own list, so a retention rule that starts or stops dropping a kind fails
+/// `the_oracle_drops_the_kinds_the_retention_policy_drops` until this list is updated on purpose.
+const RULE_KINDS: &[&str] = &[
+    "daemon.diagnostic",
+    "harness-question.observed",
+    "harness.diagnostic",
+    "harness.limits",
+    "harness.observed",
+    "harness.timeline",
+    "harness.todo.observed",
+    "harness.usage",
+    "loop.state",
+    "observer.observed",
+    "render.applied",
+    "resource.observed",
+    "runtime.action.deadline-reached",
+    "runtime.action.failed",
+    "runtime.action.requested",
+    "runtime.action.succeeded",
+    "runtime.observed",
+    "runtime.readiness-deadline-reached",
+    "runtime.reconcile-decision",
+    "sekret.called",
+    "sekret.changed",
+    "sekret.exited",
+    "sekret.refused",
+    "slo.breach-transition",
+    "subscription.mission-deferred",
+    "transport.observed",
+];
+
+/// The kinds the retention policy lets a checkpoint drop: each kind a slotted rule names, and a
+/// seat's status sources, which the status history rule trims.
+fn policy_rule_kinds() -> BTreeSet<String> {
+    let mut kinds = BTreeSet::new();
+    for rule in &fractal_schema::retention::policy().rules {
+        if rule.kind == "seat.status-history" {
+            kinds.extend(checkpoint::STATUS_SOURCE_KINDS.map(str::to_owned));
+        } else if rule.slot.is_some() {
+            kinds.insert(rule.kind.clone());
         }
-        kinds
-    });
-    &KINDS
+    }
+    kinds
+}
+
+#[test]
+fn the_oracle_drops_the_kinds_the_retention_policy_drops() {
+    let oracle = RULE_KINDS.iter().map(|kind| kind.to_string()).collect::<BTreeSet<_>>();
+    let policy = policy_rule_kinds();
+    let unlisted = policy.difference(&oracle).collect::<Vec<_>>();
+    let stale = oracle.difference(&policy).collect::<Vec<_>>();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "retention.toml changed which kinds a checkpoint drops: add {unlisted:?} to and remove \
+         {stale:?} from RULE_KINDS in this file, after checking that the oracle should accept it"
+    );
 }
 
 /// A small, fast, seeded generator (SplitMix64).
@@ -1479,7 +1520,7 @@ impl World {
                 })
                 .unwrap_or_default();
             for (id, claim) in &oracle_claims {
-                let droppable = rule_kinds().contains(&claim.kind)
+                let droppable = RULE_KINDS.contains(&claim.kind.as_str())
                     && !claim
                         .actor
                         .as_deref()

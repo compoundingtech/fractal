@@ -441,3 +441,25 @@ fn ending_the_last_watch_stops_only_the_unsubscribed_repository() {
     assert!(!fixture.running(&fixture.observer));
     assert!(fixture.running("observer/github/acme/orchid"));
 }
+
+/// A watch and the standing observer it needs are one write: a pass can never see the observer
+/// without its watch, stop it as unused, and declare it again on the next (#4831).
+#[test]
+fn a_watch_declares_its_observer_in_the_same_write() {
+    let _clock = Clock::at(START);
+    let (fixture, reconciler) = fixture();
+    let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+    fixture.store.declare_watch(&thread, "agent/example.planner", None).unwrap();
+    let declarations = |subject: &str| {
+        fixture.store.claims_for(subject, Some("intent.desired")).unwrap()
+    };
+    let observer = declarations(&fixture.observer);
+    let subscription = declarations(&thread.watch("agent/example.planner"));
+    assert_eq!((observer.len(), subscription.len()), (1, 1), "{observer:?} {subscription:?}");
+    assert_eq!(observer[0].batch_id, subscription[0].batch_id, "one write declares both");
+    for _ in 0..2 {
+        reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
+    }
+    assert!(fixture.running(&fixture.observer));
+    assert_eq!(declarations(&fixture.observer).len(), 1, "no pass stopped and declared it again");
+}

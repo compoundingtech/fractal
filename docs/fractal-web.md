@@ -619,6 +619,22 @@ CI=1 pnpm --dir apps/fractal-web exec vitest run src/data/inventory-transport.un
 pnpm --filter fractal-web typecheck
 ```
 
+### Ordered Pins data
+
+`src/data/pins.ts` follows the discovered person's reserved Pins arrangement and
+its complete paginated ordered memberships. Window frames invalidate the complete
+read, including changes outside the window. Edits use caller-owned action identities
+and fences, root membership place/remove operations, and no Sidebar folder changes.
+Creation is disabled unless the caller confirms the coordinated v2 reader rollout.
+Incompatible v1 bodies and permanent retirement are refused, not migrated.
+Consumers close and reopen the follow after a socket interruption; an HTTP refresh
+cannot restore synced or editable state on an interrupted follow. Failed reads
+retain the last complete members with an unavailable phase. Sidebar rendering is
+independent of this data API.
+The source-owned Pins binding reuses the source's fetch/socket transports, including
+replay. Source switches, unmounts and retries abort initializing reads and close their
+collection sockets before starting another follow. Kit consumers receive plain views.
+
 ## Focused local checks
 
 From the repository root, batch both web/UI typechecks and explicitly selected app
