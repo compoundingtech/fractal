@@ -40,6 +40,15 @@ const setup = (absent = false, version = 2, createCode?: 'arrangement-exists' | 
 }
 
 describe('principal ordered Pins', () => {
+  it('requires reopening after a stream-opening rejection even after refresh', async () => {
+    const h = setup(), open = h.client.collectionStream, onState = (state: PinsState) => h.states.push(state)
+    h.client.collectionStream = async () => { throw new Error('socket factory failed') }
+    const pins = await followPins({ gateway: h.client, onState }); pins.refresh()
+    await vi.waitFor(() => expect(h.requests.filter((url) => url.pathname.endsWith('/memberships'))).toHaveLength(2))
+    expect(h.states.at(-1)?.phase).toBe('unavailable')
+    await expect(pins.edit(identity, [{ op: 'remove', member: 'agent/example' }])).rejects.toThrow('must be synced'); pins.close()
+    h.client.collectionStream = open; const reopened = await followPins({ gateway: h.client, onState }); expect(h.states.at(-1)?.phase).toBe('synced'); await reopened.edit(identity, [{ op: 'remove', member: 'agent/example' }]); reopened.close()
+  })
   it('keeps a late post-edit HTTP read unavailable after socket end until reopened', async () => {
     const h = setup()
     const onState = (state: PinsState) => h.states.push(state)
