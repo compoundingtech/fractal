@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A seat's conversation timeline, the event feed and st conversations wait read the messages stream beside the graph: a stream item to or from a seat appears in its conversation, sorted after the graph claim it arrived behind on this member; GET /v1/health carries messages_store_index; GET /v1/events with messages_after returns the stream's message events in stream_items; a stream item arriving wakes event waiters and conversation followers; and st conversations wait ends on a stream reply, with --after naming a message in either store",
+  "replay": {
+    "status": "none",
+    "detail": "No graph claim, projection or cache changes."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The messages shard (shards/messages/claims.sqlite3) gains the local table stream_arrivals, created with IF NOT EXISTS when the shard opens: the graph index at which each stream item arrived on this member, and the time its timeline entries show (its accepted time, or one millisecond past the item recorded before it at the same graph index, so that two items that share a graph index never share a millisecond and each message stays next to its content entry for phones already installed). It is outside the replicated log and every digest, and it is filled for existing items the first time a reader needs them. The graph database and its storage version are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Nothing writes message.sent to the shard yet, so on a real fleet every reader returns what it did."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive fields: GET /v1/health gains messages_store_index when the member holds the shard; GET /v1/events/page accepts messages_after and then answers stream_items, messages_next_after, messages_has_more and messages_frontier, and a client that does not send it gets the graph's page exactly as before. A stream item's timeline entries take sequence g*4+2 and g*4+3, where g is the graph index it arrived at on this member; sequence orders entries and never identifies one. The conversation cursor gains a fifth part, the stream position read; this build resumes a cursor without it, and earlier builds answer one with it with cursor-gap and full_resync, so a client following a conversation across a rollback reloads it once. An older CLI against this daemon does not wake on a stream reply until its timeout, and its --after naming a stream item misses graph replies; seats use the daemon's own $ST3_BIN. This build's CLI against an older daemon waits on the graph alone, as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Creating one empty table on the shard is immediate."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back to the previous release is safe: earlier builds ignore the shard and its tables, and no graph claim was written. A conversation follower holding a cursor from this build reloads the conversation once. After rolling back and then forward again, stream items admitted while the older build ran are recorded at the graph index of the first read after the re-upgrade: they sort late in the timeline, and none is lost."
+  }
+}

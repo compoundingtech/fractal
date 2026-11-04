@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn fleet_admit_without_binds_mutating_actor_to_harness() {
+    for actor in ["agent/own", "agent/peer", "person/operator"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "fleet", "admit-without", "--peer", "peer",
+            "--reason", "peer unavailable", "--as", actor,
+        ]).unwrap();
+        assert_eq!(
+            guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_ok(),
+            actor == "agent/own",
+            "{actor}",
+        );
+        assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+    }
+}
+
+#[test]
+fn alias_deprecation_uses_argv0_basename_and_exact_suppression() {
+    use std::ffi::OsStr;
+    for (path, expected) in [
+        ("st", Some("st")), ("/usr/local/bin/st", Some("st")),
+        ("st3", Some("st3")), ("./bin/st3", Some("st3")),
+        ("fractal", None), ("/bin/fractal", None),
+        ("git", None), ("gh", None), ("st3-helper", None), ("", None),
+    ] {
+        let argv0 = Some(OsStr::new(path));
+        assert_eq!(deprecated_binary_name(argv0, None), expected, "{path}");
+        assert_eq!(deprecated_binary_name(argv0, Some(OsStr::new("1"))), None, "{path}");
+        for value in ["", "0", "true", "01"] {
+            assert_eq!(deprecated_binary_name(argv0, Some(OsStr::new(value))), expected, "{path}: {value}");
+        }
+    }
+    assert_eq!(deprecated_binary_name(None, None), None);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(deprecated_binary_name(Some(OsStr::from_bytes(b"/bin/\xffst")), None), None);
+    }
+}
+
+#[test]
 fn demo_environment_excludes_both_tui_configuration_spellings() {
     for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
         for prefix in ["ST3", "FRACTAL"] {
@@ -1456,6 +1496,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
         attachments: Vec::new(),
     };
     let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
@@ -1494,6 +1535,7 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
     };
     let queued = native_queued_message(&view, "body".into(), &[]);
     let rendered = fractal_drivers::ding::with_tag_notices("body".into(), &queued.tags);
@@ -1855,6 +1897,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let mut mailbox = NativeMailbox {
@@ -2101,6 +2144,9 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_channel_launch: None,
+            claude_attach_started_ms: None,
+            claude_session_started_ms: None,
             claude_attachment_admissions: AdmissionBucket {
                 binding: Some(("incarnation".into(), 4, "token".into())),
                 tokens: 0,
@@ -3958,7 +4004,7 @@ fn an_empty_mailbox_prints_a_heading_and_no_current_items() {
 }
 
 #[test]
-fn claimed_work_renews_for_the_exact_live_harness_incarnation_even_while_idle() {
+fn lease_guidance_finds_the_exact_live_harness_incarnation_even_while_idle() {
     let step: StepRunView = serde_json::from_value(json!({
         "subject": "step-run/run/work",
         "run": "mission-run/run",
@@ -3989,51 +4035,22 @@ fn claimed_work_renews_for_the_exact_live_harness_incarnation_even_while_idle() 
         "observed_at_unix_ms": 1
     }))
     .unwrap();
-    assert!(work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&harness)
-    ));
+    assert!(claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&harness)));
 
     let mut idle = harness.clone();
     idle.state = "idle".into();
-    assert!(work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&idle)
-    ));
+    assert!(claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&idle)));
     let mut blocked = idle;
     blocked.state = "blocked".into();
-    assert!(work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&blocked)
-    ));
+    assert!(claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&blocked)));
     let mut replacement = harness;
     replacement.incarnation_id = "worker-two".into();
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&replacement)
-    ));
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/other",
-        Some(&replacement)
-    ));
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        None
-    ));
+    assert!(!claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&replacement)));
+    assert!(!claim_has_active_harness(step.claim_incarnation.as_deref(), None));
     let mut ended = replacement.clone();
     ended.incarnation_id = "worker-one".into();
     ended.state = "ended".into();
-    assert!(!work_claim_has_active_harness(
-        &step,
-        "agent/node.worker",
-        Some(&ended)
-    ));
+    assert!(!claim_has_active_harness(step.claim_incarnation.as_deref(), Some(&ended)));
     for state in ["claimed", "working", "verifying", "blocked"] {
         let mut held = step.clone();
         held.status = state.into();
@@ -4092,7 +4109,7 @@ async fn renewal_retry_failed_work_read_preserves_the_known_lease_bound() {
     retry.lease_margin(Duration::from_secs(2));
     // Exercise the real request/selection boundary: an error is not an empty response.
     assert!(
-        renew_claimed_work(&client, "agent/worker", 0, &mut retry)
+        renew_claimed_work(&client, "agent/worker", "worker-one", 0, &mut retry)
             .await
             .is_err()
     );
@@ -5816,6 +5833,7 @@ fn message_replies_route_to_the_other_participant() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
         attachments: Vec::new(),
     };
 
@@ -9243,4 +9261,155 @@ async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() 
     }
     assert!(!job.is_finished());
     job.abort();
+}
+
+/// A seat that runs on cedar and holds one step there, served by cedar's real daemon API, with
+/// birch as the host it ran on before.
+struct MovedSeat {
+    _root: tempfile::TempDir,
+    cedar: std::sync::Arc<Store>,
+    birch: Store,
+    client: Client,
+    step: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+const MOVED_SEAT: &str = "agent/example/mover";
+const MOVED_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+
+impl MovedSeat {
+    async fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let cedar = std::sync::Arc::new(Store::open_memory("cedar").unwrap());
+        let birch = Store::open_memory("birch").unwrap();
+        cedar.bind_fleet(MOVED_FLEET).unwrap();
+        birch.bind_fleet(MOVED_FLEET).unwrap();
+        {
+            use fractal_daemon::SeatsStoreCore as _;
+            let source = "version 2\nagent \"example/mover\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+            cedar.apply_internal(&fractal_daemon::parse_intent(source, "cedar").unwrap(), "moved-seat").unwrap();
+        }
+        let state = fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0).0,
+            node: "cedar".into(), state_dir: root.path().into(),
+            pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+            fleet_id: Some(MOVED_FLEET.into()), configured_peers: vec![], client_relay: None,
+            native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+        };
+        let path = root.path().join("api.sock");
+        let socket = path.clone();
+        let server = tokio::spawn(async move {
+            fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state)).await.unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !path.exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let client = Client::unix(&path);
+        let seat = Self { _root: root, cedar, birch, client, step: String::new(), server };
+        seat.birch_observes("running", Some("on-birch"));
+        seat.cedar_observes("running", Some("on-cedar"));
+        let started: StepRunView = seat.client.post("/v1/work/start", &fractal_daemon::model::WorkStartRequest {
+            actor: MOVED_SEAT.into(), title: "Invented moved work".into(), idempotency_key: "moved-start".into(),
+        }).await.unwrap();
+        let mut seat = seat;
+        seat.step = started.subject;
+        seat.act("claim", MOVED_SEAT, "on-cedar", "moved-claim").await.unwrap();
+        seat
+    }
+
+    fn observe(store: &Store, status: &str, incarnation: Option<&str>) {
+        let mut fields = BTreeMap::from([("status".into(), json!(status)), ("host".into(), json!(store.origin))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), json!(incarnation));
+        }
+        store.append_claim(&ClaimInput {
+            subject: MOVED_SEAT.into(), kind: "runtime.observed".into(), actor: None, fields,
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn cedar_observes(&self, status: &str, incarnation: Option<&str>) {
+        Self::observe(&self.cedar, status, incarnation);
+    }
+
+    /// birch records it, and the record replicates to cedar.
+    fn birch_observes(&self, status: &str, incarnation: Option<&str>) {
+        Self::observe(&self.birch, status, incarnation);
+        let exchange = self.birch
+            .export_replication_exchange(MOVED_FLEET, &self.cedar.replication_inventory().unwrap())
+            .unwrap();
+        self.cedar.receive_replication_exchange("birch", MOVED_FLEET, &exchange).unwrap();
+        self.cedar.validate_replication_backlog().unwrap();
+        self.cedar.apply_replication_repairs().unwrap();
+        self.cedar.project_replication_backlog().unwrap();
+    }
+
+    async fn act(&self, action: &str, actor: &str, incarnation: &str, key: &str) -> Result<StepRunView> {
+        self.client.post(&format!("/v1/work/{action}/{}", urlencoding::encode(&self.step)), &WorkRequest {
+            wait_ms: None, actor: Some(actor.into()), incarnation: Some(incarnation.into()),
+            summary: (action == "progress").then(|| "still working".into()), reason: None,
+            evidence: vec![], idempotency_key: key.into(),
+        }).await
+    }
+
+    async fn refused(&self, action: &str, actor: &str, incarnation: &str, key: &str) -> String {
+        let error = self.act(action, actor, incarnation, key).await.unwrap_err();
+        fractal_daemon::client::api_error_code(&error).unwrap_or_default().to_owned()
+    }
+}
+
+impl Drop for MovedSeat {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+#[tokio::test]
+async fn another_hosts_end_of_its_old_runtime_leaves_the_live_driver_renewing() {
+    let seat = MovedSeat::new().await;
+    // birch comes back and records its own old runtime ending, after cedar's running record.
+    seat.birch_observes("stopped", Some("on-birch"));
+    seat.birch_observes("exited", None);
+    let mut retry = fractal_daemon::client::DriverRetry::default();
+    // Twelve minutes of the driver's own timer, longer than a lease: every one renews.
+    for minute in 0..12 {
+        let before = seat.cedar.step_run(&seat.step).unwrap().unwrap().updated_at_unix_ms;
+        std::thread::sleep(Duration::from_millis(2));
+        renew_claimed_work(&seat.client, MOVED_SEAT, "on-cedar", minute, &mut retry).await.unwrap();
+        let after = seat.cedar.step_run(&seat.step).unwrap().unwrap();
+        assert!(after.updated_at_unix_ms > before, "minute {minute} renewed nothing");
+        assert_eq!(after.claim_incarnation.as_deref(), Some("on-cedar"));
+    }
+    // The seat's own work goes on too.
+    seat.act("progress", MOVED_SEAT, "on-cedar", "moved-progress").await.unwrap();
+    // The driver renews only what its own incarnation holds.
+    let before = seat.cedar.step_run(&seat.step).unwrap().unwrap().updated_at_unix_ms;
+    renew_claimed_work(&seat.client, MOVED_SEAT, "on-birch", 99, &mut retry).await.unwrap();
+    assert_eq!(seat.cedar.step_run(&seat.step).unwrap().unwrap().updated_at_unix_ms, before);
+}
+
+#[tokio::test]
+async fn the_work_fence_still_refuses_an_incarnation_that_is_not_live() {
+    // (1) A newer running record of another incarnation replaced it.
+    let seat = MovedSeat::new().await;
+    seat.birch_observes("running", Some("again-on-birch"));
+    assert_eq!(seat.refused("renew", MOVED_SEAT, "on-cedar", "replaced").await, "inactive-work-incarnation");
+    // (2) Its own end, from any host.
+    let seat = MovedSeat::new().await;
+    seat.birch_observes("exited", Some("on-cedar"));
+    assert_eq!(seat.refused("renew", MOVED_SEAT, "on-cedar", "own-end").await, "inactive-work-incarnation");
+    // (3) An end that names no incarnation, from the host where it runs.
+    let seat = MovedSeat::new().await;
+    seat.cedar_observes("vanished", None);
+    assert_eq!(seat.refused("progress", MOVED_SEAT, "on-cedar", "unnamed-end").await, "inactive-work-incarnation");
+    // (4) Another actor cannot act on the claim, whatever incarnation it names.
+    let seat = MovedSeat::new().await;
+    assert!(!seat.refused("renew", "agent/example/other", "on-cedar", "wrong-actor").await.is_empty());
+    // (5) A live incarnation other than the one holding the lease cannot renew it.
+    let seat = MovedSeat::new().await;
+    seat.cedar_observes("running", Some("on-cedar-next"));
+    assert!(!seat.refused("renew", MOVED_SEAT, "on-cedar-next", "other-lease").await.is_empty());
 }

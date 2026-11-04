@@ -152,12 +152,16 @@ pub fn check(
                         Some(subject) => {
                             let message = store.message(subject)?;
                             let reader = store.claims_for(subject, Some("message.read"))?;
+                            // The reader's read is its claim or its local mark.
+                            let marked = crate::store::message_marks::recorded_at(
+                                &store.readers.get(), subject, &["message.read"], Some(route.to.as_str()),
+                            )?;
                             message.is_some_and(|message| {
                                 message.from == report.agent && message.to == route.to
-                            }) && reader.iter().any(|claim| {
+                            }) && (reader.iter().any(|claim| {
                                 claim.actor.as_deref() == Some(route.to.as_str())
                                     && Some(claim.accepted_at_unix_ms) == route.read_at_unix_ms
-                            })
+                            }) || marked.is_some_and(|at| Some(at) == route.read_at_unix_ms))
                         }
                         None => false,
                     };

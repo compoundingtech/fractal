@@ -1069,8 +1069,7 @@ impl ResourceProfileRegistry {
     }
 }
 
-/// RFC 3986 scheme characters: the same test `fractal_legacy_runner::resync` uses to decide whether a URI string
-/// carries a scheme at all. Shared so both sides agree on where profiles take over.
+/// Recognize RFC 3986 scheme characters to decide whether a URI string carries a scheme.
 fn is_uri_scheme(scheme: &str) -> bool {
     scheme
         .chars()
@@ -1328,13 +1327,13 @@ mod tests {
             ResourceProfileRegistry::empty().with_profile(demo_profile(ProfileClass::Immediate));
         assert_eq!(
             registry.resolve(
-                Path::new("/cat/agents/dev3/janitor"),
-                "dev.schickling.agent-goal://dev3/janitor"
+                Path::new("/cat/agents/devbox-a/janitor"),
+                "dev.schickling.agent-goal://devbox-a/janitor"
             ),
             Some(Resolution {
-                path: PathBuf::from("/cat/agents/dev3/janitor/resources/goal.md"),
+                path: PathBuf::from("/cat/agents/devbox-a/janitor/resources/goal.md"),
                 class: ProfileClass::Immediate,
-                containment_root: PathBuf::from("/cat/agents/dev3/janitor"),
+                containment_root: PathBuf::from("/cat/agents/devbox-a/janitor"),
             })
         );
     }

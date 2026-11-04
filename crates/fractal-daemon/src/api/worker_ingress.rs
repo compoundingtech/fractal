@@ -9,7 +9,7 @@ type Observe = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
 
 fn worker_route(path: &str) -> bool {
     path.starts_with("/v1/internal/replication/")
-        || matches!(path, "/v1/internal/seat-freshness" | "/v1/internal/seat-snapshot")
+        || matches!(path, "/v1/internal/seat-freshness" | "/v1/internal/seat-freshness/reads" | "/v1/internal/seat-snapshot")
         || path == crate::peer::CLIENT_READ_FORWARD_PATH
 }
 
@@ -134,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn worker_ingress_observe_admits_unbound_callers_on_every_route_class() {
         for path in ["/v1/internal/replication/receive", "/v1/internal/seat-freshness",
-            "/v1/internal/seat-snapshot", crate::peer::CLIENT_READ_FORWARD_PATH] {
+            "/v1/internal/seat-freshness/reads", "/v1/internal/seat-snapshot", crate::peer::CLIENT_READ_FORWARD_PATH] {
             let app = protect(Router::new().route(path, axum::routing::post(|| async { "accepted" })),
                 Arc::new(|| anyhow::bail!("supervisor unavailable")), WorkerIngressGenerationCheck::Observe);
             let response = app.oneshot(Request::post(path).body(Body::empty()).unwrap()).await.unwrap();

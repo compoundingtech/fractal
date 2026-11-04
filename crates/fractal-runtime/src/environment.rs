@@ -201,6 +201,15 @@ pub fn overlay_environment(
             .iter()
             .map(|(name, value)| (name.clone(), value.replace("${PATH}", &shell_path))),
     );
+    // A seat's scratch can include builds and checkouts. Do not let an absent TMPDIR or an
+    // inherited RAM-backed one send that work into /tmp and swap. An authored value wins.
+    if !declared.contains_key("TMPDIR")
+        && environment
+            .get("TMPDIR")
+            .is_none_or(|path| path.is_empty() || on_tmpfs(Path::new(path)))
+    {
+        environment.insert("TMPDIR".into(), "/var/tmp".into());
+    }
     prepend_executable_dir(&mut environment, executable)?;
     for name in [
         "OLDPWD",
@@ -217,6 +226,25 @@ pub fn overlay_environment(
         }
     }
     Ok(environment)
+}
+
+#[cfg(target_os = "linux")]
+fn on_tmpfs(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: path is NUL-terminated and stat is valid for a statfs write.
+    unsafe {
+        libc::statfs(path.as_ptr(), stat.as_mut_ptr()) == 0
+            && stat.assume_init().f_type == libc::TMPFS_MAGIC
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_tmpfs(_path: &Path) -> bool {
+    false
 }
 
 pub fn expand_path_placeholder(value: &mut String, environment: &BTreeMap<String, String>) {
@@ -406,6 +434,59 @@ mod tests {
         assert_eq!(environment["VALUE"], "declared");
         assert_eq!(environment["PATH"], "/st3/bin:/shell/bin:/usr/bin");
         assert!(!environment.contains_key("TERM"));
+    }
+
+    #[test]
+    fn scratch_defaults_to_disk_and_preserves_authored_tmpdir() {
+        let base = BTreeMap::from([("PATH".into(), "/shell/bin".into())]);
+        for inherited in [None, Some("")] {
+            let mut environment = base.clone();
+            if let Some(value) = inherited {
+                environment.insert("TMPDIR".into(), value.into());
+            }
+            let actual =
+                overlay_environment(environment, &BTreeMap::new(), Path::new("/bin/fractal"))
+                    .unwrap();
+            assert_eq!(actual["TMPDIR"], "/var/tmp");
+        }
+        for value in ["/var/tmp", "/chosen/scratch", ""] {
+            let declared = BTreeMap::from([("TMPDIR".into(), value.into())]);
+            let actual =
+                overlay_environment(base.clone(), &declared, Path::new("/bin/fractal")).unwrap();
+            assert_eq!(actual["TMPDIR"], value);
+        }
+        let mut inherited = base;
+        inherited.insert("TMPDIR".into(), "/var/tmp".into());
+        let actual =
+            overlay_environment(inherited, &BTreeMap::new(), Path::new("/bin/fractal")).unwrap();
+        assert_eq!(actual["TMPDIR"], "/var/tmp");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_tmpfs_scratch_moves_to_disk_but_authored_tmpfs_is_preserved() {
+        // Linux CI and build hosts mount /dev/shm as tmpfs. statfs follows symlinks too.
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join("memory");
+        std::os::unix::fs::symlink("/dev/shm", &link).unwrap();
+        assert!(on_tmpfs(&link));
+        for path in ["/dev/shm", link.to_str().unwrap()] {
+            let inherited = BTreeMap::from([
+                ("PATH".into(), "/shell/bin".into()),
+                ("TMPDIR".into(), path.into()),
+            ]);
+            let actual = overlay_environment(
+                inherited.clone(),
+                &BTreeMap::new(),
+                Path::new("/bin/fractal"),
+            )
+            .unwrap();
+            assert_eq!(actual["TMPDIR"], "/var/tmp");
+            let declared = BTreeMap::from([("TMPDIR".into(), path.into())]);
+            let actual =
+                overlay_environment(inherited, &declared, Path::new("/bin/fractal")).unwrap();
+            assert_eq!(actual["TMPDIR"], path);
+        }
     }
 
     #[cfg(unix)]
