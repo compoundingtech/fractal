@@ -15,7 +15,7 @@ pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLo
     )
 });
 const PREPARATION_SCHEMA: &str =
-    /* sqlite-large-value: allow-for-now lv-hcf3bd361bb76 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
+    /* sqlite-large-value: allow-for-now lv-h6926004f4a7e owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
     r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_claims (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS local_resource_preparation_claims_subject
 ON local_resource_preparation_claims(subject);
+CREATE INDEX IF NOT EXISTS local_resource_preparation_claims_order
+ON local_resource_preparation_claims(subject, sort_key);
 CREATE TABLE IF NOT EXISTS local_resource_preparation_pending (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -42,6 +44,18 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_dirty (
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_resource_preparation_deferred (
     subject TEXT PRIMARY KEY
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_resource_preparation_rebuild (
+    subject TEXT PRIMARY KEY,
+    after_key BLOB NOT NULL,
+    walked INTEGER NOT NULL,
+    actual TEXT,
+    kind TEXT,
+    observed_at TEXT,
+    actual_key BLOB,
+    kind_key BLOB,
+    observation_key BLOB,
+    attribution
 ) WITHOUT ROWID;
 "#;
 
@@ -393,6 +407,10 @@ fn create_repair_triggers(connection: &Connection) -> Result<()> {
 pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
     capture_work(transaction)?;
     create_tracking_triggers(transaction)?;
+    // A staged rebuild is resumed only within the process that staged it: an older binary may
+    // since have rebuilt its subject whole and a later trim deferred it again, which leaves the
+    // stage folded over claims that are no longer the subject's. Restarting costs one walk.
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h08a4e5c48cc2 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild", [])?;
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='resource_preparation_version'",
@@ -420,11 +438,12 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6c0132eacd9f owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h407801ac4b65 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
         DELETE FROM local_resource_preparation_deferred;
+        DELETE FROM local_resource_preparation_rebuild;
         INSERT INTO local_resource_preparation_dirty(subject)
         SELECT DISTINCT subject FROM claims
         WHERE (claims.subject >= 'resource/' AND claims.subject < 'resource0')
@@ -432,41 +451,221 @@ pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
     flush(transaction)
 }
 
-fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+pub(super) fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     // A rebuild from every claim present is also what a deferral waits for.
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
+    end_deferral(transaction, subject)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h59e6ed677dfb owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h688464025ee2 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_claims WHERE subject=?1", [subject])?;
     if !supported(transaction, subject)? {
         return Ok(());
     }
+    // advance() per claim, in one pass: the fold stays in memory and the row is written once,
+    // where advance() reads, parses and writes the whole merged actual again for every claim.
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
-            "SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 ORDER BY {CANONICAL_ORDER}"
+            "SELECT claims.id,claims.kind,claims.body,claims.accepted_at_unix_ms,
+                ({ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}),
+                CASE WHEN claims.kind='resource.observed'
+                    THEN COALESCE(json_extract(claims.body,'$.fields.attribution_only'),0) END
+             FROM claims JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject=?1 ORDER BY {CANONICAL_ORDER}"
         )
     });
     let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h28691152dda6 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?;
     let mut rows = statement.query([subject])?;
+    let mut claims = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h449f2da499d1 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_claims(claim_id,subject,sort_key) VALUES(?1,?2,?3)
+        ON CONFLICT(claim_id) DO UPDATE SET subject=excluded.subject,sort_key=excluded.sort_key")?;
+    let mut fold: Option<Fold> = None;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
         let key = sort_key(transaction, &id)?;
-        advance(transaction, subject, &id, key)?;
+        fold.get_or_insert_with(Fold::default).add(&FoldClaim::read(row, 1)?, &key)?;
+        claims.execute(/* sqlite-large-value: allow-for-now lv-h6986717d6e82 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ params![id, subject, key])?;
     }
-    Ok(())
+    // A subject with no claims has no row, as advance() never ran for it.
+    match fold {
+        Some(fold) => fold.write(transaction, subject),
+        None => Ok(()),
+    }
 }
 
-/// Rebuild the subjects a trim deferred, until `budget` is spent (at least one), and say whether
-/// any is left. A trim calls it once per paced transaction after its day's run.
+/// What the fold reads of one claim, from columns `first..first+5` of a row: kind, body,
+/// accepted_at_unix_ms, eligibility and the observation's attribution.
+struct FoldClaim {
+    kind: String,
+    body: String,
+    accepted: String,
+    eligible: bool,
+    attribution: rusqlite::types::Value,
+}
+
+impl FoldClaim {
+    fn read(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            kind: row.get(first)?,
+            body: row.get(first + 1)?,
+            accepted: row.get(first + 2)?,
+            eligible: row.get(first + 3)?,
+            attribution: row.get(first + 4)?,
+        })
+    }
+}
+
+/// One subject's `local_resource_preparation` row while rebuild_subject folds its claims; the
+/// fields are its columns, and `None` is a column advance() has not yet set.
+#[derive(Default)]
+struct Fold {
+    actual: Option<serde_json::Map<String, Value>>,
+    actual_key: Option<Vec<u8>>,
+    kind: Option<String>,
+    kind_key: Option<Vec<u8>>,
+    observed_at: Option<String>,
+    observation_key: Option<Vec<u8>>,
+    attribution: Option<rusqlite::types::Value>,
+}
+
+impl Fold {
+    /// advance() for one claim at `key`, the next in canonical order, on the fold in memory.
+    fn add(&mut self, claim: &FoldClaim, key: &[u8]) -> Result<()> {
+        if !claim.eligible && claim.kind != "resource.observed" {
+            return Ok(());
+        }
+        let parsed: Value = serde_json::from_str(&claim.body)?;
+        if claim.kind == "resource.observed" {
+            if let Some(observed) = parsed.pointer("/fields/kind").and_then(Value::as_str)
+                && self.kind_key.as_deref().is_none_or(|kind_key| kind_key < key)
+            {
+                self.kind = Some(observed.to_owned());
+                self.kind_key = Some(key.to_vec());
+            }
+            let replaces = match &self.observation_key {
+                None => true,
+                Some(observation_key) => match sql_order(&claim.attribution, self.attribution.as_ref().unwrap_or(&rusqlite::types::Value::Null)) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Equal => observation_key.as_slice() < key,
+                    std::cmp::Ordering::Greater => false,
+                },
+            };
+            if replaces {
+                self.observed_at = Some(claim.accepted.clone());
+                self.observation_key = Some(key.to_vec());
+                self.attribution = Some(claim.attribution.clone());
+            }
+        }
+        if claim.eligible {
+            merge_actual_value(self.actual.get_or_insert_with(Default::default), &claim.kind, parsed);
+            self.actual_key = Some(key.to_vec());
+        }
+        Ok(())
+    }
+
+    /// Replace the subject's `local_resource_preparation` row with this fold.
+    fn write(self, transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+        let actual = self.actual.map(|merged| canonical_json_text(&Value::Object(merged))).transpose()?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hd174066964fc owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation(subject,actual,kind,observed_at,actual_key,kind_key,observation_key,attribution)
+             VALUES(?1,?2,?3,COALESCE(?4,'0'),?5,?6,?7,?8)
+             ON CONFLICT(subject) DO UPDATE SET actual=excluded.actual,kind=excluded.kind,
+                 observed_at=excluded.observed_at,actual_key=excluded.actual_key,kind_key=excluded.kind_key,
+                 observation_key=excluded.observation_key,attribution=excluded.attribution",
+            params![subject, actual, self.kind, self.observed_at, self.actual_key, self.kind_key, self.observation_key, self.attribution],
+        )?;
+        Ok(())
+    }
+
+    /// Save a staged rebuild: this fold over `walked` claims, the last of them at `after_key`.
+    fn stage(&self, transaction: &Transaction<'_>, subject: &str, after_key: &[u8], walked: i64) -> Result<()> {
+        let actual = self.actual.as_ref().map(|merged| canonical_json_text(&Value::Object(merged.clone()))).transpose()?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h7e2dfb9d0eea owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_rebuild(subject,after_key,walked,actual,kind,observed_at,actual_key,kind_key,observation_key,attribution)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(subject) DO UPDATE SET after_key=excluded.after_key,walked=excluded.walked,
+                 actual=excluded.actual,kind=excluded.kind,observed_at=excluded.observed_at,actual_key=excluded.actual_key,
+                 kind_key=excluded.kind_key,observation_key=excluded.observation_key,attribution=excluded.attribution",
+            params![subject, after_key, walked, actual, self.kind, self.observed_at, self.actual_key, self.kind_key, self.observation_key, self.attribution],
+        )?;
+        Ok(())
+    }
+
+    /// A staged rebuild of `subject`: its fold, the key it stopped after and the claims it walked.
+    fn staged(transaction: &Transaction<'_>, subject: &str) -> Result<Option<(Self, Vec<u8>, i64)>> {
+        let row: Option<(Option<String>, Self, Vec<u8>, i64)> = transaction
+            .query_row(
+                "SELECT actual,kind,observed_at,actual_key,kind_key,observation_key,attribution,after_key,walked
+                 FROM local_resource_preparation_rebuild WHERE subject=?1",
+                [subject],
+                |row| {
+                    Ok((row.get(0)?, Self {
+                        actual: None,
+                        kind: row.get(1)?,
+                        observed_at: row.get(2)?,
+                        actual_key: row.get(3)?,
+                        kind_key: row.get(4)?,
+                        observation_key: row.get(5)?,
+                        attribution: row.get(6)?,
+                    }, row.get(7)?, row.get(8)?))
+                },
+            )
+            .optional()?;
+        row.map(|(actual, mut fold, after_key, walked)| {
+            fold.actual = actual.map(|actual| serde_json::from_str(&actual)).transpose()?;
+            Ok((fold, after_key, walked))
+        })
+        .transpose()
+    }
+}
+
+/// How SQLite orders two values in a comparison with no affinity, as advance()'s observation
+/// UPDATE compares an `attribution_only` with the stored one: NULL, then numbers by value, then
+/// text by bytes (BINARY), then blobs by bytes.
+fn sql_order(left: &rusqlite::types::Value, right: &rusqlite::types::Value) -> std::cmp::Ordering {
+    use rusqlite::types::Value::{Blob, Integer, Null, Real, Text};
+    use std::cmp::Ordering;
+    fn rank(value: &rusqlite::types::Value) -> u8 {
+        match value {
+            Null => 0,
+            Integer(_) | Real(_) => 1,
+            Text(_) => 2,
+            Blob(_) => 3,
+        }
+    }
+    // An integer and a real compare exactly, as SQLite's own integer-to-float comparison does.
+    fn integer_real(integer: i64, real: f64) -> Ordering {
+        if real < -9_223_372_036_854_775_808.0 {
+            return Ordering::Greater;
+        }
+        if real >= 9_223_372_036_854_775_808.0 {
+            return Ordering::Less;
+        }
+        let truncated = real as i64;
+        integer.cmp(&truncated).then_with(|| (truncated as f64).partial_cmp(&real).unwrap_or(Ordering::Equal))
+    }
+    match (left, right) {
+        (Integer(left), Integer(right)) => left.cmp(right),
+        (Real(left), Real(right)) => left.partial_cmp(right).unwrap_or(Ordering::Equal),
+        (Integer(left), Real(right)) => integer_real(*left, *right),
+        (Real(left), Integer(right)) => integer_real(*right, *left).reverse(),
+        (Text(left), Text(right)) => left.as_bytes().cmp(right.as_bytes()),
+        (Blob(left), Blob(right)) => left.cmp(right),
+        _ => rank(left).cmp(&rank(right)),
+    }
+}
+
+/// Rebuild the subjects a trim deferred until `budget` is spent (at least one claim's worth), and
+/// say whether any is left. A trim calls it once per paced transaction after its day's run. A
+/// subject too large for one budget is staged and resumed by the next call, so no transaction
+/// holds the writer for a whole long history.
 pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
-    let started = std::time::Instant::now();
+    let deadline = std::time::Instant::now() + budget;
     loop {
         let subject: Option<String> = transaction
             .query_row("SELECT subject FROM local_resource_preparation_deferred ORDER BY subject LIMIT 1", [], |row| row.get(0))
             .optional()?;
         let Some(subject) = subject else { return Ok(false) };
-        rebuild_subject(transaction, &subject)?;
-        if started.elapsed() >= budget {
+        if !step_deferred(transaction, &subject, deadline)? {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
             return Ok(transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
                 [],
@@ -474,6 +673,90 @@ pub(super) fn flush_deferred(transaction: &Transaction<'_>, budget: std::time::D
             )?);
         }
     }
+}
+
+// A stage's next claims, seeking past its key; deleted claims come back with no claims row.
+pub(super) static WALK: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT prepared.claim_id,prepared.sort_key,claims.id IS NOT NULL,claims.kind,claims.body,
+            claims.accepted_at_unix_ms,
+            ({ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}),
+            CASE WHEN claims.kind='resource.observed'
+                THEN COALESCE(json_extract(claims.body,'$.fields.attribution_only'),0) END
+         FROM local_resource_preparation_claims prepared INDEXED BY local_resource_preparation_claims_order
+         LEFT JOIN claims ON claims.id=prepared.claim_id AND claims.subject=prepared.subject
+         WHERE prepared.subject=?1 AND prepared.sort_key>?2
+         ORDER BY prepared.sort_key LIMIT 64"
+    )
+});
+
+/// Fold a deferred subject's claims onward from its stage until `deadline` (at least one claim),
+/// and say whether its rebuild finished.
+///
+/// The walk reads the subject's claims through `local_resource_preparation_claims`, in sort-key
+/// order, which is canonical order, seeking past the stage's key in `(subject, sort_key)`: a step
+/// reads only the claims it folds, however long the subject's history. Every present claim of the subject has its row there with its
+/// current key, because flush keeps them; the deleted ones a trim left behind are skipped and
+/// their rows dropped. The stage stays valid only while nothing else rebuilds the subject:
+/// `rebuild_subject` drops it, and a new claim on a deferred subject goes through that. The
+/// finished walk must have seen as many claims as the subject has, or the subject is rebuilt
+/// whole from `claims` instead.
+fn step_deferred(transaction: &Transaction<'_>, subject: &str, deadline: std::time::Instant) -> Result<bool> {
+    let (mut fold, mut after_key, mut walked) = match Fold::staged(transaction, subject)? {
+        Some(staged) => staged,
+        None if !supported(transaction, subject)? => {
+            rebuild_subject(transaction, subject)?;
+            return Ok(true);
+        }
+        None => (Fold::default(), Vec::new(), 0),
+    };
+    let mut stale = Vec::new();
+    let finished = 'walk: loop {
+        let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h70484bec3d02 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &WALK)?;
+        let mut rows = statement.query(params![subject, after_key])?;
+        let mut read = 0;
+        while let Some(row) = rows.next()? {
+            read += 1;
+            let key: Vec<u8> = row.get(1)?;
+            if row.get(2)? {
+                fold.add(&FoldClaim::read(row, 3)?, &key)?;
+                walked += 1;
+            } else {
+                stale.push(row.get::<_, String>(0)?);
+            }
+            after_key = key;
+            if std::time::Instant::now() >= deadline {
+                break 'walk false;
+            }
+        }
+        if read < 64 {
+            break true;
+        }
+    };
+    for claim_id in stale {
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hc4bf84f87912 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_claims WHERE claim_id=?1", [claim_id])?;
+    }
+    if !finished {
+        fold.stage(transaction, subject, &after_key, walked)?;
+        return Ok(false);
+    }
+    let present: i64 = transaction.query_row("SELECT COUNT(*) FROM claims WHERE subject=?1", [subject], |row| row.get(0))?;
+    if walked == 0 || walked != present {
+        // No claims left (rebuild_subject removes the row), or rows flush did not keep.
+        rebuild_subject(transaction, subject)?;
+        return Ok(true);
+    }
+    fold.write(transaction, subject)?;
+    end_deferral(transaction, subject)?;
+    Ok(true)
+}
+
+/// The subject's preparation is rebuilt from every claim present: no deferral waits on it, and no
+/// stage of an earlier walk is still valid.
+fn end_deferral(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h4de9c4537b6c owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_rebuild WHERE subject=?1", [subject])?;
+    Ok(())
 }
 
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
@@ -594,7 +877,7 @@ pub(crate) fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
         Ok(key)
     })?)
 }
-fn advance(transaction: &Transaction<'_>, subject: &str, id: &str, key: Vec<u8>) -> Result<()> {
+pub(super) fn advance(transaction: &Transaction<'_>, subject: &str, id: &str, key: Vec<u8>) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
         "SELECT kind,body,accepted_at_unix_ms,({ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM})
@@ -634,7 +917,7 @@ fn advance(transaction: &Transaction<'_>, subject: &str, id: &str, key: Vec<u8>)
                 params![subject, canonical_json_text(&Value::Object(merged))?, &key])?;
         }
     }
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h449f2da499d1 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_claims(claim_id,subject,sort_key) VALUES(?1,?2,?3)
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-he4a9650849c0 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation_claims(claim_id,subject,sort_key) VALUES(?1,?2,?3)
         ON CONFLICT(claim_id) DO UPDATE SET subject=excluded.subject,sort_key=excluded.sort_key", params![id, subject, key])?;
     Ok(())
 }

@@ -471,13 +471,13 @@ async fn bootstrap_fabric_invite(
     {
         return Ok(());
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
     };
     let helper = adapter.context(FABRIC_PAIRING_UNAVAILABLE)?;
     let mut child = tokio::process::Command::new(helper)
         .arg("--st-socket")
-        .arg(socket)
+        .arg(socket.as_ref())
         .arg("pairing-invite")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -517,6 +517,13 @@ async fn bootstrap_fabric_invite(
 }
 
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
+    // Recording an override only asks this member's daemon; it reads no fleet configuration.
+    let command = match command {
+        FleetCommand::AdmitWithout { peers, reason, actor } => {
+            return admit_without(endpoint, peers, reason, actor, json_output).await;
+        }
+        command => command,
+    };
     let manages_services = match &command {
         FleetCommand::Create(args) => !args.no_service,
         FleetCommand::Join(args) => !args.no_service,
@@ -743,6 +750,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 Ok(())
             }
         },
+        FleetCommand::AdmitWithout { .. } => unreachable!("handled before configuration is read"),
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
                 let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
@@ -1824,4 +1832,32 @@ mod invite_route_tests {
         let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
         assert!(error.to_string().contains("stopped"), "{error:#}");
     }
+}
+
+/// Let this member act on its seats' placement without `peers`, for its current daemon start.
+async fn admit_without(
+    endpoint: &Endpoint,
+    peers: Vec<String>,
+    reason: String,
+    actor: String,
+    json_output: bool,
+) -> Result<()> {
+    reject_foreign_agent_actor(&actor)?;
+    let claim: fractal_daemon::model::ClaimRecord = Client::new(endpoint.clone())
+        .post(
+            "/v1/fleet/admission-override",
+            &json!({
+                "actor": actor,
+                "peers": peers,
+                "reason": reason,
+                "idempotency_key": format!("admission-override:{}", uuid::Uuid::now_v7()),
+            }),
+        )
+        .await?;
+    if json_output {
+        println!("{}", serde_json::to_string(&claim)?);
+    } else {
+        println!("admitted without\t{}", peers.join(","));
+    }
+    Ok(())
 }

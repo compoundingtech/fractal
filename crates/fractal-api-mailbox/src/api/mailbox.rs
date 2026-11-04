@@ -13,6 +13,9 @@ use crate::mailbox::{Fence, Frame, Receipt};
 pub use fractal_api_core::api::mailbox::*;
 pub use fractal_api_core::api::mailbox::{hold_pre_boot_mail};
 pub mod authority;
+mod questions;
+mod question_lifecycle;
+pub use question_lifecycle::start as start_question_lifecycle;
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
 pub mod profile;
@@ -27,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
 #[derive(serde::Deserialize)]
@@ -2034,6 +2038,18 @@ mod tests {
         }
     }
 
+    /// The next frame past any seat frame: a declared seat's stream names its declaration first.
+    async fn next_mailbox(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    ) -> Frame {
+        loop {
+            match next(socket).await {
+                Frame::Seat { .. } => continue,
+                frame => return frame,
+            }
+        }
+    }
+
     async fn next(
         socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
     ) -> Frame {
@@ -2359,11 +2375,23 @@ mod tests {
     }
 
     async fn restart_recovers_recent_unoffered_mail_once(transport: &'static str) {
+        restart_recovers_recent_unoffered_mail_once_with(transport, false).await;
+    }
+
+    /// With `marks`, the seat is declared on this member and marks are on (db break-up 4b-2):
+    /// every receipt is a local mark, none a lifecycle claim, and the stream behaves the same.
+    async fn restart_recovers_recent_unoffered_mail_once_with(transport: &'static str, marks: bool) {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
         let database = root.path().join("graph.db");
         state.store = Arc::new(Store::open(&database, "node").unwrap());
         let seat = "agent/eval.worker";
+        if marks {
+            let source = "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; command \"true\"; }";
+            let intent = crate::graph::parse_intent(source, "node").unwrap();
+            state.store.apply_internal(&intent, "declare-eval-worker").unwrap();
+            assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+        }
         crate::store::mailbox_tests::ready(&state.store, "session-1");
         let send = |id: &str| {
             state
@@ -2437,8 +2465,10 @@ mod tests {
             .await
             .unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();
+        let first = next_mailbox(&mut socket).await;
         assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty())
+            matches!(&first, Frame::Mailbox { messages } if messages.is_empty()),
+            "{first:?}"
         );
         socket.close(None).await.unwrap();
         send("just-before-restart");
@@ -2453,7 +2483,7 @@ mod tests {
         }
         let mut socket = client.open_mailbox(&fence).await.unwrap();
         assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages }
+            matches!(next_mailbox(&mut socket).await, Frame::Mailbox { messages }
             if messages.len() == 1 && messages[0].subject == "message/just-before-restart"),
             "{transport} lost recent unoffered mail across daemon restart"
         );
@@ -2479,7 +2509,7 @@ mod tests {
                 .unwrap();
             if lifecycle == "staged" {
                 assert!(
-                    matches!(next(&mut socket).await, Frame::Mailbox { messages }
+                    matches!(next_mailbox(&mut socket).await, Frame::Mailbox { messages }
                     if messages.len() == 1 && messages[0].status == "staged"),
                     "{transport} removed an admitted recovery before its receipts finished"
                 );
@@ -2488,22 +2518,24 @@ mod tests {
                 .post::<_, ClaimRecord>("/v1/mailbox/receipts", &receipt)
                 .await
                 .unwrap();
-            assert_eq!(
-                state
-                    .store
-                    .claims_for(
-                        "message/just-before-restart",
-                        Some(&format!("message.{lifecycle}"))
-                    )
-                    .unwrap()
-                    .len(),
-                1
-            );
+            let claimed = state
+                .store
+                .claims_for("message/just-before-restart", Some(&format!("message.{lifecycle}")))
+                .unwrap()
+                .len();
+            let marked: usize = state.store.readers.get().query_row(
+                "SELECT (SELECT COUNT(*) FROM local_message_marks WHERE message=?1 AND kind=?2)
+                      + (SELECT COUNT(*) FROM local_message_staged WHERE message=?1 AND ?2='message.staged')",
+                rusqlite::params!["message/just-before-restart", format!("message.{lifecycle}")],
+                |row| row.get(0),
+            ).unwrap();
+            // A staging stays a claim while marks are on (message_marks::RECORDS_STAGED).
+            assert_eq!((claimed, marked), if marks && lifecycle != "staged" { (0, 1) } else { (1, 0) }, "{lifecycle}");
         }
         socket.close(None).await.unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();
         assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty()),
+            matches!(next_mailbox(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty()),
             "{transport} replayed recovered or historical mail"
         );
         assert!(
@@ -2526,6 +2558,11 @@ mod tests {
     #[tokio::test]
     async fn claude_restart_recovers_recent_unoffered_mail_once() {
         restart_recovers_recent_unoffered_mail_once("claude-channel").await;
+    }
+
+    #[tokio::test]
+    async fn a_seat_that_records_marks_recovers_recent_unoffered_mail_once() {
+        restart_recovers_recent_unoffered_mail_once_with("omp-channel", true).await;
     }
 
     #[tokio::test]

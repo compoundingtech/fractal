@@ -218,6 +218,17 @@ test('story-local play tags preserve the main play sets, including unlisted spre
   expect(Object.keys(entries).filter(id => entries[id].includes('both-widths')).sort()).toEqual([...baseline.BOTH_WIDTHS].sort())
 })
 
+test('sidebar tab contracts retain both widths through story-local policy tags', () => {
+  const module = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
+  expect(module).toBeDefined()
+  for (const name of ['AllStates', 'Keyboard']) {
+    const story = module[name]
+    expect(isStory(story)).toBe(true)
+    if (!isStory(story)) throw new Error(`Missing sidebar tab story ${name}`)
+    expect(composeStory(story, module.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
+  }
+})
+
 test('configured inventory discovers app stories in a new nested source folder', () => {
   const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
   try {

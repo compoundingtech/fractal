@@ -103,14 +103,12 @@ async fn conversation_first_frame_profile_lifecycle() {
     socket.send(tokio_tungstenite::tungstenite::Message::Text(
         json!({"kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":"agent/chat"}).to_string().into(),
     )).await.unwrap();
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-    let frame: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let frame = super::tests::next_data_frame(&mut socket).await;
     assert_eq!(frame["kind"], "conversation");
     // A ping/pong fence proves the socket has finished the send branch and its
     // operation, without a sleep or relying on client receive/server scheduling.
     socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
-    let pong = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-    assert!(matches!(pong, tokio_tungstenite::tungstenite::Message::Pong(_)));
+    super::tests::next_pong(&mut socket).await;
     let path = std::path::PathBuf::from(std::env::var_os("ST3_PROFILE_DIR").unwrap()).join("slow.jsonl");
     let profiles = || std::fs::read_to_string(&path).unwrap().lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -140,7 +138,7 @@ async fn conversation_first_frame_profile_lifecycle() {
         json!({"kind":"unsubscribe", "id":"chat"}).to_string().into(),
     )).await.unwrap();
     socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    super::tests::next_pong(&mut socket).await;
     assert_eq!(profiles(), records);
     socket.close(None).await.unwrap();
     // Cancellation/replacement before data delivery must not claim successful completion.
@@ -193,8 +191,7 @@ async fn cold_open_four_subscriptions_do_not_wait_for_slow_roster() {
     }
     let mut received = BTreeSet::new();
     for _ in 0..3 {
-        let raw = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+        let frame = super::tests::next_data_frame(&mut socket).await;
         assert_ne!(frame["id"], "agents", "cold roster admission must remain held");
         assert_eq!(frame["kind"], if frame["id"] == "conversation" { "conversation" } else { "snapshot" });
         println!("cold-open independent first frame: {} {:.3} ms", frame["id"], start.elapsed().as_secs_f64() * 1000.0);
@@ -206,8 +203,7 @@ async fn cold_open_four_subscriptions_do_not_wait_for_slow_roster() {
     tokio::time::sleep(Duration::from_millis(750)).await;
     let held_ms = start.elapsed().as_secs_f64() * 1000.0;
     drop(slow_roster);
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-    let frame: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let frame = super::tests::next_data_frame(&mut socket).await;
     assert_eq!(frame["id"], "agents");
     assert_eq!(frame["kind"], "snapshot");
     println!("cold-open roster first frame: {:.3} ms (admission artificially held {:.3} ms)", start.elapsed().as_secs_f64() * 1000.0, held_ms);

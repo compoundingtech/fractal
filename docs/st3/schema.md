@@ -147,6 +147,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `loop.round-dispatch` | `loop-run` | `system-only` | `append` | `durable` | `candidate:integer`, `dispatch!:integer`, `item_id:string`, `mission_run!:subject-reference(mission-run)`, `reason!:string`, `round!:integer`, `status!:string` | `loop`, `round` |
 | `loop.round-result` | `loop-run` | `system-only` | `append` | `durable` | `candidate:integer`, `feedback:subject-reference(doc)`, `item:any`, `metrics:object`, `mission_run!:subject-reference(mission-run)`, `reason:string`, `round!:integer`, `status!:string`, `token_usage:integer` | `loop`, `round` |
 | `loop.state` | `loop-run` | `system-only` | `state-transition` | `durable` | `best_metrics:object`, `best_round:integer`, `feedback:subject-reference(doc)`, `items:array`, `reason:string`, `round:integer`, `status!:string`, `winner:integer` | `loop` |
+| `member.admission-override` | `host` | `authorized-requester` | `append` | `durable` | `peers!:array`, `reason!:string`, `start!:string` |  |
 | `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `acting_for:subject-reference(agent)`, `delegation:object`, `status!:string` |  |
 | `message.delivered` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acting_for:subject-reference(agent)`, `status!:string` |  |
@@ -251,6 +252,27 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 `resource.observed` validates facts against the resource kind. Custom resource facts remain open.
 
 A `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.
+
+## Agent principal grammar
+
+An agent may declare one optional `principal "person/operator"` child. It takes
+exactly one canonical person ID string, with no properties or body; agent IDs,
+malformed person IDs and duplicate principal children are rejected. `principal`
+is not an agent property. The canonical `intent.desired.desired` tree retains
+the child without adding a separate claim field. Omitting it remains valid.
+This grammar declaration is distinct from the accountable-root contract below.
+
+Pending harness observations with `ask="question"` route to the declared
+principal, otherwise to the daemon's configured `person`. Account ownership,
+helper bindings, mission requesters and declaration authors are not question
+authority. If neither principal exists, global attention retains the prompt
+with an empty person and a configuration diagnostic instead of dropping it.
+Only a live declaration and its running incarnation can produce the item;
+republishing its principal invalidates attention. `under` remains non-owning.
+Permission and review prompts retain their existing ownership and answer
+authorization. This routing does not enable answering unsupported harnesses.
+Supported native question answers require the effective principal as answerer.
+Upgrade readers before publishing the child: older readers reject it.
 
 ## Accountable fleet roots
 

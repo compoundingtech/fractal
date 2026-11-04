@@ -3,6 +3,7 @@
 import atexit
 import calendar
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.machinery
@@ -14,6 +15,8 @@ import time
 import os
 from pathlib import Path
 import re
+import select
+import signal
 import shutil
 import socket
 import subprocess
@@ -653,6 +656,100 @@ class GovernedTest(unittest.TestCase):
             self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
 
 
+class LaneBurstTest(unittest.TestCase):
+    """A run raises its seat's lane through `fractal agents burst`, held while the holder's stdin is open (docs/st3/seat-lanes.md, Bursts)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.calls = Path(self.tmp.name) / 'calls'
+        self.released = Path(self.tmp.name) / 'released'
+
+    def fractal(self, body):
+        """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
+        path = Path(self.tmp.name) / 'fractal'
+        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        path.chmod(0o755)
+        return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
+
+    def burst(self, body, size=(8, '24G'), limit=10, env=None):
+        said = io.StringIO()
+        with mock.patch.dict(os.environ, env if env is not None else self.fractal(body)):
+            return st_test.lane_burst(size, limit, output=said), said.getvalue()
+
+    def test_the_size_follows_what_the_run_builds(self):
+        blob = json.dumps({'version': 1, 'build': {'cores': 8, 'memory': '24G'}}).encode()
+        with mock.patch.object(st_test, 'config_blob', return_value=blob) as read:
+            self.assertEqual(st_test.burst_size(['linux-gate', 'ci-script-tests']), (8, '24G'))
+            self.assertIsNone(st_test.burst_size(['ci-script-tests', 'genie-freshness']))  # builds nothing: no burst, and no read
+            self.assertEqual(read.call_count, 1)
+        with mock.patch.object(st_test, 'config_blob', return_value=None):
+            self.assertIsNone(st_test.burst_size(['linux-gate']))
+        with mock.patch.object(st_test, 'config_blob', return_value=b'{"build": {"cores": 8}}'):
+            with self.assertRaisesRegex(st_test.Failure, 'no usable build size'):
+                st_test.burst_size(['linux-gate'])
+        self.assertIn('"build"', (ROOT / '.st/lane-bursts.json').read_text())
+
+    def test_it_waits_in_line_says_each_reason_once_and_holds_until_released(self):
+        burst, said = self.burst('echo "waiting burst lane 8 cores/24.0G does not fit"; echo "waiting burst lane 8 cores/24.0G does not fit"; '
+                                 'sleep 1; echo "waiting burst lane waits behind agent/crew/other"; echo granted')
+        self.assertEqual(burst.granted, (8, '24G'))
+        self.assertGreaterEqual(burst.waited, 1)
+        self.assertEqual(said.count('does not fit'), 1)
+        self.assertIn('waits behind agent/crew/other', said)
+        self.assertEqual(self.calls.read_text().split(), ['agents', 'burst', 'agent/crew/builder', '--cores', '8', '--memory', '24G',
+                                                          '--reason', 'st-test', '--as', 'agent/crew/builder'])
+        self.assertFalse(self.released.exists(), 'held while the run goes on')
+        burst.release()
+        self.assertEqual(self.released.read_text(), 'released\n')
+        record = burst.record()
+        self.assertEqual(record['burst'], {'cores': 8, 'memory': '24G'})
+        self.assertGreaterEqual(record['burst_wait_s'], 1)
+
+    def test_a_seat_without_a_lane_or_a_daemon_without_bursts_holds_none_and_says_why(self):
+        burst, said = self.burst('echo "none agent/crew/builder has no lane on this host"; exit 0')
+        self.assertIsNone(burst.granted)
+        self.assertEqual(burst.record()['burst_none'], 'agent/crew/builder has no lane on this host')
+        self.assertIn('the checks run in the lane as it is', said)
+        burst.release()  # nothing held: nothing to give back
+        older, said = self.burst("echo \"error: unrecognized subcommand 'burst'\" >&2; exit 2")
+        self.assertIsNone(older.granted)
+        self.assertEqual(older.why, "this host's fractal has no lane bursts")
+        self.assertIn('no lane burst', said)
+
+    def test_no_seat_or_nothing_to_build_asks_nothing(self):
+        burst, _ = self.burst('echo granted', env={'ST_AGENT': '', 'ST3_BIN': '/nonexistent/fractal'})
+        self.assertEqual(burst.why, 'no seat to raise the lane of')
+        burst, _ = self.burst('echo granted', size=None)
+        self.assertEqual(burst.record(), {'burst': None, 'burst_wait_s': 0})
+        self.assertFalse(self.calls.exists())
+
+    def test_a_refusal_or_a_holder_that_dies_without_an_answer_fails_the_run(self):
+        with self.assertRaisesRegex(st_test.Failure, 'refused: burst lane 64 cores/512.0G can never fit on this host'):
+            self.burst('echo "refused burst lane 64 cores/512.0G can never fit on this host"')
+        with self.assertRaisesRegex(st_test.Failure, 'ended without an answer: the daemon is not running'):
+            self.burst('echo "the daemon is not running" >&2; exit 1')
+
+    def test_a_wait_past_the_queue_limit_fails_and_ends_the_holder(self):
+        with self.assertRaisesRegex(st_test.Failure, r'waited 0.5s \(--queue-limit\) for a lane burst of 8 cores/24G: burst lane full'):
+            self.burst('echo "waiting burst lane full"; sleep 30', limit=0.5)
+
+    def test_a_run_killed_outright_still_gives_its_burst_back(self):
+        env = self.fractal('echo granted')
+        script = (f'import importlib.machinery, importlib.util, os\n'
+                  f'loader = importlib.machinery.SourceFileLoader("st_test_kill", {str(ROOT / "scripts/st-test")!r})\n'
+                  f'st = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader)); loader.exec_module(st)\n'
+                  f'burst = st.lane_burst((8, "24G"), 10)\nprint(burst.granted, flush=True)\nos.kill(os.getpid(), 9)\n')
+        done = subprocess.run([sys.executable, '-c', script], env=dict(os.environ, **env), capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, -9, done.stderr)
+        self.assertIn("(8, '24G')", done.stdout)
+        for _ in range(100):  # the holder's stdin closed with its run: it gives the burst back by itself
+            if self.released.exists():
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.released.read_text(), 'released\n')
+
+
 class StTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -945,7 +1042,7 @@ class StTest(unittest.TestCase):
         self.assertIn('clean worktree', out)
 
     def test_a_host_that_preloads_a_library_into_every_process_still_signs(self):
-        """hetz2 sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
+        """A build host sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
         self.commit('b.txt', 'two')
         empty = Path(self.tmp.name) / 'empty'
         empty.mkdir()
@@ -1118,6 +1215,23 @@ class StTest(unittest.TestCase):
         self.assertFalse([s for s in self.statements() if 'clippy_base_sha' in s['predicate']['observed']['inputs']
                           and s['subject'][0]['digest']['gitTree'] == git(self.work, 'rev-parse', 'HEAD^{tree}')])
 
+    def test_a_base_ref_another_fetch_moves_during_the_run_does_not_change_the_verdict_and_is_reported(self):
+        # Another seat's fetch in the same clone moves origin/main while the check runs, to a base whose key list no longer trusts this
+        # signer. The note was signed for the base the run fetched, and is judged there (#4755: judged at the moved ref, it read wrong_input).
+        self.commit('b.txt', 'two')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        index = self.home / 'moved-index'
+        env_index = dict(GIT_ENV, GIT_INDEX_FILE=str(index))
+        subprocess.run(['git', '-C', str(self.work), 'read-tree', base], env=env_index, check=True)
+        blob = git(self.work, 'hash-object', '-w', '--stdin', stdin=b'')
+        subprocess.run(['git', '-C', str(self.work), 'update-index', '--cacheinfo', f'100644,{blob},.st/evidence-keys'], env=env_index, check=True)
+        tree = subprocess.run(['git', '-C', str(self.work), 'write-tree'], env=env_index, check=True, capture_output=True).stdout.decode().strip()
+        moved = git(self.work, 'commit-tree', tree, '-p', base, '-m', 'a base that trusts no key')
+        code, out, err = self.run_st_test('--check', 'demo', command=['git', '-C', str(self.work), 'update-ref', 'refs/remotes/origin/main', moved])
+        self.assertEqual(git(self.work, 'rev-parse', 'origin/main'), moved)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f'base moved since signing: origin/main is at {moved[:12]} now; these notes are for {base[:12]}', out)
+
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
         (self.work / 'stray.txt').write_text('untracked')
@@ -1153,6 +1267,49 @@ class StTest(unittest.TestCase):
         self.assertEqual(statement['predicate']['observed']['checks']['demo']['exit_code'], 3)
         self.assertIn('FAILED (3)', out)
         self.assertNotIn('covered by', out)
+
+    def test_typescript_exit_127_reports_the_shell_without_retrying_or_masking_the_failure(self):
+        calls = []
+
+        def run(argv, limit, **options):
+            calls.append(argv)
+            report = Path(options['env']['CI_WEB_SHELL_DIAGNOSTICS'])
+            report.write_text('shellHook=started status=0\nPATH=/fixture/tools\ncommand -v pnpm: <not found>\n')
+            return subprocess.run(['sh', '-c', 'exit 127'], cwd=options['cwd'], env=options['env']).returncode
+
+        with mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true']}, clear=True), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            code, out, err = self.run_st_test('--check', 'typescript-client')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('FAILED (127)', out)
+        self.assertIn('caller environment before nix develop', err)
+        self.assertIn('BASH_ENV=', err)
+        self.assertIn('web shell hook environment (before child Bash startup)', err)
+        self.assertIn('shellHook=started', err)
+        self.assertNotIn('shellHook=finished', err)
+        self.assertIn('command -v pnpm: <not found>', err)
+
+    def test_typescript_other_exits_do_not_print_shell_diagnostics(self):
+        for status in (0, 3):
+            with self.subTest(status=status), \
+                    mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true']}, clear=True), \
+                    mock.patch.object(st_test, 'run_limited', return_value=status):
+                code, out, err = self.run_st_test('--check', 'typescript-client')
+                self.assertEqual(code, int(status != 0), out + err)
+                self.assertNotIn('caller environment', err)
+
+    def test_typescript_diagnostics_allow_an_absent_or_partial_hook_report(self):
+        report = Path(self.tmp.name) / 'shell-report'
+        output = io.StringIO()
+        st_test.typescript_shell_diagnostics(report, {}, output)
+        self.assertIn('hook not observed:', output.getvalue())
+        report.write_bytes(b'shellHook=started\n' + b'x' * 20000 + b'\xff')
+        output = io.StringIO()
+        st_test.typescript_shell_diagnostics(report, {}, output)
+        self.assertIn('shellHook=started', output.getvalue())
+        self.assertIn('[hook report truncated at 16 KiB]', output.getvalue())
+        self.assertLess(len(output.getvalue()), 17000)
 
     def test_a_tree_with_a_megarepo_lock_gets_its_members_before_its_checks_run(self):
         self.commit('.gitignore', '/repos/\n')
@@ -1213,8 +1370,15 @@ class StTest(unittest.TestCase):
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': rev}}}}))
         command = st_test.members_command(directory)
         step = (ROOT / '.github/workflows/workspace-ci.ts').read_text().split('export const megarepoApplyStep', 1)[1].split('} as const', 1)[0]
-        ci = step.replace('$(jq -r \'.nodes["effect-utils"].locked.rev\' flake.lock)', rev)
-        self.assertIn(f'nix run "{command[2]}" {" ".join(command[3:])}', ci)
+        self.assertIn('python3 scripts/prepare-pnpm-source-inputs.py apply', step)
+        # CI delegates to the shared preparer. Compare its actual argv, not the old inline shell spelling.
+        import ast
+        source = ast.parse((ROOT / 'scripts/prepare-pnpm-source-inputs.py').read_text())
+        apply = next(node for node in ast.walk(source) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == 'subprocess' and node.func.attr == 'run')
+        ci = eval(compile(ast.Expression(apply.args[0]), '<megarepo argv>', 'eval'), {'revision': rev})
+        self.assertEqual(ci, ['nix', *command[1:], '--lock-sync', 'off'])
         (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'main; rm -rf /'}}}}))
         with self.assertRaises(ValueError):
             st_test.members_command(directory)
@@ -1234,10 +1398,17 @@ class StTest(unittest.TestCase):
 
     def test_a_check_s_waits_for_a_build_slot_do_not_count_against_its_time_limit(self):
         self.commit('b.txt', 'two')
-        wait = 'echo "wait $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 3; echo "slot $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"'
+        # The queue log holds whole seconds (scripts/ci-local writes `date +%s`), so the wait is written rounded outward: it starts no later
+        # than the check does and ends no earlier than the sleep. Written as the sleep's own `date +%s` bounds, it could read up to a second
+        # short, and the time a loaded host takes to start sh and date counted too: against a 2 s limit that timed out (#4879). Now only the
+        # moment between the slot line and the command's exit runs; were waits counted against the limit, the 3 s would still be over it.
+        begun = int(time.time())
+        wait = f'echo "wait {begun} tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 3; echo "slot $(( $(date +%s) + 1 )) tests" >> "$CI_LOCAL_QUEUE_LOG"'
         code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', wait])
         self.assertEqual(code, 0, out + err)
-        self.assertRegex(out, r'waited [2-4]s for build slots')
+        waited = re.search(r'waited (\d+)s for build slots', out)
+        self.assertIsNotNone(waited, out)
+        self.assertGreaterEqual(int(waited.group(1)), 3)
         # The same, streamed as scripts/ci-local's output is.
         code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', wait, 'scripts/ci-local'])
         self.assertEqual(code, 0, out + err)
@@ -1389,6 +1560,491 @@ class StTest(unittest.TestCase):
             self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
             self.assertNotIn('----- fractal-test:', out)
 
+    def web_lanes(self, run, serial=False, ledger=True):
+        """Exercise the real orchestration and ledger; replace only the measured subprocesses with controlled checks."""
+        self.commit('b.txt', 'two')
+        shim = self.home / '.local/bin/cargo'
+        shim.parent.mkdir(parents=True)
+        shim.write_text('#!/bin/sh\nexit 99\n')  # captured by run below, never a real host slot
+        shim.chmod(0o755)
+        with mock.patch.dict(st_test.LOCAL, {'demo': ['true'], st_test.WEB: ['true'], 'light': ['true']}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            result = self.run_st_test(extra_env={'ST_EVIDENCE_SERIAL': '1' if serial else '0'})
+        if not ledger:
+            return result, None
+        record = json.loads((self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()[-1])
+        return result, record
+
+    def test_web_runs_concurrently_with_the_build_lane_and_light_checks(self):
+        build, web, light = threading.Event(), threading.Event(), threading.Event()
+        overlap = []
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == 'demo':
+                build.set()
+                overlap.append(web.wait(5) and light.wait(5))
+            elif name == st_test.WEB:
+                overlap.append(build.wait(5))
+                web.set()
+            else:
+                light.set()
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(overlap, [True, True])
+        self.assertTrue(record['parallel'])
+        self.assertEqual([row['name'] for row in record['rows']], ['setup', 'demo', st_test.WEB, 'light'])
+
+    def test_serial_web_keeps_check_order_and_still_holds_one_stage_slot(self):
+        commands = []
+
+        def run(argv, limit, **options):
+            commands.append((argv[argv.index('--check') + 1], argv, options.get('kill_group', False)))
+            return 0
+
+        (code, out, err), record = self.web_lanes(run, serial=True)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual([name for name, *_ in commands], ['demo', st_test.WEB, 'light'])
+        self.assertFalse(record['parallel'])
+        self.assertNotIn('----- fractal-test:', out)
+        web = commands[1][1]
+        self.assertEqual(web.count('--stage-slot'), 1)
+        self.assertIn('BUILD_ADMISSION_HELD=1', web)
+        self.assertNotIn('--stage-slot', commands[0][1])  # Rust's detached guardian must never inherit the web slot
+        self.assertEqual([group for _, _, group in commands], [False, True, False])
+
+    def test_web_and_client_installs_and_dependency_readers_share_the_worktree_lock(self):
+        self.commit('b.txt', 'two')
+        marks = Path(self.tmp.name) / 'pnpm-events'
+        fixture = Path(self.tmp.name) / 'pnpm-fixture.py'
+        fixture.write_text(textwrap.dedent('''\
+            from pathlib import Path
+            import sys, time
+            owner, events = sys.argv[1:]
+            modules = Path('node_modules')
+            modules.mkdir(exist_ok=True)
+            def mark(phase):
+                with open(events, 'a') as stream:
+                    stream.write(owner + ' ' + phase + '\\n')
+            mark('install-start')
+            (modules / 'dependency').write_text(owner)
+            time.sleep(0.1)
+            mark('install-end')
+            # Releasing an install-only lock here would let the other installer replace our dependency during its use.
+            mark('reader-start')
+            time.sleep(0.1)
+            assert (modules / 'dependency').read_text() == owner, 'dependency replaced under its reader'
+            mark('reader-end')
+        '''))
+        attempts, commands = threading.Barrier(2), []
+        original_lock = st_test.node_workspace_lock
+
+        @contextlib.contextmanager
+        def simultaneous_installs(directory):
+            attempts.wait(5)  # both lanes attempt the same fixture installation before either takes the real file lock
+            with original_lock(directory):
+                yield
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            commands.append(name)
+            if name not in ('typescript-client', st_test.WEB):
+                return 0
+            return subprocess.run([sys.executable, str(fixture), name, str(marks)], cwd=options['cwd'],
+                                  stdout=options.get('stdout'), stderr=subprocess.STDOUT).returncode
+
+        with mock.patch.dict(st_test.LOCAL, {'typescript-client': ['true'], 'demo': ['true'], st_test.WEB: ['true']}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo', st_test.WEB})), \
+                mock.patch.object(st_test, 'node_workspace_lock', side_effect=simultaneous_installs), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            code, out, err = self.run_st_test()
+        self.assertEqual(code, 0, out + err)
+        self.assertCountEqual(commands, ['typescript-client', 'demo', st_test.WEB])
+        events = [line.split() for line in marks.read_text().splitlines()]
+        self.assertEqual([phase for _, phase in events], ['install-start', 'install-end', 'reader-start', 'reader-end'] * 2)
+        self.assertEqual(len({owner for owner, _ in events[:4]}), 1)
+        self.assertEqual(len({owner for owner, _ in events[4:]}), 1)
+        self.assertNotEqual(events[0][0], events[4][0])
+        self.assertFalse((self.work / 'st-test-pnpm.lock').exists(), 'lock stays outside the checked tree')
+
+    def test_a_crashed_web_lane_is_a_failed_check_in_the_summary_and_ledger(self):
+        def run(argv, limit, **options):
+            if argv[argv.index('--check') + 1] == st_test.WEB:
+                raise RuntimeError('web lane broke')
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'fractal-web +FAILED \(RuntimeError\).*web lane broke')
+        self.assertEqual(record['exit'], 1)
+        self.assertEqual(next(row['result'] for row in record['rows'] if row['name'] == st_test.WEB), 'FAILED (RuntimeError)')
+
+    def test_a_web_thread_that_exits_without_a_result_fails_the_check(self):
+        def run(argv, limit, **options):
+            if argv[argv.index('--check') + 1] == st_test.WEB:
+                raise SystemExit(7)
+            return 0
+
+        (code, out, err), record = self.web_lanes(run)
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'fractal-web +FAILED \(lane exited\)')
+        self.assertEqual(record['exit'], 1)
+
+    def test_the_web_wrapper_holds_one_counted_slot_until_the_check_exits_and_releases_on_failure(self):
+        shim = self.home / '.local/bin/cargo'
+        shim.parent.mkdir(parents=True)
+        shim.write_text('#!/usr/bin/env bash\nset -eu\n'
+                        'test "$1" = --stage-slot; test "$2" = fractal-web; test "$3" = --\n'
+                        'shift 3\nexec flock "$CI_WEB_SLOT_TEST_LOCK" "$@"\n')
+        shim.chmod(0o755)
+        lock = Path(self.tmp.name) / 'heavy0'
+        # A second heavy compile cannot start while the wrapped command runs. A failed check must still give the slot back.
+        check = ['sh', '-c', 'test "$BUILD_ADMISSION_HELD" = 1 || exit 8; '
+                 'if flock -n "$CI_WEB_SLOT_TEST_LOCK" true; then exit 9; fi; exit 7']
+        with mock.patch.dict(os.environ, HOME=str(self.home)):
+            command = st_test.web_slot(check)
+        ran = subprocess.run(command, env=dict(GIT_ENV, CI_WEB_SLOT_TEST_LOCK=str(lock)), capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 7, ran.stderr)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+
+    def test_a_timed_out_web_stage_stops_its_children_before_releasing_the_slot(self):
+        lock = Path(self.tmp.name) / 'heavy0'
+        marker = Path(self.tmp.name) / 'child-survived'
+        # A slot supervisor and a delayed child: killing just the supervisor would release the slot with work still running.
+        command = ['flock', str(lock), 'sh', '-c', f'(sleep 2; touch {shlex.quote(str(marker))}) & wait']
+        code = st_test.run_limited(command, st_test.Limit(0.2), kill_group=True, stdout=subprocess.DEVNULL)
+        self.assertEqual(code, 124)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+        time.sleep(2.2)
+        self.assertFalse(marker.exists(), 'the web child must stop when its slot supervisor times out')
+
+    def test_group_kill_waits_for_a_grandchild_holding_an_inherited_slot_fd(self):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        lock = Path(self.tmp.name) / 'inherited-slot'
+        expire, progress, done = threading.Event(), threading.Event(), threading.Event()
+        state = {}
+        script = f"""import fcntl, os, signal
+slot = open({str(lock)!r}, 'w')
+fcntl.flock(slot, fcntl.LOCK_EX)
+child = os.fork()
+if child:
+    os.write({write}, (str(os.getpid()) + ' ' + str(child) + '\\n').encode())
+else:
+    os.close({write})
+while True:
+    signal.pause()
+"""
+        class ControlledLimit:
+            def remaining(self):
+                if not expire.wait(10):
+                    raise RuntimeError('fixture never reached timeout')
+                return 0
+        real_killpg, real_open = os.killpg, os.pidfd_open
+        def leader_first(pgid, sig):
+            # Force the real observed ordering: the leader dies while a group member still owns the inherited fd.
+            os.kill(pgid, sig)
+        def opened(pid):
+            fd = real_open(pid)
+            if pid == state.get('grandchild'):
+                progress.set()
+            return fd
+        def run():
+            try:
+                state['code'] = st_test.run_limited([sys.executable, '-c', script], ControlledLimit(),
+                                                   kill_group=True, pass_fds=(write,), stdout=subprocess.DEVNULL)
+            except BaseException as error:
+                state['error'] = error
+            finally:
+                done.set(); progress.set()
+        with mock.patch.object(st_test.os, 'killpg', side_effect=leader_first), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=opened):
+            thread = threading.Thread(target=run)
+            thread.start()
+            try:
+                self.assertTrue(select.select([read], [], [], 5)[0], 'fixture did not start')
+                state['leader'], state['grandchild'] = map(int, os.read(read, 128).split())
+                expire.set()
+                self.assertTrue(progress.wait(5), 'cleanup did not observe the grandchild')
+                self.assertFalse(done.is_set(), 'leader exit was mistaken for whole-group completion')
+                self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 1)
+            finally:
+                expire.set()
+                if 'leader' in state:
+                    with contextlib.suppress(ProcessLookupError):
+                        real_killpg(state['leader'], signal.SIGKILL)
+                thread.join(10)
+            self.assertFalse(thread.is_alive(), 'group cleanup did not finish')
+        if 'error' in state:
+            raise state['error']
+        self.assertEqual(state['code'], 124)
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0)
+
+    def test_group_drain_excludes_zombies_and_fails_visibly_for_a_live_survivor(self):
+        proc = Path(self.tmp.name) / 'group-proc'
+        def member(pid, state, group):
+            path = proc / str(pid)
+            path.mkdir(parents=True, exist_ok=True)
+            fields = [state, '1', str(group)] + ['0'] * 16 + ['99']
+            (path / 'stat').write_text(f'{pid} (fixture ) name) ' + ' '.join(fields))
+        member(101, 'Z', 77)
+        member(102, 'S', 78)
+        member(104, 'S', 77)
+        (proc / '104/stat').write_text('incomplete stat record')
+        self.assertEqual(st_test.live_group_members(77, proc), {})
+        st_test.wait_group_exit(77, seconds=0, proc=proc)
+        member(103, 'S', 77)
+        with self.assertRaisesRegex(st_test.Failure, r'group 77.*103.*cleanup did not complete'):
+            st_test.wait_group_exit(77, seconds=0, proc=proc)
+        # A pidfd that never becomes ready must also hit the bound, rather than return or wait forever.
+        read, write = os.pipe()
+        self.addCleanup(os.close, write)
+        with mock.patch.object(st_test.os, 'pidfd_open', return_value=read), \
+                mock.patch.object(st_test.os, 'killpg'):
+            with self.assertRaisesRegex(st_test.Failure, r'cleanup did not complete'):
+                st_test.wait_group_exit(77, seconds=0.05, proc=proc)
+        with self.assertRaises(OSError):
+            os.fstat(read)  # the pinned descriptor is closed on the failure path too
+
+    def test_a_failed_group_drain_does_not_restart_the_cleanup_deadline(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test, 'kill_limited', side_effect=st_test.GroupExitFailure('cleanup incomplete')) as killed:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(st_test.GroupExitFailure):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(killed.call_count, 1, 'an expired cleanup bound must not start again')
+
+    def test_a_signal_during_group_drain_does_not_start_another_drain(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test.os, 'killpg'), \
+                mock.patch.object(st_test, 'wait_group_exit', side_effect=KeyboardInterrupt()) as drained:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(drained.call_count, 1, 'a second signal must not reset the cleanup bound')
+
+    def test_an_interrupt_before_sigkill_still_signals_and_drains_the_group(self):
+        with mock.patch.object(st_test.subprocess, 'Popen') as started, \
+                mock.patch.object(st_test.os, 'killpg', side_effect=[KeyboardInterrupt(), None]) as killed, \
+                mock.patch.object(st_test, 'wait_group_exit') as drained:
+            started.return_value.__exit__.return_value = False
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True)
+        self.assertEqual(killed.call_count, 2, 'the interrupted first SIGKILL must still be sent')
+        self.assertEqual(drained.call_count, 1)
+
+    def test_failed_cancellation_of_a_late_group_discards_its_registration(self):
+        groups = st_test.ProcessGroups()
+        groups.cancel()
+        with mock.patch.object(st_test.subprocess, 'Popen'), \
+                mock.patch.object(st_test, 'kill_limited', side_effect=st_test.GroupExitFailure('cleanup incomplete')) as killed:
+            with self.assertRaises(st_test.GroupExitFailure):
+                st_test.run_limited(['fixture'], st_test.Limit(0), kill_group=True, groups=groups)
+        self.assertEqual(groups.processes, set())
+        self.assertEqual(killed.call_count, 1)
+
+    def test_cancellation_attempts_every_group_before_raising_a_drain_failure(self):
+        groups = st_test.ProcessGroups()
+        processes = {mock.Mock(), mock.Mock()}
+        for process in processes:
+            groups.add(process)
+        with mock.patch.object(st_test, 'kill_limited', side_effect=[st_test.GroupExitFailure('cleanup incomplete'), None]) as killed:
+            with self.assertRaises(st_test.GroupExitFailure):
+                groups.cancel()
+        self.assertEqual({call.args[0] for call in killed.call_args_list}, processes)
+        self.assertTrue(groups.cancelled)
+
+    def test_group_drain_waits_on_proc_when_the_kernel_has_no_pidfds(self):
+        proc = Path(self.tmp.name) / 'old-kernel-proc'
+        (proc / '123').mkdir(parents=True)
+        stat = proc / '123/stat'
+        stat.write_text('123 (fixture) ' + ' '.join(['S', '1', '77'] + ['0'] * 16 + ['99']))
+        def exit_while_waiting(seconds):
+            stat.unlink()
+        with mock.patch.object(st_test.os, 'killpg'), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=OSError(errno.ENOSYS, 'no pidfds')), \
+                mock.patch.object(st_test.time, 'sleep', side_effect=exit_while_waiting) as slept:
+            st_test.wait_group_exit(77, proc=proc)
+        self.assertEqual(slept.call_count, 1)
+
+    def test_group_drain_without_proc_waits_for_group_disappearance(self):
+        gone = False
+        def kill(pgid, sig):
+            if gone and sig == 0:
+                raise ProcessLookupError()
+        def exit_while_waiting(seconds):
+            nonlocal gone
+            gone = True
+        with mock.patch.object(st_test.os, 'killpg', side_effect=kill) as killed, \
+                mock.patch.object(st_test.time, 'sleep', side_effect=exit_while_waiting):
+            st_test.wait_group_exit(77, proc=Path(self.tmp.name) / 'no-proc')
+        self.assertEqual([call.args[1] for call in killed.call_args_list], [0, signal.SIGKILL, 0])
+
+    def test_portable_group_drain_reaps_its_own_leader(self):
+        with subprocess.Popen(['sleep', '60'], start_new_session=True) as process:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                st_test.wait_group_exit(process.pid, seconds=2, proc=Path(self.tmp.name) / 'no-proc', reap=process.poll)
+                self.assertIsNotNone(process.returncode)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(process.pid, 0)
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+    def test_group_drain_signals_a_late_member_found_on_rescan(self):
+        proc = Path(self.tmp.name) / 'late-group-proc'
+        def member(pid):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'stat').write_text(f'{pid} (fixture) ' + ' '.join(['S', '1', '77'] + ['0'] * 16 + ['99']))
+        member(123)
+        killed = []
+        def kill(pgid, sig):
+            killed.append((pgid, sig))
+            if len(killed) == 1:
+                (proc / '123/stat').unlink()
+                member(124)
+            else:
+                (proc / '124/stat').unlink()
+        with mock.patch.object(st_test.os, 'killpg', side_effect=kill), \
+                mock.patch.object(st_test.os, 'pidfd_open', side_effect=ProcessLookupError()):
+            st_test.wait_group_exit(77, proc=proc)
+        self.assertEqual(killed, [(77, signal.SIGKILL), (77, signal.SIGKILL)])
+
+    def test_web_output_and_wrapper_diagnostics_follow_the_build_without_interleaving(self):
+        printed = threading.Event()
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == st_test.WEB:
+                print('WEB-PAYLOAD', file=options.get('stdout') or sys.stdout, flush=True)
+                printed.set()
+            elif name == 'demo':
+                print('BUILD-BEGIN', flush=True)
+                printed.wait(5)
+                print('BUILD-END', flush=True)
+            return 0
+
+        (code, out, err), _ = self.web_lanes(run)
+        self.assertEqual(code, 0, out + err)
+        header = out.index('----- fractal-test: fractal-web output -----')
+        self.assertLess(out.index('BUILD-BEGIN'), out.index('BUILD-END'))
+        self.assertLess(out.index('BUILD-END'), header)
+        self.assertLess(header, out.index('WEB-PAYLOAD'))
+        self.assertLess(header, out.index('evidence-wrap argv:', header))
+        self.assertNotIn('--check fractal-web', err)
+
+    def interrupted_web(self, during_join=False):
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        self.addCleanup(os.close, write)
+        lock = Path(self.tmp.name) / 'web-slot'
+        state = {}
+        real_run, real_join = st_test.run_limited, st_test.join_lanes
+        script = ('import fcntl, os, subprocess; '
+                  f'slot=open({str(lock)!r}, "w"); fcntl.flock(slot, fcntl.LOCK_EX); '
+                  'child=subprocess.Popen(["sleep", "30"]); '
+                  f'os.write({write}, (str(child.pid)+"\\n").encode()); child.wait()')
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name == st_test.WEB:
+                return real_run([sys.executable, '-c', script], st_test.Limit(8), kill_group=True,
+                                groups=options.get('groups'), pass_fds=(write,), stdout=options.get('stdout'))
+            if name == 'demo':
+                self.assertTrue(select.select([read], [], [], 5)[0], 'web child did not start')
+                state['child'] = int(os.read(read, 64).strip())
+                if not during_join:
+                    state['interrupted'] = time.monotonic()
+                    raise KeyboardInterrupt()
+            return 0
+
+        def join(lanes):
+            if during_join and 'interrupted' not in state:
+                state['interrupted'] = time.monotonic()
+                raise SystemExit(143)
+            return real_join(lanes)
+
+        with mock.patch.object(st_test, 'join_lanes', join), self.assertRaises(SystemExit if during_join else KeyboardInterrupt):
+            self.web_lanes(run)
+        self.assertLess(time.monotonic() - state['interrupted'], 4, 'cleanup waited for the web time limit')
+        self.assertEqual(subprocess.run(['flock', '-n', str(lock), 'true']).returncode, 0, 'web slot was not released')
+        stat = Path('/proc', str(state['child']), 'stat')
+        if stat.exists():
+            self.assertEqual(stat.read_text().rsplit(')', 1)[1].split()[0], 'Z', 'web child survived interruption')
+
+    def test_interrupting_the_build_cancels_web_before_joining_and_releases_its_slot(self):
+        self.interrupted_web()
+
+    def test_interrupting_the_join_cancels_web_and_releases_its_slot(self):
+        self.interrupted_web(during_join=True)
+
+    def test_failed_group_cancellation_still_joins_every_lane_before_unwinding(self):
+        ready = {name: threading.Event() for name in (st_test.WEB, 'light')}
+        finish = threading.Event()
+        joins = []
+        real_join = st_test.join_lanes
+
+        def run(argv, limit, **options):
+            name = argv[argv.index('--check') + 1]
+            if name in ready:
+                ready[name].set()
+                finish.wait(5)
+            else:
+                self.assertTrue(all(event.wait(5) for event in ready.values()), 'background lanes did not start')
+            return 0
+
+        def join(lanes):
+            joins.append(tuple(lanes))
+            if len(joins) == 1:
+                raise SystemExit(143)
+            finish.set()
+            real_join(lanes)
+
+        try:
+            with mock.patch.object(st_test, 'join_lanes', join), \
+                    mock.patch.object(st_test.ProcessGroups, 'cancel', side_effect=st_test.GroupExitFailure('cleanup incomplete')):
+                (code, out, err), _ = self.web_lanes(run, ledger=False)
+            self.assertEqual(code, 'failure: cleanup incomplete', out + err)
+            self.assertEqual(len(joins), 2, 'a failed cancellation skipped joining the lanes')
+            self.assertTrue(all(not thread.is_alive() for thread, _ in joins[-1]), 'a lane escaped cleanup')
+        finally:
+            finish.set()
+            if joins:
+                real_join(joins[0])
+
+    def test_a_web_group_started_after_cancellation_is_stopped_too(self):
+        groups = st_test.ProcessGroups()
+        groups.cancel()
+        started = time.monotonic()
+        code = st_test.run_limited(['sleep', '30'], st_test.Limit(8), kill_group=True, groups=groups)
+        self.assertNotEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(groups.processes, set())
+
+    def test_hup_at_the_entry_point_unwinds_python_cleanup(self):
+        marker = Path(self.tmp.name) / 'hup-cleanup'
+        source = f'''import runpy, signal, sys
+sys.argv = [{str(ROOT / 'scripts/st-test')!r}, '--list']
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+except SystemExit as error:
+    if error.code:
+        raise
+try:
+    signal.raise_signal(signal.SIGHUP)
+finally:
+    open({str(marker)!r}, 'w').write('unwound')
+'''
+        done = subprocess.run([sys.executable, '-c', source], cwd=self.work, capture_output=True, text=True,
+                              env=dict(GIT_ENV, HOME=str(self.home), **{st_test.REEXEC: 'test'}))
+        self.assertEqual(done.returncode, 129, done.stderr)
+        self.assertEqual(marker.read_text(), 'unwound')
+
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
@@ -1413,16 +2069,70 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
 
+    def test_fleet_compat_target_is_kept_and_trimmed_under_the_tree_lock_with_the_workspace_target(self):
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, _, err = self.run_st_test('--check', 'demo', command=['true'])
+            self.assertEqual(code, 0, err)
+            target = self.pool() / 'target-0'
+            compat = self.pool() / 'target-0-fleet-compat'
+            self.assertTrue((compat / 'CACHEDIR.TAG').is_file())
+            (compat / 'binary').write_text('kept compatibility build')
+            (target / 'binary').write_text('workspace build')
+            code, _, err = self.run_st_test('--check', 'demo', command=['true'])
+            self.assertEqual(code, 0, err)
+            self.assertEqual((compat / 'binary').read_text(), 'kept compatibility build')
+            actual_size = st_test.size_gb
+            def compat_size(path):
+                return st_test.TARGET_MAX_GB / 2 + 1 if path in (target, compat) else actual_size(path)
+            # Neither target alone exceeds the limit: their sum must trigger trimming of both.
+            (compat / 'CACHEDIR.TAG').unlink()  # also covers an old untagged, owned pool target
+            with mock.patch.object(st_test, 'size_gb', side_effect=compat_size):
+                code, _, err = self.run_st_test('--check', 'demo', command=['true'])
+            self.assertEqual(code, 0, err)
+            self.assertFalse((compat / 'binary').exists())
+            self.assertTrue((compat / 'CACHEDIR.TAG').is_file())
+            self.assertFalse((target / 'binary').exists())
+            self.assertTrue((target / 'CACHEDIR.TAG').is_file())
+
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
+    def test_pool_cap_counts_and_evicts_compat_targets_including_an_orphan_and_keeps_locked_ones(self):
+        base = Path(self.tmp.name) / 'pool-with-compat'
+        repo = base / 'pools/o-example'
+        for n in (0, 1):
+            self.fake_unit(base / 'pools', 'o-example', n, 1, 1000 + n)
+            compat = repo / f'target-{n}-fleet-compat'
+            compat.mkdir()
+            (compat / 'large').write_bytes(b'z' * 100_000)
+        orphan = repo / 'target-2-fleet-compat'
+        orphan.mkdir()
+        (orphan / 'large').write_bytes(b'z' * 100_000)
+        held = open(repo / 'tree-0.lock', 'a')
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with contextlib.redirect_stderr(io.StringIO()):
+            st_test.evict_to_cap(base, .00015)
+        self.assertTrue((repo / 'target-0-fleet-compat/large').exists(), 'held tree protects both targets')
+        self.assertFalse((repo / 'target-1-fleet-compat').exists(), 'compat bytes must count toward the cap and be removed')
+        self.assertFalse((repo / 'target-1').exists())
+        self.assertFalse((repo / 'tree-1').exists())
+        self.assertFalse(orphan.exists(), 'an orphaned compat target still belongs to its eviction unit')
+
     def test_a_tagless_target_the_caller_made_is_never_emptied(self):
         """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
         self.commit('b.txt', 'two')
         mine = self.home / 'mine'
         mine.mkdir()
         (mine / 'junk').write_bytes(b'x' * 4096)
+        compat = mine.with_name(mine.name + '-fleet-compat')
+        compat.mkdir()
+        (compat / 'junk').write_bytes(b'y' * 4096)
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
             self.assertEqual(self.run_st_test('--check', 'demo', command=['true'], extra_env={'ST_EVIDENCE_TARGET': str(mine)})[0], 0)
         self.assertTrue((mine / 'junk').exists())
         self.assertFalse((mine / 'CACHEDIR.TAG').exists())  # nor tagged: st-test tags only a directory it creates
+        self.assertTrue((compat / 'junk').exists())
+        self.assertFalse((compat / 'CACHEDIR.TAG').exists())
 
     def test_only_a_path_inside_the_pool_directory_is_the_pools_own(self):
         """The pool's own targets are known by resolved path, not by a name prefix: the default shared target ~/.cache/st-test-target
@@ -1718,7 +2428,7 @@ class StTest(unittest.TestCase):
         left = sorted(str(path.relative_to(base)) for path in base.glob('*/t*-[0-9]'))
         # repo-a/0 is locked, repo-b/1 is kept; repo-b/0 (used 2000) goes first, then repo-a/1 (3000)
         self.assertEqual(left, ['repo-a/target-0', 'repo-a/tree-0', 'repo-b/target-1', 'repo-b/tree-1'])
-        self.assertRegex(err.getvalue(), r'evicted repo-b/tree-0 and target-0 \(0\.\d GB, idle \d+ min\)')
+        self.assertRegex(err.getvalue(), r'evicted repo-b/tree-0 and target-0 \(including fleet-compat\) \(0\.\d GB, idle \d+ min\)')
         self.assertIn('evicted repo-a/tree-1', err.getvalue())
 
     @mock.patch.object(st_test, 'du_gb', apparent_gb)
@@ -2839,6 +3549,23 @@ class StTest(unittest.TestCase):
         path = path or self.home / '.local/state/st-test/runs.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_candidate_measurements_name_the_head_but_a_real_base_copy_is_not_a_candidate(self):
+        self.commit('b.txt', 'two')
+        head = git(self.work, 'rev-parse', 'HEAD')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        code, out, err = self.run_st_test('--out', str(Path(self.tmp.name) / 'exports'), extra_env={st_test.REEXEC: base})
+        self.assertEqual(code, 0, out + err)
+        candidate, = self.runs()
+        self.assertEqual(candidate['candidate'], head)
+        self.assertEqual(self.statements(), [])
+        base_copy = Path(self.tmp.name) / 'st-test-base-example/st-test'
+        base_copy.parent.mkdir()
+        shutil.copyfile(st_test.__file__, base_copy)
+        with mock.patch.object(st_test, '__file__', str(base_copy)):
+            code, out, err = self.run_st_test(extra_env={st_test.REEXEC: base})
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('candidate', self.runs()[-1])
+
     def test_every_run_appends_one_json_line_with_its_times_and_a_named_check_is_not_a_full_run(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test()
@@ -2846,9 +3573,12 @@ class StTest(unittest.TestCase):
         record, = self.runs()
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
-                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s']))
-        # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
-        self.assertEqual((record['tree_wait_s'], record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0, 0))
+                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'burst', 'burst_wait_s']))
+        # This private pool has no contention, but acquisition includes ticket work and /proc orphan scans before taking the tree.
+        # Rounded elapsed time can be nonzero on a loaded host; no build slot or ci-local stage actually waits in this fixture.
+        self.assertIsInstance(record['tree_wait_s'], int)
+        self.assertGreaterEqual(record['tree_wait_s'], 0)
+        self.assertEqual((record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0))
         self.assertLessEqual(record['tree_held_s'], record['total_s'])
         for field in ('started', 'ended'):
             self.assertRegex(record[field], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
@@ -2926,6 +3656,29 @@ class StTest(unittest.TestCase):
         log.write_text(row)
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'setup', 'start': '2026-11-02T03:57:46Z', 'end': '2026-11-02T04:02:20Z',
                                                          'seconds': 274, 'exit': None, 'queue_waits': 2, 'queue_s': 232}])
+
+    def test_a_run_that_builds_takes_its_lane_burst_before_its_tree_records_it_and_gives_it_back(self):
+        self.commit('b.txt', 'two')
+        order, real_tree = [], st_test.acquire_tree
+
+        def burst(size, limit):
+            order.append(('burst', size, limit))
+            held = st_test.Burst()
+            held.granted, held.waited = size, 42.4
+            held.release = lambda: order.append(('released',))
+            return held
+
+        def tree(*args, **kwargs):
+            order.append(('tree',))
+            return real_tree(*args, **kwargs)
+
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'lane_burst', side_effect=burst), \
+                mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), mock.patch.object(st_test, 'acquire_tree', side_effect=tree):
+            code, out, err = self.run_st_test('--queue-limit', '600', command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(order, [('burst', (8, '24G'), 600.0), ('tree',), ('released',)])
+        record, = self.runs()
+        self.assertEqual((record['burst'], record['burst_wait_s']), ({'cores': 8, 'memory': '24G'}, 42))
 
     def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
         self.commit('b.txt', 'two')
@@ -3247,6 +4000,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
         got[0][1].close()
 
+    def test_non_utf8_ticket_rules_are_unreadable(self):
+        ticket = Path(self.tmp.name) / 'ticket'
+        ticket.write_bytes(b'\xff\xfe')
+        self.assertEqual(st_test.ticket_rules(ticket), 0)
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
@@ -3414,33 +4172,25 @@ class PoolQueue(unittest.TestCase):
 
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)
-        free, asked, waits, got = [False], [], {}, []
+        free, asked, waits = [False], [], {}
 
         def slot_ready():
             asked.append(time.monotonic())
             return free[0], 'test: 1 of 1 heavy slots busy'
 
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
-            waiter.start()
-            time.sleep(0.6)
-            self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
-            for n in range(2):                                                  # and it holds neither while it waits (only for its look)
+        def next_pass(seconds):
+            self.assertEqual(seconds, st_test.POOL_WAIT_SECONDS)
+            self.assertLessEqual(len(asked), 3, 'the next pass takes a tree once the slot is free')
+            for n in range(2):
                 with open(self.root / f'tree-{n}.lock', 'w') as probe:
-                    for _ in range(100):
-                        try:
-                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.01)
-                    else:
-                        self.fail(f'tree-{n} stayed held while its waiter waited for a slot')
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(probe, fcntl.LOCK_UN)
-            self.assertGreater(len(asked), 2, 'it looks again on every pass')
-            free[0] = True
-            waiter.join(5)
-        n, lock = got[0]
+            free[0] = len(asked) == 3
+
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said), mock.patch.object(st_test.time, 'sleep', side_effect=next_pass):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)
+        self.assertEqual(len(asked), 4, 'three passes leave both trees free; the fourth takes one')
         lock.close()
         self.assertEqual(n, 0)
         self.assertGreaterEqual(waits['slot_wait_s'], 0)
@@ -4062,7 +4812,7 @@ class PerCrate(StTest):
 
     def test_one_crate_with_a_failed_test_does_not_make_the_other_crates_records_unverified(self):
         # evidence-wrap's check after signing used to ask for the tree's newest rust-tests record whatever its crate: with a failed crate's record
-        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on hetz2 at feefaa9c95).
+        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on a build host at feefaa9c95).
         code, out, err = self.run_crates('--push', 'origin', FAKE_FAIL='base')
         self.assertEqual(code, 1, out + err)
         self.assertNotIn('did not verify locally', out)

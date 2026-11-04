@@ -1301,11 +1301,11 @@ fn apply_step_states_tx(
 pub trait MissionsStore {
     /// Whether a refresher keeps the roster published, so readers must never fold it.
     fn agent_roster_refresher_running(&self) -> bool;
-    /// Rebuild only the planning tables. A planning claim written through the generic claim path
-    /// is projected by this rebuild alone; the other projections already took it at the append,
-    /// and rebuilding all of them re-derived every operation (about 240,000 rows) under the
-    /// writer for each planning write.
-    fn rebuild_planning_projection(&self) -> Result<()>;
+    /// Rebuild only the planning tables of one session. A planning claim written through the
+    /// generic claim path is projected by this rebuild alone; the other projections already took
+    /// it at the append, and rebuilding all of them re-derived every operation (about 240,000
+    /// rows) under the writer for each planning write.
+    fn rebuild_planning_projection(&self, session: &str) -> Result<()>;
     fn mission_provenance(
             &self,
             mission: &str,
@@ -2090,10 +2090,10 @@ impl MissionsStore for Store {
         self.fractal.agent_roster_refresh.get().is_some()
     }
 
-    fn rebuild_planning_projection(&self) -> Result<()> {
+    fn rebuild_planning_projection(&self, session: &str) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        rebuild_planning_tx(&transaction)?;
+        rebuild_planning_session_tx(&transaction, session)?;
         transaction.commit()?;
         Ok(())
     }
@@ -7990,28 +7990,10 @@ impl MissionsStore for Store {
         };
         smallclaims::touched::note_read(|| actor.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc471d2fc8f29 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT body FROM claims
-             WHERE subject=?1 AND kind='runtime.observed'
-             ORDER BY CANONICAL_DESC(claims)",
-        ))?;
-        let bodies = statement.query_map([actor], |row| row.get::<_, String>(0))?;
-        for body in bodies {
-            let body: Value = serde_json::from_str(&body?)?;
-            let fields = body.get("fields").unwrap_or(&body);
-            match fields.get("status").and_then(Value::as_str) {
-                Some("running") => {
-                    if let Some(current) = fields.get("incarnation_id").and_then(Value::as_str) {
-                        return Ok(current != incarnation);
-                    }
-                }
-                Some("exited" | "vanished" | "stopped" | "absent" | "failed") => {
-                    return Ok(true);
-                }
-                _ => {}
-            }
-        }
-        Ok(false)
+        Ok(matches!(
+            fractal_store::store::runtime_incarnation_state(&connection, actor, incarnation)?,
+            fractal_store::store::IncarnationRuntime::Ended
+        ))
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {
