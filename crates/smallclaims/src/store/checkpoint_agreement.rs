@@ -471,6 +471,9 @@ pub struct CheckpointStatusView {
     /// Display metadata only; this may differ from the build named by a checkpoint seal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub machine_version: BTreeMap<String, String>,
+    /// Latest local verification attempt, including phases completed before a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_attempt: Option<super::checkpoint_accounting::Attempt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1086,6 +1089,7 @@ impl Store {
             return Ok(());
         }
         let _completion = super::checkpoint_completion::Completion::outer();
+        let _accounting = super::checkpoint_accounting::Scope::start(&self.checkpoint_verify_latest, checkpoint);
         let staged = self.checkpoint_staged_set(terms.cut_unix_ms, Some(seal_rowid), &context.scratch)?;
         let plan = self.plan_staged_checkpoint(&staged)?;
         if plan.sealed_digest != terms.sealed_digest {
@@ -1102,6 +1106,7 @@ impl Store {
             return Ok(());
         }
         let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
+        let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
         if !proof.passed {
             let input_digest = match input_digest {
                 Some(input) => input,
@@ -1340,6 +1345,7 @@ impl Store {
             participants,
             left,
             machine_version: BTreeMap::new(),
+            verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
         })
     }
 
