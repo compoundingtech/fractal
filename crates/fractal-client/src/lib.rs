@@ -510,7 +510,14 @@ impl CollectionStream {
         actor: Option<&str>,
         status: Option<&str>,
     ) -> Result<(), ClientError> {
-        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
+        let mut command = serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit});
+        if let Some(actor) = actor {
+            command["actor"] = serde_json::json!(actor);
+        }
+        if let Some(status) = status {
+            command["status"] = serde_json::json!(status);
+        }
+        self.send(&command).await
     }
     /// Follow a usage report for a named period; an omitted end follows current usage.
     pub async fn subscribe_usage(
