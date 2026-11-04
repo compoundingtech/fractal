@@ -16273,7 +16273,7 @@ mission "example/looped" state="ready" {
         assert!(current_run["outcome"].is_null());
         assert_eq!(current_run["started_at"], second.created_at_unix_ms as u64);
         assert!(current_run["completed_at"].is_null());
-        let published = mission_list_cards_with(&state.store, &["mission/example/looped".into()], now(), &BTreeSet::new()).unwrap();
+        let published = mission_list_cards_with(&state.store, &["mission/example/looped".into()], client_now_ms(), &BTreeSet::new()).unwrap();
         for run in looped["run_details"].as_array().unwrap() {
             let card_run = published[0]["run_details"].as_array().unwrap().iter()
                 .find(|candidate| candidate["id"] == run["id"]).unwrap();
@@ -16414,7 +16414,7 @@ mission "example/looped" state="ready" {
             assert!(finished[0]["steps"][0]["completed_at"].is_null());
             assert!(finished[1]["steps"][0]["started_at"].is_u64());
             assert!(finished[1]["steps"][0]["completed_at"].is_u64());
-            let published = mission_list_cards_with(&state.store, &[mission.into()], now(), &BTreeSet::new()).unwrap();
+            let published = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
             for run in finished {
                 let card_run = published[0]["run_details"].as_array().unwrap().iter()
                     .find(|candidate| candidate["id"] == run["id"]).unwrap();
