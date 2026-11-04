@@ -1636,7 +1636,7 @@ async fn execution_requests_carry_actor_without_changing_the_work() {
                     assert_eq!(headers["x-st3-person"], actor);
                     assert_eq!(body["intent"]["kdl"], "// fixture");
                     assert_eq!(body["inputs"], json!({"revision": "fixture"}));
-                    Json(json!({"id": "fixture", "host": "fixture", "finished": true, "gates": []}))
+                    Json(json!({"api_version": "st3.v1", "value": {"id": "fixture", "host": "fixture", "finished": true, "gates": []}}))
                 },
             ));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
