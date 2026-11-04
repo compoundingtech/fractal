@@ -3,6 +3,7 @@
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
@@ -50,6 +51,28 @@ class BundleTests(unittest.TestCase):
         with patch.object(module.urllib.request, "urlopen", side_effect=AssertionError("cache miss")):
             self.run_loader()
         self.assertTrue((self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3").is_file())
+
+    def test_fractal_root_prefers_st3_and_reuses_cache(self):
+        self.check_fractal_archive("st3")
+
+    def test_fractal_only_executable_is_supported(self):
+        (self.package / "bin/st3").rename(self.package / "bin/fractal")
+        self.check_fractal_archive("fractal")
+
+    def check_fractal_archive(self, executable):
+        self.package = self.package.rename(self.root / f"fractal-{self.target}")
+        if executable == "st3":
+            (self.package / "bin/fractal").symlink_to("st3")
+        archive = self.root / "bundle.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            stream.add(self.package, arcname=self.package.name)
+        self.pin["bundles"][self.target]["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        with patch("sys.stdout", new=io.StringIO()) as stdout:
+            self.run_loader()
+            with patch.object(module.urllib.request, "urlopen", side_effect=AssertionError("cache miss")):
+                self.run_loader()
+        expected = self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin" / executable
+        self.assertEqual(stdout.getvalue().splitlines(), [str(expected), str(expected)])
 
     def test_download_has_a_timeout(self):
         with patch.object(module.urllib.request, "urlopen", wraps=module.urllib.request.urlopen) as download:

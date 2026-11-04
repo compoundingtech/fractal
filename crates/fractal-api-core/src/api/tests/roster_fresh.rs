@@ -31,7 +31,8 @@ fn update_card(store: &Store) -> ClaimRecord {
 }
 
 /// A seat that has not polled its mailbox is described by the daemon's live uptime. Pages read
-/// on this thread see the same uptime, so two reads of an unchanged roster are equal.
+/// on this thread see the same uptime and keep their own state clocks, so two reads of an unchanged
+/// roster are equal.
 fn pinned_uptime() -> crate::delivery_presence::uptime_pin::Pin {
     crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5))
 }
