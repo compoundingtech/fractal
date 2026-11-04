@@ -3237,7 +3237,7 @@ fn mission_resources_filtered(
                 !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                     || latest_finished.is_some_and(|latest| latest.subject == run.subject))
                 .map(|run| run.subject.clone()).collect::<Vec<_>>();
-            let timing = store.mission_step_timestamps_for_runs(&timing_runs)?;
+            let timing = store.mission_step_timestamps_for_runs(&timing_runs, None)?;
             let run_details = runs
                 .iter()
                 .map(|header| {
@@ -16352,8 +16352,9 @@ mission "example/looped" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "detail-node");
         for mission in ["example/detail", "example/neighbor"] {
+            let steps = (0..25).map(|index| format!("step \"do-{index:02}\" {{ agentless; }}\n")).collect::<String>();
             let source = format!(
-                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  step \"do\" {{ assigned-to \"agent/doer\" }}\n}}\n"
+                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  {steps}}}\n"
             );
             let intent = crate::graph::parse_intent(&source, "detail-node").unwrap();
             let preview = state
@@ -16388,8 +16389,10 @@ mission "example/looped" state="ready" {
                         idempotency_key: format!("{mission}-{run}"),
                     })
                     .unwrap();
+                for step in &view.steps {
+                    state.store.set_step_state(&step.subject, "working", None).unwrap();
+                }
                 if run < 2 {
-                    state.store.set_step_state(&view.steps[0].subject, "working", None).unwrap();
                     state.store.set_step_state(&view.steps[0].subject, "completed", None).unwrap();
                     for phase in ["cleanup-completed", "terminal"] {
                         state
@@ -16414,7 +16417,12 @@ mission "example/looped" state="ready" {
             assert!(finished[0]["steps"][0]["completed_at"].is_null());
             assert!(finished[1]["steps"][0]["started_at"].is_u64());
             assert!(finished[1]["steps"][0]["completed_at"].is_u64());
+            assert_eq!(finished[1]["steps"].as_array().unwrap().len(), 25);
+            assert!(finished[1]["steps"][24]["started_at"].is_u64(), "detail keeps full-step timing");
+            let before = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get);
             let published = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let read = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get) - before;
+            assert_eq!(read, 40, "only 20 preview subjects from the open and latest finished runs");
             for run in finished {
                 let card_run = published[0]["run_details"].as_array().unwrap().iter()
                     .find(|candidate| candidate["id"] == run["id"]).unwrap();

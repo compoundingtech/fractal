@@ -218,8 +218,9 @@ execution, and completes only at an authoritative terminal state. Release, lease
 and submission awaiting verification do not complete it. Reclaim keeps the first opening;
 retry (including reviewer feedback) selects a new attempt. Unknown edges are null.
 Step timing events are read in one batch for the selected runs, not once per step, bounded to
-open runs and the latest finished run, including published cards; older detail steps retain
-null timing. These are lifecycle timestamps, not elapsed execution time or an ETA.
+open runs and the latest finished run. Published cards restrict that batch to their actual
+20-step previews; detail retains all steps. Older detail steps retain null timing. These are
+lifecycle timestamps, not elapsed execution time or an ETA.
 
 Mission `run_details[].steps[]` and `run_details[].current_steps[]` expose nullable
 `assignee` and `claimant` actor references (`agent/...`, `daemon/...`, or `person/...`),

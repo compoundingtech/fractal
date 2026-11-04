@@ -6962,7 +6962,7 @@ fn a_retry_records_its_backoff_boundary() {
     assert_eq!(view.status, "pending");
     assert_eq!(view.attempt, 2);
     assert!(view.not_before_unix_ms.unwrap() >= view.updated_at_unix_ms + 59_000);
-    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject)).unwrap()[subject];
+    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap()[subject];
     assert_eq!(timing(), (None, None), "new attempt has no execution");
     store.set_step_state(subject, "working", None).unwrap();
     assert!(timing().0.is_some(), "real agentless retry opens");
@@ -6975,7 +6975,7 @@ fn a_retry_records_its_backoff_boundary() {
     assert!(timing().1.is_some(), "attemptless terminal state belongs to attempt 3");
     store.set_step_state(&run.steps[1].subject, "working", None).unwrap();
     let before = STATEMENTS_RUN.with(std::cell::Cell::get);
-    let batch = store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject)).unwrap();
+    let batch = store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap();
     assert_eq!(STATEMENTS_RUN.with(std::cell::Cell::get) - before, 1, "one history query for both steps");
     assert_eq!(batch.len(), 2);
     assert!(batch[&run.steps[1].subject].0.is_some());
@@ -7047,7 +7047,7 @@ mission "retry" state="ready" {
     store
         .work_action(subject, "claim", &request("claim-round-2"))
         .unwrap();
-    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject)).unwrap()[subject];
+    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap()[subject];
     let first_opening = timing().0;
     expire_work_lease_by_claim(&store, subject, "agent/node.worker", "current");
     assert_eq!(store.step_run(subject).unwrap().unwrap().status, "ready");

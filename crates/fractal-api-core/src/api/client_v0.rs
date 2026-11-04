@@ -1002,10 +1002,14 @@ pub fn mission_list_cards_with(
             !matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled"))
                 || latest_finished.is_some_and(|latest| latest["id"] == run["id"]))
             .filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let timing = store.mission_step_timestamps_for_runs(&timing_runs)?;
+        let previews = run_subjects.iter().map(|run| {
+            Ok((run.as_str(), crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run, at_unix_ms))?))
+        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let subjects = previews.values().flat_map(|(_, _, steps)| steps.iter().map(|step| step.subject.clone())).collect::<Vec<_>>();
+        let timing = store.mission_step_timestamps_for_runs(&timing_runs, Some(&subjects))?;
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
-            let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
+            let (total,done,steps)=&previews[run_id];
             let terminal=matches!(run["status"].as_str(),Some("completed"|"failed"|"cancelled"));
             let scheduler_fault=store.reconcile_fault(run_id, crate::reconcile::FIRST_READINESS_FAULT_SCOPE)?;
             let must_act=if terminal {"nobody"} else if attention.contains(run_id) {"you"}

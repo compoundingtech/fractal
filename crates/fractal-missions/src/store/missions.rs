@@ -203,6 +203,11 @@ pub struct MissionRunStateMoment {
 
 pub type MissionStepTimestamps = BTreeMap<String, (Option<u128>, Option<u128>)>;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static MISSION_TIMING_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn step_timestamps(events: &[(String, Value, u128)], attempt: u32) -> (Option<u128>, Option<u128>) {
     let (mut started, mut completed) = (None, None);
     let mut current_attempt = 1;
@@ -1678,7 +1683,7 @@ pub trait MissionsStore {
             subjects: Option<&[String]>,
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
     /// First execution opening and authoritative terminal edge of the selected attempt.
-    fn mission_step_timestamps_for_runs(&self, runs: &[String]) -> Result<MissionStepTimestamps>;
+    fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -4729,23 +4734,24 @@ impl MissionsStore for Store {
         self.mission_run_states_among(Some(subjects))
     }
 
-    fn mission_step_timestamps_for_runs(&self, runs: &[String]) -> Result<MissionStepTimestamps> {
+    fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps> {
         if runs.is_empty() {
             return Ok(BTreeMap::new());
         }
         let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6cdf9d3f4aed owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd9e9bd3ec3b9 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
              FROM claims JOIN batches ON batches.id=claims.batch_id
              JOIN step_runs s ON s.subject=claims.subject
              JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
              WHERE r.id IN (SELECT value FROM json_each(?1))
+               AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
                AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
                    'work.claimed','work.failed','work.person-done','work.person-cancelled')
              ORDER BY claims.subject, {CANONICAL_ORDER}"
         ))?;
-        let rows = statement.query_map([serde_json::to_string(&runs)?], |row| {
+        let rows = statement.query_map(params![serde_json::to_string(&runs)?, subjects.map(serde_json::to_string).transpose()?], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?, row.get::<_, String>(4)?))
         })?;
@@ -4755,6 +4761,8 @@ impl MissionsStore for Store {
             events.entry(subject).or_insert_with(|| (attempt, Vec::new())).1
                 .push((kind, serde_json::from_str(&body)?, at.parse()?));
         }
+        #[cfg(any(test, feature = "test-support"))]
+        MISSION_TIMING_SUBJECTS_READ.with(|count| count.set(count.get() + events.len()));
         Ok(events.into_iter().map(|(subject, (attempt, events))| {
             (subject, step_timestamps(&events, attempt))
         }).collect())
