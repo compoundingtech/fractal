@@ -65,7 +65,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             .query_map([&run], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, u32>(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (subject, hash, path, attempt) in steps {
-            let events = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1e7860de8786 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("SELECT kind,body,accepted_at_unix_ms FROM claims JOIN batches ON batches.id=claims.batch_id
+            let events = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h43c8328fcd04 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("SELECT kind,body,claims.accepted_at_unix_ms FROM claims JOIN batches ON batches.id=claims.batch_id
                 WHERE subject=?1 ORDER BY {CANONICAL_ORDER}"))?
                 .query_map([&subject], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
                 .map(|row| { let (kind,body,at)=row?; Ok((kind,serde_json::from_str(&body)?,at.parse()?)) })
@@ -93,7 +93,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
                 {
                     continue;
                 }
-                let close = tx.query_row(/* sqlite-large-value: allow-for-now lv-h1886f185b69a owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("SELECT accepted_at_unix_ms FROM claims JOIN batches ON batches.id=claims.batch_id
+                let close = tx.query_row(/* sqlite-large-value: allow-for-now lv-h7fa46ab76bbc owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("SELECT claims.accepted_at_unix_ms FROM claims JOIN batches ON batches.id=claims.batch_id
                     WHERE subject=?1 AND kind IN ('work.person-done','work.person-cancelled') ORDER BY {CANONICAL_ORDER} LIMIT 1"),
                     [&ask], |row| row.get::<_, String>(0)).optional()?.map(|at| at.parse::<u128>()).transpose()?.unwrap_or(end);
                 holds.push((at.parse::<u128>()?, close));
@@ -230,15 +230,13 @@ pub fn read(connection: &Connection, run: &str, at: u128) -> Result<Option<Value
                 .get(path)
                 .into_iter()
                 .flatten()
-                .filter(|step| weights.contains_key(*step))
-                .collect::<Vec<_>>();
-            if critical && dependencies.iter().any(|step| !totals.contains_key(*step)) {
+                .filter(|step| weights.contains_key(*step));
+            if critical && dependencies.clone().any(|step| !totals.contains_key(step)) {
                 continue;
             }
             let prefix = if critical {
                 dependencies
-                    .iter()
-                    .filter_map(|step| totals.get(*step))
+                    .filter_map(|step| totals.get(step))
                     .fold((0, 0), |(a, b), &(c, d)| (a.max(c), b.max(d)))
             } else {
                 (0, 0)
