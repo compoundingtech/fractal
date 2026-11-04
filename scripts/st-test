@@ -957,12 +957,14 @@ class Burst:
     The holder renews the daemon's lease and gives the burst back when its stdin closes: when this run ends, whatever ends it.
     `granted` is the size held, or None with `why` when the run holds none (no lane, lanes off, a daemon without bursts).
     It is asked in steps (poll), so a run waiting for a pool tree asks only once a tree is free and takes the tree only once it is granted
-    (acquire_tree): `size` is what it asks for (burst_size; None asks nothing), and `limit_s` the seconds its asks may wait in all (--queue-limit)."""
+    (acquire_tree): `size` is what it asks for (burst_size; None asks nothing), and `limit_s` the seconds one ask may wait (--queue-limit). `waited`
+    counts every ask's wait, for the record; a burst given back and asked again starts a new ask, as a grant showed the host can serve one."""
 
     def __init__(self, size=None, limit_s=0.0, output=None):
         self.size, self.limit_s, self.output = size, limit_s, output
         self.holder, self.granted, self.why, self.waited, self.errors = None, None, None, 0.0, None
         self.told, self.pending, self.counted = None, '', None  # the last reason shown, unread answer text, and when waited was last counted
+        self.asked = 0.0  # what `waited` was when this ask began
 
     def record(self):
         return {'burst': None if self.granted is None else {'cores': self.granted[0], 'memory': self.granted[1]},
@@ -1019,7 +1021,7 @@ class Burst:
             self.errors = tempfile.TemporaryFile()  # a file, not a pipe: a holder's warnings over hours must never fill a pipe nobody reads
             self.holder = subprocess.Popen([st, 'agents', 'burst', agent, '--cores', str(cores), '--memory', memory, '--reason', 'st-test',
                                             '--as', agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors)
-            self.counted = time.monotonic()
+            self.counted, self.asked = time.monotonic(), self.waited
         cores, memory = self.size
         deadline, looked = time.monotonic() + timeout, False
         try:
@@ -1028,12 +1030,12 @@ class Burst:
                 self.waited += now - self.counted
                 self.counted = now
                 if '\n' not in self.pending:
-                    if self.waited >= self.limit_s:
+                    if self.waited - self.asked >= self.limit_s:
                         raise Failure(f'waited {self.limit_s:g}s (--queue-limit) for a lane burst of {cores} cores/{memory}: {self.told or "no answer"}')
                     if looked and now >= deadline:
                         return False
                     looked = True  # at least one look, however short the timeout
-                    ready, _, _ = select.select([self.holder.stdout], [], [], max(0.0, min(deadline - now, self.limit_s - self.waited)))
+                    ready, _, _ = select.select([self.holder.stdout], [], [], max(0.0, min(deadline - now, self.limit_s - (self.waited - self.asked))))
                     if not ready:
                         continue
                     chunk = os.read(self.holder.stdout.fileno(), 4096).decode(errors='replace')
@@ -1086,7 +1088,8 @@ class Burst:
         for fd in fds:
             os.set_inheritable(fd, True)
         HANDED_HOLDERS.append((self.holder, self.errors))  # referenced until the exec: a collected file object closes its pipe, which gives the burst back
-        state = {'pid': self.holder.pid, 'fds': fds, 'size': list(self.size), 'waited': self.waited, 'told': self.told, 'pending': self.pending}
+        state = {'pid': self.holder.pid, 'fds': fds, 'size': list(self.size), 'waited': self.waited, 'asked': self.asked, 'told': self.told,
+                 'pending': self.pending}
         self.holder, self.errors = None, None
         return json.dumps(state)
 
@@ -1114,7 +1117,8 @@ class Burst:
             os.set_inheritable(fd, False)  # no check this run starts may keep the holder's stdin open past the run
         burst = cls(size, limit_s, output)
         burst.holder, burst.errors = HandedHolder(pid, fds[0], fds[1]), os.fdopen(fds[2], 'w+b')
-        burst.waited, burst.told, burst.pending, burst.counted = float(state.get('waited') or 0), state.get('told'), state.get('pending') or '', time.monotonic()
+        burst.waited, burst.asked = float(state.get('waited') or 0), float(state.get('asked') or 0)
+        burst.told, burst.pending, burst.counted = state.get('told'), state.get('pending') or '', time.monotonic()
         return burst
 
 
@@ -1776,6 +1780,8 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
             # An ask that waits tries no tree, not even to look: a flock taken on every pass would keep a free tree from the run behind,
             # whose TREE_FREE_FALLBACK_SECONDS count only while it finds the tree free each time.
             asking = burst is not None and burst.holder is not None and burst.granted is None and not burst.poll()
+            if asking:
+                free_since.clear()  # a tree seen free before the ask began has not been free all along, as far as this waiter knows
             if ahead == 0 and not asking:
                 for n in range(trees):
                     lock = open(root / f'tree-{n}.lock', 'w')
@@ -1796,7 +1802,9 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BaseException:
                         lock.close()
                         raise
-                    if slot_ready is None or (burst is not None and burst.holder is not None):  # a granted burst was asked with a build slot free
+                    # A granted burst was asked with a build slot free. The tree is taken at once even if the slots have filled since: a burst
+                    # held without its tree is what this order exists to prevent, so the build waits for a slot in the tree (TREE_SLOT_WAIT_LIMIT's case).
+                    if slot_ready is None or (burst is not None and burst.holder is not None):
                         if burst_lets(n):
                             return taken(n, lock)
                         lock.close()

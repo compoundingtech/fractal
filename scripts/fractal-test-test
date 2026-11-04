@@ -736,6 +736,17 @@ class LaneBurstTest(unittest.TestCase):
         with self.assertRaisesRegex(st_test.Failure, r'waited 0.5s \(--queue-limit\) for a lane burst of 8 cores/24G: burst lane full'):
             self.burst('echo "waiting burst lane full"; sleep 30', limit=0.5)
 
+    def test_each_ask_has_its_own_queue_limit_and_the_record_counts_every_wait(self):
+        with mock.patch.dict(os.environ, self.fractal('echo "waiting burst lane full"; sleep 1; echo granted')), \
+                contextlib.redirect_stderr(io.StringIO()):
+            burst = st_test.Burst((8, '24G'), 1.6)
+            for _ in range(2):  # granted, given back with no tree free, and asked again: the second ask is not failed for the first one's wait
+                burst.wait()
+                self.assertEqual(burst.granted, (8, '24G'))
+                burst.give_back()
+        self.assertGreaterEqual(burst.waited, 2)
+        self.assertEqual(self.released.read_text(), 'released\nreleased\n')
+
     def test_a_run_killed_outright_still_gives_its_burst_back(self):
         env = self.fractal('echo granted')
         script = (f'import importlib.machinery, importlib.util, os\n'
