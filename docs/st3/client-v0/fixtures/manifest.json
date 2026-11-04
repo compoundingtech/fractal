@@ -20,6 +20,7 @@
     { "file": "timeline.json", "definition": "Envelope" },
     { "file": "timeline-views.json", "definition": "Envelope" },
     { "file": "timeline-conformance.json", "definition": "TimelinePage" },
+    { "file": "notice-conformance.json", "definition": "NoticeSnapshot" },
     { "file": "timeline-relay-omission.json", "definition": "Envelope" },
     { "file": "timeline-delivery-links.json", "definition": "Envelope" },
     { "file": "timeline-message-participants.json", "definition": "Envelope" },

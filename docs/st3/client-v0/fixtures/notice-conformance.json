@@ -1,0 +1,71 @@
+{
+  "snapshot": {
+    "id": "custom/attention/snapshot/01900000-0000-7000-8000-000000000001",
+    "kind": "attention-notice",
+    "schema_version": 1,
+    "revision": "snapshot-v1",
+    "updated_at": "2026-10-01T10:00:00.000Z",
+    "source_id": "custom/attention/source/01900000-0000-7000-8000-000000000002",
+    "creation_claims": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    "basis_claim": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "source_revision": "source-v1",
+    "producer": "agent/example/producer",
+    "runtime": "agent/example/runtime",
+    "input": {
+      "schema_version": 1,
+      "dedupe_key": "example-report",
+      "resource": "resource/example",
+      "recipient": "person/example",
+      "intent": "done",
+      "urgency": "confirm",
+      "requested": true,
+      "summary": "Build complete — 完了",
+      "speech": "The requested build is complete.",
+      "body": "Details remain informational, not a request for an answer.",
+      "links": [{"label": "Result", "url": "https://example.com/result"}],
+      "source": {"host": "host/example", "agent": "agent/example/producer", "repo": "example/repo", "pty": "pty/example", "cwd": "/example"},
+      "created_at": "2026-10-01T09:59:00Z",
+      "expires_at": "2026-10-02T09:59:00Z"
+    },
+    "policy": {"disposition": "deliver", "reason": "requested report", "revision": "policy-v1", "availability_basis": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "delivery": [{"state": "pending", "surface": "tray"}],
+    "integrity": {"state": "ready", "manifest_state": "ready", "manifest_claim": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    "seen_at": null,
+    "dismissed_at": null,
+    "snoozed_until": null,
+    "control_revision": null
+  },
+  "valid_delivery": [
+    {"state": "delivered", "surface": "speech", "outcome_claim": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "completed_at": "2026-10-01T10:00:00Z", "evidence": "spoken"},
+    {"state": "failed", "surface": "push", "outcome_claim": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "reason": "adapter unavailable"},
+    {"state": "suppressed", "surface": "log", "reason": "policy"}
+  ],
+  "valid_integrity": [
+    {"state": "unavailable", "manifest_state": "missing", "reason": "missing-registration"},
+    {"state": "conflicted", "manifest_state": "conflicted", "creation_claims": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}
+  ],
+  "invalid_snapshot": [
+    {"pointer": "/extra", "value": true},
+    {"pointer": "/input/extra", "value": true},
+    {"pointer": "/input/source/extra", "value": true},
+    {"pointer": "/input/summary", "value": ""},
+    {"pointer": "/input/dedupe_key", "value": ""},
+    {"pointer": "/kind", "value": "notice"},
+    {"pointer": "/schema_version", "value": 2},
+    {"pointer": "/id", "value": "custom/attention/snapshot/not-a-uuid"},
+    {"pointer": "/basis_claim", "value": "not-a-claim"},
+    {"pointer": "/runtime", "value": "person/example"},
+    {"pointer": "/updated_at", "value": "2026-02-30T10:00:00Z"},
+    {"pointer": "/updated_at", "value": "2026-10-01T10:00:00+01:00"},
+    {"pointer": "/input/summary", "value": "two\nlines"},
+    {"pointer": "/input/intent", "value": "needs-input"},
+    {"pointer": "/input/speech", "value": null},
+    {"pointer": "/input/links/0/label", "value": "  "},
+    {"pointer": "/input/links/0/url", "value": "/relative"},
+    {"pointer": "/input/links/0/url", "value": "https://example.com/a b"},
+    {"pointer": "/input/links/0/url", "value": "https://example.com/%xy"},
+    {"pointer": "/delivery/0/state", "value": "delivered"},
+    {"pointer": "/integrity/state", "value": "conflicted"},
+    {"pointer": "/control_revision", "value": ""}
+  ]
+}
