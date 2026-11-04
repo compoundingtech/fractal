@@ -1,10 +1,12 @@
 //! Render loop policy, including the last accepted syntax of published legacy loop shapes.
-use kdl::{KdlNode, KdlNodeFormat};
+use kdl::KdlNode;
 use crate::gate_render::{block, duration, node, property, render_gate_node, text};
 use crate::model::{DependencySpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MetricSource, MissionSpec, St3Error};
 
 pub(crate) fn comment(node: &mut KdlNode, message: &str) {
-    node.set_format(KdlNodeFormat { leading: format!("// {message}\n"), ..Default::default() });
+    let mut format = node.format().cloned().unwrap_or_default();
+    format.leading.push_str(&format!("// {message}\n"));
+    node.set_format(format);
 }
 
 pub(crate) fn dependencies(values: &[DependencySpec]) -> Result<Vec<KdlNode>, St3Error> {
@@ -180,6 +182,8 @@ mod tests {
             (LoopCandidateSelector::Metric { metric: "quality".into() }, r#"candidates 3 max-parallel=2 { select metric="quality"; }"#),
             (LoopCandidateSelector::Human { gate: GateSpec::Human { name: "pick".into(), reviewer: "person/test".into(), mode: Some("approve".into()), question: None, review_targets: vec![] } },
                 r#"candidates 3 max-parallel=2 { select { gate "pick" type="human" mode="approve" { reviewer "person/test"; }; }; }"#),
+            (LoopCandidateSelector::Llm { gate: GateSpec::Llm { name: "pick".into(), model: "model".into(), host: "node".into(), workspace: ".".into(), tools: vec!["shell".into()], environment: Default::default(), token_budget: 12, time_limit_ms: 1000, prompt: "choose".into() } },
+                r#"candidates 3 max-parallel=2 { select { gate "pick" type="llm" { host "node"; workspace "."; env {}; time-limit "1000ms"; model "model"; tools "shell"; token-budget 12; prompt "choose"; }; }; }"#),
         ] {
             let mut mission = fixture();
             let spec = mission.steps.get_mut("retry").unwrap().loop_spec.as_mut().unwrap();
