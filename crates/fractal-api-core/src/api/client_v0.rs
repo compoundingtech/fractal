@@ -995,6 +995,9 @@ pub fn mission_list_cards_with(
         let active = overview["counts"].as_object().unwrap().iter()
             .filter(|(state,_)| !matches!(state.as_str(),"completed"|"failed"|"cancelled"))
             .map(|(_,count)| count.as_u64().unwrap_or(0)).sum::<u64>();
+        let run_subjects = newest.iter().filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let run_states = store.mission_run_states_for_runs(&run_subjects)?;
+        let latest_finished = newest.iter().find(|run| matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled")));
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
             let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
@@ -1005,10 +1008,15 @@ pub fn mission_list_cards_with(
                 else if steps.iter().any(|s| matches!(s.status.as_str(),"ready"|"claimed"|"working")
                     && (s.assigned_to.is_some() || s.claimant.is_some() || !s.available_to.is_empty())) {"agent"}
                 else if steps.iter().any(|s| s.status=="blocked") {"blocked"} else {"system"};
+            let timing = steps.iter().filter(|_| !terminal || latest_finished.is_some_and(|latest| latest["id"] == run["id"]))
+                .map(|step| Ok((step.subject.as_str(), store.mission_step_timestamps(&step.subject, step.attempt)?)))
+                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
             let shown=steps.iter().map(|step| json!({
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
                 "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
+                "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
+                "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),
                 "keep_open":crate::mission::step_keeps_open(definition.map(|d| &d.mission), &step.step),
                 "progress_at": null,
                 "blocked_reason":step.blocked_reason.as_deref().or_else(|| scheduler_fault.as_deref().filter(|_| step.status=="pending")),"blockers":step.blockers,
@@ -1022,6 +1030,8 @@ pub fn mission_list_cards_with(
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
                 "state_since":client_timestamp(run["updated_at_unix_ms"].as_u64().unwrap_or(0) as u128),
+                "started_at":run["created_at_unix_ms"].as_u64(),
+                "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
                 "steps":shown
             }))
         }).collect::<anyhow::Result<Vec<_>>>()?;

@@ -196,8 +196,62 @@ pub struct RuntimeAuthority {
 #[derive(Clone, Debug, Default)]
 pub struct MissionRunStateMoment {
     pub since_unix_ms: u128,
+    pub completed_at_unix_ms: Option<u128>,
     pub status: Option<String>,
     pub outcome: Option<MissionRunOutcomeView>,
+}
+
+fn step_timestamps(events: &[(String, Value, u128)], attempt: u32) -> (Option<u128>, Option<u128>) {
+    let (mut started, mut completed) = (None, None);
+    let mut current_attempt = 1;
+    for (kind, body, at) in events {
+        let fields = body.get("fields").unwrap_or(body);
+        if matches!(kind.as_str(), "step-run.state" | "step-run.carried") {
+            if let Some(value) = fields["attempt"].as_u64() {
+                current_attempt = value;
+            }
+        }
+        let event_attempt = fields["attempt"].as_u64().unwrap_or(current_attempt);
+        if event_attempt != u64::from(attempt) {
+            continue;
+        }
+        let status = fields["status"].as_str().unwrap_or_default();
+        if kind == "work.claimed"
+            || (matches!(kind.as_str(), "step-run.state" | "step-run.carried")
+                && matches!(status, "claimed" | "working"))
+        {
+            started.get_or_insert(*at);
+        }
+        if matches!(kind.as_str(), "step-run.state" | "work.failed" | "work.person-done" | "work.person-cancelled")
+            && matches!(status, "completed" | "failed" | "cancelled" | "skipped")
+        {
+            completed.get_or_insert(*at);
+        }
+    }
+    (started, completed)
+}
+
+#[test]
+fn step_timestamps_follow_execution_not_lease_intervals() {
+    let event = |kind: &str, fields: Value, at| (kind.to_owned(), json!({"fields": fields}), at);
+    let mut events = vec![
+        event("work.claimed", json!({"attempt":1,"claim_expires_at_unix_ms":15}), 10),
+        event("work.released", json!({"attempt":1}), 12),
+        event("work.claimed", json!({"attempt":1}), 20),
+        event("work.submitted", json!({"attempt":1}), 25),
+        event("step-run.state", json!({"status":"verifying"}), 26),
+    ];
+    assert_eq!(step_timestamps(&events, 1), (Some(10), None));
+    events.push(event("work.failed", json!({"attempt":1,"status":"failed"}), 30));
+    events.push(event("step-run.state", json!({"status":"completed"}), 31));
+    assert_eq!(step_timestamps(&events, 1), (Some(10), Some(30)));
+    events.push(event("step-run.state", json!({"attempt":2,"status":"pending"}), 40));
+    assert_eq!(step_timestamps(&events, 2), (None, None));
+    events.push(event("step-run.state", json!({"status":"working"}), 50));
+    assert_eq!(step_timestamps(&events, 2), (Some(50), None));
+    events.push(event("step-run.state", json!({"status":"completed"}), 60));
+    assert_eq!(step_timestamps(&events, 2), (Some(50), Some(60)));
+    assert_eq!(step_timestamps(&events, 1), (Some(10), Some(30)));
 }
 
 /// The most changed items one resource-change message lists.
@@ -1628,6 +1682,8 @@ pub trait MissionsStore {
             &self,
             subjects: Option<&[String]>,
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
+    /// First execution opening and authoritative terminal edge of the selected attempt.
+    fn mission_step_timestamps(&self, subject: &str, attempt: u32) -> Result<(Option<u128>, Option<u128>)>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -4675,6 +4731,10 @@ impl MissionsStore for Store {
         self.mission_run_states_among(Some(subjects))
     }
 
+    fn mission_step_timestamps(&self, subject: &str, attempt: u32) -> Result<(Option<u128>, Option<u128>)> {
+        Ok(step_timestamps(&step_timing_events(&self.readers.get(), subject)?, attempt))
+    }
+
     fn mission_run_states_among(
             &self,
             subjects: Option<&[String]>,
@@ -4712,6 +4772,8 @@ impl MissionsStore for Store {
             let at = at.parse().unwrap_or_default();
             // `mission-run.state` claims are durable, so the claim before is the state replaced.
             let previous_status = states.get(&subject).and_then(|state| state.status.clone());
+            let completed_at_unix_ms = states.get(&subject).and_then(|state| state.completed_at_unix_ms)
+                .or_else(|| (phase.as_deref() == Some("terminal")).then_some(at));
             let outcome = (phase.as_deref() == Some("terminal")
                 && previous_phase.as_deref() == Some("terminal"))
             .then(|| {
@@ -4728,6 +4790,7 @@ impl MissionsStore for Store {
                 subject,
                 MissionRunStateMoment {
                     since_unix_ms: at,
+                    completed_at_unix_ms,
                     status,
                     outcome,
                 },

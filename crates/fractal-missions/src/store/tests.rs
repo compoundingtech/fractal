@@ -8084,6 +8084,8 @@ fn a_run_an_old_replay_ended_stays_over_with_claims_that_say_so() {
 fn a_person_sets_the_outcome_of_a_finished_run_and_every_node_shows_it() {
     let source = Store::open_memory("source").unwrap();
     let failed = failed_takeover_run(&source, &["deploy-check"]);
+    let completed_at = source.mission_run_states().unwrap()[&failed.subject].completed_at_unix_ms;
+    assert!(completed_at.is_some());
     let reason = "the deploy shipped after the check host came back";
     let completed = source
         .set_mission_run_outcome(
@@ -8123,6 +8125,7 @@ fn a_person_sets_the_outcome_of_a_finished_run_and_every_node_shows_it() {
         claim.accepted_at_unix_ms
     );
     assert_eq!(states[&failed.subject].outcome.as_ref(), Some(&outcome));
+    assert_eq!(states[&failed.subject].completed_at_unix_ms, completed_at);
     assert_eq!(
         source
             .set_mission_run_outcome(
