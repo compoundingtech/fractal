@@ -28,20 +28,20 @@ fn looping() -> Looping {
     for _ in 0..3 {
         reconciler.reconcile_once().unwrap();
     }
-    assert!(woken(&store).is_empty());
+    assert!(woken(&store).unwrap().is_empty());
     reconciler.set_max_passes_per_minute(600).unwrap();
     let notify = reconciler.notify.clone();
     let task = tokio::spawn(reconciler.run());
     Looping { store, notify, task }
 }
 
-fn woken(store: &Store) -> Vec<String> {
-    store
-        .messages(Some(SEAT), false)
-        .unwrap()
+/// Steps named by open wake messages. Fallible, so a read that meets a pass can be retried.
+fn woken(store: &Store) -> anyhow::Result<Vec<String>> {
+    Ok(store
+        .messages(Some(SEAT), false)?
         .into_iter()
         .filter_map(|message| work_message_target(&message).map(|(step, ..)| step.to_owned()))
-        .collect()
+        .collect())
 }
 
 fn lantern(root: &tempfile::TempDir) -> String {
@@ -117,7 +117,7 @@ mission "keeper" state="ready" {{
 async fn assert_woken(store: &Store, run: &str) {
     let woken = tokio::time::timeout(WOKEN_WITHIN, async {
         loop {
-            let woken = beside_the_loop(|| Ok::<_, anyhow::Error>(woken(store)));
+            let woken = beside_the_loop(|| woken(store));
             if !woken.is_empty() {
                 return woken;
             }
