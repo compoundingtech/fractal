@@ -19976,7 +19976,7 @@ fn enrich_step_wake_with(
                     tags.iter().filter_map(Value::as_str),
                     "wake-source:",
                 )
-                .any(|value| matches!(value, "manual" | "queue-head-held"))
+                .any(|value| value == "manual")
             })
         {
             continue;
