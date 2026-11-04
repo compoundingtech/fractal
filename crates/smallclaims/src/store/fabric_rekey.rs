@@ -293,4 +293,164 @@ mod tests {
         assert!(aborted.iter().any(|entry| entry["transport"] == "fabric" && entry["node"] == request.old_node));
         assert!(aborted.iter().any(|entry| entry["state"] == "aborted"));
     }
+    #[test]
+    fn prepare_refuses_wrong_identity_conflicts_extended_retries_and_expired_commit() {
+        let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        configure(&store);
+        let mut invalid = request(FabricRekeyAction::Prepare);
+        invalid.old_node = "c".repeat(64);
+        assert!(store.fabric_rekey_at(&invalid, "test", 1000).is_err());
+        invalid = request(FabricRekeyAction::Prepare);
+        invalid.deadline = 1601;
+        assert!(store.fabric_rekey_at(&invalid, "test", 1000).is_err());
+        let prepared = request(FabricRekeyAction::Prepare);
+        store.fabric_rekey_at(&prepared, "test", 1000).unwrap();
+        invalid.deadline = 1600;
+        invalid.next_node = "c".repeat(64);
+        assert!(store.fabric_rekey_at(&invalid, "test", 1000).is_err());
+        invalid = prepared.clone();
+        invalid.deadline = 1601;
+        assert!(store.fabric_rekey_at(&invalid, "test", 1001).is_err());
+        assert!(store.fabric_rekey_at(&invalid, "test", 1600).is_err());
+        invalid = prepared;
+        invalid.action = FabricRekeyAction::Commit;
+        assert!(store.fabric_rekey_at(&invalid, "test", 1600).is_err());
+    }
+
+    #[test]
+    fn crashed_prepare_resumes_original_signed_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.db");
+        let store = Store::open(&path, "anchor", Arc::new(Plain)).unwrap();
+        let key = configure(&store);
+        let prepared = request(FabricRekeyAction::Prepare);
+        store.fabric_rekey_at(&prepared, "test", 1000).unwrap();
+        drop(store);
+        let store = Store::open(&path, "anchor", Arc::new(Plain)).unwrap();
+        store.set_member_key(Some(key)).unwrap();
+        assert!(!store.fabric_rekey_at(&prepared, "test", 1100).unwrap());
+        let mut extended = prepared.clone();
+        extended.deadline += 1;
+        assert!(store.fabric_rekey_at(&extended, "test", 1100).is_err());
+        assert!(current_endpoints(&store).iter().any(|entry| entry["deadline"] == 1600));
+    }
+
+    #[test]
+    fn abort_before_first_prepare_is_safe_and_receipts_refuse_own_or_missing_target() {
+        let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        let key = configure(&store);
+        assert!(!store.fabric_rekey_at(&request(FabricRekeyAction::Abort), "test", 1601).unwrap());
+        let mut receipt = request(FabricRekeyAction::Receipt);
+        receipt.member_key = Some(key.public().to_owned());
+        receipt.state = Some(FabricRekeyState::Prepared);
+        assert!(store.fabric_rekey_at(&receipt, "test", 1000).is_err());
+        receipt.member_key = Some("missing".into());
+        assert!(store.fabric_rekey_at(&receipt, "test", 1000).is_err());
+    }
+
+    #[test]
+    fn receipt_is_signed_and_bound_to_remote_live_state_and_all_selectors() {
+        let anchor = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        let anchor_key = configure(&anchor);
+        let peer = Store::open_memory("peer", Arc::new(Plain)).unwrap();
+        let (peer_key, _) = MemberKey::generate().unwrap();
+        let peer_key = Arc::new(peer_key);
+        peer.bind_fleet("rekey-test").unwrap();
+        peer.pin_fleet_anchor(anchor_key.public()).unwrap();
+        peer.set_member_key(Some(peer_key.clone())).unwrap();
+        anchor.append_claim(&ClaimInput {
+            subject: "host/peer".into(), kind: "fleet.member-admitted".into(), actor: None,
+            fields: BTreeMap::from([
+                ("fleet_id".into(), json!("rekey-test")),
+                ("member_key".into(), json!(peer_key.public())),
+                ("via".into(), json!("invite")), ("mode".into(), json!("listening")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let mut rotation = request(FabricRekeyAction::Prepare);
+        anchor.fabric_rekey_at(&rotation, "test", 1000).unwrap();
+        let exchange = anchor.export_replication_exchange("rekey-test", &ReplicationInventory::default()).unwrap();
+        peer.receive_replication_exchange("anchor", "rekey-test", &exchange).unwrap();
+        peer.validate_replication_backlog().unwrap();
+        peer.apply_replication_repairs().unwrap();
+        peer.project_replication_backlog().unwrap();
+        let mut receipt = request(FabricRekeyAction::Receipt);
+        receipt.member_key = Some(anchor_key.public().to_owned());
+        receipt.state = Some(FabricRekeyState::Committed);
+        assert!(peer.fabric_rekey_at(&receipt, "test", 1001).is_err());
+        receipt.state = Some(FabricRekeyState::Prepared);
+        receipt.deadline -= 1;
+        assert!(peer.fabric_rekey_at(&receipt, "test", 1001).is_err());
+        receipt.deadline += 1;
+        assert!(peer.fabric_rekey_at(&receipt, "test", 1001).unwrap());
+        assert!(!peer.fabric_rekey_at(&receipt, "test", 1002).unwrap());
+        peer.publish_fleet_endpoints("listening", &[], "test").unwrap();
+        let view = peer.fleet_view_sealed().unwrap();
+        let own = view.members.iter().find(|member| member.name == "peer").unwrap();
+        assert!(own.endpoints.iter().any(|entry| entry["transport"] == "fabric-rekey-receipt"
+            && entry["state"] == "prepared" && entry["member_key"] == anchor_key.public()));
+        rotation.action = FabricRekeyAction::Commit;
+        anchor.fabric_rekey_at(&rotation, "test", 1003).unwrap();
+        let exchange = anchor.export_replication_exchange("rekey-test", &ReplicationInventory::default()).unwrap();
+        peer.receive_replication_exchange("anchor", "rekey-test", &exchange).unwrap();
+        peer.validate_replication_backlog().unwrap();
+        peer.apply_replication_repairs().unwrap();
+        peer.project_replication_backlog().unwrap();
+        assert!(peer.fabric_rekey_at(&receipt, "test", 1004).is_err());
+        receipt.state = Some(FabricRekeyState::Committed);
+        assert!(peer.fabric_rekey_at(&receipt, "test", 1004).unwrap());
+        assert!(peer.fabric_rekey_at(&receipt, "test", 1600).is_err());
+        peer.publish_fleet_endpoints_clearing_fabric_rekey("listening", &[], "test").unwrap();
+        let view = peer.fleet_view_sealed().unwrap();
+        let own = view.members.iter().find(|member| member.name == "peer").unwrap();
+        assert!(own.endpoints.iter().any(|entry| entry["transport"] == "fabric-rekey-receipt"
+            && entry["state"] == "committed"), "settings clear must preserve remote receipts");
+    }
+
+    #[test]
+    fn explicit_clear_withdraws_committed_route_without_resurrection() {
+        let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        configure(&store);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut rotation = request(FabricRekeyAction::Prepare);
+        rotation.deadline = now + 500;
+        store.fabric_rekey_at(&rotation, "test", now).unwrap();
+        rotation.action = FabricRekeyAction::Commit;
+        store.fabric_rekey_at(&rotation, "test", now).unwrap();
+        assert!(store.publish_fleet_endpoints_clearing_fabric_rekey("listening", &[], "test").unwrap());
+        assert!(current_endpoints(&store).is_empty());
+        assert!(!store.publish_fleet_endpoints("listening", &[], "test").unwrap());
+        assert!(current_endpoints(&store).is_empty());
+    }
+
+    #[test]
+    fn dial_out_publication_clears_completed_rotation_and_never_advertises_fabric() {
+        let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        configure(&store);
+        let rotation = request(FabricRekeyAction::Prepare);
+        store.fabric_rekey_at(&rotation, "test", 1000).unwrap();
+        // Its historical deadline is expired: changing mode can withdraw the route.
+        store.publish_fleet_endpoints("dial-out", &[json!({
+            "transport":"fabric","node":rotation.old_node,"protocol":"fractal/fleet/rekey-test"
+        })], "test").unwrap();
+        assert!(current_endpoints(&store).is_empty());
+        assert_eq!(store.fleet_view_sealed().unwrap().members[0].mode, "dial-out");
+    }
+
+    #[test]
+    fn expired_aborted_operation_can_start_again_with_same_pending_key() {
+        let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+        configure(&store);
+        let mut rotation = request(FabricRekeyAction::Prepare);
+        store.fabric_rekey_at(&rotation, "test", 1000).unwrap();
+        rotation.action = FabricRekeyAction::Abort;
+        store.fabric_rekey_at(&rotation, "test", 1001).unwrap();
+        rotation.action = FabricRekeyAction::Prepare;
+        rotation.deadline = 1700;
+        assert!(store.fabric_rekey_at(&rotation, "test", 1100).is_err());
+        assert!(store.fabric_rekey_at(&rotation, "test", 1600).unwrap());
+        assert!(current_endpoints(&store).iter().any(|entry|
+            entry["transport"] == "fabric-rekey" && entry["state"] == "prepared"
+                && entry["deadline"] == 1700));
+    }
 }

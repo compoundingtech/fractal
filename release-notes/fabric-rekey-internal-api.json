@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Expose signed Fabric rekey publication and exact peer receipts through the internal fleet API",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Reuses fleet.member-endpoints claims; no database migration."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Non-routing rekey metadata is preserved during worker refresh and removed by explicit transport withdrawal."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service restart required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Reject changed deadlines and mismatched receipts; resume signed state after a restart and preserve explicit transport withdrawal."
+  }
+}
