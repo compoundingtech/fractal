@@ -1731,7 +1731,7 @@ pub async fn now(
     if history && actor.is_none() && owner_run.is_none() {
         return super::attention_history::page(state, snapshot, effective_query, "now").await;
     }
-    client_snapshot_page(
+    let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
         "now",
@@ -1759,7 +1759,12 @@ pub async fn now(
             Ok(items)
         },
     )
-    .await
+    .await?;
+    // After the page's cache and digest: a seat's host's answer is never part of either.
+    super::relay_attention_target_states(&state, &mut page.items)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((snapshot, Json(page)))
 }
 
 pub fn device_resources(
