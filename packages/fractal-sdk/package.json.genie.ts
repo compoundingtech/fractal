@@ -26,6 +26,9 @@ export default packageJson({
   exports: {
     './effect': './src/effect/mod.ts',
     './admission': './src/effect/admission.ts',
+    './read': './src/effect/read.ts',
+    './pty': './src/effect/pty.ts',
+    './mutations': './src/effect/mutations.ts',
   },
   scripts: {
     test: 'vitest run --config vitest.config.ts',

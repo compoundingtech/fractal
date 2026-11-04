@@ -6,7 +6,10 @@
   "type": "module",
   "exports": {
     "./admission": "./src/effect/admission.ts",
-    "./effect": "./src/effect/mod.ts"
+    "./effect": "./src/effect/mod.ts",
+    "./mutations": "./src/effect/mutations.ts",
+    "./pty": "./src/effect/pty.ts",
+    "./read": "./src/effect/read.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

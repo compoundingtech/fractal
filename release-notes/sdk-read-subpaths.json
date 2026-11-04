@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add isolated SDK read, PTY and mutation subpaths while retaining the complete effect entry",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No database or wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Existing @fractal/sdk/effect and /admission callers remain supported. The additive /read entry exposes collection, roster, conversation and terminal-screen reads plus decoding, freshness and tracing helpers; /pty exposes PTY services; /mutations exposes HTTP snapshot, message sending and arrangement actions. Web callers migrate separately."},
+  "downtime": {"status": "none", "detail": "No restart or downtime required."},
+  "manual": {"status": "none", "detail": "No required configuration or state migration."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}
