@@ -130,7 +130,7 @@ mod tests {
             metric "score" direction="lower" { field "score" "resource/test"; }
             metric "exec" direction="higher" { exec "echo 1" { host "node"; workspace "."; env { TOKEN "secret"; }; time-limit "1s"; }; }
             stop { plateau metric="quality" rounds=2; repeated-failure 2; no-progress 3; token-budget 100; }
-            until { gate "ready" { exists "file/test"; }; }
+            until { gate "ready" { exists "file/node:/test"; }; }
             round { goal "round"; completion { when "all-steps-exhausted"; }; }
             keep-if metric="quality"
             on-keep { goal "keep"; completion { when "all-steps-exhausted"; }; }
