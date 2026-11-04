@@ -613,11 +613,15 @@ async fn resolve_pending(
     journal: &mut Journal,
     desired: &DesiredPolicy,
     expiries: &Expiries,
+    preserved: &BTreeSet<String>,
 ) -> Result<Option<Mutation>> {
     let Some(pending) = &journal.pending else {
         return Ok(None);
     };
-    let replay_allowed = pending_matches_desired(pending, desired, expiries);
+    let replay_allowed = pending_matches_desired(pending, desired, expiries)
+        && pending.request["operations"].as_array().is_some_and(|operations|
+            operations.iter().all(|operation|
+                !preserved.contains(operation["node_id"].as_str().unwrap_or_default())));
     match complete_pending(socket, pending, replay_allowed).await {
         Ok(mutation) => {
             journal.pending = None;
@@ -668,6 +672,7 @@ async fn apply(
     expiries: Expiries,
     ended: BTreeSet<String>,
     withdrawing: bool,
+    preserved: BTreeSet<String>,
 ) -> Result<ReconcileStatus> {
     let owner = format!("st/fleet/{fleet_id}");
     let grants = accepted_grants(fleet_id);
@@ -679,7 +684,7 @@ async fn apply(
             "pending Fabric batch belongs to another fleet"
         );
     }
-    resolve_pending(state_dir, socket, &mut journal, &desired, &expiries).await?;
+    resolve_pending(state_dir, socket, &mut journal, &desired, &expiries, &preserved).await?;
     let mut journal_changed = false;
     for node in ended {
         journal_changed |= journal.retired.insert(node);
@@ -693,7 +698,9 @@ async fn apply(
             retained = retained_policy(&current, &owner, &desired);
             &retained
         };
-        let operations = plan(&current, &owner, policy, &expiries);
+        let mut operations = plan(&current, &owner, policy, &expiries);
+        operations.retain(|operation|
+            !preserved.contains(operation["node_id"].as_str().unwrap_or_default()));
         ensure!(
             operations.len() <= 128,
             "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
@@ -725,7 +732,7 @@ async fn apply(
             // Durable before sending: restarting st must not forget an uncertain commit
             // or replace a pending/timed-out cancellation with an empty-diff success.
             save_journal(state_dir, &journal).await?;
-            let mutation = resolve_pending(state_dir, socket, &mut journal, policy, &expiries)
+            let mutation = resolve_pending(state_dir, socket, &mut journal, policy, &expiries, &preserved)
                 .await?
                 .expect("pending transaction");
             journal_changed = false;
@@ -737,7 +744,8 @@ async fn apply(
         }
     }
     ensure!(
-        plan(&current, &owner, &desired, &expiries).is_empty(),
+        plan(&current, &owner, &desired, &expiries).iter().all(|operation|
+            preserved.contains(operation["node_id"].as_str().unwrap_or_default())),
         "Fabric final snapshot does not match the desired exact grants and expiry; no rekey receipt is safe"
     );
     let retired_count = journal.retired.len();
@@ -814,10 +822,18 @@ pub async fn reconcile(
             Err(error) => Some(format!("fabric_capability_unknown: {error:#}")),
         }
     };
+    let mut preserved = BTreeSet::new();
     if blocked_reason.is_some() {
-        // Never turn expiring overlap into permanent authorization on an older daemon.
-        // Keep the old route; ordinary peer additions and revocations still reconcile.
-        for (_, rotation) in rotations { desired.remove(&rotation.next_node); }
+        // Preparation may stop staging, but an installed cutover must not be
+        // undone by a transient probe failure. Freeze committed records exactly
+        // as installed, including immutable expiry and both owner namespaces.
+        for (_, rotation) in rotations {
+            if rotation.state == "committed" {
+                preserved.extend([rotation.old_node, rotation.next_node]);
+            } else {
+                desired.remove(&rotation.next_node);
+            }
+        }
         expiries.clear();
     }
     let ended = view
@@ -828,7 +844,7 @@ pub async fn reconcile(
         .filter(|endpoint| endpoint["transport"] == "fabric")
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
-    let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false).await?;
+    let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false, preserved).await?;
     if let Some(reason) = blocked_reason.filter(|_| status.state == "applied") {
         status.state = "rekey_blocked".into();
         status.message = Some(reason);
@@ -857,6 +873,7 @@ pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result
         Expiries::new(),
         BTreeSet::new(),
         true,
+        BTreeSet::new(),
     )
     .await
 }
