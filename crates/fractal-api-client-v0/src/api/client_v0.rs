@@ -2034,7 +2034,15 @@ async fn collection_stream_socket(
         move |state, session, request, permit| {
             let windows = windows.clone();
             async move {
-                collection_items_with_windows(&state, &session, &request, permit, windows).await
+                let mut read =
+                    collection_items_with_windows(&state, &session, &request, permit, windows).await?;
+                // After the window cache: a seat's host's answer is never part of a revision.
+                if request.collection == "attention" {
+                    fractal_api_core::api::relay_attention_target_states(&state, &mut read.1)
+                        .await
+                        .map_err(ApiError::internal)?;
+                }
+                Ok(read)
             }
         },
     )
@@ -4251,7 +4259,7 @@ pub async fn mission_detail(
     let store = state.store.clone();
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
-    let items = super::blocking_store(move || {
+    let mut items = super::blocking_store(move || {
         let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
         // The presentation the missions list publishes for this mission; a read computes none.
         if let Some(published) = store.published_missions_list().newest()
@@ -4265,6 +4273,10 @@ pub async fn mission_detail(
         Ok(items)
     })
     .await?;
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    fractal_api_core::api::message_reads::relay_client_wakes(&state, &mut items)
+        .await
+        .map_err(ApiError::internal)?;
     client_detail(items, "mission", &id)
 }
 
@@ -10417,9 +10429,7 @@ mission "queue-parity" state="ready" {
         socket.send(Message::Text(json!({
             "kind":"subscribe", "id":"held", "collection":"work", "limit":2
         }).to_string().into())).await.unwrap();
-        let snapshot = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await.unwrap().unwrap().unwrap();
-        let snapshot: Value = serde_json::from_str(snapshot.to_text().unwrap()).unwrap();
+        let snapshot = next_data_frame(&mut socket).await;
         assert_eq!(snapshot["kind"], "snapshot");
         assert_eq!(observed.load(Ordering::SeqCst), 1);
 
@@ -10505,12 +10515,7 @@ mission "queue-parity" state="ready" {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], id);
             assert_eq!(frame["kind"], if index < 16 { "snapshot" } else { "error" });
         }
@@ -10523,12 +10528,7 @@ mission "queue-parity" state="ready" {
             ))
             .await
             .unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["id"], "window-0");
         assert_eq!(frame["kind"], "snapshot");
         socket.close(None).await.unwrap();
@@ -10581,12 +10581,7 @@ mission "queue-parity" state="ready" {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], id.as_str());
             assert_eq!(frame["kind"], kind);
             if kind == "error" {
@@ -10937,6 +10932,91 @@ mission "differential" state="ready" {
         exact_agent_selector_stream_fixture(true).await;
     }
 
+    /// The next data frame on a collection socket. The server pings every
+    /// COLLECTION_PING_INTERVAL (8 s), and a test that runs that long under load gets a ping
+    /// between its frames: it is answered and skipped, never read as a frame.
+    pub async fn next_data_frame<S>(socket: &mut S) -> Value
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        data_frame_within(socket, Duration::from_secs(5)).await.expect("a data frame within 5 s")
+    }
+
+    /// The data frame that arrives within `wait`, if one does; a keepalive ping is not one.
+    pub async fn data_frame_within<S>(socket: &mut S, wait: Duration) -> Option<Value>
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        data_text_within(socket, wait).await.map(|text| serde_json::from_str(&text).unwrap())
+    }
+
+    /// The text of the data frame that arrives within `wait`, for a test that checks its bytes.
+    pub async fn data_text_within<S>(socket: &mut S, wait: Duration) -> Option<String>
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, socket.next()).await.ok()?.unwrap().unwrap() {
+                Message::Text(text) => return Some(text.to_string()),
+                Message::Ping(_) | Message::Pong(_) => socket.flush().await.unwrap(),
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+    }
+
+    /// The pong to this test's own ping, answering the server's keepalive pings on the way.
+    pub async fn next_pong<S>(socket: &mut S)
+    where
+        S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
+            + futures_util::Sink<tokio_tungstenite::tungstenite::Message>
+            + Unpin,
+        S::Error: std::fmt::Debug,
+    {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap() {
+                Message::Pong(_) => return,
+                Message::Ping(_) => socket.flush().await.unwrap(),
+                other => panic!("expected the pong to this test's ping, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_test_frames_skip_the_servers_keepalive_ping() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.send(Message::Ping(Vec::new().into())).await.unwrap();
+            socket.send(Message::Text(json!({"kind":"changes"}).to_string().into())).await.unwrap();
+            socket.send(Message::Ping(Vec::new().into())).await.unwrap();
+            // Hold the socket open until the client is done.
+            while socket.next().await.is_some() {}
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/")).await.unwrap();
+        assert_eq!(next_data_frame(&mut socket).await["kind"], "changes");
+        assert_eq!(data_frame_within(&mut socket, Duration::from_millis(200)).await, None);
+        drop(socket);
+        server.await.unwrap();
+    }
+
     async fn exact_agent_selector_stream_fixture(fleet_first: bool) {
         use futures_util::{SinkExt as _, StreamExt as _};
         use tokio_tungstenite::tungstenite::Message;
@@ -10989,8 +11069,7 @@ mission "differential" state="ready" {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
         socket.send(Message::Text(json!({"kind":"subscribe","id":"details",
             "collection":"agents","agent":"agent/z","limit":1}).to_string().into())).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let snapshot: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let snapshot = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&snapshot);
         assert_eq!(snapshot["kind"], "snapshot");
         assert_eq!(snapshot["order"], json!(["agent/z"]));
@@ -11007,15 +11086,14 @@ mission "differential" state="ready" {
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         signal_changed(&writer);
         tokio::time::timeout(Duration::from_secs(5), completions.recv()).await.unwrap().unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(200), socket.next()).await.is_err(),
+        assert!(data_frame_within(&mut socket, Duration::from_millis(200)).await.is_none(),
             "an unrelated agent change must not emit a frame");
         assert_eq!(writer.store.agent_resources_refolded_cards_for_test(), folded);
         assert_eq!(writer.store.agent_resources_builds_for_test(), builds);
         agent_selector_observe(&writer, "agent/z", "harness.observed",
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let changes: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let changes = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&changes);
         assert_eq!(changes["kind"], "changes");
         assert_eq!(changes["upserts"].as_array().unwrap().len(), 1);
@@ -11027,8 +11105,7 @@ mission "differential" state="ready" {
         agent_selector_observe(&writer, "agent/z", "runtime.observed",
             json!({"status":"stopped","runtime_id":"agent/z","incarnation_id":"one"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let removed: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let removed = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&removed);
         assert_eq!(removed["kind"], "changes");
         assert_eq!(removed["removes"], json!(["agent/z"]));
@@ -11037,8 +11114,7 @@ mission "differential" state="ready" {
         agent_selector_observe(&writer, "agent/z", "runtime.observed",
             json!({"status":"running","runtime_id":"agent/z","incarnation_id":"two"}));
         signal_changed(&writer);
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let returned: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let returned = next_data_frame(&mut socket).await;
         assert_collection_frame_conforms(&returned);
         assert_eq!(returned["kind"], "changes");
         assert_eq!(returned["upserts"][0]["id"], "agent/z");
@@ -11085,14 +11161,12 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"lifecycle","collection":"agents","limit":2}).to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["kind"], "snapshot");
         assert_eq!(frame["items"][0]["lifecycle"], "standing");
         for (lifecycle, key) in [(Some("owner"), "lifecycle-owner"), (Some("bounded"), "lifecycle-bounded"), (None, "lifecycle-removed")] {
             apply(lifecycle, key);
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["kind"], "changes", "{frame}");
             assert_eq!(frame["upserts"][0]["id"], "agent/example/purpose");
             assert_eq!(frame["upserts"][0].get("lifecycle"), lifecycle.map(|value| json!(value)).as_ref());
@@ -11651,9 +11725,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"subscribe",
             "id":"roster", "collection":"agents", "limit":200}).to_string().into())).await.unwrap();
         let mut next = async |within: Duration| -> Value {
-            let frame = tokio::time::timeout(within, socket.next()).await
-                .expect("a roster frame").unwrap().unwrap();
-            serde_json::from_str(frame.to_text().unwrap()).unwrap()
+            data_frame_within(&mut socket, within).await.expect("a roster frame")
         };
         let snapshot = next(Duration::from_secs(1)).await;
         assert_eq!(snapshot["kind"], "snapshot", "{snapshot}");
@@ -12050,9 +12122,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"subscribe",
             "id":"roster", "collection":"agents", "limit":200}).to_string().into())).await.unwrap();
         let mut next = async |within: Duration| -> Value {
-            let frame = tokio::time::timeout(within, socket.next()).await
-                .expect("a roster frame").unwrap().unwrap();
-            serde_json::from_str(frame.to_text().unwrap()).unwrap()
+            data_frame_within(&mut socket, within).await.expect("a roster frame")
         };
         let snapshot = next(Duration::from_secs(5)).await;
         assert_eq!(snapshot["kind"], "snapshot", "{snapshot}");
@@ -12396,8 +12466,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"barrier","collection":"missions","limit":2}).to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         // A delivered snapshot confirms all replacements and unsubscribe were drained.
         // All physical workers still own their slots; this is not a timing-only assertion.
         let available = slots.unwrap().available_permits();
@@ -12472,16 +12541,14 @@ mission "differential" state="ready" {
         }
         let mut snapshots = BTreeSet::new();
         for _ in 0..3 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["kind"], "snapshot", "{frame}");
             snapshots.insert(frame["collection"].as_str().unwrap().to_owned());
         }
         assert_eq!(snapshots, BTreeSet::from(["agents".into(), "missions".into(), "attention".into()]));
         // The admission has remained physically blocked through all three deliveries.
         release.send(true).unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["kind"], "conversation", "{frame}");
         assert_eq!(frame["session_id"], managed_session_id("agent/admission-worker", "current"));
         socket.close(None).await.unwrap();
@@ -12555,8 +12622,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":visible,"collection":"missions","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["kind"], "snapshot", "{frame}");
             assert_eq!(frame["id"], visible);
             tokio::time::timeout(Duration::from_secs(5), drops.recv()).await.unwrap().unwrap();
@@ -12565,8 +12631,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":"barrier","collection":"work","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], "barrier", "obsolete admission arrived after release: {frame}");
             assert_eq!(frame["kind"], "snapshot");
             socket.close(None).await.unwrap();
@@ -12638,8 +12703,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":visible,"collection":"missions","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], visible);
             assert_eq!(frame["collection"], "missions");
             assert_eq!(frame["kind"], "snapshot");
@@ -12651,8 +12715,7 @@ mission "differential" state="ready" {
             socket.send(tokio_tungstenite::tungstenite::Message::Text(
                 json!({"kind":"subscribe","id":"barrier","collection":"work","limit":2}).to_string().into(),
             )).await.unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             assert_eq!(frame["id"], "barrier", "obsolete result arrived after release: {frame}");
             assert_eq!(frame["kind"], "snapshot");
             socket.close(None).await.unwrap();
@@ -12714,8 +12777,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"probe","collection":"work","limit":2}).to_string().into(),
         )).await.unwrap();
-        let frame = socket.next().await.unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = data_frame_within(&mut socket, Duration::from_secs(60)).await.expect("a data frame");
         assert_eq!(frame["id"], "probe");
         let source = "version 2\nmission \"during-read\" state=\"ready\" { goal \"Observed after the fence.\"; step \"check\" { agentless; goal \"Check.\" } }\n";
         let intent = crate::graph::parse_intent(source, "during-read").unwrap();
@@ -12726,8 +12788,7 @@ mission "differential" state="ready" {
         release.notify_one();
         let mut frames = Vec::new();
         while frames.len() < 2 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             if frame["id"] == "held" { frames.push(frame); }
         }
         assert_eq!(frames[0]["kind"], "snapshot");
@@ -12803,9 +12864,7 @@ mission "differential" state="ready" {
         }
         let mut received = BTreeMap::new();
         for _ in 0..2 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             received.insert(frame["id"].as_str().unwrap().to_owned(), frame);
         }
         assert_eq!(received["fast"]["kind"], "snapshot");
@@ -12818,9 +12877,7 @@ mission "differential" state="ready" {
             json!({"kind":"subscribe","id":"slow","collection":"agents","limit":2})
                 .to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["id"], "slow");
         assert_eq!(frame["kind"], "snapshot");
         release.notify_one();
@@ -12875,8 +12932,7 @@ mission "differential" state="ready" {
         socket.send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"kind":"subscribe","id":"admission","collection":"conversation","conversation":"session/missing"}).to_string().into(),
         )).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         // Worker-owned permit signals prove capacity is exhausted independently
         // of whether the queued read happened to be polled before the outbox frame.
         let available = slots.unwrap().available_permits();
@@ -12885,8 +12941,7 @@ mission "differential" state="ready" {
         assert_eq!(frame["kind"], "error");
         assert_eq!(available, 0, "canceled awaiters released live physical read slots");
         tokio::time::timeout(Duration::from_secs(5), starts.recv()).await.unwrap().unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["id"], "replace");
         assert_eq!(frame["kind"], "snapshot");
         socket.close(None).await.unwrap();
@@ -12937,8 +12992,7 @@ mission "differential" state="ready" {
                 json!({"kind":"subscribe","id":id,"collection":collection,"limit":2}).to_string().into(),
             )).await.unwrap();
         }
-        let frame = socket.next().await.unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = data_frame_within(&mut socket, Duration::from_secs(60)).await.expect("a data frame");
         assert_eq!(frame["id"], "retry");
         assert_eq!(frame["kind"], "resync");
         // Let the immediately-ready attention tick mark the pending agents read dirty.
@@ -12946,8 +13000,7 @@ mission "differential" state="ready" {
         release.notify_one();
         let mut frames = BTreeMap::new();
         for _ in 0..2 {
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = next_data_frame(&mut socket).await;
             frames.insert(frame["id"].as_str().unwrap().to_owned(), frame);
         }
         assert_eq!(frames["refused"]["kind"], "error");
@@ -13008,17 +13061,11 @@ mission "differential" state="ready" {
             ))
             .await
             .unwrap();
-        let first: Value =
-            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        let first = data_frame_within(&mut socket, Duration::from_secs(60)).await.expect("a data frame");
         assert_eq!(first["kind"], "resync");
         assert_eq!(first["retryable"], true);
         assert_collection_frame_conforms(&first);
-        let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let recovered: Value = serde_json::from_str(next.to_text().unwrap()).unwrap();
+        let recovered = next_data_frame(&mut socket).await;
         assert_eq!(recovered["kind"], "snapshot");
         assert_eq!(recovered["id"], "agents");
         assert!(reads.load(Ordering::SeqCst) >= 2);
@@ -13030,12 +13077,7 @@ mission "differential" state="ready" {
             ))
             .await
             .unwrap();
-        let refused = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let refused: Value = serde_json::from_str(refused.to_text().unwrap()).unwrap();
+        let refused = next_data_frame(&mut socket).await;
         assert_eq!(refused["kind"], "error");
         assert_eq!(refused["retryable"], false);
         assert_collection_frame_conforms(&refused);
@@ -14897,15 +14939,21 @@ subscription "watch/source" {
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
-        assert_eq!(projection.message, format!("operation projection drift: {}", drift.join(", ")));
+        assert!(projection.message.starts_with(&format!("operation projection drift: {}; found by the audit that finished 0 min ago", drift.join(", "))), "{}", projection.message);
 
         assert!(state.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
         let projection_status = || {
             doctor_report(&state).unwrap().0.checks.into_iter()
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
+        // Doctor reports the last audit and never audits inline: it still shows the drift the
+        // startup audit found until the next audit runs.
+        assert_eq!(projection_status(), "fail");
+        assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
         corrupt();
+        assert_eq!(projection_status(), "pass");
+        assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
         refresh_operation_report(&state, key, None);
         let checks = operation_checks(&state).unwrap().unwrap();
@@ -20904,8 +20952,7 @@ mission "example/zero-run" state="ready" {
             conversation_read_now(&state, &session, &session_id, Some(baseline_cursor)).unwrap();
         assert_eq!(message_update["items"].as_array().unwrap().len(), 2);
         let message_cursor = message_update["next_cursor"].as_str().unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut socket).await;
         assert_eq!(frame["value"]["items"], message_update["items"]);
         assert_eq!(frame["value"]["items"][0]["body"]["message_id"], message_id);
         let graft = frame["value"]["items"][0].clone();
@@ -20966,9 +21013,7 @@ mission "example/zero-run" state="ready" {
         // even though the harness has since persisted its correlated native echo.
         let (mut replay_socket, _) = tokio_tungstenite::connect_async(
             format!("ws://{address}/stream?after={baseline_cursor}")).await.unwrap();
-        let replay = tokio::time::timeout(Duration::from_secs(5), replay_socket.next())
-            .await.unwrap().unwrap().unwrap();
-        let replay: Value = serde_json::from_str(replay.to_text().unwrap()).unwrap();
+        let replay = next_data_frame(&mut replay_socket).await;
         let replay_graft = replay["value"]["items"].as_array().unwrap().iter()
             .find(|item| item["body"]["message_id"] == message_id).unwrap();
         assert_eq!(replay_graft["id"], graft["id"]);
@@ -20988,8 +21033,7 @@ mission "example/zero-run" state="ready" {
                 .iter()
                 .any(|item| item["body"]["text"] == "Native reply")
         );
-        let frame = tokio::time::timeout(Duration::from_secs(5), resumed_socket.next()).await.unwrap().unwrap().unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = next_data_frame(&mut resumed_socket).await;
         assert_eq!(frame["value"]["items"], native_update["items"]);
         assert!(frame["value"]["items"].as_array().unwrap().iter().all(|item| item["role"] != "user"));
         resumed_socket.close(None).await.unwrap();

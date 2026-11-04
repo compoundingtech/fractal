@@ -129,7 +129,7 @@ pub fn discover(home: Option<&Path>, include_history: bool) -> Result<ExternalDi
     let discovery = if include_history {
         // Live transcripts are read now; saved history comes from the background inventory,
         // so a cold history tree never holds a request past HISTORY_WAIT.
-        let candidates = platform_processes()?;
+        let candidates = home_processes(home)?;
         let mut files = discover_files(home, false, &candidates)?;
         let live = files
             .iter()
@@ -252,7 +252,7 @@ fn discover_uncached(
     strict_id: Option<&str>,
     include_history: bool,
 ) -> Result<ExternalDiscovery> {
-    let candidates = platform_processes()?;
+    let candidates = home_processes(home)?;
     let files = discover_files(home, include_history, &candidates)?;
     assemble_discovery(files, candidates, strict_id, include_history)
 }
@@ -1837,6 +1837,58 @@ fn unresolved_process(driver: ExternalDriver, process: ExternalProcess) -> Unres
         revision: digest(&fingerprint),
         driver,
         process,
+    }
+}
+
+/// The processes discovery considers for sessions under `home`: every harness process on the
+/// host, unless a test fixture has scoped that home to its own processes.
+fn home_processes(home: &Path) -> Result<Vec<ProcessCandidate>> {
+    #[cfg_attr(not(feature = "test-support"), allow(unused_mut))]
+    let mut candidates = platform_processes()?;
+    #[cfg(feature = "test-support")]
+    fixture_scope::retain(home, &mut candidates);
+    #[cfg(not(feature = "test-support"))]
+    let _ = home;
+    Ok(candidates)
+}
+
+/// Other tests' fake harnesses share the host's process table, so a fixture that asserts on the
+/// sessions under its own native home scopes that home to processes carrying its marker in
+/// their environment. Production never registers a scope.
+#[cfg(feature = "test-support")]
+pub mod fixture_scope {
+    use super::*;
+
+    /// The environment variable a scoped fixture's processes carry.
+    pub const MARKER: &str = "FRACTAL_NATIVE_FIXTURE";
+
+    static SCOPES: LazyLock<Mutex<BTreeMap<PathBuf, String>>> = LazyLock::new(Default::default);
+
+    /// Discovery under `home` sees only processes whose environment has [`MARKER`] set to
+    /// `marker`, until the returned guard drops.
+    pub fn scope(home: &Path, marker: &str) -> Scope {
+        SCOPES.lock().expect("fixture process scopes").insert(home.to_owned(), marker.to_owned());
+        Scope(home.to_owned())
+    }
+
+    pub struct Scope(PathBuf);
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            SCOPES.lock().expect("fixture process scopes").remove(&self.0);
+        }
+    }
+
+    pub(super) fn retain(home: &Path, candidates: &mut Vec<ProcessCandidate>) {
+        let Some(marker) = SCOPES.lock().expect("fixture process scopes").get(home).cloned() else {
+            return;
+        };
+        let entry = format!("{MARKER}={marker}");
+        candidates.retain(|candidate| {
+            fs::read(format!("/proc/{}/environ", candidate.process.pid)).is_ok_and(|environment| {
+                environment.split(|byte| *byte == 0).any(|value| value == entry.as_bytes())
+            })
+        });
     }
 }
 

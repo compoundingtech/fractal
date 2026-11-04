@@ -78,27 +78,6 @@ pub(crate) struct HarnessKind {
 /// the channel extension spliced in.
 type PreparedLaunch = (Vec<(String, String)>, Vec<String>);
 
-/// Run one ordinary interactive pi-family provider.
-pub(crate) fn run_for(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    provider_argv: Vec<String>,
-    kind: &HarnessKind,
-) -> Result<()> {
-    run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        provider_argv,
-        kind,
-        &[],
-        &[],
-        None,
-        true,
-    )
-}
-
 /// Run one interactive pi-family provider and maintain its presence until it exits.
 pub(crate) fn run_for_with_environment(
     catalog_root: &Path,

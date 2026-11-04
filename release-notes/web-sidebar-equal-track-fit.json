@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use equal sidebar tab tracks without intrinsic minimums displacing neighboring tabs",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Tight tracks fit four complete marker-label pairs in the sidebar; the hidden equal-track replica determines when counts fit."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

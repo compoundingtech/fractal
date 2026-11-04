@@ -838,7 +838,7 @@ subscription "fixture" {
 
 #[test]
 fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress() {
-    let (store, revision) = fixture_for(Store::open_memory("prepared-fixture").unwrap());
+    let (store, revision) = fixture_for(Store::open_shared_memory("prepared-fixture").unwrap());
     take_counts();
     let first = observe(&store, &revision, 1);
     let baseline = take_counts();

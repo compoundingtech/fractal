@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
-import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
+import { ResponsiveAgentSidebar, useSidebarNavigation } from './ResponsiveAgentSidebar.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { NarrowLayoutContext, ResizableSplit } from '@fractal/ui/assistant-ui/shell'
@@ -177,5 +177,52 @@ describe('sidebar split (real kit ResizableSplit)', () => {
     expect(split.commits).toEqual([])
     await pointer(separator, 'pointermove', 180)
     expect(split.changes.at(-1)).toBe(200)
+  })
+})
+
+const NavigationFixture = ({ show }: { readonly show: () => void }) => <>{useSidebarNavigation(show)}</>
+describe('sidebar navigation chords', () => {
+  const press = (key: string, target: EventTarget = document) => target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  it('opens Agents on g a and lists the available chord in help', async () => {
+    const show = vi.fn()
+    await act(async () => root.render(<NavigationFixture show={show} />))
+    await act(async () => { press('g'); press('a') })
+    expect(show).toHaveBeenCalledOnce()
+    await act(async () => press('?'))
+    const help = within(document.body).getByRole('dialog', { name: 'Keyboard shortcuts' })
+    expect(help.textContent).toContain('g a')
+    expect(help.textContent).toContain('Show Agents')
+    expect(help.textContent).not.toContain('g l')
+    await act(async () => within(help).getByRole('button', { name: 'Close' }).click())
+    expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
+  })
+  it('opens help while the desktop sidebar is collapsed', async () => {
+    const Fixture = () => {
+      const help = useSidebarNavigation(() => undefined)
+      return <>{help}<ResponsiveAgentSidebar viewport={1440} width={256} maxWidth={440} collapsed drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => undefined} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}><span>Sidebar body</span></ResponsiveAgentSidebar></>
+    }
+    await act(async () => root.render(<Fixture />))
+    expect(host.textContent).not.toContain('Sidebar body')
+    await act(async () => press('?'))
+    expect(within(document.body).getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeTruthy()
+  })
+  it.each(['input', 'textarea', 'terminal', 'editable'])('does not capture typing in %s', async kind => {
+    const show = vi.fn()
+    await act(async () => root.render(<><NavigationFixture show={show} />{kind === 'input' ? <input /> : kind === 'textarea' ? <textarea /> : <div {...(kind === 'terminal' ? { 'aria-roledescription': 'terminal' } : { contentEditable: true })} />}</>))
+    const target = host.lastElementChild!
+    await act(async () => { press('g', target); press('a', target); press('?', target) })
+    expect(show).not.toHaveBeenCalled()
+    expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
+  })
+  it('expires a sequence and leaves unavailable destinations alone', async () => {
+    const show = vi.fn()
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(1)
+    await act(async () => root.render(<NavigationFixture show={show} />))
+    press('g')
+    clock.mockReturnValue(1002)
+    press('a')
+    for (const key of ['l', 'm', 'f']) { press('g'); expect(press(key)).toBe(true) }
+    expect(show).not.toHaveBeenCalled()
+    clock.mockRestore()
   })
 })

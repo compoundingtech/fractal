@@ -600,6 +600,48 @@ async fn resume_native_driver(
     .await
 }
 
+/// How long a driver whose loop has ended waits for its provider to stop. The wrapper escalates
+/// to SIGKILL of its process group five seconds after the stop, which ends the driver with it;
+/// a driver still waiting past this exits by itself.
+const UNSERVED_PROVIDER_STOP: Duration = Duration::from_secs(15);
+
+/// The driver's loop has ended, for example because the daemon fenced this incarnation's
+/// mailbox when another incarnation took the seat. A provider still running would be left with
+/// no driver: nothing renews its claims, records what it does or wakes it, and Tokio's shutdown
+/// waits for its blocking task without limit, so the seat never ends and is never restarted
+/// (#4743). Stop it as a stop signal would and wait for it: its wrapper records the provider's
+/// end, and the runtime's exit is observed where the terminal runs, so the reconciler restarts
+/// the seat where it is placed. The driver records no runtime exit itself: a fence most often
+/// means another incarnation holds the seat, and a newer exit record would stand for it.
+async fn stop_unserved_provider(
+    subject: &str,
+    driver: &str,
+    mut task: tokio::task::JoinHandle<Result<()>>,
+    outcome: Result<()>,
+) -> Result<()> {
+    if task.is_finished() {
+        return outcome;
+    }
+    let reason = match &outcome {
+        Ok(()) => "its loop returned".to_owned(),
+        Err(error) => format!("{error:#}"),
+    };
+    let _ = write_driver_log(
+        subject,
+        &format!("the {driver} driver can no longer serve its provider ({reason}); stopping the provider so the seat restarts"),
+    );
+    fractal_drivers::provider_session::request_stop();
+    if tokio::time::timeout(UNSERVED_PROVIDER_STOP, &mut task).await.is_err() {
+        // Returning would wait for the provider's blocking task without limit.
+        let _ = write_driver_log(
+            subject,
+            &format!("the {driver} provider did not stop within {}s of the stop; the driver exits without it", UNSERVED_PROVIDER_STOP.as_secs()),
+        );
+        std::process::exit(2);
+    }
+    outcome
+}
+
 /// The detached session a provider task returned, if it returned one.
 fn detached_session(outcome: &Result<()>) -> Option<fractal_drivers::provider_session::DetachedSession> {
     outcome
@@ -613,10 +655,24 @@ async fn drive_st2_native(
     client: &Client,
     subject: &str,
     driver: &str,
+    paths: NativePaths,
+    incarnation: String,
+    loop_state: NativeLoopState,
+    mut task: tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    let outcome =
+        drive_st2_native_loop(client, subject, driver, paths, incarnation, loop_state, &mut task).await;
+    stop_unserved_provider(subject, driver, task, outcome).await
+}
+
+async fn drive_st2_native_loop(
+    client: &Client,
+    subject: &str,
+    driver: &str,
     mut paths: NativePaths,
     incarnation: String,
     mut loop_state: NativeLoopState,
-    mut task: tokio::task::JoinHandle<Result<()>>,
+    task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
     let NativePaths {
@@ -633,7 +689,7 @@ async fn drive_st2_native(
             // loaded host, a short fixture). The daemon then refuses the binding because that
             // provider has ended. There is nothing left to deliver to: record the exit as
             // usual instead of failing the wrapper with the refusal.
-            Err(error) if provider_ended_before_bind(&error) && provider_task_settled(&task).await => {
+            Err(error) if provider_ended_before_bind(&error) && provider_task_settled(task).await => {
                 NativeMailbox::unbound(subject, &incarnation, driver, &mut loop_state)
             }
             Err(error) => return Err(error),
@@ -686,7 +742,7 @@ async fn drive_st2_native(
         #[cfg(feature = "test-support")]
         {
             completion_announced |= fixture_terminal_completion_barrier(
-                &mut observations, client, subject, driver, &mut loop_state.ready, &task,
+                &mut observations, client, subject, driver, &mut loop_state.ready, task,
             ).await?;
             if completion_announced && crate::fixture()
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
@@ -709,7 +765,7 @@ async fn drive_st2_native(
                 // to deliver to: stop listening and let the task arm record the exit.
                 if let Some(fractal_daemon::mailbox::Frame::Fenced { reason }) = &frame
                     && provider_ended_refusal(reason)
-                    && provider_task_settled(&task).await
+                    && provider_task_settled(task).await
                 {
                     mailbox.subscription = None;
                     continue;
@@ -728,7 +784,7 @@ async fn drive_st2_native(
                     Err(error) => note_driver_tick_failure(subject, error, &mut last_control_warning),
                 }
             }
-            result = &mut task, if completion_announced || fixture_completion_task_enabled() => {
+            result = &mut *task, if completion_announced || fixture_completion_task_enabled() => {
                 loop_state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
                 let outcome = result?;
                 if let Some(session) = detached_session(&outcome) {
@@ -742,7 +798,7 @@ async fn drive_st2_native(
                     };
                     let _ = replacement.exec(subject, &paths.state_root(), &resume);
                     loop_state = resume.loop_state;
-                    task = spawn_st3_provider(driver, &paths, ProviderStart::Adopt(session));
+                    *task = spawn_st3_provider(driver, &paths, ProviderStart::Adopt(session));
                     completion_announced = false;
                     continue;
                 }
@@ -1099,13 +1155,13 @@ async fn drive_st2_native(
                 }
                 replacement.check();
             }
-            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() => {
+            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() && !task.is_finished() => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
                         && work_retry.ready()
                     {
-                        renew_claimed_work(client, subject, minute, &mut work_retry).await?;
+                        renew_claimed_work(client, subject, &incarnation, minute, &mut work_retry).await?;
                         work_retry.succeeded();
                         renewed_minute = Some(minute);
                     }
@@ -1983,7 +2039,7 @@ async fn run_pi_channel(
                     && renewed_minute != Some(renew_minute)
                     && work_retry.ready()
                 {
-                    match renew_claimed_work(client, subject, renew_minute, &mut work_retry).await {
+                    match renew_claimed_work(client, subject, &incarnation, renew_minute, &mut work_retry).await {
                         Ok(()) => {
                             work_retry.succeeded();
                             renewed_minute = Some(renew_minute);
@@ -2295,7 +2351,25 @@ async fn drive_codex_native(
     argv: Vec<String>,
     incarnation: String,
     start: ProviderStart,
+    loop_state: NativeLoopState,
+) -> Result<()> {
+    let mut task = None;
+    let outcome =
+        drive_codex_native_loop(client, subject, argv, incarnation, start, loop_state, &mut task).await;
+    match task {
+        Some(task) => stop_unserved_provider(subject, "codex", task, outcome).await,
+        None => outcome,
+    }
+}
+
+async fn drive_codex_native_loop(
+    client: &Client,
+    subject: &str,
+    argv: Vec<String>,
+    incarnation: String,
+    start: ProviderStart,
     mut loop_state: NativeLoopState,
+    task: &mut Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
     let mut paths = if matches!(start, ProviderStart::Launch(
@@ -2360,7 +2434,7 @@ async fn drive_codex_native(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
-    let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
+    let task = task.insert(spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start));
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
     let mut subagents = fractal_daemon::subagents::Publisher::start(
@@ -2413,11 +2487,11 @@ async fn drive_codex_native(
                     Err(error) => note_driver_tick_failure(subject, error, &mut last_control_warning),
                 }
                 #[cfg(feature = "test-support")]
-                if completion_announced { fixture_codex_completion_phase(&task).await?; }
+                if completion_announced { fixture_codex_completion_phase(task).await?; }
             }
             // Preflight can fail before creating any harness observation. Waiting for an
             // ended event here would hide that error indefinitely.
-            result = &mut task => {
+            result = &mut *task => {
                 let outcome = result.context("joining the Codex driver")?;
                 if let Some(session) = detached_session(&outcome) {
                     loop_state.delivery_episode = delivery.episode;
@@ -2430,7 +2504,7 @@ async fn drive_codex_native(
                     };
                     let _ = replacement.exec(subject, &root, &resume);
                     loop_state = resume.loop_state;
-                    task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, ProviderStart::Adopt(session));
+                    *task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, ProviderStart::Adopt(session));
                     completion_announced = false;
                     continue;
                 }
@@ -2544,7 +2618,7 @@ async fn drive_codex_native(
                     }
                     if completion_announced {
                         #[cfg(feature = "test-support")]
-                        fixture_codex_completion_phase(&task).await?;
+                        fixture_codex_completion_phase(task).await?;
                         continue;
                     }
                 }
@@ -2728,13 +2802,13 @@ async fn drive_codex_native(
                     replacement.check();
                 }
             }
-            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() => {
+            _ = settle.retry_tick(&mut work_retry, &mut work_interval), if !completion_announced && settle.passed() && !task.is_finished() => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
                         && work_retry.ready()
                     {
-                        renew_claimed_work(client, subject, minute, &mut work_retry).await?;
+                        renew_claimed_work(client, subject, &incarnation, minute, &mut work_retry).await?;
                         work_retry.succeeded();
                         renewed_minute = Some(minute);
                     }

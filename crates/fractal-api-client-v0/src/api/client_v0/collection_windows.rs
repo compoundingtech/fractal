@@ -922,12 +922,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = super::super::tests::next_data_frame(socket).await;
             assert_eq!(frame["kind"], "snapshot");
             assert_eq!(frame["id"], id);
         }
@@ -948,12 +943,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), reconnect.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = super::super::tests::next_data_frame(&mut reconnect).await;
         assert_eq!(frame["kind"], "snapshot");
         assert_eq!(frame["snapshot"]["store_index"], index);
         assert_eq!(windows.builds(), 1);
@@ -1216,9 +1206,7 @@ mod tests {
                     barrier.wait().await;
                     socket.send(Message::Text(json!({"kind":"subscribe", "id":"visible",
                         "collection":collection, "limit":n%8+1}).to_string().into())).await.unwrap();
-                    let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
-                        .await.unwrap().unwrap().unwrap();
-                    let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    let frame = super::super::tests::data_frame_within(&mut socket, Duration::from_secs(10)).await.expect("a data frame within 10 s");
                     assert_eq!(frame["kind"], "snapshot", "{frame}");
                     assert_eq!(frame["items"].as_array().unwrap().len(), n%8+1);
                     socket

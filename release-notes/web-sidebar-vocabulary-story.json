@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep agent vocabulary assertions in the existing frozen-observation story without adding scanner exemptions",
+  "replay": {"status": "none", "detail": "Story-only assertion grouping changes; no replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rules or scanner exemptions are added."},
+  "compatibility": {"status": "none", "detail": "Production sidebar behavior is unchanged."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

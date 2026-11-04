@@ -74,7 +74,11 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
-Local stderr diagnostics remain available. Standard `OTEL_*` environment variables configure
+The lines the daemon writes itself (prefixed `st3:` or `fractal:`) still reach stderr, but with no
+subscriber a `tracing` event anywhere in its code is written nowhere. `[logging] stderr_warnings
+= true` in the daemon's config installs a stderr subscriber at WARN for that case, so warnings such
+as a writer hold over a second reach the journal; it is off by default, and does nothing when
+export already installed a subscriber with its own stderr layer. Standard `OTEL_*` environment variables configure
 export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every Fractal
 unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 

@@ -61,9 +61,9 @@ for binary in "${binaries[@]}"; do
 done
 # Share the release installer's Nix and canonical-command ownership policy.
 installer="$(cd "$(dirname "$0")" && pwd)/install-release"
-bash "$installer" --source-preflight --bin-dir "$bin_dir"
+bash "$installer" --source-preflight --receipt-source "$from/fractal" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
-for name in "${binaries[@]}" st st3 stui; do
+for name in "${binaries[@]}" st st3 stui .fractal-install.json .fractal-install.json.pending; do
   [[ ! -d $bin_dir/$name ]] || {
     echo "install: $bin_dir/$name is a directory; refusing to replace it" >&2
     exit 1
@@ -93,9 +93,9 @@ cleanup() {
   set +e
   restored=true
   if $rollback_ready && ! $committed; then
-    for name in "${binaries[@]}" st st3 stui; do
+    for name in "${binaries[@]}" st st3 stui .fractal-install.json .fractal-install.json.pending; do
       # The macOS helper owns its independent signed-app/link transaction.
-      if $macos && [[ $name == fractal || $name == st || $name == st3 ]]; then continue; fi
+      if $macos && [[ $name == fractal || $name == st || $name == st3 || $name == .fractal-install.json* ]]; then continue; fi
       if [[ -e $stage/previous/$name || -L $stage/previous/$name ]]; then
         # An untouched hardlink is already restored; mv rejects identical
         # source/destination entries. Uncertain identity uses the original
@@ -129,7 +129,7 @@ mkdir "$bin_dir/.smalltalk-install.lock" || {
 locked=true
 stage=$(mktemp -d "$bin_dir/.source.install.XXXXXX")
 mkdir "$stage/previous"
-for name in "${binaries[@]}" st st3 stui; do
+for name in "${binaries[@]}" st st3 stui .fractal-install.json .fractal-install.json.pending; do
   if [[ -e $bin_dir/$name || -L $bin_dir/$name ]]; then
     ln -P "$bin_dir/$name" "$stage/previous/$name"
   fi
@@ -146,9 +146,15 @@ if $macos; then
   python3 "$(dirname "$installer")/install-macos.py" --from "$from" --bin-dir "$bin_dir"
 fi
 rollback_ready=true
+if ! $macos; then
+  "$from/fractal" setup --receipt-prepare "$bin_dir" --receipt-installer script
+fi
 for name in "${binaries[@]}" st st3; do
   if $macos && [[ $name == fractal || $name == st || $name == st3 ]]; then continue; fi
   mv -f "$stage/$name" "$bin_dir/$name"
+  if [[ $name == fractal ]]; then
+    "$from/fractal" setup --receipt-write "$bin_dir"
+  fi
 done
 rm -f -- "$bin_dir/stui"
 committed=true
