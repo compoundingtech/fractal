@@ -246,11 +246,11 @@ agent "seat" { workspace "/tmp"; command "true"; capacity cores=4 memory="8G" }"
 
 #[test]
 fn the_burst_lane_admission_keeps_room_for_is_what_fractal_test_asks_for() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.st/lane-bursts.json");
-    let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let path = test_env!("CARGO_MANIFEST_DIR", "/../../.st/lane-bursts.json");
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let memory = config["build"]["memory"].as_str().unwrap();
     let gib = memory.strip_suffix('G').and_then(|gib| gib.parse::<u64>().ok()).unwrap();
     let lane = super::seat_admission::BURST_LANE;
     assert_eq!((config["build"]["cores"].as_u64(), gib << 30), (Some(u64::from(lane.cores)), lane.memory),
-        ".st/lane-bursts.json's build ({memory}) and BURST_LANE must agree");
+        "the build burst fractal test asks for ({memory}) and BURST_LANE must agree");
 }
