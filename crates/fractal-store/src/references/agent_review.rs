@@ -73,7 +73,22 @@ mod tests {
     }
 
     fn declare(store: &Store) {
-        store.apply(&intent(), &BTreeMap::new(), "declare").unwrap();
+        let intent = intent();
+        let expected = intent
+            .subjects
+            .keys()
+            .map(|subject| {
+                (
+                    subject.clone(),
+                    store
+                        .selected_desired_token(subject)
+                        .unwrap()
+                        .into_iter()
+                        .collect(),
+                )
+            })
+            .collect();
+        store.apply(&intent, &expected, "declare").unwrap();
     }
 
     fn empty_scope() -> Scope<'static> {
