@@ -9,6 +9,10 @@ use crate::model::{
     WorkSelector,
 };
 
+// Prepared internally; publication stays closed until the complete agent-review safety path lands.
+#[allow(dead_code)]
+pub(crate) mod agent_review;
+
 /// What the graph holds, as far as the reference checks need it.
 pub trait Graph {
     /// Whether `subject` has a current declaration.
