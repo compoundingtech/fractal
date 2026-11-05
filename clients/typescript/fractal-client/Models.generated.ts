@@ -4,6 +4,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>. */
+export const PINS_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000002" as const;
+
 /** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
 export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
 
@@ -117,6 +120,9 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  launch_contract?: {
+
+} | null;
   lifecycle?: AgentLifecycle;
   mail_custody?: AgentMailCustody;
   name: string;
@@ -1286,12 +1292,14 @@ export type ClientDiagnosticsBatch = {
 };
 
 export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+  actor?: string | null;
   collection: "commands";
   id: string;
   kind: "subscribe";
   limit?: number;
+  status?: string | null;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;
@@ -1731,7 +1739,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2252,6 +2260,7 @@ export type Message = ResourceHeader & {
   sent_at: Timestamp;
   session_id?: (Id | null);
   state: "sent" | "delivered" | "read" | "closed";
+  status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;
   to: Id;
@@ -2284,6 +2293,12 @@ export type MessageSendRefusal = ({
   variant: "LifecycleUnavailable";
 });
 
+export type MessageStatusFrom = {
+  host: string;
+  reason?: string;
+  state: string;
+};
+
 export type Mission = ResourceHeader & {
   active_runs?: number;
   id?: MissionId;
@@ -2314,6 +2329,14 @@ export type MissionActionOffer = {
   confirm: boolean;
   id: "retry-step" | "restart-agent" | "cancel-run" | "chat";
   target: Id;
+};
+
+export type MissionDeclaration = {
+  legacy: boolean;
+  mission: string;
+  published_at: number;
+  revision: Revision;
+  text: string;
 };
 
 export type MissionId = string;
@@ -2375,6 +2398,7 @@ export type MissionRunSummary = {
   blocker?: {
 
 } | null;
+  completed_at?: number | null;
   current_steps: Array<{
   assignee?: (ActorRef | null);
   claimant?: (ActorRef | null);
@@ -2385,6 +2409,15 @@ export type MissionRunSummary = {
   title: string | null;
 }>;
   deadline?: (Timestamp | null);
+  eta?: (null | {
+  as_of: number;
+  basis: {
+  method: "per-step" | "critical-path";
+  samples: number;
+};
+  remaining_high_ms: number;
+  remaining_low_ms: number;
+});
   generation_id?: RunGenerationId;
   id: MissionRunId;
   last_progress?: string | null;
@@ -2396,6 +2429,7 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  started_at?: number | null;
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
@@ -2420,6 +2454,7 @@ export type MissionStep = {
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
+  completed_at?: number | null;
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
@@ -2433,6 +2468,7 @@ export type MissionStep = {
   path: string;
   progress_at?: (Timestamp | null);
   since: Timestamp;
+  started_at?: number | null;
   state: WorkState;
   title?: string | null;
   wake?: (MissionWake | null);
@@ -2492,6 +2528,132 @@ export type MissionWake = {
 };
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
+
+export type NoticeActor = string;
+
+export type NoticeClaimId = string;
+
+export type NoticeCreated = {
+  body?: string;
+  created_at: NoticeTimestamp;
+  dedupe_key: string;
+  expires_at?: NoticeTimestamp;
+  intent: "done" | "failed" | "blocked" | "fyi";
+  links: Array<NoticeLink>;
+  recipient: NoticePerson;
+  requested: boolean;
+  resource: string;
+  schema_version: 1;
+  source: NoticeSource;
+  speech?: string;
+  summary: string;
+  urgency: "info" | "attention" | "confirm";
+};
+
+export type NoticeDelivery = ({
+  state: "pending";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  completed_at: NoticeTimestamp;
+  evidence: "spoken" | "shown" | "logged";
+  outcome_claim: NoticeClaimId;
+  state: "delivered";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  outcome_claim: NoticeClaimId;
+  reason: string;
+  state: "failed";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  reason: string;
+  state: "suppressed";
+  surface: "tray" | "speech" | "push" | "log";
+});
+
+export type NoticeDismissParameters = {
+  notice_id: NoticeId;
+};
+
+export type NoticeFence = {
+  control_revision: (Revision | null);
+  notice_id: NoticeId;
+  source_revision: Revision;
+};
+
+export type NoticeId = string;
+
+export type NoticeIntegrity = ({
+  manifest_claim: NoticeClaimId;
+  manifest_state: "ready";
+  state: "ready";
+} | {
+  manifest_state: "ready" | "missing" | "invalid" | "rebuilding" | "stale";
+  reason: "invalid-source" | "missing-source" | "missing-registration" | "rebuilding" | "stale";
+  state: "unavailable";
+} | {
+  creation_claims: Array<NoticeClaimId>;
+  manifest_state: "ready" | "conflicted";
+  state: "conflicted";
+});
+
+export type NoticeLink = {
+  label: string;
+  url: string;
+};
+
+export type NoticePerson = string;
+
+export type NoticePolicy = {
+  availability_basis: NoticeClaimId;
+  disposition: "deliver" | "held" | "suppressed";
+  reason: string;
+  revision: Revision;
+};
+
+export type NoticeRuntime = string;
+
+export type NoticeSeenParameters = {
+  notice_id: NoticeId;
+};
+
+export type NoticeSnapshot = {
+  basis_claim: NoticeClaimId;
+  control_revision: (Revision | null);
+  creation_claims: Array<NoticeClaimId>;
+  delivery: Array<NoticeDelivery>;
+  dismissed_at: (NoticeTimestamp | null);
+  id: NoticeId;
+  input: NoticeCreated;
+  integrity: NoticeIntegrity;
+  kind: "attention-notice";
+  policy: NoticePolicy;
+  producer: NoticeActor;
+  revision: Revision;
+  runtime: NoticeRuntime;
+  schema_version: 1;
+  seen_at: (NoticeTimestamp | null);
+  snoozed_until: (NoticeTimestamp | null);
+  source_id: NoticeSourceId;
+  source_revision: Revision;
+  updated_at: NoticeTimestamp;
+};
+
+export type NoticeSnoozeParameters = {
+  notice_id: NoticeId;
+  until: (NoticeTimestamp | null);
+};
+
+export type NoticeSource = {
+  agent?: NoticeRuntime;
+  cwd?: string;
+  host: string;
+  pty?: string;
+  repo?: string;
+};
+
+export type NoticeSourceId = string;
+
+export type NoticeTimestamp = string;
 
 export type ObservationAccepted = {
   accepted: true;
@@ -4148,6 +4310,7 @@ export type Work = ResourceHeader & {
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
+  execution_waited_ms?: number;
   gate_kind?: 
   "watch"
   | "predicate"

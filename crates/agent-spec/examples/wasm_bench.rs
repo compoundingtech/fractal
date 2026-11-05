@@ -59,8 +59,8 @@ fn main() {
     let resolver =
         agent_spec::profile_wasm::WasmResolver::load(fixture).expect("demo module loads");
     let mut warm_instance = resolver.instantiate().expect("demo instantiates");
-    let uri = "dev.schickling.agent-goal://dev3/janitor";
-    let agent_dir = "/cat/agents/dev3/janitor";
+    let uri = "dev.schickling.agent-goal://devbox-a/janitor";
+    let agent_dir = "/cat/agents/devbox-a/janitor";
 
     // Sanity: all three paths agree.
     let via_registry = ResourceProfileRegistry::empty()

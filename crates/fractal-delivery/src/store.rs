@@ -112,7 +112,7 @@ pub use fractal_store::store::{latest_claim_of_kind_tx, latest_retention, limits
 pub use fractal_store::store::{mission_eligibility, mission_ivm, mission_list, mission_provenance, mission_run_header_from_row, mission_run_header_tx, mission_run_outcome_tx, mission_run_variables, mission_run_view_and_definition_tx, mission_run_view_for_projection_tx, mission_run_view_for_reconcile_tx, mission_run_view_tx};
 pub use fractal_store::store::{mission_state_name, missions, newest_claims_of_kind_query, normalize_message_party, normalize_mission_run, normalize_resource_observation, normalize_seat, normalize_step_run, observer_actuals, observer_subscription_detail, operation_audit, operational_repair_plan_tx};
 pub use fractal_store::store::{operations, owned_sets, owner_lists, person_work, pinned_generation_mission_tx, planning_session_view_tx, pricing_identity, project_claim_isolated_tx, project_mission_run_created, project_mission_run_update, project_replicated_base_claims, project_replicated_mission_runs};
-pub use fractal_store::store::{project_revision_proposal, projection_digest, projectors, publication, publication_facts, published_list, published_views, reapply_local_work_lease_renewals_tx, rebuild_planning_tx, rebuild_run_part_tx, rebuild_run_tree_tx, recently_ended_since};
+pub use fractal_store::store::{project_revision_proposal, projection_digest, projectors, publication, publication_facts, published_list, published_views, reapply_local_work_lease_renewals_tx, rebuild_planning_session_tx, rebuild_planning_tx, rebuild_run_part_tx, rebuild_run_tree_tx, recently_ended_since};
 pub use fractal_store::store::{reconcile_work_context, replay_graph_from_nothing_tx, resource_preparation, resources, retirements, revision_cutover_name, revision_proposal_view_tx, revision_seats, rollouts, roster_admission, run_part_of_tx, run_tree_of_tx};
 pub use fractal_store::store::{runtime, runtime_list, runtime_starts, same_declared_launch, schema_fields_for_body, seat_queue_inputs_of_tx, seat_queue_inputs_tx, seat_queue_joins_query, seat_queue_moves_query, seat_status, seat_work_at_snapshot_query, seats};
 pub use fractal_store::store::{select_replicated_desired, select_replicated_mission, selected_actual_source_at, stale_pull_request_request_tx, step_execution_clock_at, step_labels, step_owner_is_terminal_tx, step_run_from_row, step_run_row_tx, step_timeout_episode, step_timeout_extension_at, step_timing_events};
@@ -228,6 +228,8 @@ pub struct MailboxWatermark {
     desired: Option<String>,
     /// The messages shard's position: its items and their local lifecycle are not graph claims.
     stream: fractal_store::store::messages_shard::mailbox_reads::StreamPosition,
+    /// The newest local mark event: a seat's marks are not graph claims either (message_marks.rs).
+    marks: u64,
 }
 
 fn message_reminder_rank(tags: &[String]) -> Option<(&str, u64)> {

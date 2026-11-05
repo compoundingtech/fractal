@@ -2845,8 +2845,8 @@ fn a_legacy_declaration_falls_back_to_its_bus_identity_and_positional_address() 
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
-        "agents/dev3/verifier/agent.kdl",
-        "agent \"verifier\" { host \"dev3\"; command \"work\" }\n",
+        "agents/devbox-a/verifier/agent.kdl",
+        "agent \"verifier\" { host \"devbox-a\"; command \"work\" }\n",
     );
 
     let found = discover_strict(tmp.path());
@@ -2854,10 +2854,10 @@ fn a_legacy_declaration_falls_back_to_its_bus_identity_and_positional_address() 
     let spec = find(&found.specs, "verifier");
     assert_eq!(spec.id, None);
     assert_eq!(spec.address, None);
-    assert_eq!(spec.effective_id("other"), "dev3.verifier");
+    assert_eq!(spec.effective_id("other"), "devbox-a.verifier");
     assert_eq!(spec.effective_address(), "verifier");
-    assert_eq!(spec.bus_address("other"), "dev3.verifier");
-    assert_eq!(spec.bus_id("other"), "dev3.verifier");
+    assert_eq!(spec.bus_address("other"), "devbox-a.verifier");
+    assert_eq!(spec.bus_id("other"), "devbox-a.verifier");
 }
 
 /// An explicit `id` is the immutable subject identity and an explicit `address` is the effective
@@ -2867,11 +2867,11 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
-        "agents/dev3/verifier/agent.kdl",
+        "agents/devbox-a/verifier/agent.kdl",
         r#"agent "verifier" {
   id "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"
   address "dotfiles.fractal.keymap.verifier"
-  host "dev3"
+  host "devbox-a"
   command "work"
 }
 "#,
@@ -2885,7 +2885,7 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
         Some("0199b8f4-8d3a-7c21-9a44-6f85b7320ea1")
     );
     assert_eq!(
-        spec.effective_id("dev3"),
+        spec.effective_id("devbox-a"),
         "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1"
     );
     assert_eq!(
@@ -2895,21 +2895,21 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
     assert_eq!(spec.effective_address(), "dotfiles.fractal.keymap.verifier");
     assert_eq!(
         spec.bus_address("other"),
-        "dev3.dotfiles.fractal.keymap.verifier"
+        "devbox-a.dotfiles.fractal.keymap.verifier"
     );
     // The legacy bus identity remains the declaration's positional projection; it is not the ID.
-    assert_eq!(spec.bus_id("other"), "dev3.verifier");
+    assert_eq!(spec.bus_id("other"), "devbox-a.verifier");
     assert_eq!(spec.identity, "verifier");
 
     // Equal bytes across the two namespaces do not collide: the ID may look like an address and
     // an address may look like a legacy host-qualified identity.
     write(
         tmp.path(),
-        "agents/dev3/opaque/agent.kdl",
+        "agents/devbox-a/opaque/agent.kdl",
         r#"agent "opaque" {
-  id "dev3.frozen.legacy"
-  address "dev3.frozen.legacy"
-  host "dev3"
+  id "devbox-a.frozen.legacy"
+  address "devbox-a.frozen.legacy"
+  host "devbox-a"
   command "work"
 }
 "#,
@@ -2917,8 +2917,8 @@ fn explicit_id_and_address_lower_as_separate_typed_namespaces() {
     let found = discover_strict(tmp.path());
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     let opaque = find(&found.specs, "opaque");
-    assert_eq!(opaque.id.as_deref(), Some("dev3.frozen.legacy"));
-    assert_eq!(opaque.effective_address(), "dev3.frozen.legacy");
+    assert_eq!(opaque.id.as_deref(), Some("devbox-a.frozen.legacy"));
+    assert_eq!(opaque.effective_address(), "devbox-a.frozen.legacy");
 }
 
 /// A declaration whose *only* agent-shaped signal is an `id` or an `address` is not a candidate.
@@ -3023,7 +3023,7 @@ fn the_address_grammar_is_bounded_lowercase_dotted_segments() {
 fn the_id_grammar_admits_uuidv7_and_frozen_bus_identities_only() {
     for accepted in [
         "0199b8f4-8d3a-7c21-9a44-6f85b7320ea1",
-        "dev3.dotfiles.fractal.help-key.verifier",
+        "devbox-a.dotfiles.fractal.help-key.verifier",
         "example-linux.worker",
         "Legacy_Identity-9",
     ] {

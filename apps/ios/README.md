@@ -81,7 +81,14 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
-With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.15.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.17.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+
+Before installing from a fresh checkout without devenv, run
+`python3 scripts/prepare-pnpm-source-inputs.py prepare` from the repository
+root. This requires `nix`, Python 3, Node and Git on `PATH`: it runs the
+flake-pinned megarepo CLI in commit mode, with lock synchronization disabled,
+then publishes the root-owned source inputs declared in `pnpm-source-inputs.json`.
+CI and the web shell use the same preparation command.
 
 `app.config.js` selects the installed identity with `APP_VARIANT`:
 
@@ -128,6 +135,11 @@ python3 apps/ios/scripts/release_delivery.py \
   --device "$FRACTAL_IOS_DEVICE" --team "$FRACTAL_IOS_TEAM" \
   --developer-dir "$DEVELOPER_DIR" --build-only
 ```
+
+The delivery worker prepares locked megarepo members and republishes source
+inputs before checking its frozen-install cache. A missing `nix` or a failed
+member/publisher command fails closed as `build_failed` with reason
+`source_inputs_preparation_failed`; the build log contains the failing command.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 Delivery options and push configuration prefer `FRACTAL_IOS_*` variables, with
@@ -187,7 +199,7 @@ verify the installed build independently of pairing or proof-only UI.
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
 also appears in connected-client diagnostics.
 
-Prerequisites are Python 3, Git, Node 24, pnpm 12.15.0, CocoaPods, Xcode, and `gate-slot`
+Prerequisites are Python 3, Git, Node 24, pnpm 12.17.0, CocoaPods, Xcode, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
 `taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
 Utility QoS yields to interactive work without restricting a native build to

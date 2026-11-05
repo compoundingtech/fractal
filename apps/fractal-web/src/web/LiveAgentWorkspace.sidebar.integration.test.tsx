@@ -7,7 +7,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -18,7 +18,7 @@ import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
-import type { ConnectionState } from '@fractal/sdk/effect'
+import type { ConnectionState } from '@fractal/sdk/read'
 import { within } from 'storybook/test'
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 
@@ -558,7 +558,7 @@ describe('workspace overlays', () => {
       // RAC reserves vertical arrows for row navigation, even from a row control.
       trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
     })
-    const menu = document.querySelector('[role="menu"]')
+    const menu = await within(document.body).findByRole('menu')
     expect(menu).not.toBeNull()
     expect(host.querySelector('[data-testid="live-agent-workspace"]')!.contains(menu)).toBe(true)
   })

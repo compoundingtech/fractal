@@ -14,7 +14,7 @@ import { observed, unavailable, type Feed } from '../data/source.ts'
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import type { ConversationPage } from '../data/source.ts'
-import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { createConversationTranscript } from './conversationTranscript.ts'
 
@@ -206,8 +206,7 @@ describe('live header parity', () => {
   })
   it('opens the same declaration from the agent row context menu', async () => {
     await click('Actions for Example Agent')
-    const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === 'View KDL')
-    expect(item).toBeDefined()
+    const item = await within(document.body).findByRole('menuitem', { name: 'View KDL' })
     await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
     const dialog = document.querySelector('[role="dialog"][data-testid="declaration-dialog"]')
     expect(dialog?.querySelector('h2')?.textContent).toBe(agent.id)

@@ -124,6 +124,20 @@ has no executed-job sample. Individual submitters retain their profile CPU,
 I/O and SQL attribution. All accounting scopes finish before acknowledgements,
 so callers cannot snapshot their completed operations before samples arrive.
 
+`task_cpu::blocking` starts a profile operation only when task metrics are on, so with metrics off
+its work shows as `(unlabeled tokio-rt-worker)`, which is also what Tokio names its blocking
+threads. The loops whose work is otherwise unlabeled use `task_cpu::profiled_blocking`, which names the
+work in either mode:
+- the publication evidence loop (`publication.evidence_ready`, `publication.advance_evidence`);
+- the signature bootstrap, page by page:
+  - `maintenance.signature_bootstrap_page` (an inventory or migration page);
+  - `maintenance.signature_bootstrap_judgment` (a judging loan);
+  - `maintenance.signature_bootstrap_retire` (a legacy retirement page);
+  - `maintenance.signature_bootstrap_state` and `maintenance.signature_bootstrap_verdicts_pending`
+    (its progress reads).
+
+The bootstrap's quiet intervals between pages are in none of them.
+
 The batch `WriterHold` and telemetry `Holding` guard also drop before the first
 ACK is sent, after postcommit callbacks and sample publication. Previously they
 dropped when the batch function returned, after sending every ACK. The holds
@@ -206,19 +220,26 @@ oldest first, with its holder, start (`started_unix_ms`) and `held_ms`, so a stu
 before it ends. `holders` ranks up to 16 holders by writer time over the last hour (count, over
 target, total and max). `long_holds` and `long_reads` keep the last 64 writer holds and read
 transactions over the target in that hour, newest first; a long hold also gives its `kind`
-(`batch` or `lend`), `writes` and `longest_write_ms`. The replication projection chunk's loan
+(`batch` or `lend`), and a batch its `writes` and `longest_write_ms`. A lend's borrower writes on
+the connection itself, uncounted, so a lend gives neither. The replication projection chunk's loan
 also says where its hold went: `stages` gives the time in each of `begin` (BEGIN IMMEDIATE),
 `chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
 `health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
 and log sinks, which run under the writer) and `release` (giving the connection back, with the
 commit observers it runs). Inside `incremental`, rebuilding an aggregate a late claim reached is
 its own stage: `rebuild-base` (a desired subject, document or mission), `rebuild-tree` (a whole
-run tree), `rebuild-part` (one part of a tree) or `rebuild-planning` (every planning session).
+run tree), `rebuild-part` (one part of a tree), `rebuild-planning-session` (the planning session
+a planning claim names) or `rebuild-planning` (every planning session, for a claim that names none).
 Stages never overlap: a rebuild's time is not also in `incremental`, so the stages and
 `unattributed_ms` add up to `held_ms`. `rebuilt` counts, by the stage that ran them, the
 aggregates rebuilt and the claims they replayed. A full replay's own rebuilds count under
 `replay`. `unattributed_ms` is the rest: the handoff between the writer thread
-and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
+and the borrower. Its hold in progress names the `stage` it is in. Starting a mission run also
+stages its lend: `existing-occurrence` (whether a schedule occurrence's run exists), `idempotency`
+(the cached response for its key), `admission` (owned-set, name and stale-ref checks), `inputs`,
+`capacity` (the mission's active-run limit), `run-rows` (the run, its generation and steps),
+`claims` (its creation claims), `view` (the run view it returns and caches), `idempotency-record`
+and `commit`. Other holds carry no stages.
 `begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
 not by itself show that their marks are placed right. `open_reads` lists up to eight read
 snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
@@ -477,7 +498,16 @@ synthetic fixture measurements, not measurements of a deployed daemon or transpo
 
 Conversation collection followers (`follow_conversation`) and standalone conversation sockets
 (`conversation_stream_socket`) use the existing conversation page/change reader. Mailbox reads
-already name `task mailbox-snapshot` and `task mailbox-update`. Attention's collection clock
+already name `task mailbox-snapshot` and `task mailbox-update`. The rest of a mailbox stream's
+store work after the upgrade names what it checks: `task mailbox-fence` (the binding's fence, on
+each dirty pass and each report without a peer), `task mailbox-report` (admitting a report),
+`task mailbox-replay` (a replay proof), `task mailbox-primary` (a Claude primary's generation),
+`task mailbox-rollout`, `task mailbox-attachment`, `task mailbox-own-post` and `task mailbox-loss`.
+With task metrics on, the stream's writes stay under `mailbox.write`, as before. A label shows only
+where no operation is already running on that thread.
+The background maintenance loops that run after commits name theirs
+`maintenance.client_message_selectors`, `maintenance.completion_health`,
+`maintenance.response_expiry_deadline` and `maintenance.response_expiry_clock`. Attention's collection clock
 handles grace and expiry without a claim; HTTP Home/now reads retain their route labels.
 Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen source and periodically
 recheck their live fence; the existing fence span is `terminal/live-fence`. These are source
@@ -803,7 +833,7 @@ Each reader also maps the store file (`PRAGMA mmap_size`, 1 TiB by default, so t
 In WAL mode SQLite empties a reader's page cache whenever its next transaction sees any commit,
 and on a busy store nearly every request starts after one. Without the mapping that request
 fetched every page it touched again with one `read()` call each, from the kernel's file cache
-into the connection's private cache: on dev3, 87,500 calls a second across 73 readers, with 79%
+into the connection's private cache: on one host, 87,500 calls a second across 73 readers, with 79%
 of the daemon's CPU in the kernel (#3343). A mapped page needs no call and no copy, and all
 readers share the kernel's one copy of it. WAL frames are still read with `read()`. Mapped
 pages the daemon has touched count in its RSS as file-backed memory (`RssFile`), so VmRSS,

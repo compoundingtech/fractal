@@ -5,13 +5,18 @@ use super::*;
 use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, step};
 use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
-    let store = Store::open_memory("node").unwrap();
+    declared(Store::open_memory("node").unwrap(), trims_locally)
+}
+
+/// `store` with both seats declared.
+fn declared(store: Store, trims_locally: bool) -> Store {
     store.bind_fleet(TEST_FLEET).unwrap();
     let source = "version 2\nagent \"amber\" { command \"true\" }\nagent \"birch\" { command \"true\" }\n";
     let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -394,6 +399,273 @@ fn a_local_cut_refolds_the_views_within_its_run_once_the_interval_is_due() {
         assert_eq!(seen.iter().any(|(refolded, _)| *refolded), refolds, "{interval:?}: {seen:?}");
         assert!(seen.iter().all(|(_, kept)| *kept), "{interval:?}: a refold keeps the roster's generation: {seen:?}");
     }
+}
+
+/// The frames in a store's WAL, which the next write appends after until a restart starts it
+/// over: `mxFrame` of the WAL-index header, read from the shared-memory file so that looking
+/// checkpoints nothing.
+fn wal_frames(store: &Store) -> i32 {
+    let mut shm = store.path.clone().into_os_string();
+    shm.push("-shm");
+    let header = std::fs::read(shm).unwrap_or_default();
+    header.get(16..20).map_or(0, |frames| i32::from_ne_bytes(frames.try_into().unwrap()))
+}
+
+/// A file-backed member trimming locally, with its trim unpaced and one envelope a chunk, and a
+/// cut's worth of observations to drop.
+fn file_member(scratch: &std::path::Path) -> Arc<Store> {
+    let store = declared(Store::open(&scratch.join("claims.sqlite3"), "node").unwrap(), true);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..300 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    Arc::new(store)
+}
+
+/// Read transactions of 60 ms on two readers half a read apart, so one is always open and was
+/// begun before the trim's latest commit, as a busy daemon's are; and the daemon's idle recycle
+/// every 20 ms. Stop with `stop`.
+fn busy_daemon(store: &Arc<Store>, stop: &Arc<AtomicBool>) -> Vec<std::thread::JoinHandle<()>> {
+    let mut threads = Vec::new();
+    for offset in [0, 30] {
+        let (store, stop) = (Arc::clone(store), Arc::clone(stop));
+        threads.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(offset));
+            let reader = store.readers.get();
+            while !stop.load(Ordering::Acquire) {
+                let read = reader.unchecked_transaction().unwrap();
+                read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                read.commit().unwrap();
+            }
+        }));
+    }
+    let (store, stop) = (Arc::clone(store), Arc::clone(stop));
+    threads.push(std::thread::spawn(move || {
+        let checkpoint = rusqlite::Connection::open(&store.path).unwrap();
+        while !stop.load(Ordering::Acquire) {
+            store.checkpoint_idle_wal_report(&checkpoint).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }));
+    threads
+}
+
+/// A trim writes nearly all the time and a busy daemon always has a reader on an older snapshot,
+/// so the idle recycle never finds the WAL copied: on a large member the WAL grew 650 MB a minute
+/// until the trim was stopped. Past its bound the trim stops deleting and restarts the WAL, so the
+/// WAL stays near the bound for the whole cut however much the cut deletes.
+#[test]
+fn a_paced_local_trim_keeps_the_wal_under_its_bound_with_readers_always_open() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = file_member(scratch.path());
+    let bound = 1_000;
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TrimWal {
+        frames: bound,
+        check: std::time::Duration::ZERO,
+        ..smallclaims::store::checkpoint_trim::TRIM_WAL
+    });
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    let stop = Arc::new(AtomicBool::new(false));
+    let daemon = busy_daemon(&store, &stop);
+    let sampled = Arc::new(Mutex::new((0, 0, 0)));
+    let samples = Arc::clone(&sampled);
+    let hook_store = Arc::clone(&store);
+    let mut last = wal_frames(&store);
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        let frames = wal_frames(&hook_store);
+        let mut samples = samples.lock().unwrap();
+        // The largest WAL, the most one chunk added, and every frame the trim wrote.
+        samples.0 = samples.0.max(frames);
+        samples.1 = samples.1.max(frames - last);
+        samples.2 += (frames - last).max(0);
+        last = frames;
+    }));
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    store.trim_chunk_hook.lock().unwrap().take();
+    stop.store(true, Ordering::Release);
+    daemon.into_iter().for_each(|thread| thread.join().unwrap());
+    assert_eq!(actions.first(), Some(&"trimmed"), "{actions:?}");
+    assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
+    let (largest, chunk, written) = *sampled.lock().unwrap();
+    assert!(written > 10 * bound, "the trim writes far past the bound ({written} frames)");
+    // Past the bound by what one chunk and the run between two looks write, never by the cut.
+    assert!(largest < bound + bound / 4, "the WAL reached {largest} frames, bound {bound}, chunk {chunk}");
+    // Each restart says so on the daemon's stderr.
+    let restarts = logged.lock().unwrap().iter().filter(|line| line.starts_with("st3: a trim restarted the WAL {")).count();
+    assert!(restarts * bound as usize >= written as usize / 2, "{restarts} restart lines for {written} frames");
+}
+
+/// A trim whose WAL will not restart, because a reader holds a snapshot past the trim's wait,
+/// stops where it is, deletes nothing more, and goes on at the next step once the reader is gone.
+#[test]
+fn a_trim_that_cannot_restart_the_wal_stops_until_the_next_step_and_resumes() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = file_member(scratch.path());
+    let bound = 200;
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TrimWal {
+        frames: bound,
+        busy: std::time::Duration::from_millis(20),
+        wait: std::time::Duration::from_millis(300),
+        check: std::time::Duration::ZERO,
+    });
+    let all = observer_ids(&store);
+    // From the third chunk, one reader holds its snapshot for longer than the trim waits.
+    let (begun, release) = (Arc::new(std::sync::Barrier::new(2)), Arc::new(AtomicBool::new(false)));
+    let holder = Arc::new(Mutex::new(None));
+    let (hook_store, hook_begun, hook_release, hook_holder) =
+        (Arc::clone(&store), Arc::clone(&begun), Arc::clone(&release), Arc::clone(&holder));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        if chunk == 3 {
+            let (store, begun, release) = (Arc::clone(&hook_store), Arc::clone(&hook_begun), Arc::clone(&hook_release));
+            *hook_holder.lock().unwrap() = Some(std::thread::spawn(move || {
+                let reader = store.readers.get();
+                let read = reader.unchecked_transaction().unwrap();
+                read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+                begun.wait();
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                read.commit().unwrap();
+            }));
+            hook_begun.wait();
+        }
+    }));
+    let logged = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&logged);
+    *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let stopped_at = wal_frames(&store);
+    assert!(
+        logged.lock().unwrap().iter().any(|line| line.starts_with("st3: a trim could not restart the WAL and stops until the next step {")),
+        "the stop is logged: {:?}", logged.lock().unwrap()
+    );
+    let left = observer_ids(&store);
+    release.store(true, Ordering::Release);
+    holder.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(actions.first(), Some(&"deferred"), "{actions:?}");
+    assert!(cut_states(&store).iter().any(|state| state == "trimming"), "{:?}", cut_states(&store));
+    assert!(left.len() < all.len() && left.len() > 10, "the run stopped part way ({} of {} left)", left.len(), all.len());
+    assert!(stopped_at < 2 * bound, "the trim deleted past the bound ({stopped_at} frames)");
+    // The reader gone, the next step restarts the WAL and finishes the cut.
+    store.set_trim_wal(smallclaims::store::checkpoint_trim::TRIM_WAL);
+    let actions = kinds(&step(&store, &context(scratch.path(), 0)));
+    assert_eq!(actions.first(), Some(&"trimmed"), "{actions:?}");
+    assert!(observer_ids(&store).len() < 10, "the cut dropped the observations");
+}
+
+/// Send `to` what `from` holds and `to` lacks, `to` describing itself with range digests.
+fn sync_into(from: &Store, to: &Store) -> usize {
+    let remote = to.export_replication_summary(TEST_FLEET).unwrap().inventory;
+    let exchange = from.export_replication_exchange(TEST_FLEET, &remote).unwrap();
+    let received = to.receive_replication_exchange(&from.origin, TEST_FLEET, &exchange).unwrap().received;
+    to.validate_replication_backlog().unwrap();
+    to.project_replication_backlog().unwrap();
+    received
+}
+
+fn inventory_generation(store: &Store) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='replication_inventory_generation'),0)", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// A local cut deletes payloads of envelopes it still lists, so the inventory's identities and
+/// digests do not change while it runs: the replication snapshot is not rebuilt chunk after
+/// chunk, which made every exchange wait behind an inventory build the next chunk made stale.
+/// A peer that syncs in the middle of the run and after it ends with the same inventory, and
+/// the snapshot built on through the run matches one built from nothing.
+#[test]
+fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agrees() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    // No catch-up within the run, so any rebuild the run causes shows.
+    store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    peer.bind_fleet(TEST_FLEET).unwrap();
+    while sync_into(&store, &peer) != 0 {}
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (hook_store, hook_peer, hook_seen) = (Arc::clone(&store), Arc::clone(&peer), Arc::clone(&seen));
+    let mut first = None;
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        let snapshot = hook_store.replication_snapshot().unwrap();
+        let first = first.get_or_insert_with(|| (Arc::clone(&snapshot), inventory_generation(&hook_store)));
+        hook_seen.lock().unwrap().push((chunk, Arc::ptr_eq(&first.0, &snapshot), inventory_generation(&hook_store) == first.1));
+        if chunk == 3 {
+            sync_into(&hook_store, &hook_peer);
+            sync_into(&hook_peer, &hook_store);
+        }
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() > 4, "the cut deletes in many chunks ({})", seen.len());
+    assert!(seen.iter().all(|(_, same, _)| *same), "a chunk rebuilt the replication snapshot: {seen:?}");
+    assert!(seen.iter().all(|(_, _, same)| *same), "a chunk moved the inventory generation: {seen:?}");
+    while sync_into(&store, &peer) != 0 {}
+    while sync_into(&peer, &store) != 0 {}
+    let built_on = store.replication_snapshot().unwrap();
+    store.forget_replication_snapshot();
+    let from_nothing = store.replication_snapshot().unwrap();
+    assert!(!Arc::ptr_eq(&built_on, &from_nothing));
+    assert_eq!(built_on.inventory.digest, from_nothing.inventory.digest, "the snapshot built on through the run matches one built from nothing");
+    assert_eq!(built_on.inventory.payloadless, from_nothing.inventory.payloadless, "the run's stop rebuilt which payloads it holds");
+    assert_eq!(peer.replication_snapshot().unwrap().inventory.digest, from_nothing.inventory.digest, "the peer lists the same identities");
+}
+
+fn triggers(store: &Store) -> BTreeSet<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%_inventory_%'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// Opening a store replaces the inventory triggers that counted every trimmed payload with ones
+/// that count only identities the inventory stops or starts listing. An older build that opens
+/// it recreates its own trigger beside the new one and counts every row again, which is what it
+/// always did; the next open of this build drops it again.
+#[test]
+fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_back_beside_them() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("claims.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let names = triggers(&store);
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v2") && names.contains("retired_envelopes_inventory_INSERT_v2"), "{names:?}");
+    assert!(!names.contains("replica_envelopes_inventory_DELETE") && !names.contains("retired_envelopes_inventory_INSERT"), "{names:?}");
+    // As an older build's open creates it.
+    store
+        .connection
+        .write()
+        .execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h5f1625904b9b owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS replica_envelopes_inventory_DELETE AFTER DELETE ON replica_envelopes
+             BEGIN
+                 INSERT INTO meta(key,value) VALUES('replication_inventory_generation','1')
+                 ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1;
+             END;",
+        )
+        .unwrap();
+    assert!(triggers(&store).contains("replica_envelopes_inventory_DELETE"));
+    drop(store);
+    let store = Store::open(&path, "node").unwrap();
+    let names = triggers(&store);
+    assert!(!names.contains("replica_envelopes_inventory_DELETE"), "this build's open drops it again: {names:?}");
+    assert!(names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
 }
 
 /// The claims sequence a page cursor carries, which the final mark of a trim moves on.

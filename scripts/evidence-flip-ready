@@ -140,14 +140,14 @@ def fields_of(text):
     return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
 
 
-def pr_runs(github, since, until, tries=4):
-    """The window's pull request runs, newest first, page by page until a page reaches back before the window. The created=
+def pr_runs(github, since, until, tries=4, workflow='fleet.yml'):
+    """The window's pull request runs of `workflow` (Workspace CI by default), newest first, page by page until a page reaches back before the window. The created=
     filter is not used: it answers an empty listing for about one request in four (2026-10-22: 205, 205, 0, ... for the
     same request), which would read as missing lines. A page that is empty or short of what the listing's total says it
     holds is asked again, then the run is unreadable; so is a window of more than the listing's 1,000 runs."""
     runs, page = {}, 1
     while True:
-        path = f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100&page={page}'
+        path = f'repos/{github.repo}/actions/workflows/{workflow}/runs?event=pull_request&per_page=100&page={page}'
         for attempt in range(tries):
             out = json.loads(github.gh('api', path))
             batch, total = out.get('workflow_runs') or [], min(out.get('total_count') or 0, 1000)

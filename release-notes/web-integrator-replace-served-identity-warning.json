@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve replacement stderr in integrator tick diagnostics and accept nonzero replacement exits only when the published edge serves the candidate build identity.",
+  "replay": { "status": "none", "detail": "No data replay; existing failed tick records remain unchanged." },
+  "schema": { "status": "none", "detail": "Successful activation can add a bounded replaceWarning diagnostic to the existing JSONL tick record." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "No exit-code or stderr-message contract is assumed; publication still requires the exact candidate revision at the edge." },
+  "downtime": { "status": "none", "detail": "No service activation during this change." },
+  "manual": { "status": "none", "detail": "Adopt through the deployment-owned integrator launcher pin; no runtime is changed by this PR." },
+  "recovery": { "status": "none", "detail": "A confirmed candidate keeps normal current/previous build retention despite replacement cleanup failure. An unconfirmed candidate preserves Devnet recovery and restores the previous pointer only when its served identity is confirmed. Failure detail and success warnings retain the last 4000 diagnostic characters." }
+}

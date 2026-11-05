@@ -1160,10 +1160,7 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> Value {
-        use futures_util::StreamExt as _;
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await.unwrap().unwrap().unwrap();
-        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+        super::super::tests::next_data_frame(socket).await
     }
 
     #[tokio::test]

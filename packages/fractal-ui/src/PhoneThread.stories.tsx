@@ -61,9 +61,11 @@ const inFlow = (element: HTMLElement, root: HTMLElement) => {
 export const Narrow: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const column = canvas.getByTestId('phone-column')
-  const composer = canvas.getByRole('form', { name: 'Message composer, Row projection' })
+  const composerGroup = canvas.getByRole('group', { name: 'Message composer, Row projection' })
+  const composer = composerGroup.querySelector('form')
+  await expect(composer).not.toBeNull()
   await expect(canvasElement.querySelector('[data-testid="kit-composer"]')).toHaveAttribute('data-narrow', 'true')
-  await expect(inFlow(composer, column)).toBe(true)
+  await expect(inFlow(composer!, column)).toBe(true)
   const field = canvas.getByRole('textbox', { name: 'Message' })
   // 16px field text: iOS Safari zooms the page when a smaller field takes focus.
   await expect(getComputedStyle(field).fontSize).toBe('16px')

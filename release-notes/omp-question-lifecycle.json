@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Durably cancel observed OMP questions when their admitted native session or driver lifetime ends, including abrupt loss without reconnect; all observation flags remain off by default and answering remains unavailable.",
+  "replay": {"status": "changed", "detail": "Startup retires unresolved locally ingested OMP observations predating generation leases because their admitted wrapper generation cannot be recovered. This bounded background recovery writes cancelled resolutions without answers or receipts; foreign observations are preserved and the API does not wait for the sweep."},
+  "schema": {"status": "changed", "detail": "Store open creates local_harness_question_generations if absent, without a numeric schema version change. The owner-local, non-replicated table records exact admitted native question generation witnesses before publishing an observation and removes them after durable resolution. No replicated claim, checkpoint or client schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, replication rules or coordinated member upgrade requirement changes."},
+  "compatibility": {"status": "none", "detail": "Existing question.closed/cancelled semantics are retained with empty answers and no person receipt. No client-v0 or native settlement wire changes. Exact managed wrapper admission remains required; no answer sink is installed."},
+  "downtime": {"status": "none", "detail": "No additional planned interruption. Lifecycle reconciliation is bounded background work; startup-to-health timing for larger stores has not been measured."},
+  "manual": {"status": "none", "detail": "No new operator steps. Observation still requires independent explicit ST_OMP_WEB_ANSWERS=1 opt-ins; every default remains off. Cleanup of already observed questions continues with the flag off."},
+  "recovery": {"status": "changed", "detail": "Generation leases and immutable cancelled resolutions survive restart. Unavailable evidence preserves pending questions; definitive process, provider or native session loss retires them. Reinstalling an older binary does not undo the added table or cancelled resolutions; older observation code does not run this lifecycle cleanup, so roll forward to retain that behavior."}
+}

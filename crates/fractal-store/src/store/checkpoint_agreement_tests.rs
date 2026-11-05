@@ -8,6 +8,43 @@ use smallclaims::store::checkpoint_agreement::*;
 const CUT: u128 = 20 * DAY_MS;
 
 #[test]
+fn checkpoint_verification_accounts_phases_and_adds_status_metadata() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = Store::open_memory("alder").unwrap();
+    let before = serde_json::to_value(store.checkpoint_status(context.now_unix_ms, &[]).unwrap()).unwrap();
+    assert!(before.get("verification_attempt").is_none());
+    observe(&store, 4);
+    assert_eq!(kinds(&step(&store, &context)), ["sealed"]);
+    assert_eq!(kinds(&step(&store, &context)), ["verified"]);
+    let status = store.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+    let attempt = status.verification_attempt.as_ref().unwrap();
+    assert_eq!(attempt.checkpoint, checkpoint_name(newest_due_cut(context.now_unix_ms)));
+    assert_eq!(attempt.phases.iter().map(|phase| phase.phase.as_str()).collect::<Vec<_>>(),
+        ["capture", "plan", "proof_copy", "strip_renumber", "projections_before",
+         "readers_before", "drop", "projections_after", "readers_after", "finish"]);
+    for phase in &attempt.phases {
+        let value = serde_json::to_value(phase).unwrap();
+        assert!(value["wall_ms"].as_u64().is_some());
+        for counter in ["read_bytes", "write_bytes"] {
+            #[cfg(target_os = "linux")]
+            assert!(value[counter].as_u64().is_some(), "{value}");
+            #[cfg(not(target_os = "linux"))]
+            assert!(value[counter].is_null());
+        }
+    }
+    assert_eq!(attempt.phases[2].copy_method.as_deref(), Some("vacuum_into"));
+    assert!(attempt.phases[5].count.is_some());
+    assert!(attempt.phases[8].count.is_some());
+    let mut json = serde_json::to_value(&status).unwrap();
+    assert_eq!(serde_json::from_value::<CheckpointStatusView>(json.clone()).unwrap(), status);
+    json.as_object_mut().unwrap().remove("verification_attempt");
+    let legacy = serde_json::from_value::<CheckpointStatusView>(json).unwrap();
+    assert!(legacy.verification_attempt.is_none());
+    assert_eq!(legacy.node, status.node);
+}
+
+#[test]
 fn startup_revisions_are_display_metadata_in_a_mixed_checkpoint_round() {
     fn started(store: &Store, subject: &str, version: Option<&str>) {
         let mut fields = BTreeMap::from([("status".into(), json!("running"))]);
@@ -354,18 +391,21 @@ fn a_late_envelope_before_the_cut_reseals_until_someone_verified() {
     step(&birch, &context);
 
     // An envelope from before the cut reaches alder late, from a writer it had not heard
-    // of. Alder seals again, now with cedar as a participant.
+    // of. Alder waits for cedar's first seal before refreshing its own.
     observe(&cedar, 1);
     sync(&[&alder, &cedar]);
+    assert!(step(&alder, &context).is_empty());
+    sync(&[&alder, &birch, &cedar]);
+    assert!(step(&birch, &context).is_empty());
+    assert_eq!(kinds(&step(&cedar, &context)), ["sealed"]);
+    sync(&[&alder, &birch, &cedar]);
     let actions = step(&alder, &context);
     let CheckpointAction::Sealed { participants, .. } = &actions[0] else {
         panic!("{actions:?}");
     };
     assert_eq!(participants, &names(&["alder", "birch", "cedar"]));
     sync(&[&alder, &birch, &cedar]);
-    for node in [&birch, &cedar] {
-        assert_eq!(kinds(&step(node, &context)), ["sealed"]);
-    }
+    assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
     sync(&[&alder, &birch, &cedar]);
     assert_eq!(kinds(&step(&alder, &context)), ["verified"]);
 

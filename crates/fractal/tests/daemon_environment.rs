@@ -67,6 +67,34 @@ fn doctor_report(home: &Path, socket: &Path) -> serde_json::Value {
 }
 
 #[test]
+fn fixture_shell_is_owned_by_home_and_reused_after_sigkill() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = fractal_daemon::test_support::evidence_tempdir();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join(".bash_profile"), format!(
+        "export PATH='{}'\nprintf '%s' \"$0\" > \"$HOME/shell-path\"\n", std::env::var("PATH").unwrap()
+    )).unwrap();
+    // start_service clears the environment, including TMPDIR. Kill rather than allowing Drop
+    // in main to clean anything: this is how fixture daemons are stopped by their tests.
+    let (mut service, _) = start_service(root.path(), &home, &root.path().join("state"));
+    let shell = std::path::PathBuf::from(std::fs::read_to_string(home.join("shell-path")).unwrap());
+    assert!(shell.starts_with(home.join(".cache/fractal-fixture")), "{shell:?}");
+    service.0.kill().unwrap();
+    service.0.wait().unwrap();
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+        .env_clear().env("HOME", &home).arg("--help").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(shell.is_file());
+    assert_eq!(std::fs::read_dir(shell.parent().unwrap()).unwrap().count(), 1);
+    drop(service);
+    root.close().unwrap();
+    assert!(!shell.exists(), "the test's cleanup removes the killed fixture's shell");
+}
+
+#[test]
 fn a_fixture_listener_ignores_the_callers_host_seat_ancestry() {
     if fractal_daemon::test_support::supervise_test() {
         return;

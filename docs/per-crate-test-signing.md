@@ -200,6 +200,13 @@ A full run once sat 30 minutes in the megarepo member step (`mr apply`, whose `g
 the network was fine). The step now has a limit (`ST_TEST_MEMBERS_LIMIT`, default 1200 s), writes its output to a file, and is killed with
 everything it started when the limit passes; the run then reports "NOT RUN" with the reason. The `ST_TEST_*` settings are read before the seat
 environment scrub, which would otherwise remove them.
+The limit counts the step's own running, not its wait in the host's build admission (#5068): `nix run` goes through the gate, which once held
+it for the whole 1200 s on a crowded host before it ran anything. The nix shim runs it as `exec build-admission start CLASS LABEL -- nix …`,
+and the gate execs nix once it is admitted, so the step waits exactly while its own process is the gate; st-test reads that every half second.
+The gate also says when it admits: st-test names a pipe in `BUILD_ADMISSION_NOTIFY_FD`, and the gate writes `admitted <time> <waited>` there just
+before the exec. That line ends the wait at once, with at least the gate's figure, which also covers an admission between two samples. A gate
+that does not write it leaves only the sample.
+The waits are bounded by `--queue-limit` instead, and a run that ends either way says how long it waited.
 
 ## 10. Step 5a: rust-tests in the default suite, signed from linux-gate's own run
 
@@ -231,7 +238,7 @@ and verification belong to the publisher. Failures still export failure records 
 
 ## 12. Verification and push time (measured 2026-10-24)
 
-Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
+Two warm full runs on a build host took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
 changed:
 
 - **Asking the verifier about 52 crates.** `fractal-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
@@ -251,7 +258,7 @@ changed:
 
 `evidence-wrap` verifies each new record before it pushes it, by asking the verifier about the check on the record's tree. For a per-crate check
 that asked for the tree's newest `rust-tests` record whatever its crate, so one crate's failed record on the tree made every record signed after it
-come back "did not verify locally" (50 of 52 crates on hetz2 at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
+come back "did not verify locally" (50 of 52 crates on a build host at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
 `source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `fractal-test` use. Nothing about the record
 or the verifier's rules changes.
 

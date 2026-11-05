@@ -188,9 +188,9 @@ broken local work. A connection pushes and pulls history while its backlog drain
 ### Changing an existing member's transports
 
 ```text
-st fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
-st fleet transports remove fabric [--no-service]
-st fleet transports prefer <tailscale|fabric> [--no-service]
+st fleet transports add [--as ACTOR] fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
+st fleet transports remove [--as ACTOR] fabric [--no-service]
+st fleet transports prefer [--as ACTOR] <tailscale|fabric> [--no-service]
 ```
 
 Run these commands on the member whose transports should change. They update the existing
@@ -200,6 +200,16 @@ identity, secret, signing key and graph history stay intact.
 Add and remove support Fabric. Prefer reorders either enabled Tailscale or Fabric
 without changing enablement or exposure; it rejects disabled carriers and is a
 no-op when already first. It preserves the remaining carriers' relative order.
+Pass `--as` to attribute the recorded announcement to a person or agent, including
+preference changes that leave exposure unchanged. Agent callers must pass their
+own literal identity immediately after `add`, `remove`, or `prefer`; borrowing a
+different actor or omitting the actor fails closed before local settings change.
+Attributed commands authorize through the public transport endpoint before local
+effects and publish before saving settings, so a refusal leaves `fleet.toml`
+unchanged. An atomic private intent keeps the exact publication bytes, base/target
+settings and actor until save succeeds. Only a matching base, actor and target
+reuses the request; changed endpoint observations do not alter retry bytes.
+Automatic worker announcements use the internal route.
 
 Adding Fabric requires a listening member with a configured replication port and a working
 local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes
@@ -247,9 +257,9 @@ allow the peer port. See [Tailscale](st3/tailscale.md) for setup.
 
 ### Fabric
 
-Run Fabric with `--runtime-peers` and install the external `st-fabric-adapter` on
-both machines. Keep the adapter running on the sponsor. No prior peer trust is
-needed:
+Run Fabric with `--runtime-peers` and install the external `fractal-fabric-adapter` on
+both machines. The old executable name `st-fabric-adapter` is still accepted.
+Keep the adapter running on the sponsor. No prior peer trust is needed:
 
 ```sh
 # On a member:
@@ -288,8 +298,11 @@ the exposure. The adapter maintains trust and grants; Fractal does not edit
 
 #### Adapter helper boundary
 
-The CLI discovers `st-fabric-adapter` beside its executable or on `PATH`;
-`ST_FABRIC_ADAPTER` selects an explicit helper for isolated tests.
+The CLI discovers `fractal-fabric-adapter` beside its executable or on `PATH`,
+then accepts `st-fabric-adapter` within each searched directory.
+`FRACTAL_FABRIC_ADAPTER` selects an explicit helper for isolated tests;
+`ST_FABRIC_ADAPTER` is still accepted. If both variables are set, they must name
+the same path.
 `pairing-invite` accepts one JSON line `{"code":"..."}` on standard input and
 returns a JSON line containing the augmented `code`. `pairing-join` is a
 private interactive JSON-line protocol: the code produces `node_id`, the signed

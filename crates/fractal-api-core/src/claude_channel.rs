@@ -1049,7 +1049,7 @@ mod tests {
             subject: "message/head".into(), from: "person/sender".into(), to: fence.subject.clone(),
             content: "doc/missing".into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
-            created_index: sent.store_index, attachments: Vec::new(),
+            created_index: sent.store_index, attachments: Vec::new(), status_from: None,
             sender_class: None, assistant_grant_id: None,
         };
         let error = body(&client, &message).await.unwrap_err();
@@ -1096,7 +1096,7 @@ mod tests {
             subject: format!("message/{name}"), from: "person/sender".into(), to: "agent/worker".into(),
             content: name.into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
-            created_index: index as u64 + 1, attachments: Vec::new(),
+            created_index: index as u64 + 1, attachments: Vec::new(), status_from: None,
             sender_class: None, assistant_grant_id: None,
         }).collect();
         let mut content = BTreeMap::from([
@@ -1389,6 +1389,7 @@ mod tests {
                 sender_class: None,
                 assistant_grant_id: None,
                 created_index: 1,
+                status_from: None,
                 attachments: Vec::new(),
             };
             assert_eq!(

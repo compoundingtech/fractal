@@ -83,6 +83,9 @@ pub struct World {
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,
+    /// Server alert total only when the attention rows are an incomplete window.
+    #[serde(skip)]
+    pub inbox_alerts: Option<usize>,
     pub attention: Load<Vec<Attention>>,
     pub agents: Load<Vec<Agent>>,
     pub missions: Load<Vec<Mission>>,

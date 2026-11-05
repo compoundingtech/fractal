@@ -6,7 +6,10 @@
   "type": "module",
   "exports": {
     "./admission": "./src/effect/admission.ts",
-    "./effect": "./src/effect/mod.ts"
+    "./effect": "./src/effect/compat.ts",
+    "./mutations": "./src/effect/mutations.ts",
+    "./pty": "./src/effect/pty.ts",
+    "./read": "./src/effect/mod.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
@@ -14,10 +17,10 @@
   },
   "dependencies": {
     "@fractal/client": "workspace:^",
-    "effect": "4.0.3"
+    "effect": "4.1.0"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.3",
+    "@effect/vitest": "4.1.0",
     "@types/node": "24.10.0",
     "typescript": "6.0.3",
     "vitest": "4.1.9"

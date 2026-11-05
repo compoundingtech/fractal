@@ -5,17 +5,18 @@
 set -euo pipefail
 stage=${1:?usage: scripts/ci-perf cost|load|load-hog}
 if [ -z "${GITHUB_ACTIONS:-}" ]; then
-  # A run outside CI. On hetz2 the load test takes the perf slot itself, so two runs never
-  # measure at once (scripts/ci-perf-slot --help); elsewhere nothing shares the machine.
+  # A run outside CI. On a host that shares one machine between load runs, marked by the file
+  # ~/.config/fractal/perf-slot, the load test takes the perf slot itself, so two runs never measure
+  # at once (scripts/ci-perf-slot --help); without the marker nothing takes it automatically.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  if { [ "$stage" = load ] || [ "$stage" = load-hog ]; } && [ -z "${FRACTAL_PERF_SLOT_HELD-${ST_PERF_SLOT_HELD:-}}" ] && [ "$(< /proc/sys/kernel/hostname)" = hetz2 ]; then
+  if { [ "$stage" = load ] || [ "$stage" = load-hog ]; } && [ -z "${FRACTAL_PERF_SLOT_HELD-${ST_PERF_SLOT_HELD:-}}" ] && [ -e "${HOME:-/nonexistent}/.config/fractal/perf-slot" ]; then
     exec python3 "$(dirname "$0")/ci-perf-slot" -- bash "$0" "$@"
   fi
   # Persistent, so generated stores survive between runs; the checkout is the workspace.
   : "${RUNNER_TEMP:=/var/tmp/st-perf-$(id -u)}"
   : "${GITHUB_WORKSPACE:=$(cd "$(dirname "$0")/.." && pwd)}"
   export RUNNER_TEMP GITHUB_WORKSPACE
-  # The devShell hides the host's tools; cargo's test runner on hetz2 needs systemd-run.
+  # The devShell hides the host's tools; cargo's test runner on a slotted host needs systemd-run.
   command -v systemd-run > /dev/null || PATH="$PATH:/run/current-system/sw/bin"
   mkdir -p "$RUNNER_TEMP"
   if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
