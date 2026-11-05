@@ -1,5 +1,5 @@
 import type * as Fractal from '@fractal/client/schema'
-import type { DecodedAgent } from '@fractal/sdk/effect'
+import type { DecodedAgent } from '@fractal/sdk/read'
 import { DateTime, Option } from 'effect'
 
 import words from '../../../../fixtures/clients/words.json' with { type: 'json' }

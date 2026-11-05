@@ -2,7 +2,7 @@
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
 import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema'
-import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/effect'
+import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/read'
 import { DateTime, Option, Schema } from 'effect'
 
 import type { ConversationItem, ToolCallItem, ToolResult, UnsupportedReason } from './model.ts'

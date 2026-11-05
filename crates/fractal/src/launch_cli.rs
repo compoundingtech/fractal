@@ -557,7 +557,12 @@ pub(super) async fn run_mission_view(
             publish_mission_file(client, args, json_output).await
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
-        MissionViewCommand::Check(args) => check_mission_file(client, args, json_output).await,
+        MissionViewCommand::Check(args) => {
+            let attributed = args.actor.as_ref()
+                .map(|actor| execution_client(endpoint, actor.clone()))
+                .transpose()?;
+            check_mission_file(attributed.as_ref().unwrap_or(client), args, json_output).await
+        }
         MissionViewCommand::Start(args) => start_mission_run(client, args, json_output).await,
         MissionViewCommand::Cancel(args) => {
             cancel_mission_run(client, endpoint, args, json_output).await

@@ -20,15 +20,14 @@ pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.clos
 /// it does not know, and a backup of marks restores on it. It ranks below every mark.
 pub const STAGED: &str = "message.staged";
 
-/// Whether a hosted seat's staging is recorded as a mark. Not yet: a build that reads marks but not
-/// `local_message_staged` (v0.3.25) would read a staged mark as unoffered mail and offer it again
-/// after a rollback, so a staging stays a claim until a release that reads these exists. Readers
-/// read both already.
-pub const RECORDS_STAGED: bool = false;
-
-/// Whether the claim append path records `kind` as a mark for a hosted seat.
-pub fn recorded_as_mark(kind: &str) -> bool {
-    MARKS.contains(&kind) || RECORDS_STAGED && kind == STAGED
+/// Whether the claim append path records `kind` as a mark for a hosted seat, read in the writer's
+/// transaction. A delivery, read or close is, once marks are on. A staging is only once every other
+/// member also counts a host's staging ([`super::marks_switch::staged_switched_tx`]): until then a
+/// member that reads staged claims only would show the mail as sent. A build that reads marks but
+/// not `local_message_staged` (v0.3.25 and earlier) reads a staged mark as unoffered mail and offers
+/// it again after a rollback, so a release note names that rollback.
+pub fn recorded_as_mark(connection: &Connection, kind: &str) -> Result<bool> {
+    Ok(MARKS.contains(&kind) || kind == STAGED && super::marks_switch::staged_switched_tx(connection)?)
 }
 
 /// How many of the newest mark events stay (`local_message_mark_events`).
@@ -302,6 +301,23 @@ pub fn local_consumer(connection: &Connection, origin: &str, message: &str, cons
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-h8f64d250e864 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
     Ok(!probe)
+}
+
+/// The messages this member's seats staged as marks at or before `staged_by` (Unix ms) that no
+/// later step has reached yet, as their count and the first of them. A release that does not read
+/// `local_message_staged` (v0.3.25 and earlier) would read each as unoffered mail and offer it again
+/// after a rollback.
+pub fn undelivered_staged(connection: &Connection, staged_by: u128) -> Result<(u64, Option<String>)> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT COUNT(DISTINCT staged.message), MIN(staged.message) FROM local_message_staged staged
+             WHERE staged.recorded_at_unix_ms<=?1
+               AND NOT EXISTS (SELECT 1 FROM local_message_marks marks WHERE marks.message=staged.message)
+               AND NOT EXISTS (SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                               WHERE claims.subject=staged.message
+                                 AND claims.kind IN ('message.delivered','message.read','message.closed'))",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1a32ef3b0b5c owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [i64::try_from(staged_by).unwrap_or(i64::MAX)], |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get(1)?)))?)
 }
 
 /// The furthest-along mark of `message`, as its status ("staged", "delivered", "read" or "closed").

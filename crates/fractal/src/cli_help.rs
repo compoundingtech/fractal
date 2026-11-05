@@ -1,9 +1,7 @@
 //! Human entry points and the actions to take after creating durable work.
 use std::fmt::Write as _;
 
-use clap::CommandFactory as _;
-
-use super::{Cli, presentation::shell_argument};
+use super::{command_graph, presentation::shell_argument};
 
 const GROUPS: &[(&str, &[&str])] = &[
     (
@@ -84,7 +82,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
     }
     // Use the real global options to find the root command, so option values such as a
     // device name or endpoint containing "help" cannot accidentally trigger this path.
-    let parser = Cli::command().disable_help_subcommand(true).subcommand(
+    let parser = command_graph().disable_help_subcommand(true).subcommand(
         clap::Command::new("help").arg(
             clap::Arg::new("all")
                 .long("all")
@@ -102,7 +100,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 }
 
 pub(super) fn root_help(all: bool) -> String {
-    let command = Cli::command();
+    let command = command_graph();
     let mut output = String::from(
         "See what needs you:\n  fractal now\n\nRun fractal in a terminal to open the interface:\n  fractal\n  fractal ui --space NAME\n\nStart an agent and talk to it:\n  fractal agents new NAME --harness claude --attach\n\nSee what is running:\n  fractal missions ls\n  fractal agents ls\n\nFrom an agent:\n  fractal skill\n  fractal work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or fractal work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: fractal [OPTIONS] <COMMAND>\n",
     );
@@ -354,7 +352,7 @@ mod tests {
                 inspect(child);
             }
         }
-        inspect(&mut Cli::command());
+        inspect(&mut command_graph());
     }
 
     #[test]
@@ -379,7 +377,7 @@ mod tests {
         let sender_guidance = fractal_daemon::skill::message_sender_guidance();
         assert_eq!(default.matches(sender_guidance).count(), 1);
         assert_eq!(all.matches(sender_guidance).count(), 1);
-        for command in Cli::command()
+        for command in command_graph()
             .get_subcommands()
             .filter(|command| !command.is_hide_set())
         {

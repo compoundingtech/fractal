@@ -40,9 +40,9 @@ const privateRegistry = () => {
 const buildPublic = async (main: string, registries: { readonly public: string; readonly private: string }) => {
   const entry = join(root, 'main.js')
   writeFileSync(entry, [
-    `import { changelogManifest } from ${JSON.stringify(join(app, 'src/changelog/build.ts'))}`,
+    `import { getChangelogManifest } from ${JSON.stringify(join(app, 'src/changelog/build.ts'))}`,
     `import { changelogEntryIds } from ${JSON.stringify(join(app, 'src/changelog/metadata.ts'))}`,
-    'globalThis.changelog = { changelogManifest, changelogEntryIds }',
+    `globalThis.changelog = { changelogManifest: getChangelogManifest(${JSON.stringify(machineVersion)}), changelogEntryIds }`,
     main,
   ].join('\n'))
   const output = await build({

@@ -319,6 +319,13 @@ pub(super) async fn run_work(
                 };
                 let driver_held = claim_has_driver(client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
                 print!("{}", render_client_work_detail(work, driver_held));
+                if work.claim_expires_at_unix_ms.is_some() {
+                    print!("{}", render_wait_lease(
+                        &work.header.id, work.claimant.as_deref(), work.claim_incarnation.as_deref(),
+                        u128::from(work.execution_waited_ms), work.claim_expires_at_unix_ms.map(u128::from),
+                        current_unix_ms()?, driver_held,
+                    ));
+                }
                 Ok(())
             }
         }
@@ -375,6 +382,12 @@ pub(super) async fn run_work(
                 print_value(&response, true)
             } else {
                 println!("{}\t{}", response.status, response.subject);
+                let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
+                print!("{}", render_wait_lease(
+                    &response.subject, response.claimant.as_deref(), response.claim_incarnation.as_deref(),
+                    response.execution_waited_ms, response.claim_expires_at_unix_ms,
+                    current_unix_ms()?, driver_held,
+                ));
                 Ok(())
             }
         }
@@ -714,6 +727,34 @@ async fn post_work(
     }
 }
 
+fn render_wait_lease(
+    subject: &str,
+    claimant: Option<&str>,
+    incarnation: Option<&str>,
+    waited_ms: u128,
+    expires: Option<u128>,
+    now: u128,
+    driver_held: Option<bool>,
+) -> String {
+    let budget = u128::from(fractal_daemon::store::MAX_STEP_WAIT_MS);
+    let mut output = format!(
+        "Wait budget: {} used of {} · {} left\n",
+        fractal_daemon::store::format_wait_span(waited_ms),
+        fractal_daemon::store::format_wait_span(budget),
+        fractal_daemon::store::format_wait_span(budget.saturating_sub(waited_ms)),
+    );
+    if let Some(expires) = expires {
+        let expiry = i64::try_from(expires).ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map_or_else(|| format!("{expires}ms since Unix epoch"),
+                |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        output.push_str(&format!("Lease deadline: {expiry} ({} seconds left). {}\n",
+            expires.saturating_sub(now) / 1000,
+            render_claim_lease(subject, claimant, incarnation, expires, driver_held)));
+    }
+    output
+}
+
 /// This machine's host documents, which a claim prints because they describe where the claimed
 /// work runs. A lookup that fails prints nothing: the claim itself has already succeeded.
 async fn host_facts(client: &Client) -> Option<(String, Vec<(String, String)>)> {
@@ -755,4 +796,76 @@ fn mission_revision_intent(
         "version 2\nmission-run {run:?} {{\n  revision {operation_id:?} {{\n    mission {:?}\n    from {from_generation:?}\n    reason {reason:?}\n  }}\n}}\n",
         format!("mission/{mission_id}@{revision}")
     )
+}
+
+#[cfg(test)]
+mod wait_lease_tests {
+    use super::*;
+
+    #[test]
+    fn wait_and_show_report_separate_wait_budget_and_lease_deadline() {
+        let step: StepRunView = serde_json::from_value(json!({
+            "subject":"step-run/test/work", "run":"mission-run/test",
+            "generation":"run-generation/test", "step":"work", "definition_hash":"test",
+            "status":"working", "attempt":1, "agentless":false, "worker_reported":false,
+            "claimant":"agent/test", "claim_incarnation":"live", "readiness_epoch":1,
+            "claim_expires_at_unix_ms":600000, "execution_waited_ms":120000,
+            "execution_paused_until_unix_ms":1920000,
+            "created_at_unix_ms":0, "updated_at_unix_ms":0
+        })).unwrap();
+        let render = |now, driver| render_wait_lease(
+            &step.subject, step.claimant.as_deref(), step.claim_incarnation.as_deref(),
+            step.execution_waited_ms, step.claim_expires_at_unix_ms, now, driver,
+        );
+        let rendered = render(120000, Some(true));
+        assert!(rendered.starts_with("Wait budget: "));
+        assert!(rendered.contains("Lease deadline: 1970-01-01T00:10:00Z (480 seconds left). The Fractal driver renews the lease"));
+        assert!(!rendered.contains("fractal work renew"));
+        assert!(render(700000, None).contains("(0 seconds left)"));
+    }
+
+    #[tokio::test]
+    async fn held_work_show_uses_only_the_client_resource_on_a_client_only_endpoint() {
+        use axum::{Json, Router, http::{StatusCode, Uri}};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("client.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let app = Router::new().fallback(move |uri: Uri| {
+            recorded.lock().unwrap().push(uri.path().to_owned());
+            async move {
+                if fractal_client::fabric::FabricEndpoint::validate_path(uri.path()).is_err() {
+                    return (StatusCode::FORBIDDEN, Json(json!({"error": "client routes only"})));
+                }
+                (StatusCode::OK, Json(json!({
+                    "api_version": "st3.client.v0", "request_id": "request/work-show",
+                    "snapshot": {
+                        "id": "snapshot/test", "host_id": "host/test", "store_index": 1,
+                        "projection_version": "test", "created_at": "2026-01-01T00:00:00Z"
+                    },
+                    "value": {
+                        "kind": "work", "id": "step-run/test/work", "revision": "1",
+                        "updated_at": "2026-01-01T00:00:00Z", "mission_run_id": "mission-run/test",
+                        "generation_id": "run-generation/test", "definition_id": "mission/test",
+                        "path": "work", "state": "working", "attempt": 1, "readiness_epoch": 1,
+                        "claimant": "agent/test", "claim_incarnation": "live",
+                        "claim_expires_at_unix_ms": 600000, "execution_waited_ms": 120000
+                    }
+                })))
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = Endpoint::Unix(socket);
+        let client = Client::new(endpoint.clone());
+        let result = run_work(&client, &endpoint, WorkCommand::Show {
+            subject: "test/work".into(), ignored_actor: None,
+        }, false).await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(requests.iter().any(|path| path.starts_with("/v1/client/")));
+        assert!(!requests.iter().any(|path| path.starts_with("/v1/work-items/")));
+    }
 }

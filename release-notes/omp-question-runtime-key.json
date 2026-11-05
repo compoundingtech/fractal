@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Validate observed OMP questions against their provider runtime key rather than their physical PTY name, preserving slash-qualified and terminal-bound seats through ingestion and lifecycle reconciliation.",
+  "replay": {"status": "none", "detail": "No replay or claim interpretation changes. Previously refused and acknowledged observations are not reconstructed."},
+  "schema": {"status": "none", "detail": "No database, replicated claim, checkpoint, or client schema changes."},
+  "rules": {"status": "none", "detail": "No replication rules or coordinated member upgrade changes."},
+  "compatibility": {"status": "none", "detail": "Existing provider bindings already use the agent identity without agent/ as their runtime key. Physical generation witnesses retain their PTY names and checks; native observation and settlement wire formats are unchanged."},
+  "downtime": {"status": "none", "detail": "No additional planned interruption."},
+  "manual": {"status": "none", "detail": "No new operator steps. OMP question observation remains explicitly opt-in and answering remains unavailable."},
+  "recovery": {"status": "none", "detail": "Correctly bound open questions remain current across lifecycle checks even when the physical runtime name differs. Unavailable evidence still preserves questions, and positive generation loss still retires them. Roll forward to retain this correction."}
+}

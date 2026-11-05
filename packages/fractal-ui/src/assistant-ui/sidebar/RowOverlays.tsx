@@ -102,6 +102,7 @@ export function AgentRowMenu({ row, actions, onOpen, onMarkRead, onDetailsPress 
   const title = sidebarRowTitle(row)
   const ownerId = row.parentRef?.replace(/^agent\//, '') ?? row.id
   const canOpen = actions?.select !== undefined || onOpen !== undefined
+  const pins = row.subagent === undefined ? actions?.pins : undefined
   return <MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
@@ -110,6 +111,8 @@ export function AgentRowMenu({ row, actions, onOpen, onMarkRead, onDetailsPress 
       {actions?.details !== undefined && <MenuItem id="details" onAction={() => actions.details?.(row.ref)} style={menuItemStyle}>Agent details</MenuItem>}
       {actions?.declaration !== undefined && row.subagent === undefined && <MenuItem id="declaration" onAction={() => actions.declaration?.(row.ref)} style={menuItemStyle}>View KDL</MenuItem>}
       {actions?.declaration !== undefined && row.mission !== undefined && <MenuItem id="mission-declaration" onAction={() => actions.declaration?.(row.mission!)} style={menuItemStyle}>View mission definition</MenuItem>}
+      {pins !== undefined && <MenuItem id="pin" onAction={() => pins.toggle(row.ref)} style={menuItemStyle}>{pins.has(row.ref) ? 'Unpin agent' : 'Pin agent'}</MenuItem>}
+      {pins !== undefined && row.mission !== undefined && <MenuItem id="pin-mission" onAction={() => pins.toggle(row.mission!)} style={menuItemStyle}>{pins.has(row.mission) ? 'Unpin mission' : 'Pin mission'}</MenuItem>}
       {(actions?.terminal !== undefined || actions?.resource !== undefined) && row.terminal !== undefined && <MenuItem id="terminal" onAction={() => actions?.terminal !== undefined ? actions.terminal(row.terminal!, ownerId) : actions?.resource?.(row.terminal!, ownerId)} style={menuItemStyle}>Open terminal</MenuItem>}
       {actions?.resource !== undefined && row.mission !== undefined && <MenuItem id="mission" onAction={() => actions.resource?.(row.mission!, ownerId)} style={menuItemStyle}>Open mission</MenuItem>}
       {actions?.resource !== undefined && row.worktree !== undefined && <MenuItem id="worktree" onAction={() => actions.resource?.(row.worktree!, ownerId)} style={menuItemStyle}>Open worktree</MenuItem>}

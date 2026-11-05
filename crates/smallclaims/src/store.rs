@@ -88,6 +88,7 @@ pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
+pub mod checkpoint_accounting;
 pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
@@ -889,6 +890,9 @@ pub struct Store {
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
     /// holds no fleet claims of its own. See `bind_fleet_authority`.
     fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
+    /// For a shard, its authority's fleet generation when its last admission began. Membership
+    /// that changes later can decide envelopes the shard held. See `fleet_moved_since_admission`.
+    admitted_fleet_generation: AtomicI64,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
     pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
@@ -934,6 +938,7 @@ pub struct Store {
     /// The last seal-identity digest, and the capture epoch it holds for; see
     /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
     pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
+    pub(crate) checkpoint_verify_latest: checkpoint_accounting::Latest,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1298,6 +1303,7 @@ impl Store {
         Ok(Self {
             connection,
             admitted: None,
+            checkpoint_verify_latest: Default::default(),
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,
@@ -1317,6 +1323,7 @@ impl Store {
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             fleet_authority: std::sync::OnceLock::new(),
+            admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
@@ -2320,10 +2327,26 @@ pub fn set_thread_clock(at: Option<u128>) {
     THREAD_CLOCK.with(|clock| clock.set(at));
 }
 
-/// The kinds the membership fold reads.
+/// The kinds the membership fold reads, apart from `fleet.shard-bounds`, and that the
+/// generation triggers of `FLEET_GENERATION_TRIGGER_VERSION` name.
 pub const FLEET_CLAIM_KINDS: &str = "'fleet.member-admitted','fleet.member-endpoints','fleet.member-left',\
                                  'fleet.member-removed','fleet.invite-created','fleet.invite-redeemed',\
                                  'fleet.invite-revoked'";
+
+/// Every kind the membership fold reads.
+pub const FLEET_FOLD_KINDS: &str = "'fleet.member-admitted','fleet.member-endpoints','fleet.member-left',\
+                                'fleet.member-removed','fleet.invite-created','fleet.invite-redeemed',\
+                                'fleet.invite-revoked','fleet.shard-bounds'";
+
+/// `fleet.shard-bounds` joined the fold after the generation triggers' version 1, so its own
+/// triggers are installed beside them on every open rather than by a new trigger version: a
+/// build refuses a database whose trigger version is newer than its own, and an older build
+/// keeps triggers it does not name.
+const SHARD_BOUNDS_GENERATION_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h1fa3ea612d41 owner=smallclaims::store TODO=prepare-body-and-predecessor-values */ "
+    CREATE TRIGGER IF NOT EXISTS fleet_generation_shard_bounds_insert AFTER INSERT ON claims
+    WHEN NEW.kind='fleet.shard-bounds' BEGIN UPDATE fleet_generation SET value=value+1 WHERE id=1; END;
+    CREATE TRIGGER IF NOT EXISTS fleet_generation_shard_bounds_delete AFTER DELETE ON claims
+    WHEN OLD.kind='fleet.shard-bounds' BEGIN UPDATE fleet_generation SET value=value+1 WHERE id=1; END;";
 
 /// Upper bound on signature requests or answers in one exchange.
 pub const REPLICATION_SIGNATURE_LIMIT: usize = 512;
@@ -2600,10 +2623,11 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, mode != "listening")?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, attribution)
     }
 
     /// Explicitly withdraw rotation metadata when changing transport settings.
@@ -2615,7 +2639,7 @@ impl Store {
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, true)?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, None)
     }
 
     fn publish_fleet_endpoints_locked(
@@ -2623,12 +2647,16 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let Some(member_key) = self.member_public_key() else {
             return Ok(false);
         };
         let subject = format!("host/{}", self.origin);
-        if let Some(latest) = self.latest_claim(&subject, Some("fleet.member-endpoints"))? {
+        // Automatic announcements are deduplicated; an attributed settings change is an audit event.
+        if let Some(latest) = self.latest_claim(&subject, Some("fleet.member-endpoints"))?
+            && attribution.is_none()
+        {
             let fields = latest.body.get("fields").cloned().unwrap_or_default();
             if fields["member_key"] == member_key
                 && fields["mode"] == mode
@@ -2640,7 +2668,7 @@ impl Store {
         self.append_claim(&ClaimInput {
             subject,
             kind: "fleet.member-endpoints".into(),
-            actor: None,
+            actor: attribution.map(|(actor, _)| actor.to_owned()),
             fields: BTreeMap::from([
                 ("member_key".into(), Value::String(member_key)),
                 ("mode".into(), Value::String(mode.into())),
@@ -2649,7 +2677,7 @@ impl Store {
             ]),
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: None,
+            idempotency_key: attribution.map(|(_, mutation_id)| mutation_id.to_owned()),
         })
         .map_err(anyhow::Error::from)?;
         // Seed and sign at once, so the announcement counts in this node's own fold.
@@ -3106,6 +3134,7 @@ fn initialize_fleet_generation(connection: &Connection) -> Result<()> {
             [FLEET_GENERATION_TRIGGER_VERSION],
         )?;
     }
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6bf592a179cd owner=smallclaims::store TODO=trace-statement-and-value-representation */ SHARD_BOUNDS_GENERATION_TRIGGERS)?;
     transaction.commit()?;
     Ok(())
 }
@@ -3255,7 +3284,7 @@ fn fleet_claims_with_signers_query() -> String {
                    AND signatures.envelope_hash=envelopes.envelope_hash)
          FROM claims JOIN batches ON batches.id=claims.batch_id
          LEFT JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
-         WHERE claims.kind IN ({FLEET_CLAIM_KINDS})
+         WHERE claims.kind IN ({FLEET_FOLD_KINDS})
          ORDER BY claims.id"
     )
 }
@@ -3337,13 +3366,18 @@ pub fn fleet_admission_hold(
     )
 }
 
-/// `fleet_admission_hold` for an envelope of a named shard; see `Membership::shard_window`.
+/// `fleet_admission_hold` for an envelope of the shard `shard`; see `Membership::shard_window`.
 pub fn shard_admission_hold(
     connection: &Connection,
     membership: &crate::fleet::Membership,
+    shard: &str,
     envelope: &ReplicaEnvelope,
 ) -> Result<Option<&'static str>> {
-    window_admission_hold(connection, membership.shard_window(&envelope.writer), envelope)
+    window_admission_hold(
+        connection,
+        membership.shard_window(shard, &envelope.writer, envelope.sequence),
+        envelope,
+    )
 }
 
 fn window_admission_hold(
@@ -3405,12 +3439,12 @@ pub fn envelope_carries_fleet_claims(
     envelope: &ReplicaEnvelope,
 ) -> Result<bool> {
     Ok(connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4c6232d63361 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4d7e6620c0d0 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &format!(
             "SELECT EXISTS(
                  SELECT 1 FROM replica_envelopes AS envelopes
                  JOIN claims ON claims.batch_id=envelopes.batch_id
                  WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?3
-                   AND claims.kind IN ({FLEET_CLAIM_KINDS})
+                   AND claims.kind IN ({FLEET_FOLD_KINDS})
              )"
         ))?
         .query_row(
@@ -3788,8 +3822,16 @@ impl Store {
 
     /// Append this member's leave as its writer's last batch.
     /// Write this node's leave, once per member key: running `st fleet leave` again returns the
-    /// leave already written, so nothing follows it.
-    pub fn leave_fleet(&self, person: &str) -> Result<ClaimRecord, St3Error> {
+    /// leave already written, so nothing follows it. `shard_high_water` is this node's own last
+    /// writer sequence in each shard it holds. Its key counts in a shard only at or below what
+    /// its own `fleet.shard-bounds` says (`Membership::shard_window`), so the leave writes one
+    /// first, for the shards it wrote. Older builds hold that claim as an unknown kind and fence
+    /// the key at every shard sequence until they upgrade.
+    pub fn leave_fleet(
+        &self,
+        person: &str,
+        shard_high_water: &BTreeMap<String, u64>,
+    ) -> Result<ClaimRecord, St3Error> {
         let key = self
             .member_public_key()
             .ok_or_else(|| St3Error::new("not-a-member", "this node has no member key"))?;
@@ -3800,6 +3842,38 @@ impl Store {
             .filter(|claim| claim.body["fields"]["member_key"] == key.as_str())
         {
             return Ok(written);
+        }
+        // The bounds go before the leave: after it they would fall outside this key's window and
+        // count for nothing. Bounds this key already wrote that reach as far, from a leave that
+        // was interrupted, are not written again.
+        let wrote = shard_high_water
+            .iter()
+            .filter(|(_, sequence)| **sequence != 0)
+            .map(|(shard, sequence)| (shard.clone(), Value::from(*sequence)))
+            .collect::<serde_json::Map<_, _>>();
+        let bounded = self
+            .latest_claim(&subject, Some(crate::fleet::membership::SHARD_BOUNDS))
+            .map_err(internal)?
+            .filter(|claim| claim.body["fields"]["member_key"] == key.as_str())
+            .is_some_and(|claim| {
+                wrote.iter().all(|(shard, sequence)| {
+                    claim.body["fields"]["shard_high_water"][shard.as_str()].as_u64()
+                        >= sequence.as_u64()
+                })
+            });
+        if !wrote.is_empty() && !bounded {
+            self.append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: crate::fleet::membership::SHARD_BOUNDS.into(),
+                actor: Some(person.into()),
+                fields: BTreeMap::from([
+                    ("member_key".into(), Value::String(key.clone())),
+                    ("shard_high_water".into(), Value::Object(wrote)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })?;
         }
         let record = self.append_claim(&ClaimInput {
             subject,
@@ -3866,6 +3940,14 @@ impl Store {
         })
         .map_err(anyhow::Error::from)?;
         Ok(())
+    }
+
+    /// The last writer sequence this store wrote under its own name, or the floor it took when
+    /// it joined, or 0: its next batch follows it.
+    pub fn own_writer_sequence(&self) -> Result<u64> {
+        let reader = self.readers.get();
+        let snapshot = reader.unchecked_transaction()?;
+        Ok(next_replica_sequence(&snapshot, &self.origin)?.saturating_sub(1))
     }
 
     /// This store's own highest batch under `writer`, if it ever wrote as that name.
@@ -7978,7 +8060,32 @@ impl Store {
         self.admit_replication_backlog(AdmissionAuthority::Source)
     }
 
+    /// Whether a shard's fleet authority changed its membership since the shard last admitted
+    /// its backlog. The graph admits membership claims on its own schedule, at startup after the
+    /// shard and later as they replicate, so a shard asks this before it skips an admission pass
+    /// for want of new data: a leaver's bounds, admitted after its envelopes, decide them. A
+    /// default store judges its own membership claims within each pass and answers false.
+    pub fn fleet_moved_since_admission(&self) -> Result<bool> {
+        match self.fleet_authority.get() {
+            Some(authority) => Ok(authority.fleet_generation()? != self.admitted_fleet_generation.load(Ordering::Acquire)),
+            None => Ok(false),
+        }
+    }
+
     fn admit_replication_backlog(
+        &self,
+        authority: AdmissionAuthority,
+    ) -> Result<ReplicationAdmission> {
+        // Read before the pass, so membership that changes during it is judged by the next one.
+        let generation = self.fleet_authority.get().map(|fleet| fleet.fleet_generation()).transpose()?;
+        let admission = self.admit_replication_backlog_now(authority)?;
+        if let Some(generation) = generation {
+            self.admitted_fleet_generation.store(generation, Ordering::Release);
+        }
+        Ok(admission)
+    }
+
+    fn admit_replication_backlog_now(
         &self,
         authority: AdmissionAuthority,
     ) -> Result<ReplicationAdmission> {
@@ -8050,6 +8157,12 @@ impl Store {
             (retry_hash_mismatches, retry_subject_references, envelopes)
         };
         let mut outcome = ReplicationAdmission::default();
+        // A shard that takes its fleet from another store judges its envelopes by their bounds
+        // in that shard.
+        let shard = match self.fleet_authority.get() {
+            Some(_) => self.bound_shard()?,
+            None => None,
+        };
         // Prepare the authority fold off the writer in one reader snapshot. A generation
         // comparison inside each acquired transaction proves that fold still applies there.
         let mut membership: Option<(i64, crate::fleet::Membership)> = None;
@@ -8139,14 +8252,14 @@ impl Store {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let hold = match authority {
-                        AdmissionAuthority::Membership if self.fleet_authority.get().is_some() => {
-                            shard_admission_hold(&pass, prepared_membership, envelope)?
+                    let hold = match (authority, shard.as_deref()) {
+                        (AdmissionAuthority::Membership, Some(shard)) => {
+                            shard_admission_hold(&pass, prepared_membership, shard, envelope)?
                         }
-                        AdmissionAuthority::Membership => {
+                        (AdmissionAuthority::Membership, None) => {
                             fleet_admission_hold(&pass, prepared_membership, envelope)?
                         }
-                        AdmissionAuthority::Source => None,
+                        (AdmissionAuthority::Source, _) => None,
                     };
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {

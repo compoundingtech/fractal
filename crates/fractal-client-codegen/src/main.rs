@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 
 mod declarations;
 mod rich;
+mod notice;
+mod notice_schema;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -70,6 +72,17 @@ fn main() -> Result<()> {
         &rust_client,
         &swift_models,
         &swift_client,
+    )?;
+    let (notice_models, notice_schema) = notice::models(&schema)?;
+    output(
+        &root.join("crates/fractal-client/src/notice_models.generated.rs"),
+        &format_rust(&notice_models)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_schema.generated.json"),
+        &notice_schema,
+        check,
     )?;
     output(
         &root.join("crates/fractal-client/src/contract.rs"),
@@ -229,6 +242,10 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
             continue;
         }
+        if id == "device-command.get" {
+            writeln!(out, "    pub async fn device_command_get(&self, id: &str, wait: bool) -> Result<Envelope<DeviceCommand>, ClientError> {{ self.get(&format!(\"/v1/client/device-commands/{{}}?wait={{wait}}\", percent_encode(id))).await }}")?;
+            continue;
+        }
         if id == "harness-questions.list" {
             writeln!(out, "    pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/harness-questions{{suffix}}\")).await }}")?;
             continue;
@@ -252,6 +269,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    pub async fn mission_declaration_get(&self, mission: &str, revision: Option<&str>) -> Result<Envelope<MissionDeclaration>, ClientError> {{ let mut path = format!(\"/v1/client/mission-declaration?mission={{}}\", percent_encode(mission)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -432,6 +451,10 @@ fn swift_operation_methods(
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
             continue;
         }
+        if id == "device-command.get" {
+            writeln!(out, "    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> {{ let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: \"/\"))) ?? id; return try await get(\"v1/client/device-commands/\\(escaped)\", query: [.init(name: \"wait\", value: String(wait))]) }}")?;
+            continue;
+        }
         if id == "harness-questions.list" {
             writeln!(out, "    public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/harness-questions\", query: query) }}")?;
             continue;
@@ -527,6 +550,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/mission-declaration\", query: query) }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -690,14 +715,19 @@ fn validate_model(
             && (rust.contains("#[serde(tag = \"type\", content = \"body\"")
                 || (rust.contains("struct TaggedBody")
                     && rust.contains("#[serde(rename = \"type\")]")));
-        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline {
+        let command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && rust_block.contains("pub command: DeviceCommandBody")
+            && rust.contains("#[serde(tag = \"command_kind\", content = \"args\")]");
+        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline && !command_body {
             bail!("Rust `{rust_name}` does not model schema field `{property}`");
         }
         let swift_field = match property.as_str() {
             "final" => "isFinal".into(),
             other => lower_camel_snake(other),
         };
-        if !swift_block.contains(&swift_field) {
+        let swift_command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && swift_block.contains("command: PhoneCommand");
+        if !swift_block.contains(&swift_field) && !swift_command_body {
             bail!("Swift `{swift_name}` does not model schema field `{property}`");
         }
     }
@@ -729,7 +759,7 @@ fn validate_surfaces(
             schema,
             definition,
             definition,
-            &format!("{definition}Resource"),
+            &if definition == "DeviceCommand" { definition.to_owned() } else { format!("{definition}Resource") },
             rust,
             swift,
         )?;
@@ -795,6 +825,7 @@ fn validate_surfaces(
         "CanonicalNode",
         "SubjectDefinition",
         "PublicationDefinition",
+        "MissionDeclaration",
         "AgentsStatusWatermark",
         "Snapshot",
         "AgentsPublicationMetadata",
@@ -1383,6 +1414,10 @@ fn ts_object(value: &Value) -> Result<String> {
             fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
         }
     }
+    // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.
+    if fields.is_empty() && value["additionalProperties"] == false {
+        return Ok("Record<string, never>".into());
+    }
     if let Some(extra) = value.get("additionalProperties")
         && extra.is_object()
     {
@@ -1585,6 +1620,10 @@ fn typescript_operation_methods(
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
             continue;
         }
+        if id == "device-command.get" {
+            writeln!(out, "    async deviceCommandGet(id: string, options: {{ wait?: boolean }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DeviceCommand>> {{ return this.get(`/v1/client/device-commands/${{encodeURIComponent(id)}}` + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
         let route = if path.contains("{id}") {
             path.replace("{id}", "${encodeURIComponent(routedId(id))}")
         } else {
@@ -1687,6 +1726,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MissionDeclaration>> {{ return this.get('{route}' + query({{ mission, revision }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,

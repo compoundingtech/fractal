@@ -24,7 +24,7 @@ ChatGPT web (developer-mode app)        ChatGPT desktop (local plugin)
 | --- | --- | --- |
 | st daemon (`crates/st3`) | Principal, grants, scopes, owner approvals, fences and action receipts | Speak MCP or expose the control socket to ChatGPT |
 | Typed client (`crates/st3-client`) | Client-v0 assistant operations | Widen authority |
-| Adapter (`crates/st-chatgpt`) | Both MCP transports, closed tool list, annotations and pluggable authentication | Run arbitrary commands, expose `st3.sock` or return credentials |
+| Adapter (`crates/st-chatgpt`) | Both MCP transports, closed tool list, annotations and pluggable authentication | Run arbitrary commands, expose `fractal.sock` or return credentials |
 | ChatGPT app or plugin record | Connection to the adapter | Hold st credentials |
 | Downstream deployment | Adapter and tunnel services for one installation | Fork the authority model or tool list |
 

@@ -406,8 +406,8 @@ const settle = Effect.promise(async () => {
   }
 })
 
-const withGateway = (
-  test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void>,
+const withGateway = <E,>(
+  test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void, E>,
   { maxFollows = 2, sessionTraceLayer }: {
     readonly maxFollows?: number
     readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider>

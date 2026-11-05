@@ -59,6 +59,7 @@ pub fn capture_effective(
     let normalize = |path: PathBuf| path.components().filter(|c| *c != Component::CurDir).collect::<PathBuf>();
     let mut files = BTreeMap::new();
     let mut paths = BTreeSet::new();
+    let mut rule_directories = BTreeSet::new();
     if let Some(render) = crate::render::children(&desired.desired).iter()
         .find(|child| crate::render::name(child) == Some("render"))
     {
@@ -84,12 +85,13 @@ pub fn capture_effective(
     // Native instruction conventions: https://github.com/can1357/oh-my-pi/blob/main/docs/context-files.md
     // Include workspace and ancestor instructions even when no render operation owns them.
     for ancestor in workspace.ancestors().chain(Path::new(&member.cwd).ancestors()) {
-        for name in ["AGENTS.md", "CLAUDE.md", "PERSONA.md", ".omp/AGENTS.md", ".omp/RULES.md",
+        for name in ["AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "PERSONA.md", ".omp/AGENTS.md", ".omp/RULES.md",
             ".claude/CLAUDE.md", ".omp/config.yml", ".omp/config.yaml", ".omp/mcp.json",
             ".mcp.json", ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"] {
             let path = normalize(ancestor.join(name));
             if path.is_file() { paths.insert(path); }
         }
+        claude_rules(&ancestor.join(".claude/rules"), &mut paths, &mut rule_directories)?;
     }
     for (variable, names) in [("HOME", &[".claude/CLAUDE.md", ".omp/AGENTS.md", ".omp/config.yml", ".codex/config.toml"][..]),
         ("CLAUDE_CONFIG_DIR", &["CLAUDE.md", "settings.json"]), ("CODEX_HOME", &["AGENTS.md", "config.toml"]),
@@ -99,6 +101,12 @@ pub fn capture_effective(
                 let path = normalize(Path::new(base).join(name));
                 if path.is_file() { paths.insert(path); }
             }
+            let rules = match variable {
+                "HOME" => Some(Path::new(base).join(".claude/rules")),
+                "CLAUDE_CONFIG_DIR" => Some(Path::new(base).join("rules")),
+                _ => None,
+            };
+            if let Some(rules) = rules { claude_rules(&rules, &mut paths, &mut rule_directories)?; }
         }
     }
     let resolve = |value: &str| {
@@ -135,6 +143,19 @@ pub fn capture_effective(
     let binary = smallclaims::hash::canonical_hash(&("launch-binary-v1", binaries))?;
     let digest = smallclaims::hash::canonical_hash(&("launch-contract-v1", &prompt, &binary))?;
     Ok(Contract { version: 1, digest, prompt, binary })
+}
+
+fn claude_rules(root: &Path, paths: &mut BTreeSet<PathBuf>, visited: &mut BTreeSet<PathBuf>) -> Result<()> {
+    if !root.is_dir() || !visited.insert(std::fs::canonicalize(root)?) { return Ok(()); }
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            claude_rules(&path, paths, visited)?;
+        } else if path.extension().is_some_and(|extension| extension == "md") {
+            paths.insert(std::fs::canonicalize(path)?);
+        }
+    }
+    Ok(())
 }
 
 fn context_imports(path: &Path, bytes: &[u8], paths: &mut BTreeSet<PathBuf>) -> Result<()> {
@@ -252,6 +273,46 @@ mod tests {
             std::fs::write(&path, "after").unwrap();
             assert_ne!(old.prompt, capture(&store, &desired, &BTreeMap::new()).unwrap().prompt);
         }
+    }
+
+    #[test]
+    fn claude_local_instructions_include_ancestors_and_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let cwd = workspace.join("nested");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let mut desired = declaration(&workspace);
+        desired.member.as_mut().unwrap().cwd = cwd.display().to_string();
+        for path in [root.path().join("CLAUDE.local.md"), workspace.join("CLAUDE.local.md"), cwd.join("CLAUDE.local.md")] {
+            std::fs::write(&path, "before").unwrap();
+            let old = capture(&store, &desired, &BTreeMap::new()).unwrap();
+            std::fs::write(&path, "after").unwrap();
+            let new = capture(&store, &desired, &BTreeMap::new()).unwrap();
+            assert_eq!(new.drift(&old), Some(Drift { prompt: true, binary: false }));
+        }
+    }
+
+    #[test]
+    fn claude_rules_include_nested_ancestor_and_effective_account_files() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let account = root.path().join("account");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let mut desired = declaration(&workspace);
+        desired.member.as_mut().unwrap().environment.insert("CLAUDE_CONFIG_DIR".into(), account.display().to_string());
+        for path in [root.path().join(".claude/rules/ancestor.md"), workspace.join(".claude/rules/main.md"),
+            workspace.join(".claude/rules/nested/context.md"), account.join("rules/nested/tools.md")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "before").unwrap();
+            let old = capture(&store, &desired, &BTreeMap::new()).unwrap();
+            std::fs::write(&path, "after").unwrap();
+            let new = capture(&store, &desired, &BTreeMap::new()).unwrap();
+            assert_eq!(new.drift(&old), Some(Drift { prompt: true, binary: false }));
+        }
+        std::os::unix::fs::symlink(workspace.join(".claude/rules"), workspace.join(".claude/rules/cycle")).unwrap();
+        assert_eq!(capture(&store, &desired, &BTreeMap::new()).unwrap(), capture(&store, &desired, &BTreeMap::new()).unwrap());
     }
 
     #[test]

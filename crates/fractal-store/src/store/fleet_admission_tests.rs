@@ -421,10 +421,15 @@ fn a_member_leaves_once_and_a_second_leave_writes_nothing() {
     let laptop = node("laptop", Some(&laptop_key), Some(&anchor_key));
     sync(&anchor, &laptop);
 
-    let first = laptop.leave_fleet("person/test").unwrap();
+    // A shard the member never wrote needs no bounds, so the leave writes only what older builds
+    // write; a second leave writes nothing, bounds included.
+    let unwritten = BTreeMap::from([("messages".to_owned(), 0)]);
+    let first = laptop.leave_fleet("person/test", &unwritten).unwrap();
     let head = highest_sequence(&laptop, "laptop");
     assert_eq!(first.body["fields"]["high_water"], json!(head));
-    let again = laptop.leave_fleet("person/test").unwrap();
+    assert!(laptop.latest_claim("host/laptop", Some("fleet.shard-bounds")).unwrap().is_none());
+    let wrote = BTreeMap::from([("messages".to_owned(), 3)]);
+    let again = laptop.leave_fleet("person/test", &wrote).unwrap();
     assert_eq!(again.id, first.id);
     assert_eq!(highest_sequence(&laptop, "laptop"), head);
 
@@ -435,6 +440,71 @@ fn a_member_leaves_once_and_a_second_leave_writes_nothing() {
     };
     assert_eq!(ended.ended.as_deref(), Some("left"));
     assert_eq!(ended.end, Some(head));
+}
+
+/// An older peer holds a leaver's shard bounds as an unknown kind, one record for the leave, and
+/// fences the leaver's key at every shard sequence: it fences more, never less. Upgraded, it
+/// admits the held bounds on retry, and the key counts at or below them again.
+#[test]
+fn an_older_peer_holds_shard_bounds_and_fences_the_leaver_until_it_upgrades() {
+    use crate::fleet::Window;
+    let anchor_key = key();
+    let laptop_key = key();
+    let older_key = key();
+    let anchor = node("anchor", Some(&anchor_key), Some(&anchor_key));
+    anchor
+        .admit_fleet_anchor(FLEET, anchor_key.public(), "listening")
+        .unwrap();
+    admit(&anchor, "laptop", &laptop_key, "invite", None);
+    admit(&anchor, "older", &older_key, "invite", None);
+    let laptop = node("laptop", Some(&laptop_key), Some(&anchor_key));
+    sync(&anchor, &laptop);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("older.sqlite3");
+    let older = Store::open(&path, "older").unwrap();
+    older.bind_fleet(FLEET).unwrap();
+    older.pin_fleet_anchor(anchor_key.public()).unwrap();
+    older.set_member_key(Some(older_key.clone())).unwrap();
+    let mut registry = fractal_schema::registry().clone();
+    registry.claims.remove("fleet.shard-bounds").unwrap();
+    older.set_claim_registry(registry);
+    sync(&anchor, &older);
+
+    let wrote = BTreeMap::from([("messages".to_owned(), 6)]);
+    laptop.leave_fleet("person/test", &wrote).unwrap();
+    laptop.leave_fleet("person/test", &wrote).unwrap();
+    let keyed = Window::Keyed(BTreeSet::from([laptop_key.public().to_owned()]));
+    sync(&laptop, &anchor);
+    let current = anchor.fleet_membership().unwrap();
+    assert_eq!(current.shard_window("messages", "laptop", 6), keyed);
+    assert_eq!(current.shard_window("messages", "laptop", 7), Window::Fenced);
+
+    let admission = sync(&laptop, &older);
+    assert_eq!((admission.unknown, admission.invalid), (1, 0));
+    sync(&laptop, &older);
+    let held = older.replica_records(true).unwrap();
+    assert_eq!(held.len(), 1, "one held claim for the leave");
+    assert_eq!(held[0].error_code.as_deref(), Some("unknown-claim-kind"));
+    let membership = older.fleet_membership().unwrap();
+    assert!(matches!(
+        membership.state("laptop"),
+        MemberState::Ended(i) if i.ended.as_deref() == Some("left")
+    ));
+    assert_eq!(membership.shard_window("messages", "laptop", 1), Window::Fenced);
+    drop(older);
+
+    // The upgraded build retries the held bounds, and its membership moves with them.
+    let upgraded = Store::open(&path, "older").unwrap();
+    upgraded.set_member_key(Some(older_key)).unwrap();
+    let before = upgraded.fleet_membership().unwrap();
+    assert_eq!(before.shard_window("messages", "laptop", 1), Window::Fenced);
+    let admission = upgraded.validate_replication_backlog().unwrap();
+    assert_eq!(admission.unknown, 0);
+    upgraded.project_replication_backlog().unwrap();
+    assert!(upgraded.replica_records(true).unwrap().is_empty());
+    let after = upgraded.fleet_membership().unwrap();
+    assert_eq!(after.shard_window("messages", "laptop", 6), keyed);
+    assert_eq!(after.shard_window("messages", "laptop", 7), Window::Fenced);
 }
 
 fn highest_sequence(store: &Store, writer: &str) -> u64 {
@@ -1240,19 +1310,19 @@ fn a_dial_out_member_is_never_observed_and_endpoints_are_announced_once() {
     sync(&a, &laptop);
     assert!(
         laptop
-            .publish_fleet_endpoints("dial-out", &[], "test")
+            .publish_fleet_endpoints("dial-out", &[], "test", None)
             .unwrap()
     );
     assert!(
         !laptop
-            .publish_fleet_endpoints("dial-out", &[], "test")
+            .publish_fleet_endpoints("dial-out", &[], "test", None)
             .unwrap()
     );
     assert!(!laptop.observes_transport_to("a").unwrap());
     let endpoint = [json!({"transport": "loopback", "address": "127.0.0.1:1"})];
     assert!(
         laptop
-            .publish_fleet_endpoints("listening", &endpoint, "test")
+            .publish_fleet_endpoints("listening", &endpoint, "test", None)
             .unwrap()
     );
     assert!(laptop.observes_transport_to("a").unwrap());
@@ -1263,6 +1333,28 @@ fn a_dial_out_member_is_never_observed_and_endpoints_are_announced_once() {
     };
     assert_eq!(incarnation.mode, "listening");
     assert_eq!(incarnation.endpoints, endpoint);
+}
+
+#[test]
+fn attributed_transport_changes_are_recorded_even_with_unchanged_endpoints() {
+    let anchor = key();
+    let store = node("local", Some(&anchor), Some(&anchor));
+    admit(&store, "local", &anchor, "anchor", None);
+    let endpoints = [json!({"transport": "loopback", "address": "127.0.0.1:1"})];
+    assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap());
+    for mutation_id in ["transport-change-1", "transport-change-2"] {
+        let before = store.index().unwrap();
+        assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", Some(("agent/example", mutation_id))).unwrap());
+        let claim = store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap();
+        assert_eq!(claim.actor.as_deref(), Some("agent/example"));
+        assert!(store.index().unwrap() > before, "distinct changes record new events");
+        let after = store.index().unwrap();
+        assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", Some(("agent/example", mutation_id))).unwrap());
+        assert_eq!(store.index().unwrap(), after, "replay must not append a claim");
+        assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints"))
+            .unwrap().unwrap().id, claim.id);
+    }
+    assert!(!store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap());
 }
 
 #[test]

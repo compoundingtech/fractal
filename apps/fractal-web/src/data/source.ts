@@ -27,7 +27,8 @@ import type {
 } from '@fractal/client/schema'
 import type { ErrorEnvelope, SubagentDriver } from '@fractal/client'
 import type { Timestamp } from '@fractal/client/schema'
-import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
+import type { ConnectionState, DecodedAgent, DecodedUsageSummary, Undecodable } from '@fractal/sdk/read'
+import type { MessageSendInput } from '@fractal/sdk/mutations'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
 
@@ -305,6 +306,12 @@ export interface DataSource {
   /** Status bar / live picker bar text, e.g. `fixtures` or `dev gateway · read-only`. */
   readonly label: string
   readonly gateway?: string
+  readonly pins?: Atom.Atom<{
+    readonly state: { readonly phase: string; readonly members: readonly { readonly member: string }[] }
+    readonly editable: boolean
+    readonly toggle: (ref: string) => void
+    readonly retry: () => void
+  }>
   /** Fixtures: the world's fixed base time. Live: `wallClock`. Every relative timestamp reads this. */
   readonly now: Atom.Atom<number>
   readonly grants: Atom.Atom<Grants>

@@ -834,6 +834,10 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/publication-definition",
         "/v1/client/publication-definition?subject=agent%2Fbench%2Fcost%2Fmover",
     ),
+    get(
+        "GET /v1/client/mission-declaration",
+        "/v1/client/mission-declaration?mission={mission}",
+    ),
     get("GET /v1/client/now", "/v1/client/now"),
     get("GET /v1/client/machines", "/v1/client/machines"),
     get("GET /v1/client/hosts/{*id}", "/v1/client/hosts/local/repositories"),
@@ -1052,6 +1056,16 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/internal/fleet/invites",
         "/v1/internal/fleet/invites",
+    ),
+    // The generated store has a member signing key; each sample appends a real attributed
+    // announcement without changing transport settings or contacting a replication worker.
+    post(
+        "POST /v1/fleet/transports",
+        "/v1/fleet/transports",
+        |_, attempt| json!({
+            "actor":"person/bench-operator", "mutation_id":format!("cost-fleet-transports-{attempt}"),
+            "mode":"listening", "endpoints":[],
+        }),
     ),
     get("GET /v1/evals/{*run}", "/v1/evals/{run}"),
     get(
@@ -3108,6 +3122,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "POST /v1/fleet/transports" {
+                                anyhow::ensure!(
+                                    value["published"] == true,
+                                    "the transport cost probe must publish an attributed endpoint announcement",
+                                );
+                            }
                             if matches!(probe.route, "GET /v1/client/usage" | "GET /v1/usage") {
                                 let period = value.get("value").unwrap_or(&value);
                                 anyhow::ensure!(

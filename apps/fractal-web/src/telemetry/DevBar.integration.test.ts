@@ -6,11 +6,16 @@
  * and an overflowed segment's unseen state is mirrored on the kit's +N control.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type * as ChangelogModule from '../changelog/build.ts'
 
 const fixture = vi.hoisted(() => ({
   machineVersion: '0.1.0+test.123456789abc',
   entryId: '2026-10-14-shared-devbar',
   title: 'Shared developer bar',
+  wait: undefined as Promise<void> | undefined,
+  fail: false,
+  loads: 0,
+  loaded: undefined as typeof ChangelogModule | undefined,
 }))
 
 // Node tests stub only the CSS runtime; the composition and disclosure behaviour is under test.
@@ -26,19 +31,33 @@ vi.mock('@overeng/meters/react', () => ({
 }))
 // One deterministic entry instead of the app registry, in both the unseen ids and the lazy prose.
 vi.mock('../changelog/metadata.ts', () => ({ changelogDeployment: 'main', changelogEntryIds: [fixture.entryId] }))
+vi.mock('../changelog/load.ts', () => ({
+  loadedChangelog: () => fixture.loaded,
+  loadChangelog: async () => {
+    fixture.loads++
+    await fixture.wait
+    if (fixture.fail) throw new Error('Chunk unavailable')
+    fixture.loaded = await import('../changelog/build.ts')
+    return fixture.loaded
+  },
+}))
 vi.mock('../changelog/build.ts', () => ({
   changelogDeployment: 'main',
-  changelogManifest: {
+  getChangelogManifest: () => ({
     schemaVersion: 1,
     product: 'fractal-web',
     build: { machineVersion: fixture.machineVersion },
     entries: [{ id: fixture.entryId, date: '2026-10-14', visibility: 'public', title: fixture.title, summary: 'Diagnostics use the shared kit.' }],
-  },
+  }),
 }))
 
 let unmount: (() => Promise<void>) | undefined
 
 beforeEach(() => {
+  fixture.wait = undefined
+  fixture.fail = false
+  fixture.loads = 0
+  fixture.loaded = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   // React Aria and the overflow focus fallback use CSS.escape; jsdom does not supply it.
@@ -106,6 +125,48 @@ it('opens recent changes from the devbar segment, acknowledges them, and closes 
     expect(document.activeElement).toBe(changelogTrigger(host))
   })
   expect(host.querySelector('section[aria-label="Counters"]')).not.toBeNull()
+}, 30_000)
+
+it('prefetches on focus without opening or acknowledging changes', async () => {
+  const { act, host } = await mount()
+  expect(fixture.loads).toBe(0)
+  await act(async () => changelogTrigger(host).focus())
+  expect(fixture.loads).toBe(1)
+  expect(recentChanges()).toBeNull()
+  expect(changelogTrigger(host).getAttribute('aria-label')).toBe('Changes, unread')
+  await act(async () => changelogTrigger(host).click())
+  expect(recentChanges()?.textContent).toContain(fixture.title)
+  expect(recentChanges()?.querySelector('[role="status"]')).toBeNull()
+}, 30_000)
+
+it('opens idle-prefetched code without an intermediate loading state', async () => {
+  await (await import('../changelog/load.ts')).loadChangelog()
+  const { act, host } = await mount()
+  await act(async () => changelogTrigger(host).click())
+  expect(recentChanges()?.textContent).toContain(fixture.title)
+  expect(recentChanges()?.querySelector('[role="status"]')).toBeNull()
+  expect(fixture.loads).toBe(1)
+}, 30_000)
+
+it('opens immediately on a cold load and contains a failed chunk with retry', async () => {
+  const { promise, resolve: release } = Promise.withResolvers<void>()
+  fixture.wait = promise
+  fixture.fail = true
+  const { act, host } = await mount()
+  await act(async () => changelogTrigger(host).click())
+  expect(recentChanges()?.textContent).toContain('Loading recent changes')
+  await act(async () => release())
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    expect(recentChanges()?.textContent).toContain('workspace is unaffected')
+  })
+  fixture.fail = false
+  const retry = [...recentChanges()!.querySelectorAll('button')].find(button => button.textContent === 'Retry')
+  await act(async () => retry?.click())
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    expect(recentChanges()?.textContent).toContain(fixture.title)
+  })
 }, 30_000)
 
 it('mirrors the unseen indicator on the overflow control when the changelog segment is hidden', async () => {

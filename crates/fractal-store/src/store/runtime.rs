@@ -195,6 +195,8 @@ impl FractalRuntime {
         migrate_local_usage_seen(connection)?;
         // Before the projection backfills, which fold marks in.
         message_marks::create_table(connection)?;
+        message_outbox::create_table(connection)?;
+        relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
@@ -214,6 +216,7 @@ impl FractalRuntime {
         coordination::create_schema(connection)?;
         // After every projection its triggers maintain.
         message_marks::create_triggers(connection)?;
+        relayed_closes::create_triggers(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
@@ -542,6 +545,7 @@ impl Runtime for FractalRuntime {
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
         completion_state::flush(transaction)?;
+        run_eta::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {

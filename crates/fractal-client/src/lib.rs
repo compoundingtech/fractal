@@ -45,6 +45,20 @@ const HARD_MAX_RESPONSE_BYTES: usize = 8 * 1_048_576;
 pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
+// DeviceCommandRequest.ttl_ms maximum in client-v0.schema.json; checked below.
+const DEVICE_COMMAND_MAX_TTL_MS: u64 = 60_000;
+const DEVICE_COMMAND_WAIT_MARGIN: Duration = Duration::from_secs(5);
+
+fn request_deadline(method: &Method, path: &str) -> Duration {
+    if *method == Method::GET
+        && path.starts_with("/v1/client/device-commands/")
+        && path.ends_with("?wait=true")
+    {
+        Duration::from_millis(DEVICE_COMMAND_MAX_TTL_MS) + DEVICE_COMMAND_WAIT_MARGIN
+    } else {
+        REQUEST_DEADLINE
+    }
+}
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
 const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
@@ -2346,6 +2360,17 @@ impl Client {
     pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {
         self.capabilities_internal().await
     }
+    pub async fn device_command_get(
+        &self,
+        id: &str,
+        wait: bool,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.get(&format!(
+            "/v1/client/device-commands/{}?wait={wait}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {
         self.get(&format!(
             "/v1/client/documents/content?name={}",
@@ -2398,6 +2423,20 @@ impl Client {
             percent_encode(subject)
         ))
         .await
+    }
+    pub async fn mission_declaration_get(
+        &self,
+        mission: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<MissionDeclaration>, ClientError> {
+        let mut path = format!(
+            "/v1/client/mission-declaration?mission={}",
+            percent_encode(mission)
+        );
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
     }
     pub async fn subject_definition(
         &self,
@@ -3706,6 +3745,21 @@ impl Client {
             .await
     }
 
+    /// Issue one expiring command. This is not a durable action or replay queue.
+    pub async fn device_command(
+        &self,
+        command: &DeviceCommandRequest,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-commands", command).await
+    }
+
+    pub async fn device_result(
+        &self,
+        result: &DeviceResult,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-results", result).await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
@@ -4535,6 +4589,7 @@ impl Client {
         let limit = read_authorization.map_or_else(|| self.response_limit(), |(_, limit)| limit);
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
+        let deadline = request_deadline(&method, path);
         let request = async {
             match &self.transport_endpoint(path).await? {
                 TransportEndpoint::Unix(socket) => {
@@ -4596,7 +4651,7 @@ impl Client {
                 }
             }
         };
-        let outcome = tokio::time::timeout(REQUEST_DEADLINE, request).await;
+        let outcome = tokio::time::timeout(deadline, request).await;
         if let Some(guard) = guard {
             match &outcome {
                 Ok(Ok((status, _))) => guard.finish(RequestOutcome::Completed, Some(*status)),
@@ -4896,6 +4951,38 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod wire_receiver_tests {
     use super::*;
+
+    #[test]
+    fn phone_command_wait_deadline_covers_contract_maximum() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        for variant in schema["$defs"]["DeviceCommandRequest"]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(
+                variant["properties"]["ttl_ms"]["maximum"],
+                DEVICE_COMMAND_MAX_TTL_MS
+            );
+        }
+        assert_eq!(
+            request_deadline(
+                &Method::GET,
+                "/v1/client/device-commands/device-command%2Fa?wait=true"
+            ),
+            Duration::from_millis(DEVICE_COMMAND_MAX_TTL_MS) + DEVICE_COMMAND_WAIT_MARGIN
+        );
+        assert_eq!(
+            request_deadline(&Method::GET, "/v1/client/device-commands/a?wait=false"),
+            REQUEST_DEADLINE
+        );
+        assert_eq!(
+            request_deadline(&Method::POST, "/v1/client/device-commands"),
+            REQUEST_DEADLINE
+        );
+    }
 
     #[test]
     fn stream_receivers_accept_both_spellings_but_only_one_selected_protocol() {
@@ -5300,6 +5387,21 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phone_documents_without_params_matches_the_schema() {
+        let value = serde_json::to_value(PhoneNavigateArgs::Documents(None)).unwrap();
+        assert_eq!(value, serde_json::json!({"screen": "Documents"}));
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        let schema =
+            serde_json::json!({"$ref": "#/$defs/PhoneNavigateArgs", "$defs": contract["$defs"]});
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&value));
+        assert!(!validator.is_valid(&serde_json::json!({"screen": "Documents", "params": null})));
+    }
+
     #[test]
     fn agents_publication_subscribe_has_only_the_opt_in_grammar() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(

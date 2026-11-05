@@ -158,7 +158,7 @@ pub fn change_keys(change: &Change) -> Vec<String> {
         "run-generation.created" => {
             keys.extend(field("run").map(|run| format!("generations:{run}")));
         }
-        "work.released" => {
+        "work.released" | "work.handoff-returned" => {
             // The recipient may not have read this step before. The releasing actor
             // and old step subject already invalidate the previous holder's work.
             keys.extend(field("handoff_to").map(|actor| format!("actor:{actor}")));

@@ -720,6 +720,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
         .route("/v1/fleet/admission-override", post(fleet::admission_override))
+        .route("/v1/fleet/transports", post(fleet::change_transports))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))
@@ -2959,6 +2960,7 @@ fn client_work_values(
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
+                "execution_waited_ms": work.execution_waited_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
                 "constraints": work.constraints,
@@ -4736,7 +4738,9 @@ fn client_message_resource(
 ) -> anyhow::Result<Value> {
     let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
     let updated_at = metadata["updated_at"].as_str().unwrap_or("0").parse::<u128>()?;
-    let reasons = if message.status == "closed" {
+    // A close the seat's host relayed is history too, though the message's own status is this
+    // member's records until the host answers again.
+    let reasons = if message.status == "closed" || metadata["closed"] == true {
         vec!["closed"]
     } else if !current {
         vec!["superseded"]
@@ -4921,7 +4925,9 @@ fn client_message_resources_at(
             .cloned()
             .unwrap_or(Value::Null);
         let mut reasons = Vec::new();
-        if message.status == "closed" {
+        if message.status == "closed"
+            || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
+        {
             reasons.push("closed");
         } else if !current_ids.contains(&message.subject) {
             reasons.push("superseded");
@@ -6625,6 +6631,8 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        #[cfg(feature = "test-support")]
+        hold_first_agent_roster().await;
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
@@ -6655,6 +6663,27 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// An isolated startup test reads a serving daemon whose refresher runs but has published no
+/// roster yet, as every daemon is for a moment after it starts serving.
+#[cfg(feature = "test-support")]
+async fn hold_first_agent_roster() {
+    let Some(directory) = std::env::var_os("ST3_TEST_AGENT_ROSTER_BARRIER") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(directory.join("entered"), b"first roster held")
+            .expect("publish agents roster barrier");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !directory.join("release").exists() {
+            assert!(Instant::now() < deadline, "startup test did not release the agents roster");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await
+    .expect("agents roster barrier");
 }
 
 /// One owner iteration, including both queues that can outlive its readers.
@@ -7386,6 +7415,7 @@ pub async fn guard_bound_request(
         "/v1/agents/start",
         "/v1/agents/source-offline",
         "/v1/fleet/admission-override",
+        "/v1/fleet/transports",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
@@ -7955,10 +7985,11 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
 }
 
 /// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
-/// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
-/// the host did not answer for stays, as this member cannot say it was read. A seat with more held
+/// that host answers about its held mail sent before `before`: mail its seat took any step with
+/// (staged, delivered, read or closed) goes, as any such claim or mark clears the host's own held
+/// flag, and mail the host did not answer for stays, as this member cannot say it was offered. A seat with more held
 /// mail than one read asks of a host keeps this member's own count, which can only be higher.
-fn relayed_held_mail(
+pub fn relayed_held_mail(
     state: &AppState,
     seats: Vec<(String, u64, u128)>,
     before: u128,
@@ -8010,7 +8041,7 @@ fn relayed_held_mail(
     for (subject, (seat, at)) in sent {
         if relayed
             .get(&subject)
-            .is_some_and(|answer| matches!(answer.status(), Some("read" | "closed")))
+            .is_some_and(|answer| answer.status().is_some())
         {
             continue;
         }
@@ -8037,7 +8068,20 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
     let switched = state.store.marks_switched();
     let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
     let message = match (switched, blockers) {
-        (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
+        (Ok(true), _) => {
+            let staged = state.store.staged_switched();
+            let staged_blockers = crate::store::marks_switch::staged_blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+            match (staged, staged_blockers) {
+                (Ok(true), _) => "on: this member records its own seats' staging, delivery, read and close as local marks".to_owned(),
+                (Ok(false), Ok(blockers)) if blockers.is_empty() => "on: this member records its own seats' delivery, read and close as local marks; every member is ready for stagings, which turn to marks at the next check".to_owned(),
+                (Ok(false), Ok(blockers)) => format!(
+                    "on: this member records its own seats' delivery, read and close as local marks; stagings stay claims until every other member advertises {}=1, whose reads count a host's staging ({})",
+                    crate::store::marks_switch::STAGED_FEATURE, blockers.join("; ")),
+                (Err(error), _) | (_, Err(error)) => {
+                    return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+                }
+            }
+        }
         (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
         (Ok(false), Ok(blockers)) => format!(
             "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",
@@ -8047,6 +8091,29 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
         }
     };
     DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
+}
+
+/// How long a staging may wait for its delivery before doctor calls it stalled: in-flight mail is
+/// staged and delivered within seconds, and a rollback never follows a staging that closely.
+const STALLED_STAGING_MS: u128 = 60_000;
+
+/// While this member's seats have mail staged as a mark over [`STALLED_STAGING_MS`] ago and not yet
+/// delivered, rolling this member back below v0.3.26 would offer that mail again: a warning that
+/// names the safe floor and the release note's steps. None while there is no such mail, so a strict
+/// doctor does not fail on ordinary in-flight mail.
+fn message_staging_check(state: &AppState, now: u128) -> Option<DoctorCheck> {
+    let name = "message-staging-rollback".to_owned();
+    match crate::store::message_marks::undelivered_staged(&state.store.readers.get(), now.saturating_sub(STALLED_STAGING_MS)) {
+        Ok((0, _)) => None,
+        Ok((count, first)) => Some(DoctorCheck {
+            name,
+            status: "warn".into(),
+            message: format!(
+                "{count} message(s) this member's seats staged as local marks over a minute ago are not delivered yet ({}): rolling this member back to v0.3.25 or earlier would offer them again; v0.3.26 is the safe floor. To roll back below it, first roll every member to v0.3.26, wait a minute for stagings to turn back to claims, and let staged mail deliver (release note staging-marks-writer)",
+                first.as_deref().unwrap_or("unknown")),
+        }),
+        Err(error) => Some(DoctorCheck { name, status: "warn".into(), message: format!("{error:#}") }),
+    }
 }
 
 /// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
@@ -9411,7 +9478,9 @@ fn doctor_report_within(
     checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
     });
-    checks.check("message-marks", || Ok(vec![message_marks_check(state)]));
+    checks.check("message-marks", || {
+        Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
+    });
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });

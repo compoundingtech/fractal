@@ -56,7 +56,7 @@ fn js(value: &Value) -> String {
 
 /// RFC 3986 Appendix A grammar, including relative references and IP literals.
 /// A URL constructor is not a substitute: it normalizes spaces and accepts IRIs.
-fn uri_reference_pattern() -> String {
+pub(super) fn uri_reference_pattern() -> String {
     let atom = r"(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})";
     let pchar = r"(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})";
     let h16 = r"[0-9A-Fa-f]{1,4}";

@@ -120,6 +120,9 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  launch_contract?: {
+
+} | null;
   lifecycle?: AgentLifecycle;
   mail_custody?: AgentMailCustody;
   name: string;
@@ -652,9 +655,7 @@ export type AssistantAgentItem = {
 
 export type AssistantAgentPage = {
   collection: "assistant.agents";
-  filters: {
-
-};
+  filters: Record<string, never>;
   items: Array<AssistantAgentItem>;
   kind: "page";
   page: PageInfo;
@@ -687,9 +688,7 @@ export type AssistantAttentionItem = {
 
 export type AssistantAttentionPage = {
   collection: "assistant.attention";
-  filters: {
-
-};
+  filters: Record<string, never>;
   items: Array<AssistantAttentionItem>;
   kind: "page";
   page: PageInfo;
@@ -804,9 +803,7 @@ export type AssistantMissionItem = {
 
 export type AssistantMissionPage = {
   collection: "assistant.missions";
-  filters: {
-
-};
+  filters: Record<string, never>;
   items: Array<AssistantMissionItem>;
   kind: "page";
   page: PageInfo;
@@ -1295,6 +1292,14 @@ export type ClientDiagnosticsBatch = {
 };
 
 export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+  actor?: string | null;
+  collection: "commands";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  status?: string | null;
+  trace?: SubscribeTraceContext;
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;
@@ -1441,6 +1446,7 @@ export type CollectionName =
   | "usage"
   | "machines"
   | "devices"
+  | "commands"
   | "sessions"
   | "terminals"
 ;
@@ -1598,6 +1604,61 @@ export type Device = ResourceHeader & {
   person_id?: never;
 });
 
+export type DeviceCommand = {
+  args: (PhoneInspectArgs | PhoneNavigateArgs | PhoneMessageReadArgs);
+  command_kind: "phone.inspect" | "phone.navigate" | "phone.message.read";
+  device_id: string;
+  error_code?: string;
+  expires_at: Timestamp;
+  id: string;
+  issued_at: Timestamp;
+  issued_by: Id;
+  kind: "device-command";
+  result?: unknown;
+  session_actor: Id;
+  state: DeviceCommandState;
+} & ResourceHeader & ({
+  args?: PhoneInspectArgs;
+  command_kind?: "phone.inspect";
+} | {
+  args?: PhoneNavigateArgs;
+  command_kind?: "phone.navigate";
+} | {
+  args?: PhoneMessageReadArgs;
+  command_kind?: "phone.message.read";
+});
+
+export type DeviceCommandOutcome = "completed" | "not-foreground" | "expired" | "refused" | "failed";
+
+export type DeviceCommandRequest = ({
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  args: PhoneInspectArgs;
+  device: string;
+  kind: "phone.inspect";
+  ttl_ms?: number;
+} | {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  args: PhoneNavigateArgs;
+  device: string;
+  kind: "phone.navigate";
+  ttl_ms?: number;
+} | {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  args: PhoneMessageReadArgs;
+  device: string;
+  kind: "phone.message.read";
+  ttl_ms?: number;
+});
+
+export type DeviceCommandState = "pending" | "delivered" | "completed" | "not-foreground" | "expired" | "refused" | "failed";
+
+export type DeviceResult = {
+  command_id: string;
+  error_code?: string;
+  outcome: DeviceCommandOutcome;
+  result?: unknown;
+};
+
 export type DeviceSignature = {
   chain: Array<string>;
   format: "fields-v1";
@@ -1678,7 +1739,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2270,6 +2331,14 @@ export type MissionActionOffer = {
   target: Id;
 };
 
+export type MissionDeclaration = {
+  legacy: boolean;
+  mission: string;
+  published_at: number;
+  revision: Revision;
+  text: string;
+};
+
 export type MissionId = string;
 
 export type MissionPresentation = {
@@ -2329,6 +2398,7 @@ export type MissionRunSummary = {
   blocker?: {
 
 } | null;
+  completed_at?: number | null;
   current_steps: Array<{
   assignee?: (ActorRef | null);
   claimant?: (ActorRef | null);
@@ -2339,6 +2409,15 @@ export type MissionRunSummary = {
   title: string | null;
 }>;
   deadline?: (Timestamp | null);
+  eta?: (null | {
+  as_of: number;
+  basis: {
+  method: "per-step" | "critical-path";
+  samples: number;
+};
+  remaining_high_ms: number;
+  remaining_low_ms: number;
+});
   generation_id?: RunGenerationId;
   id: MissionRunId;
   last_progress?: string | null;
@@ -2350,6 +2429,7 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  started_at?: number | null;
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
@@ -2374,6 +2454,7 @@ export type MissionStep = {
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
+  completed_at?: number | null;
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
@@ -2387,6 +2468,7 @@ export type MissionStep = {
   path: string;
   progress_at?: (Timestamp | null);
   since: Timestamp;
+  started_at?: number | null;
   state: WorkState;
   title?: string | null;
   wake?: (MissionWake | null);
@@ -2446,6 +2528,132 @@ export type MissionWake = {
 };
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
+
+export type NoticeActor = string;
+
+export type NoticeClaimId = string;
+
+export type NoticeCreated = {
+  body?: string;
+  created_at: NoticeTimestamp;
+  dedupe_key: string;
+  expires_at?: NoticeTimestamp;
+  intent: "done" | "failed" | "blocked" | "fyi";
+  links: Array<NoticeLink>;
+  recipient: NoticePerson;
+  requested: boolean;
+  resource: string;
+  schema_version: 1;
+  source: NoticeSource;
+  speech?: string;
+  summary: string;
+  urgency: "info" | "attention" | "confirm";
+};
+
+export type NoticeDelivery = ({
+  state: "pending";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  completed_at: NoticeTimestamp;
+  evidence: "spoken" | "shown" | "logged";
+  outcome_claim: NoticeClaimId;
+  state: "delivered";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  outcome_claim: NoticeClaimId;
+  reason: string;
+  state: "failed";
+  surface: "tray" | "speech" | "push" | "log";
+} | {
+  reason: string;
+  state: "suppressed";
+  surface: "tray" | "speech" | "push" | "log";
+});
+
+export type NoticeDismissParameters = {
+  notice_id: NoticeId;
+};
+
+export type NoticeFence = {
+  control_revision: (Revision | null);
+  notice_id: NoticeId;
+  source_revision: Revision;
+};
+
+export type NoticeId = string;
+
+export type NoticeIntegrity = ({
+  manifest_claim: NoticeClaimId;
+  manifest_state: "ready";
+  state: "ready";
+} | {
+  manifest_state: "ready" | "missing" | "invalid" | "rebuilding" | "stale";
+  reason: "invalid-source" | "missing-source" | "missing-registration" | "rebuilding" | "stale";
+  state: "unavailable";
+} | {
+  creation_claims: Array<NoticeClaimId>;
+  manifest_state: "ready" | "conflicted";
+  state: "conflicted";
+});
+
+export type NoticeLink = {
+  label: string;
+  url: string;
+};
+
+export type NoticePerson = string;
+
+export type NoticePolicy = {
+  availability_basis: NoticeClaimId;
+  disposition: "deliver" | "held" | "suppressed";
+  reason: string;
+  revision: Revision;
+};
+
+export type NoticeRuntime = string;
+
+export type NoticeSeenParameters = {
+  notice_id: NoticeId;
+};
+
+export type NoticeSnapshot = {
+  basis_claim: NoticeClaimId;
+  control_revision: (Revision | null);
+  creation_claims: Array<NoticeClaimId>;
+  delivery: Array<NoticeDelivery>;
+  dismissed_at: (NoticeTimestamp | null);
+  id: NoticeId;
+  input: NoticeCreated;
+  integrity: NoticeIntegrity;
+  kind: "attention-notice";
+  policy: NoticePolicy;
+  producer: NoticeActor;
+  revision: Revision;
+  runtime: NoticeRuntime;
+  schema_version: 1;
+  seen_at: (NoticeTimestamp | null);
+  snoozed_until: (NoticeTimestamp | null);
+  source_id: NoticeSourceId;
+  source_revision: Revision;
+  updated_at: NoticeTimestamp;
+};
+
+export type NoticeSnoozeParameters = {
+  notice_id: NoticeId;
+  until: (NoticeTimestamp | null);
+};
+
+export type NoticeSource = {
+  agent?: NoticeRuntime;
+  cwd?: string;
+  host: string;
+  pty?: string;
+  repo?: string;
+};
+
+export type NoticeSourceId = string;
+
+export type NoticeTimestamp = string;
 
 export type ObservationAccepted = {
   accepted: true;
@@ -2747,6 +2955,45 @@ export type PersonUpdate = {
   version: 1;
 };
 
+export type PhoneInspectArgs = Record<string, never>;
+
+export type PhoneMessageReadArgs = {
+  message_id: string;
+};
+
+export type PhoneNavigateArgs = ({
+  screen: "NowRoot" | "Agents" | "Missions" | "Usage" | "History";
+} | {
+  params: {
+  id: PhoneRouteString;
+};
+  screen: "Mission" | "Attention" | "Launch";
+} | {
+  params: {
+  sessionId?: PhoneRouteString;
+  target: PhoneRouteString;
+};
+  screen: "Conversation";
+} | {
+  params: {
+  terminalId: PhoneRouteString;
+};
+  screen: "Terminal";
+} | {
+  params?: {
+  prefix?: PhoneRouteString;
+};
+  screen: "Documents";
+} | {
+  params: {
+  reference: PhoneRouteString;
+  trail: Array<PhoneRouteString>;
+};
+  screen: "Document";
+});
+
+export type PhoneRouteString = string;
+
 export type PlannerConfig = {
   effort?: string;
   model?: string;
@@ -2883,7 +3130,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceCollectionName = 
   "missions"
@@ -2897,6 +3144,7 @@ export type ResourceCollectionName =
   | "usage"
   | "machines"
   | "devices"
+  | "commands"
   | "sessions"
   | "terminals"
 ;
@@ -2919,6 +3167,7 @@ export type ResourceHeader = {
   | "lane"
   | "machine"
   | "device"
+  | "device-command"
   | "operation"
   | "history"
   | "session"
@@ -4061,6 +4310,7 @@ export type Work = ResourceHeader & {
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
+  execution_waited_ms?: number;
   gate_kind?: 
   "watch"
   | "predicate"

@@ -30,7 +30,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
   // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
   // set, a narrowing of those (see kit-play-commit-set.mjs for what it leaves out);
-  // Commit plays use raw CPU seconds; wall time is only a hang guard.
+  // Commit plays use CPU seconds per play; wall time is only a hang guard.
   // Empty environment values mean unset.
   const option = (name, allowed, fallback) => {
     const value = process.env[name] || fallback
@@ -79,7 +79,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
     const cost = assessKitPlayCost(budget, {
-      elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit',
+      elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit', plays: rows.length,
     })
     const receipt = {
       pass: !fatalError && !cost.overBudget && (shardCount > 1 ? fullIds : ids).length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
@@ -106,7 +106,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n| Shard | Cases (completed/expected) | Passed | Failed | Play minutes | Result |\n| --- | --- | --- | --- | --- | --- |\n| kit ${shardIndex}/${shardCount} | ${receipt.cases}/${receipt.expectedCases} | ${receipt.passed} | ${receipt.failed} | ${receipt.playMinutes.toFixed(2)} | ${receipt.pass ? 'PASS' : 'FAIL'} |\n`)
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\nkit ${shardIndex}/${shardCount} Storybook build: ${(receipt.storybookBuildSeconds / 60).toFixed(2)} runner-minutes (included in this shard; duplicate build cost is the sum of nonzero-shard builds).\n`)
     }
-    if (cost.overCpuBudget) console.error(`Kit plays (${set}) used ${cost.cpuSeconds.toFixed(2)} CPU s, over the ${cost.maxCpuSeconds} CPU s limit (anchor ${cost.cpuAnchorSeconds} s +10%).`)
+    if (cost.overCpuBudget) console.error(`Kit plays (${set}) used ${cost.cpuSecondsPerPlay.toFixed(6)} CPU s/play across ${rows.length} plays (${cost.cpuSeconds.toFixed(2)} CPU s), over the ${cost.maxCpuSecondsPerPlay.toFixed(6)} CPU s/play limit (anchor ${cost.cpuAnchorSecondsPerPlay.toFixed(6)} CPU s/play +${cost.cpuMargin * 100}%).`)
     if (cost.overWallGuard) console.error(`Kit plays (${set}) took ${elapsedSeconds.toFixed(1)} s, over the ${cost.wallGuardSeconds} s wall hang guard.`)
     return receipt
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from './fromTimeline.ts'
 import type { ToolCallItem } from './model.ts'
 import { toolKindFor } from './toolClassification.ts'

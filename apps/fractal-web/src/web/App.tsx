@@ -3,6 +3,7 @@ import * as React from 'react'
 import { DataSourceProvider } from '../data/react.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { UNSAFE_PortalProvider } from 'react-aria'
+import { I18nProvider } from 'react-aria/I18nProvider'
 import { usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { DiagnosticsBoundary } from './DiagnosticsBoundary.tsx'
 
@@ -16,20 +17,22 @@ export const App = () => {
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
   return (
-    <UNSAFE_PortalProvider getContainer={getContainer}>
-      {Diagnostics !== undefined && (
-        <DiagnosticsBoundary>
-          <React.Suspense fallback={null}>
-            <Diagnostics defaultVisible />
-          </React.Suspense>
-        </DiagnosticsBoundary>
-      )}
-      <DataSourceProvider source={live.source} registry={live.registry}>
-        <React.Profiler id="workbench" onRender={telemetry.onCommit}>
-          <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} />
-        </React.Profiler>
-      </DataSourceProvider>
-      <div ref={overlayHost} data-app-overlay-host="" />
-    </UNSAFE_PortalProvider>
+    <I18nProvider locale="en-US">
+      <UNSAFE_PortalProvider getContainer={getContainer}>
+        {Diagnostics !== undefined && (
+          <DiagnosticsBoundary>
+            <React.Suspense fallback={null}>
+              <Diagnostics defaultVisible />
+            </React.Suspense>
+          </DiagnosticsBoundary>
+        )}
+        <DataSourceProvider source={live.source} registry={live.registry}>
+          <React.Profiler id="workbench" onRender={telemetry.onCommit}>
+            <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} />
+          </React.Profiler>
+        </DataSourceProvider>
+        <div ref={overlayHost} data-app-overlay-host="" />
+      </UNSAFE_PortalProvider>
+    </I18nProvider>
   )
 }
