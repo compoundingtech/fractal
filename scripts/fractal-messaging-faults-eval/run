@@ -400,7 +400,7 @@ def graph_reads_of(node, claims, subject):
     reads = [claim for claim in claims if claim.get("kind") == "message.read"]
     path = node.root / "state/claims.sqlite3"
     if path.exists():
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
         try:
             rows = connection.execute(
                 "SELECT receipt, recorded_at_unix_ms FROM local_message_marks WHERE message=? AND kind='message.read'",
