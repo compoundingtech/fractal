@@ -4,7 +4,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Effect, Exit, Schema } from 'effect'
-import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from '../src/conversation/fromTimeline.ts'
 import { prepareTranscriptTurns, type PreparedTranscriptTurn } from '../src/web/conversationTranscript.ts'
 
