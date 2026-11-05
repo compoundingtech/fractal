@@ -9,6 +9,7 @@ mod declarations;
 mod rich;
 mod notice;
 mod notice_schema;
+mod swift_notice;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -82,6 +83,11 @@ fn main() -> Result<()> {
     output(
         &root.join("crates/fractal-client/src/notice_schema.generated.json"),
         &notice_schema,
+        check,
+    )?;
+    output(
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift"),
+        &swift_notice::models(&schema)?,
         check,
     )?;
     output(
