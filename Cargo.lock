@@ -1760,6 +1760,7 @@ dependencies = [
  "libc",
  "opentelemetry",
  "opentelemetry_sdk",
+ "regex",
  "reqwest",
  "ring",
  "serde",
