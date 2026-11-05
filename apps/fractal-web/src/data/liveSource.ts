@@ -1,6 +1,6 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
-import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
+import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   Fractal,
@@ -15,6 +15,7 @@ import {
   type FractalOptions,
   type SyncStatus,
   syncStatusFromFailure,
+  decodeConversationChunk,
 } from '@fractal/sdk/read'
 import { loadMutations, loadPty } from './lazySdk.ts'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
@@ -77,6 +78,9 @@ import { gatewayObjectives } from './objectivesSource.ts'
  * transport failures trigger the published fallback immediately instead of waiting this long. */
 export const ROSTER_FIRST_SNAPSHOT_DEADLINE_MS = 3_000
 
+/** Generated page framing with the SDK's tolerant decoder owning individual entries. */
+const historyPage = Schema.Struct({ ...TimelinePage.fields, items: Schema.Array(Schema.Unknown) })
+
 /** The owned source registry and runtime teardown handle. */
 export interface LiveSource {
   readonly source: DataSource
@@ -106,6 +110,7 @@ interface RetainedFeed<A> {
 
 interface RetainedConversation extends RetainedFeed<ConversationPage> {
   readonly send: AttachmentPort['send']
+  readonly loadOlder: () => Promise<void>
 }
 
 interface PendingSend {
@@ -816,6 +821,10 @@ export const liveSource = ({
     let painted = false
     let publishedItems: ConversationPage['items'] = []
     let changedFrom = Infinity
+    let older: ConversationPage['older']
+    let olderRequest: Promise<void> | undefined
+    let sessionId: string | undefined
+    let generation = 0
     const projectPage = (): ConversationPage => {
       const projection = timeline.project()
       const hadPending = pending.size > 0
@@ -835,6 +844,8 @@ export const liveSource = ({
         ...(timeline.header === undefined ? {} : { header: timeline.header }),
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
+        ...(timeline.olderCursor === undefined ? {} : { olderCursor: timeline.olderCursor }),
+        ...(older === undefined ? {} : { older }),
         change: { from: publishedItems, index: changedFrom },
         ...(timeline.observation === undefined ? {} : { observation: timeline.observation }),
       }
@@ -860,6 +871,12 @@ export const liveSource = ({
             if (event._tag !== 'Observed') return event
             ux?.().switchDataReady(ref)
             const previousSize = timeline.size
+            if (event.value.replace) {
+              generation += 1
+              older = undefined
+              olderRequest = undefined
+              sessionId = event.value.sessionId
+            }
             timeline.apply(event.value)
             // Entries are identity-deduplicated by the retained timeline, not counted per chunk.
             incrDebug('Wf.conversationEntries', timeline.size - previousSize)
@@ -872,6 +889,40 @@ export const liveSource = ({
       if (!retained.publish(page)) return
       publishedItems = page.items
       changedFrom = Infinity
+    }
+    const loadOlder = (): Promise<void> => {
+      if (olderRequest !== undefined) return olderRequest
+      const cursor = timeline.olderCursor
+      if (cursor === undefined || sessionId === undefined) return Promise.resolve()
+      const requestedGeneration = generation
+      const requestedSession = sessionId
+      older = { _tag: 'Loading' }
+      publishPending()
+      olderRequest = (async () => {
+        try {
+          // Opaque continuations retain the server's cursor-bound page size.
+          const response = await client.timelineList(requestedSession, { cursor })
+          // Keep entries raw for the SDK's tolerant per-entry/block decoder.
+          const page = decodeUnknownSync(historyPage)(response.value)
+          if (generation !== requestedGeneration) return
+          timeline.prepend(decodeConversationChunk({
+            kind: 'conversation', collection: 'conversation', id: ref,
+            session_id: page.session_id, replace: false, items: page.items,
+            has_more: page.page.has_more,
+            ...(Option.isNone(page.page.next_cursor) ? {} : { older_cursor: page.page.next_cursor.value }),
+          }))
+          older = undefined
+        } catch (cause) {
+          if (generation !== requestedGeneration) return
+          older = { _tag: 'Failed', detail: cause instanceof Error ? cause.message : String(cause) }
+        } finally {
+          if (generation === requestedGeneration) {
+            olderRequest = undefined
+            publishPending()
+          }
+        }
+      })()
+      return olderRequest
     }
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
@@ -946,7 +997,7 @@ export const liveSource = ({
         return { _tag: 'Refused', reason: 'failed', detail }
       }
     }
-    return { ...retained, send }
+    return { ...retained, send, loadOlder }
   })
   const recentConversations = new Map<string, RetainedConversation>()
   const retainConversation = (ref: string) => {
@@ -1185,6 +1236,7 @@ export const liveSource = ({
         retainConversation(ref).prefetch()
       },
       retryConversation: (ref) => retainConversation(ref).retry(),
+      loadOlder: (ref) => retainConversation(ref).loadOlder(),
       resources,
       terminal,
       terminalInterest: (ref) => retainTerminal(ref).interest,
