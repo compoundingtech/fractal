@@ -1932,12 +1932,17 @@ with the branch as it was (`git merge --abort`); so does a checkout that gained 
 before it pushes: it fetches the base, merges it in when the gate would now judge the merge (as above, with your git identity, never a rebase), and
 asks the base's verifier about EVERY check of the suite for the head, as `--status` does. What is covered is not run again; what is not (a check whose
 tree the merge changed, a crate whose key main's `.st/rust-test-inputs.json` moved, the whole-tree checks a narrowed `--check rust-tests --crate X`
-run did not select once it merged) is signed in the same pool tree, and the branch is pushed at once when nothing is missing, so main has no time
-to move a protected file between a green run and its push (2026-10-29: a run's three checks were green and its push was refused, main having moved a
+run did not select once it merged) is signed in the same pool tree, and the branch is pushed as soon as coverage is complete
+(2026-10-29: a run's three checks were green and its push was refused, main having moved a
 protected file during the run). It does this at most `TOP_UP_ROUNDS` (3) times after the run itself, each against the base as it is then (`fractal-test:
 top-up round 1 of 3: origin/main is at <sha>, merged into the branch as <sha>; signing what <sha> lacks: linux-gate, rust-tests (2 crates: ...)`), and
 then fails, exit 2, with `main is moving too fast; run again`: the notes it signed are pushed, the branch is not. A conflict in a top-up merge stops the
-run the same way (`git merge --abort`, the branch as it was, not pushed). When the base did not move and a check the round signed is still not covered
+run the same way (`git merge --abort`, the branch as it was, not pushed). If the fetched base changed `scripts/st-test`, the green run releases its tree
+and continues in that base's runner before planning the top-up. The new runner asks about its own whole suite, including newly added local checks
+such as `linux-fleet-compat`, rather than carrying the old runner's check list into the push. It keeps the process, original start time, admission order
+and consumed top-up rounds; changing runners does not reset the three-round bound. Notes that still cover the new base are reused, including after
+an original `--rerun` or narrowed selection; a newly required check that fails leaves the branch unpublished.
+When the base did not move and a check the round signed is still not covered
 (a note the verifier finds too old, say), signing again would change nothing: the run ends as before, pushing a merge it made and not a head that is not
 covered. A narrowed run that merged nothing pushes only its notes, as before. The branch goes to the branch of the same name on REMOTE (never forced,
 through the pre-push hook as any push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a
