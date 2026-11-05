@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Command recorder history is bounded to a 64 MiB current log plus one 64 MiB archive, instead of growing without limit (#4341).",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Command JSONL and receipt schemas are unchanged. Local recorder sidecars add an empty stable lock file, a fixed eight-byte native timeout-drop counter, and at most one 64 MiB legacy-migration staging file."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No claim retention or checkpoint rules change. Only local command diagnostics rotate."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The default recorder report snapshots both retained generations. Explicit --log inputs still name individual files. Concurrent recorders serialize size checks, rotation and whole-line appends on a stable sidecar flock. A two-second contention budget (including up to 100 ms for an independently locked drop counter) drops that record and counts the drop in st doctor without changing the wrapped command's output or exit status; creation receipts are published independently before logging. Older recorder binaries do not honor this lock or cap, so the bound applies once running recorders use this build."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon downtime required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual migration. On the next successful append, existing oversized logs are clipped by seeking to their newest complete-line tail before rotation. Retained logs total at most 128 MiB; one bounded staging file can add 64 MiB during or after an interrupted legacy migration. Copy existing logs before upgrading if older diagnostics must be kept. Never remove or replace commands.jsonl.lock while recorders are running."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the build to stop rotation. Discarded local diagnostic history cannot be recovered without a separate copy; claims and creation receipts are unaffected."
+  }
+}

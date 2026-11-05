@@ -51,6 +51,16 @@ The local observation log is trimmed by each node on its own, after `[observatio
 (seven days by default); [Data authority](data-authority.md) describes it. A replicated claim is
 dropped only by a checkpoint, which every member agrees to.
 
+## Local command diagnostics
+
+The [command recorder](command-recorder.md#the-log) is local JSONL diagnostic history, separate from
+the claim policy and receipt spool. It keeps a 64 MiB current `recorder/commands.jsonl` and one
+64 MiB `commands.jsonl.1` archive (128 MiB retained). Rotation drops the oldest archive; no minimum
+age is promised. An oversized legacy file is clipped to its newest complete lines on the next
+successful append. Legacy migration uses one fixed staging file of at most 64 MiB. Log lock
+contention waits at most two seconds, then drops that record and increments a fixed-size counter
+visible in `st doctor`. None of this changes replicated claim retention or creation receipts.
+
 ## Rules and `pending`
 
 A class says what may be dropped; a rule says how. A checkpoint drops a claim only when a rule for

@@ -10,8 +10,8 @@
 //! receipt spool for later ingestion; the recorder never contacts the daemon.
 //!
 //! A recorder observes; it does not enforce. A program called by its absolute path skips it, so a
-//! quiet log does not prove that nothing ran. A failure to record never fails, delays, or changes
-//! the command.
+//! quiet log does not prove that nothing ran. Log lock contention waits at most two seconds;
+//! failure to record never changes the command's output or status.
 //!
 //! Readers accept both `st3` and `fractal` recorder markers and v1 schemas while writers
 //! retain `st3` spellings. An existing legacy marker wins even when it cannot be decoded.
@@ -30,6 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
+
+mod log;
 
 /// The programs st3 records.
 pub const PROGRAMS: [&str; 2] = ["git", "gh"];
@@ -87,12 +89,17 @@ pub fn directory(state_dir: &Path) -> Result<PathBuf> {
     Ok(std::path::absolute(state_dir.join("recorder").join("bin"))?)
 }
 
-/// The append-only command log for a state directory.
+/// The current generation of the bounded command log for a state directory.
 pub fn log_path(state_dir: &Path) -> Result<PathBuf> {
     Ok(std::path::absolute(
         state_dir.join("recorder").join("commands.jsonl"),
     )?)
 }
+
+pub(crate) fn log_snapshot(path: &Path) -> std::io::Result<Vec<(PathBuf, fs::File, u64)>> {
+    log::snapshot(path)
+}
+
 /// The spool of creation receipts for a state directory.
 pub fn receipt_path(state_dir: &Path) -> PathBuf {
     state_dir.join("recorder").join("receipts")
@@ -196,12 +203,19 @@ pub fn health(state_dir: &Path) -> (bool, String) {
             ),
         );
     }
+    let dropped = log::dropped(&log);
+    let drops = if dropped > 0 {
+        format!("; {dropped} records dropped after the two-second log lock timeout")
+    } else {
+        String::new()
+    };
     (
         true,
         format!(
-            "{} calls are recorded in {}; a call by absolute path is not",
+            "{} calls are recorded in {}; a call by absolute path is not{}",
             linked.join(" and "),
-            log.display()
+            log.display(),
+            drops
         ),
     )
 }
@@ -975,16 +989,7 @@ fn append(marker: &Marker, call: &Call<'_>) {
         return;
     };
     line.push(b'\n');
-    let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(&marker.log)
-    else {
-        return;
-    };
-    let _ = file.write_all(&line);
+    log::append(&marker.log, &line);
 }
 
 /// Arguments are recorded as text with URL credentials, extra HTTP headers, and authorization

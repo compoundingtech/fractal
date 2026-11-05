@@ -1,7 +1,8 @@
 # Command recorder
 
 Fractal records every `git` and `gh` call that it starts, so the calls can be analyzed each day. The
-recorder observes. It does not enforce, block, or change a command.
+recorder observes. It preserves the command's output and exit status; recording can wait up to two
+seconds for another recorder to release the log lock.
 
 ## What goes through it
 
@@ -41,7 +42,7 @@ recorder on PATH`, records the call with exit code 127, and exits 127.
 
 ## The log
 
-The log is `<state>/recorder/commands.jsonl`, one per host. It is append-only JSON Lines with mode
+The log is `<state>/recorder/commands.jsonl`, one per host. It contains JSON Lines with mode
 0600. The live daemon on a host with default settings writes
 `~/.local/state/st3/recorder/commands.jsonl`.
 
@@ -68,8 +69,26 @@ An argument longer than 4096 bytes is cut and ends with `…[N more bytes]`. The
 credentials (`https://***@host`), `extraheader=` values, and `Authorization:` header values with
 `***`. That redaction is a best effort, so treat the log as private to the account.
 
-The log is not rotated. A daily job that reads it can move it aside; the next call creates a new
-file.
+The current file is capped at 64 MiB. Before a whole record would exceed that cap, the recorder
+renames the current file to `commands.jsonl.1`, replacing the previous archive, then starts a new
+current file. The two retained generations total at most 128 MiB. A record larger than 64 MiB is
+skipped. This local diagnostic history has no minimum time window; busy hosts keep fewer hours.
+Copy both generations elsewhere before rotation if you need longer history.
+
+On the next recorded call after upgrading, oversized legacy files are clipped to their newest
+complete lines within 64 MiB before rotation. The recorder seeks near the end rather than reading
+the entire legacy file. A fixed `commands.jsonl.next` staging file can use another 64 MiB during
+this migration, including after an interrupted migration. The retained files plus staging total
+at most 192 MiB after migration; existing oversized files are not bounded until that next call
+successfully records. Claim retention and creation receipts are independent of this diagnostic log.
+
+Writers serialize the size check, rotation, and append on `commands.jsonl.lock`, a separate stable
+inode. Never remove or replace that lock file while recorders are running. A lock wait expires
+within two seconds, including up to 100 ms reserved for drop accounting: that one record is
+dropped and counted in the fixed eight-byte
+`commands.jsonl.dropped` counter, while the wrapped command keeps its own output and status.
+`st doctor` displays the accumulated timeout drops. Counter failures and other log failures remain silent. No file
+sync is forced; a crash can lose recent diagnostics.
 
 ```sh
 log=~/.local/state/st3/recorder/commands.jsonl
@@ -83,10 +102,13 @@ or an appendable log is missing.
 
 ## Summarize calls
 
-`st recorder report` summarizes the last 24 hours of the local log. `--hours` changes the window,
+`st recorder report` summarizes retained calls within the last 24 hours across both local
+generations. It opens both files and captures their lengths under the writer lock, then releases
+the lock before parsing, so rotation cannot lose or count a generation twice. A stuck holder
+returns a report error after two seconds. `--hours` changes the window,
 `--top` changes the number of slow calls, and `--json` produces structured output. To summarize
-several hosts, copy their private logs to the machine running the report and pass each one with
-`--log`:
+several hosts, copy their private logs (including each archive) to the machine running the report
+and pass each file with `--log`:
 
 ```sh
 st recorder report --hours 24

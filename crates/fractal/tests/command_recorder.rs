@@ -531,6 +531,67 @@ fn concurrent_calls_append_whole_lines() {
     assert_eq!(indexes, (0..16).collect::<Vec<_>>());
 }
 
+#[test]
+fn a_stuck_log_lock_drops_only_the_record_and_preserves_the_receipt_and_exit() {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let fixture = fixture(
+        "#!/bin/sh\nprintf 'https://github.com/owner/repo/issues/123\\n'\nprintf 'command error\\n' >&2\nexit 9\n",
+    );
+    let guard = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(fixture.log.with_extension("jsonl.lock"))
+        .unwrap();
+    // Hold the same sidecar inode in this process until the recorder has exited.
+    assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut child = fixture
+        .recorded("gh")
+        .args(["issue", "create"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = wait_within(&mut child, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(9));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    assert_eq!(stdout, b"https://github.com/owner/repo/issues/123\n");
+    assert_eq!(stderr, b"command error\n");
+    assert!(fixture.records().is_empty());
+    assert_eq!(fixture.receipts()[0]["exit_code"], 9);
+    let (healthy, detail) = fractal_daemon::recorder::health(&fixture.root.path().join("state"));
+    assert!(healthy, "{detail}");
+    assert!(detail.contains("1 records dropped"), "{detail}");
+    assert_eq!(
+        fs::metadata(fixture.log.with_extension("jsonl.dropped"))
+            .unwrap()
+            .len(),
+        8
+    );
+    drop(guard);
+    assert_eq!(
+        fixture.recorded("git").output().unwrap().status.code(),
+        Some(9)
+    );
+    assert_eq!(fixture.records().len(), 1);
+}
+
 /// The terminal sends its interrupt to the whole foreground process group. The recorder outlives
 /// it long enough to record the interrupted call, then ends by the same signal.
 #[cfg(target_os = "linux")]

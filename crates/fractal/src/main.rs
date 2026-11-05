@@ -6746,17 +6746,16 @@ fn run_recorder(command: RecorderCommand, config: &Config, json_output: bool) ->
             let since = until
                 .checked_sub_signed(window)
                 .context("--hours is too large")?;
-            let logs = if args.logs.is_empty() {
-                let local = fractal_daemon::recorder::log_path(&config.state_dir)?;
-                if local.exists() {
-                    vec![local]
-                } else {
-                    Vec::new()
-                }
+            let report = if args.logs.is_empty() {
+                fractal_daemon::recorder_report::summarize_current(
+                    &config.state_dir,
+                    since,
+                    until,
+                    args.top,
+                )?
             } else {
-                args.logs
+                fractal_daemon::recorder_report::summarize(args.logs, since, until, args.top)?
             };
-            let report = fractal_daemon::recorder_report::summarize(logs, since, until, args.top)?;
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {

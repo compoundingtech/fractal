@@ -1,9 +1,9 @@
-//! Summaries of the append-only command logs. A report may combine logs copied from several hosts.
+//! Summaries of retained command logs. A report may combine logs copied from several hosts.
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Read as _};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -85,16 +85,45 @@ pub fn summarize(
     until: DateTime<Utc>,
     limit: usize,
 ) -> Result<Report> {
+    let opened = files.into_iter().map(|path| {
+        let file =
+            File::open(&path).with_context(|| format!("open command log {}", path.display()))?;
+        let length = file.metadata()?.len();
+        Ok((path, file, length))
+    });
+    summarize_opened(opened, since, until, limit)
+}
+
+/// Snapshot both local generations under the recorder lock, then parse without holding it.
+pub fn summarize_current(
+    state_dir: &Path,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    limit: usize,
+) -> Result<Report> {
+    let path = crate::recorder::log_path(state_dir)?;
+    let files = crate::recorder::log_snapshot(&path)
+        .with_context(|| format!("snapshot command log {}", path.display()))?;
+    summarize_opened(files.into_iter().map(Ok), since, until, limit)
+}
+
+fn summarize_opened(
+    opened: impl IntoIterator<Item = Result<(PathBuf, File, u64)>>,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    limit: usize,
+) -> Result<Report> {
+    let mut files = Vec::new();
     let mut counts = BTreeMap::<(String, String, String), (u64, u64)>::new();
     let mut agent_counts = BTreeMap::<(String, String), (u64, u64)>::new();
     let mut gh_api = BTreeMap::<String, u64>::new();
     let mut slowest = Vec::new();
     let mut calls = 0;
     let mut skipped_lines = 0;
-    for path in &files {
-        let file =
-            File::open(path).with_context(|| format!("open command log {}", path.display()))?;
-        let mut reader = BufReader::new(file);
+    for opened in opened {
+        let (path, file, length) = opened?;
+        files.push(path.clone());
+        let mut reader = BufReader::new(file.take(length));
         let mut line = Vec::new();
         let mut index = 0;
         loop {
@@ -332,6 +361,39 @@ pub fn render(report: &Report) -> String {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn local_report_includes_both_retained_generations_and_allows_missing_current() {
+        let root = tempfile::tempdir().unwrap();
+        let since = "2026-09-28T00:00:00Z".parse().unwrap();
+        let until = "2026-09-29T00:00:00Z".parse().unwrap();
+        assert!(
+            summarize_current(root.path(), since, until, 10)
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        let directory = root.path().join("recorder");
+        std::fs::create_dir(&directory).unwrap();
+        let archive = directory.join("commands.jsonl.1");
+        let current = directory.join("commands.jsonl");
+        let line = serde_json::json!({
+            "schema": SCHEMA, "time": "2026-09-28T01:00:00Z", "host": "alpha",
+            "actor": "builder", "program": "git", "args": ["status"],
+            "exit_code": 0, "signal": null, "duration_ms": 1.0
+        })
+        .to_string()
+            + "\n";
+        std::fs::write(&archive, &line).unwrap();
+        let report = summarize_current(root.path(), since, until, 10).unwrap();
+        assert_eq!(report.files.as_slice(), std::slice::from_ref(&archive));
+        assert_eq!(report.calls, 1);
+        std::fs::write(&current, &line).unwrap();
+        let report = summarize_current(root.path(), since, until, 10).unwrap();
+        assert_eq!(report.files, [archive, current]);
+        assert_eq!(report.calls, 2);
+        assert_eq!(report.skipped_lines, 0);
+    }
 
     #[test]
     fn summarizes_both_command_schemas_and_ignores_unknown_schemas() {
