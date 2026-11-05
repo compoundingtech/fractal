@@ -129,12 +129,12 @@ fn agent_review_step_local_history_survives_new_claim() {
     for kind in ["work.claimed", "step-run.carried"] {
         let (store, step) = fixture(r#"assigned-to "agent/example/new""#);
         let source = sibling(&store, &step, "source");
+        let mut bare = json!({"attempt": 1, "status": "ready", "claimant": "agent/example/old"});
+        if kind == "step-run.carried" {
+            bare["source_step_run"] = json!(source.subject);
+        }
         for (kind, body) in [
-            (
-                kind,
-                json!({"attempt": 1, "status": "ready", "claimant": "agent/example/old",
-                    "source_step_run": source.subject}),
-            ),
+            (kind, bare),
             (
                 "work.submitted",
                 json!({"fields": {"attempt": 1, "claimant": null}}),
