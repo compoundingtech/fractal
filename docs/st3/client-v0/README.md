@@ -40,6 +40,11 @@ the original validated RFC3339 spelling and an `Option<DateTime.Utc>` millisecon
 projection (`None` for leap seconds). Encoding reproduces `wire` exactly, including
 microseconds and finer fractions, and refuses inconsistent projections. Only
 `NoticeTimestamp` opts in; the existing `timestamp` codec remains `DateTime.Utc`.
+Schema-root `x-st-internal-resources` generates private descriptor/decoder insertion
+content in `notice_descriptors.generated.rs`, compiled by conformance tests. Model
+kind and ID references come from the same notice closure; decoding goes directly
+from bytes to the native model, never through `Resource::Unknown` serialization.
+This metadata does not register a collection, Resource arm, capability or action.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.

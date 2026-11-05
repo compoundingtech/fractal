@@ -1,5 +1,8 @@
 {
   "x-st-integers": "json-safe",
+  "x-st-internal-resources": {
+    "NoticeSnapshot": { "collection": "notices" }
+  },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://st3.local/schemas/client-v0.schema.json",
   "title": "st3 client v0",
