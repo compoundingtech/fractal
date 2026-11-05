@@ -57,7 +57,7 @@ fn main() -> Result<()> {
         &swift_operation_methods(reads, actions)?,
     )?;
     let typescript_models = typescript_models(&schema, &operations, &constants)?;
-    let typescript_schema = rich::models(&schema)?;
+    let typescript_schemas = rich::partitioned_models(&schema, &operations)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
         "    // @st3-codegen:typescript-operation-methods",
@@ -106,11 +106,13 @@ fn main() -> Result<()> {
         &typescript_models,
         check,
     )?;
-    output(
-        &root.join("clients/typescript/fractal-client/Schema.generated.ts"),
-        &typescript_schema,
-        check,
-    )?;
+    for (name, contents) in typescript_schemas {
+        output(
+            &root.join("clients/typescript/fractal-client").join(name),
+            &contents,
+            check,
+        )?;
+    }
     output(
         &root.join("clients/typescript/fractal-client/Client.generated.ts"),
         &typescript_client,

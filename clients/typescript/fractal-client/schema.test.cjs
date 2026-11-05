@@ -4,6 +4,39 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('read entrypoint loads no mutation or PTY validators, even without tree shaking', () => {
+    const { spawnSync } = require('node:child_process');
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', String.raw`
+        import { registerHooks } from 'node:module';
+        import assert from 'node:assert/strict';
+        const loaded = [];
+        registerHooks({ load(url, context, nextLoad) {
+            const result = nextLoad(url, context);
+            if (/fractal-client\/.*generated\.ts$/.test(url)) {
+                loaded.push(url.split('/').at(-1));
+                assert.doesNotMatch(String(result.source),
+                    /export const (?:ActionCommon|ActionRequest|ActionResult|TerminalScreen|TerminalAttachment|TerminalLine|TerminalRun|TerminalModes|TerminalColor|TerminalLink|AssistantTerminalContent|\w+Parameters)\b/);
+            }
+            return result;
+        } });
+        const read = await import('@fractal/client/schema/read');
+        assert.ok(read.Agent && read.TimelineEntry && read.CollectionFrame);
+        assert.deepEqual(loaded.sort(), ['ReadSchema.generated.ts', 'SchemaSupport.generated.ts']);
+    `], { cwd: __dirname, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+});
+
+test('full and read entrypoints share validators and strict unknown-case tracking', async () => {
+    const [, full] = await modules;
+    const read = await import('./ReadSchema.generated.ts');
+    assert.equal(full.Agent, read.Agent);
+    assert.equal(full.decodeUnknownSync, read.decodeUnknownSync);
+    const unknown = read.decodeUnknownSync(read.ErrorCode)('future-error');
+    assert.equal(full.containsUnknownCase(unknown), true);
+    assert.throws(() => full.decodeUnknownSync(read.ErrorCode, 'strict')('future-error'));
+    assert.ok(full.ActionRequest && full.ActionResult && full.TerminalScreen && full.TerminalAttachment);
+});
+
 test('JSON Schema string bounds count Unicode code points, not UTF-16 units', async () => {
     const [{ Schema }, Rich] = await modules;
     const name = Rich.decodeUnknownSync(Rich.ArrangementName, 'strict');

@@ -152,6 +152,14 @@ Browser `WebSocket` cannot set headers. A browser socket factory must move the c
 
 Import `@fractal/client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0` stable peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
 
+Use `@fractal/client/schema/read` for non-terminal read/query responses and collection streams.
+Its generated import graph constructs no mutation request/result/parameter or PTY screen/session
+validators, without relying on tree shaking. Terminal resource metadata remains available for
+roster/resource reads. Terminal screen/content and mutation codecs stay on `@fractal/client/schema`,
+which retains all existing exports and re-exports the same read validator instances. Shared codec
+support preserves strict decoding and unknown-case tracking across both entrypoints. Regeneration
+also writes `ReadSchema.generated.ts` and `SchemaSupport.generated.ts`; never edit them directly.
+
 ```ts
 import * as FractalSchema from '@fractal/client/schema'
 

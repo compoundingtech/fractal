@@ -12,7 +12,7 @@
  * The tracer is teed into an in-memory `SpanRing` for the dev perf panel and, when an OTLP URL is
  * given, exported as OTLP/JSON via `fetch` directly to that explicitly configured endpoint.
  */
-import { CollectionName } from '@fractal/client/schema'
+import { CollectionName } from '@fractal/client/schema/read'
 import { normalizeDecodePath } from '@fractal/sdk/effect'
 import { Context, Deferred, Effect, Exit, FiberSet, Layer, Option, Schema, Scope, Tracer } from 'effect'
 import * as FetchHttpClient from 'effect/http/FetchHttpClient'

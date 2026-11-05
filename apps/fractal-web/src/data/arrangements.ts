@@ -12,7 +12,7 @@
  */
 import { SIDEBAR_ARRANGEMENT_UUID, FractalClient } from '@fractal/client'
 import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@fractal/client'
-import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema'
+import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema/read'
 import { Schema } from 'effect'
 
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))

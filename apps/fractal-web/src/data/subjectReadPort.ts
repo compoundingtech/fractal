@@ -6,7 +6,7 @@ import {
   type EnvelopeOf,
   type Page,
 } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import { Context, Data, Effect, Fiber, Option, Queue, Schedule, Schema, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'

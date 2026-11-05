@@ -1,7 +1,7 @@
 // Project decoded Fractal conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema'
+import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema/read'
 import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
