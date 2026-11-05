@@ -7,6 +7,7 @@ const CONFLICT: &str = "reviewer-not-independent";
 const UNKNOWN: &str = "reviewer-owner-unresolved";
 const CHILD: &str = "agent/example/child";
 const PARENT: &str = "agent/example/parent";
+const REQUESTER: &str = "agent/example/requester";
 
 fn request(mission: &str) -> MissionRunRequest {
     MissionRunRequest {
@@ -32,6 +33,7 @@ fn fixture() -> (Store, MissionRunView, MissionRunView) {
 agent "example/free" { command "true"; workspace "/tmp" }
 agent "example/parent" { command "true"; workspace "/tmp" }
 agent "example/child" { command "true"; workspace "/tmp" }
+agent "example/requester" { command "true"; workspace "/tmp" }
 mission "parent" state="ready" {
   goal "Check the complete run boundary."
   step "start" { assigned-to "agent/example/parent" }
@@ -53,8 +55,10 @@ mission "nested-loop" state="ready" { goal "Reject nested loop history."
     );
     let parent = store.create_mission_run(&request("parent")).unwrap();
     let step = &step(&parent, "start").subject;
+    let mut request = request("child");
+    request.requester = Some(REQUESTER.into());
     let child = store
-        .create_child_mission_run(&request("child"), &parent, step, None)
+        .create_child_mission_run(&request, &parent, step, None)
         .unwrap();
     (store, parent, child)
 }
@@ -78,6 +82,17 @@ fn event(store: &Store, subject: &str, kind: &str, actor: &str, body: Value) {
     tx.commit().unwrap();
 }
 
+fn progress(store: &Store, subject: &str, actor: &str) {
+    event(store, subject, "work.progress", actor, json!({}));
+}
+
+#[test]
+fn agent_review_run_excludes_child_requester() {
+    let (store, parent, child) = fixture();
+    assert_eq!(check(&store, &parent.subject, REQUESTER), CONFLICT);
+    assert_eq!(check(&store, &child.subject, REQUESTER), CONFLICT);
+}
+
 #[test]
 fn agent_review_run_steps_children_and_parent_worker() {
     let (store, parent, child) = fixture();
@@ -85,17 +100,11 @@ fn agent_review_run_steps_children_and_parent_worker() {
     assert_eq!(check(&store, &child.subject, PARENT), CONFLICT);
     assert_eq!(check(&store, &parent.subject, FREE), "ok");
     let other = step(&parent, "other");
-    event(&store, &other.subject, "work.progress", FREE, json!({}));
+    progress(&store, &other.subject, FREE);
     assert_eq!(check(&store, &parent.subject, FREE), CONFLICT);
     // The child's boundary includes its starting step, not other steps of its parent.
     assert_eq!(check(&store, &child.subject, FREE), "ok");
-    event(
-        &store,
-        &child.steps[0].subject,
-        "work.progress",
-        FREE,
-        json!({}),
-    );
+    progress(&store, &child.steps[0].subject, FREE);
     assert_eq!(check(&store, &parent.subject, FREE), CONFLICT);
 }
 
@@ -103,13 +112,7 @@ fn agent_review_run_steps_children_and_parent_worker() {
 fn agent_review_run_missing_rows_and_unknown_owner_fail_closed() {
     let (store, parent, child) = fixture();
     assert_ne!(check(&store, "mission-run/missing", FREE), "ok");
-    event(
-        &store,
-        &child.steps[0].subject,
-        "work.progress",
-        "agent/example/missing",
-        json!({}),
-    );
+    progress(&store, &child.steps[0].subject, "agent/example/missing");
     assert_eq!(check(&store, &parent.subject, FREE), UNKNOWN);
     let (store, parent, _) = fixture();
     event(
@@ -147,7 +150,7 @@ fn agent_review_run_loop_definitions_fail_closed() {
 fn agent_review_run_missing_step_projection_fails_closed() {
     let (store, parent, _) = fixture();
     let other = step(&parent, "other");
-    event(&store, &other.subject, "work.progress", FREE, json!({}));
+    progress(&store, &other.subject, FREE);
     store
         .connection
         .write()
@@ -174,12 +177,6 @@ mission-run "after" {{ mission "mission/child@{}"; workspace "/tmp"; requester "
     publish_mission(&store, &source, "after");
     let run = store.mission_run("after").unwrap().unwrap();
     assert_eq!(check(&store, &run.subject, FREE), "ok");
-    event(
-        &store,
-        &step(&run, "after-run").subject,
-        "work.progress",
-        FREE,
-        json!({}),
-    );
+    progress(&store, &step(&run, "after-run").subject, FREE);
     assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
 }

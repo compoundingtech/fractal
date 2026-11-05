@@ -8,6 +8,7 @@ use fractal_store::store::{
 /// Internal hierarchy policy over one caller-owned connection snapshot.
 /// Includes every generation, descendant and enclosing parent step, not sibling runs.
 /// Loops fail closed; start/reassignment is unavailable and public parsers still reject agent-review.
+/// Pooled steps in terminal or superseded generations over-exclude until the raw-row follow-on.
 #[doc(hidden)]
 pub fn validate_run_reviewer(
     scope: &Scope<'_>,
@@ -58,9 +59,11 @@ pub fn validate_run_reviewer(
                 return Err(unresolved(&generation));
             }
             for step in &view.steps {
-                excluded.extend(validate_step_reviewer(
-                    scope, connection, step, requester, reviewer,
-                )?);
+                for requester in [requester, header.requester.as_str()] {
+                    excluded.extend(validate_step_reviewer(
+                        scope, connection, step, requester, reviewer,
+                    )?);
+                }
             }
             // Creation history and generation prefixes also expose missing child/parent rows.
             let start = format!("step-run/{generation}/");
