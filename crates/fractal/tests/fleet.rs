@@ -6312,6 +6312,180 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
+/// A page cursor into the messages stream names its position in `stream_after` and leaves out
+/// `after`, so the previous release, whose cursor needs `after`, refuses it and the listing starts
+/// over rather than reading a stream position as a graph index. A subject the graph holds lists
+/// once, as the graph's, and a walk by small pages lists every message once, in order, on pages
+/// that are never empty. A cursor the release gave, into the graph or into the stream, still
+/// reads on this build.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    // Pages of two, so the release's five messages and three stream items take four pages.
+    const QUERY: &str = "/v1/messages/page?to=agent/fleet-reader&limit=2";
+    let page = |node: &Node, cursor: Option<String>| {
+        let client = node.client();
+        async move {
+            let path = match cursor {
+                Some(cursor) => format!("{QUERY}&cursor={cursor}"),
+                None => QUERY.to_owned(),
+            };
+            client.get::<MessagePage>(&path).await
+        }
+    };
+    // Every page from `cursor` to the end, each with the cursor it gave.
+    let walk = |node: &Node, mut cursor: Option<String>| {
+        let client = node.client();
+        async move {
+            let mut pages = Vec::new();
+            loop {
+                let path = match &cursor {
+                    Some(cursor) => format!("{QUERY}&cursor={cursor}"),
+                    None => QUERY.to_owned(),
+                };
+                let page: MessagePage = client.get(&path).await.unwrap();
+                assert_eq!(page.has_more, page.next_cursor.is_some());
+                cursor = page.next_cursor.clone();
+                let subjects = page.items.iter().map(|item| item.subject.clone()).collect::<Vec<_>>();
+                pages.push((subjects, page.next_cursor));
+                if cursor.is_none() {
+                    return pages;
+                }
+                assert!(pages.len() < 20, "the listing never ended: {pages:?}");
+            }
+        }
+    };
+    let subjects = |pages: &[(Vec<String>, Option<String>)]| {
+        pages.iter().flat_map(|(subjects, _)| subjects.clone()).collect::<Vec<_>>()
+    };
+    // What a cursor says, as JSON.
+    let decoded = |cursor: &str| -> Value {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(cursor.strip_prefix("messages/").expect("a message cursor"))
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+    let into_stream = |cursor: &Value| {
+        cursor["stream_after"].as_u64().or(cursor["after"].as_u64()).is_some_and(|after| after >= base)
+    };
+
+    // The release's mail, more than two pages of it.
+    let mut graph = Vec::new();
+    for n in 1..=5 {
+        let receipt: Value = o
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("release-{n}"), "from": PERSON, "to": "agent/fleet-reader",
+                "content": format!("graph mail {n}"),
+            }))
+            .await
+            .unwrap();
+        graph.push(receipt["subject"].as_str().expect("a send receipt names its message").to_owned());
+    }
+    let first = page(&o, None).await.unwrap();
+    assert_eq!(first.items.iter().map(|item| item.subject.clone()).collect::<Vec<_>>(), graph[..2]);
+    let release_cursor = first.next_cursor.expect("the release's first page has more");
+    assert!(decoded(&release_cursor)["after"].as_u64().is_some_and(|after| after < base));
+
+    // Upgrade in place, then the stream: three items, and two under subjects the graph holds,
+    // one between them and one last.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let stream = ["message/0000000000000e01", "message/0000000000000e02", "message/0000000000000e03"];
+    for subject in [stream[0], graph[2].as_str(), stream[1], stream[2], graph[3].as_str()] {
+        append_stream_item(&o, subject).await;
+    }
+    for shared in &graph[2..4] {
+        assert_eq!(stream_items(&o, shared).await, 1);
+    }
+    let mut expected = graph.clone();
+    expected.extend(stream.map(str::to_owned));
+    let upgraded = walk(&o, None).await;
+    assert_eq!(subjects(&upgraded), expected, "each subject once, the graph's first: {upgraded:?}");
+    // The last stream item is the graph's, so the stream ends a page early rather than give a
+    // cursor to an empty one.
+    assert_eq!(
+        upgraded.iter().map(|(subjects, _)| subjects.len()).collect::<Vec<_>>(),
+        [2, 2, 2, 2],
+        "{upgraded:?}"
+    );
+    // The graph's subjects read as the graph's messages.
+    for (n, shared) in [(3, &graph[2]), (4, &graph[3])] {
+        let read: MessageView = o.client().get(&format!("/v1/messages/read/{shared}")).await.unwrap();
+        assert_eq!(read.content, format!("graph mail {n}"));
+    }
+    // A cursor into the graph keeps `after`; one into the stream names `stream_after` alone.
+    let cursors = upgraded.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
+    assert_eq!(cursors.len(), 3);
+    for cursor in &cursors[..2] {
+        assert!(cursor["after"].as_u64().is_some_and(|after| after < base), "{cursor}");
+        assert!(cursor.get("stream_after").is_none(), "{cursor}");
+    }
+    assert!(cursors[2]["stream_after"].as_u64().is_some_and(|after| after >= base), "{}", cursors[2]);
+    assert!(cursors[2].get("after").is_none(), "{}", cursors[2]);
+    let stream_cursor = upgraded[2].1.clone().unwrap();
+    // The cursor the release gave before the upgrade reads on through the stream.
+    assert_eq!(subjects(&walk(&o, Some(release_cursor.clone())).await), expected[2..]);
+
+    // Roll back: the release answers the stream cursor as invalid (422), and the listing starts over.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let rolled_back = walk(&o, None).await;
+    let listed = subjects(&rolled_back);
+    // v0.3.25 then lists the stream, with the graph's subjects again among it; this build's guard
+    // is what lists each once.
+    assert_eq!(listed[..5], graph, "the release lists its mail first: {rolled_back:?}");
+    let release_cursors = rolled_back.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
+    if release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
+        // A release with stream_after cursors reads this build's.
+        assert_eq!(subjects(&walk(&o, Some(stream_cursor.clone())).await), expected[6..]);
+    } else {
+        let refused = page(&o, Some(stream_cursor.clone())).await.unwrap_err();
+        let (status, code, message, _) =
+            fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
+        assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+    }
+    // A cursor the release gives into the stream, if it lists the stream, names it in `after`.
+    let release_stream_cursor = rolled_back
+        .iter()
+        .filter_map(|(_, cursor)| cursor.clone())
+        .find(|cursor| into_stream(&decoded(cursor)));
+
+    // Upgrade again: the whole walk is as it was, and the release's stream cursor reads on.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A cursor's `through` is the graph's index at its first page, which each start moves on.
+    let shape = |pages: &[(Vec<String>, Option<String>)]| {
+        pages
+            .iter()
+            .map(|(subjects, cursor)| {
+                let cursor = cursor.as_deref().map(decoded);
+                let position = cursor.map(|cursor| (cursor.get("after").cloned(), cursor.get("stream_after").cloned()));
+                (subjects.clone(), position)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&walk(&o, None).await), shape(&upgraded));
+    assert_eq!(subjects(&walk(&o, Some(release_cursor)).await), expected[2..]);
+    // The release's first stream cursor follows its page that ended at the first stream item.
+    if let Some(cursor) = release_stream_cursor {
+        assert_eq!(subjects(&walk(&o, Some(cursor)).await), expected[6..]);
+    }
+}
+
 /// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
 /// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
 /// rolled back. The release's claims read the same throughout; a mark replicates nothing and
@@ -6441,6 +6615,198 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     let after = listed(&o).await;
     assert_eq!(state(&after), ["read", "read", "read", "sent"]);
     assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+}
+
+/// Each record of the archive at `path`, as JSON.
+fn archive_records(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+/// A standalone node started by this build on `archive`, restored with this build's CLI into its
+/// state directory and named for the restored writer, as the restore says to.
+async fn restored_node(parent: &Path, directory: &str, archive: &Path) -> (Node, Value) {
+    let mut node = Node::named(parent, directory, "restoring");
+    let database = node.state_dir().join("claims.sqlite3");
+    let restored = node
+        .command(&["--json", "backup", "restore", "--database", database.to_str().unwrap(), archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+    let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let writer = report["writer"].as_str().unwrap().to_owned();
+    fs::write(node.root.join("config/st3/config.toml"), format!("node = \"{writer}\"\nperson = \"{PERSON}\"\n")).unwrap();
+    node.name = writer;
+    node.start().await;
+    (node, report)
+}
+
+/// Backups across the messages shard (db break-up step 4c-1). While the shard holds nothing, the
+/// previous release and this build restore each other's archives, and this build writes what the
+/// release writes from the same database: its version and every record but the build that wrote
+/// it. Once the shard holds a stream item the archive is version 5: the release refuses it, naming
+/// the format, and this build restores it with the item and its read on the member.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let read = |node: &Node, subject: &str, key: &str| {
+        let client = node.client();
+        let path = format!("/v1/messages/{}/claims", subject.trim_start_matches("message/"));
+        let key = key.to_owned();
+        async move {
+            let mut receipt = Value::Null;
+            for lifecycle in ["delivered", "read"] {
+                receipt = client
+                    .post(&path, &json!({
+                        "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                        "idempotency_key": format!("{key}-{lifecycle}"),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            receipt
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    let backup = |node: &Node, archive: &Path, database: Option<&Path>| {
+        let mut arguments = vec!["backup", "create", archive.to_str().unwrap()];
+        if let Some(database) = database {
+            arguments.extend(["--database", database.to_str().unwrap()]);
+        }
+        let created = node.command(&arguments).output().unwrap();
+        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+        archive_records(archive)
+    };
+    let release_restore = |node: &mut Node, archive: &Path, database: &Path| {
+        node.binary = old.clone();
+        let restored = node
+            .command(&["--json", "backup", "restore", "--database", database.to_str().unwrap(), archive.to_str().unwrap()])
+            .output()
+            .unwrap();
+        node.binary = PathBuf::from(st3());
+        restored
+    };
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    read(&o, &first, "release-read").await;
+    let before = listed(&o).await;
+    assert_eq!(before, [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]);
+
+    // The release's archive: this build restores it, and reads the same mail on it.
+    let release_archive = root.path().join("release.jsonl");
+    let release_records = backup(&o, &release_archive, None);
+    let release_version = release_records[0]["data"]["version"].as_u64().unwrap();
+    assert!(release_version < 5, "{}", release_records[0]);
+    let (mut from_release, report) = restored_node(root.path(), "from-release", &release_archive).await;
+    assert!(report.get("shards").is_none_or(|shards| shards.as_object().is_some_and(|shards| shards.is_empty())), "{report}");
+    assert_eq!(listed(&from_release).await, before, "the release's archive restored different mail");
+    from_release.stop();
+
+    // Upgrade in place. The shard is open and empty, and this build's archive of the database is
+    // the one the release writes of it: the same version, and every record but the writing build.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    o.stop();
+    let database = o.state_dir().join("claims.sqlite3");
+    let copy = root.path().join("release-export/claims.sqlite3");
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+        .unwrap();
+    let empty_shard_archive = root.path().join("empty-shard.jsonl");
+    let ours = backup(&o, &empty_shard_archive, Some(&database));
+    o.binary = old.clone();
+    let theirs = backup(&o, &root.path().join("release-of-upgraded.jsonl"), Some(&copy));
+    o.binary = PathBuf::from(st3());
+    let without_build = |records: &[Value]| {
+        let mut header = records[0].clone();
+        header["data"].as_object_mut().unwrap().remove("source_build");
+        // The end record's hash covers the header, so only its count can match.
+        let end = &records[records.len() - 1];
+        assert_eq!(end["record"], "end", "{end}");
+        (header, records[1..records.len() - 1].to_vec(), end["data"]["envelopes"].clone())
+    };
+    assert!(ours[0]["data"]["version"].as_u64().unwrap() < 5, "{}", ours[0]);
+    assert!(ours[0]["data"].get("shards").is_none(), "{}", ours[0]);
+    assert!(ours.iter().all(|record| !record["record"].as_str().unwrap().starts_with("shard-")));
+    assert_eq!(without_build(&ours), without_build(&theirs), "an empty shard changed the archive");
+    // The release restores it.
+    let restored = release_restore(&mut o, &empty_shard_archive, &root.path().join("release-restored/claims.sqlite3"));
+    assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+    let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(report["graph_digest"], ours[0]["data"]["graph_digest"], "{report}");
+    assert_eq!(report["projections_match"], true, "{report}");
+
+    // A stream item, read on the member: the next archive carries the shard, as version 5.
+    o.start().await;
+    let stream = "message/0000000000000e01";
+    append_stream_item(&o, stream).await;
+    let receipt = read(&o, stream, "stream-read").await;
+    assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    let mut merged = before.clone();
+    merged.push((stream.to_owned(), "read".to_owned()));
+    assert_eq!(listed(&o).await, merged);
+    let shard_archive = root.path().join("shard.jsonl");
+    let records = backup(&o, &shard_archive, None);
+    let header = &records[0]["data"];
+    assert_eq!(header["version"], 5, "{header}");
+    assert_eq!(header["shards"]["messages"]["envelope_count"], 1, "{header}");
+    assert!(header["shards"]["messages"]["local"]["stream_lifecycle"]["count"].as_u64() > Some(0), "{header}");
+    for kind in ["shard-envelope", "shard-local"] {
+        assert!(records.iter().any(|record| record["record"] == kind), "the archive has no {kind} record");
+    }
+
+    // The release refuses it and publishes nothing.
+    let target = root.path().join("release-refused/claims.sqlite3");
+    let refused = release_restore(&mut o, &shard_archive, &target);
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    // The release names no version: that is the message an operator sees.
+    assert!(error.trim_end().ends_with(": unsupported claim backup format/version"), "{error}");
+    assert!(!target.exists());
+
+    // This build restores it: the graph's mail, and the stream item still read.
+    let (restored, report) = restored_node(root.path(), "from-shard", &shard_archive).await;
+    assert_eq!(report["shards"]["messages"]["envelope_count"], 1, "{report}");
+    assert_eq!(stream_items(&restored, stream).await, 1);
+    assert_eq!(listed(&restored).await, merged, "the shard's archive restored different mail");
+    let view: MessageView = restored.client().get(&format!("/v1/messages/read/{stream}")).await.unwrap();
+    assert_eq!((view.from.as_str(), view.status.as_str()), ("agent/fleet-sender", "read"));
+    assert!(restored.claims().await.iter().all(|claim| claim["subject"] != stream), "a restored stream item reached the graph");
 }
 
 /// A member of the previous release and one of this build, side by side: delivery and read state
@@ -7002,6 +7368,56 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     // The seat's own host reads its own marks, with no host to name.
     let own: Value = b.client().get(&format!("/v1/messages/read/{read}")).await.unwrap();
     assert_eq!((own["status"].clone(), own.get("status_from").cloned()), (json!("read"), None), "{own}");
+
+    // A reminder group to the seat, whose winner b closes as a mark. Once a read on `a` hears the
+    // close from b, a's client list makes the older reminder current and the closed winner
+    // history, and still no close replicates (#4866).
+    let mut reminders = Vec::new();
+    for version in [1, 2] {
+        let receipt: Value = b
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("b-seat-reminder-{version}"), "from": PERSON, "to": seat,
+                "content": "stand-up", "tags": ["reminder:standup", format!("version:{version}")],
+            }))
+            .await
+            .unwrap();
+        reminders.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (older, winner) = (reminders[0].clone(), reminders[1].clone());
+    for lifecycle in ["delivered", "read", "closed"] {
+        let receipt: Value = b
+            .client()
+            .post(
+                &format!("/v1/messages/{}/claims", winner.trim_start_matches("message/")),
+                &json!({"lifecycle": lifecycle, "actor": seat, "idempotency_key": format!("{winner}-{lifecycle}")}),
+            )
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
+    }
+    let layer = |page: &Value, subject: &str| {
+        page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).map(|item| item["operational"].clone())
+    };
+    wait_until("a's client list makes the older reminder current once it hears b's close", 90, || {
+        let client = a.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older).is_some_and(|layer| layer["layer"] == "current") && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
+    let history: Value = a.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    assert_eq!(
+        layer(&history, &winner),
+        Some(json!({"layer": "history", "actionable": false, "reasons": ["closed"]})),
+        "{history}"
+    );
+    assert!(
+        !a.claims().await.iter().any(|claim| claim["subject"] == winner.as_str() && claim["kind"] == "message.closed"),
+        "b's close replicated as a claim"
+    );
 }
 
 /// A fleet of the previous release upgraded to this build, then one member rolled back. Before
@@ -7095,10 +7511,45 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     .await;
     assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
 
+    // The host closes a reminder's winner as a mark; once `o` hears it, its client list makes the
+    // older reminder current (#4866), and `o` keeps the close in its member-local table.
+    let mut reminders = Vec::new();
+    for version in [1, 2] {
+        let receipt: Value = h
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("h-seat-reminder-{version}"), "from": PERSON, "to": seat,
+                "content": "stand-up", "tags": ["reminder:standup", format!("version:{version}")],
+            }))
+            .await
+            .unwrap();
+        reminders.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (older, winner) = (reminders[0].clone(), reminders[1].clone());
+    for kind in ["delivered", "read", "closed"] {
+        assert!(lifecycle(&h, &winner, kind).await.starts_with("offset-receipt/"), "{kind}");
+    }
+    let layer = |page: &Value, subject: &str| {
+        page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).map(|item| item["operational"]["layer"].clone())
+    };
+    wait_until("o's client list makes the older reminder current once it hears the host's close", 90, || {
+        let client = o.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older) == Some(json!("current")) && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
+
     // `o` rolls back: the host stops recording marks, and its next lifecycle write is a claim.
     o.stop();
     o.binary = old.clone();
     o.start().await;
+    // The release never reads the kept close: its table and trigger are inert, and it lists the
+    // reminders from its own records.
+    let listed: Value = o.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    assert!(layer(&listed, &older).is_some() && layer(&listed, &winner).is_some(), "{listed}");
     wait_until("the host turns marks off beside a member that does not read them", 150, || {
         let off = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("off:");
         async move { off }
@@ -7125,6 +7576,20 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     // The host's own records are whole: its marks and the claim after them.
     assert_eq!(view(&h, &marked).await.unwrap()["status"], "closed");
     assert_eq!(view(&h, &before).await.unwrap()["status"], "delivered");
+
+    // Rolled forward again, `o` counts the close it kept before the rollback at its next fold.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("o counts the kept close again after rolling forward", 90, || {
+        let client = o.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older) == Some(json!("current")) && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
 }
 
 /// A seat's conversation and `conversations wait` across the previous release and this build, on
@@ -7643,6 +8108,63 @@ async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
             && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
                 || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
     })
+}
+
+/// The standing observer's declarations on `node`, oldest first, as (origin, stopped).
+async fn observer_declarations(node: &Node) -> Vec<(String, bool)> {
+    node.claims().await.iter()
+        .filter(|claim| claim["subject"] == "observer/github/fixture/app" && claim["kind"] == "intent.desired")
+        .map(|claim| (
+            claim["origin"].as_str().unwrap_or_default().to_owned(),
+            claim.pointer("/body/desired/children/0/name") == Some(&json!("stop")),
+        ))
+        .collect()
+}
+
+/// A member of the previous release watches a pull request beside a poller of this build that
+/// already observes the repository (#4831). The poller declares its observer once, in the write
+/// that declares the watch using it, so no pass stops it as unused and declares it again; the
+/// elder's watch, the released command, plans beside that one declaration and becomes a
+/// subscription on the poller's observer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_member_watches_beside_this_builds_poller() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the poller's observer declaration", 90, || async {
+        observer_declarations(&elder).await.iter().any(|(origin, _)| origin == "fixture-poller")
+    }).await;
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+    let declarations = observer_declarations(&poller).await;
+    assert_eq!(
+        declarations.iter().filter(|(origin, _)| origin == "fixture-poller").collect::<Vec<_>>(),
+        [&("fixture-poller".to_owned(), false)],
+        "the poller declared its observer once and never stopped it: {declarations:?}",
+    );
 }
 
 /// A previous release without the GitHub plugin keeps the poller writing item snapshots.

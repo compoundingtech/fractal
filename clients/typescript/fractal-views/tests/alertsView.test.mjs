@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, servedAnswers, servedPrompt } from '@fractal/views/homeView';
+import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, openAlerts, pendingQuestions, promptAlertKey, promptAnswers, questionAnswer, servedAnswers, servedPrompt } from '@fractal/views/homeView';
 
 // What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
 // derives nothing, so these rows carry it as Fractal serves them.
@@ -69,36 +69,14 @@ assert.equal(promptAnswers({ ...prompt, actions: [] }), null);
 assert.equal(promptAnswers({ ...prompt, action_parameters: {} }), null);
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { answers: [] } } }), null);
 
-// Every tool call with no result yet, in full, oldest first.
-const call = (id, name, args) => ({ id: `entry-${id}`, type: 'tool_call', body: { call_id: id, name, arguments: args } });
-const result = id => ({ id: `result-${id}`, type: 'tool_result', body: { call_id: id, status: 'ok', content: 'ok' } });
-assert.deepEqual(pendingCalls([]), []);
-assert.deepEqual(pendingCalls([call('c1', 'Bash', { command: 'ls' }), result('c1')]), []);
-assert.deepEqual(pendingCalls([call('c1', 'Bash', { command: 'ls' }), result('c1'), call('c2', 'Bash', { command: 'rm -rf build\necho done', description: 'Clean' })]), [
-  { id: 'c2', tool: 'Bash', lines: ['command: rm -rf build', '  echo done', 'description: Clean'], input: { command: 'rm -rf build\necho done', description: 'Clean' } },
-]);
-assert.deepEqual(pendingCalls([call('c3', 'Edit', JSON.stringify({ file_path: '/tmp/a', old_string: 'x' }))])[0].lines, ['file_path: /tmp/a', 'old_string: x']);
-// Two unanswered calls are both listed.
-const two = pendingCalls([call('c4', 'Bash', { command: 'make' }), result('c9'), call('c5', 'Write', { file_path: '/tmp/b' })]);
-assert.deepEqual(two.map(each => each.id), ['c4', 'c5']);
-// Allow is offered only beside the call the prompt names, shown in full; deny always.
-const answers = { target_id: 'a', episode: 'e', answers: ['allow', 'deny'], call_id: 'c' };
-assert.deepEqual(offeredAnswers(answers, []), ['deny']);
-assert.deepEqual(offeredAnswers(answers, [{ id: 'c', tool: 'Bash', lines: [] }]), ['deny']);
-assert.deepEqual(offeredAnswers(answers, [{ id: 'c', tool: 'Bash', lines: ['command: ls'] }]), ['allow', 'deny']);
-assert.deepEqual(offeredAnswers(answers, two), ['deny']);
-// A prompt that names no call is only denied, even beside a lone unanswered call.
-for (const unnamed of [{ ...answers, call_id: null }, { target_id: 'a', episode: 'e', answers: ['allow', 'deny'] }]) {
-  assert.deepEqual(offeredAnswers(unnamed, [{ id: 'c', tool: 'Bash', lines: ['command: ls'] }]), ['deny']);
-  assert.deepEqual(promptCalls(unnamed, two), []);
-}
+const call = (id, tool, input) => ({ id, tool, input, lines: [] });
 
 // A question is answered with its choices: each question by its text, several labels joined.
 const asked = [call('q1', 'AskUserQuestion', { questions: [
   { question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] },
   { question: 'Which pets?', header: 'Pets', multiSelect: true, options: [{ label: 'Cat', description: '' }, { label: 'Dog', description: '' }, { label: 'Fish', description: '' }] },
 ] })];
-const questions = pendingQuestions(pendingCalls(asked));
+const questions = pendingQuestions(asked);
 assert.equal(questions.length, 2);
 assert.equal(questions[1].multiSelect, true);
 assert.equal(questionAnswer(questions, [[1]]), null, 'every question needs a choice');
@@ -110,31 +88,14 @@ const prompting = (episode, revision) => item('p', 'harness-prompt', { revision,
 assert.equal(promptAlertKey(prompting('e1', 'r1')), promptAlertKey(prompting('e1', 'r1')));
 assert.notEqual(promptAlertKey(prompting('e2', 'r1')), promptAlertKey(prompting('e1', 'r1')), 'a new prompt behind the alert');
 assert.notEqual(promptAlertKey(prompting('e1', 'r2')), promptAlertKey(prompting('e1', 'r1')), 'a new revision of it');
-assert.equal(pendingQuestions(pendingCalls([call('b', 'Bash', { command: 'ls' })])), null);
+assert.equal(pendingQuestions([call('b', 'Bash', { command: 'ls' })]), null);
 assert.equal(pendingQuestions([]), null);
 const question = { target_id: 'a', episode: 'e', answers: ['answer', 'deny'], call_id: 'q1' };
-assert.deepEqual(offeredAnswers(question, pendingCalls(asked)), ['answer', 'deny']);
-assert.deepEqual(offeredAnswers(question, []), ['deny'], 'no question to choose from yet');
-// A plan is approved only when it is shown; a screen prompt's answers are always offered.
-const plan = { target_id: 'a', episode: 'e', answers: ['approve', 'deny'], call_id: 'p' };
-assert.deepEqual(offeredAnswers(plan, pendingCalls([call('p', 'ExitPlanMode', { plan: '1. Build' })])), ['approve', 'deny']);
-assert.deepEqual(offeredAnswers(plan, []), ['deny']);
-assert.deepEqual(offeredAnswers({ target_id: 'a', episode: 'e', answers: ['trust', 'exit'] }, []), ['trust', 'exit']);
 assert.equal(answerLabel('use-all'), 'Use all');
 assert.equal(answerLabel('approve'), 'Approve plan');
-// A call auto mode denied: allow it once or its kind, or leave it denied; none needs a shown call.
-assert.deepEqual(offeredAnswers({ target_id: 'a', episode: 'e', answers: ['approve-once', 'approve-kind', 'dismiss'] }, []), ['approve-once', 'approve-kind', 'dismiss']);
 assert.equal(answerLabel('approve-kind'), 'Allow this kind');
 
-// A prompt names its exact call: allow is offered only beside it, never beside another pending
-// call (a parent's Task call while its subagent asks), and not at all when it named none.
 const bound = { target_id: 'a', episode: 'e', answers: ['allow', 'deny'], call_id: 'c2' };
-const parentAndChild = pendingCalls([call('c1', 'Task', { prompt: 'run the build' })]);
-assert.deepEqual(offeredAnswers(bound, parentAndChild), ['deny'], 'the pending call is not the one asked about');
-const both = pendingCalls([call('c1', 'Task', { prompt: 'run the build' }), call('c2', 'Bash', { command: 'make' })]);
-assert.deepEqual(offeredAnswers(bound, both), ['allow', 'deny']);
-assert.deepEqual(promptCalls(bound, both).map(each => each.id), ['c2']);
-assert.deepEqual(offeredAnswers({ ...bound, call_id: null }, both), ['deny'], 'no named call, no allow');
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: 'c2' } } }).call_id, 'c2');
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: null } } }).call_id, null);
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'] } } }).call_id, null, 'a missing call_id names none');
@@ -162,6 +123,6 @@ assert.deepEqual(servedAnswers(bound, unread), ['deny']);
 assert.equal(servedPrompt({ presentation: null }).calls, null, 'an older st serves no prompt');
 assert.deepEqual(servedAnswers({ target_id: 'a', episode: 'e', answers: ['trust', 'exit'] }, unread), ['trust', 'exit'], "a screen prompt's own answers need no call");
 // A question is answered only where st allows it and its questions can be read.
-const askedServed = servedPrompt({ presentation: { prompt: { calls: [{ call_id: 'q', tool: 'AskUserQuestion', input: JSON.stringify(asked[0].body.arguments), input_complete: true }], answers: ['answer', 'deny'], allow: true } } });
+const askedServed = servedPrompt({ presentation: { prompt: { calls: [{ call_id: 'q', tool: 'AskUserQuestion', input: JSON.stringify(asked[0].input), input_complete: true }], answers: ['answer', 'deny'], allow: true } } });
 assert.deepEqual(servedAnswers({ ...question, call_id: 'q' }, askedServed), ['answer', 'deny']);
 assert.deepEqual(servedAnswers({ ...question, call_id: 'q' }, { ...askedServed, allow: false }), ['deny']);

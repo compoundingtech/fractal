@@ -47,6 +47,7 @@ import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
+import type { ObjectivesSource } from './objectivesSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
@@ -304,6 +305,12 @@ export interface DataSource {
   /** Status bar / live picker bar text, e.g. `fixtures` or `dev gateway · read-only`. */
   readonly label: string
   readonly gateway?: string
+  readonly pins?: Atom.Atom<{
+    readonly state: { readonly phase: string; readonly members: readonly { readonly member: string }[] }
+    readonly editable: boolean
+    readonly toggle: (ref: string) => void
+    readonly retry: () => void
+  }>
   /** Fixtures: the world's fixed base time. Live: `wallClock`. Every relative timestamp reads this. */
   readonly now: Atom.Atom<number>
   readonly grants: Atom.Atom<Grants>
@@ -314,6 +321,8 @@ export interface DataSource {
   readonly subjectReads: SubjectReads
   /** Visible Details uses shared native getter facts; no private harness decoding. */
   readonly nativeDetails?: NativeDetailsSource
+  /** Objectives, budgets and their history from this member's native served model. */
+  readonly objectives?: ObjectivesSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>

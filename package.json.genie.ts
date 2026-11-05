@@ -10,6 +10,7 @@ export const diagnosticsPackages = [devbarPkg]
  */
 export const workspaceMembers = [
   'clients/typescript/fractal-client',
+  'clients/typescript/fractal-declarations',
   'clients/typescript/fractal-views',
   'clients/typescript/fractal-scenarios',
   'apps/ios',

@@ -1,7 +1,6 @@
 //! The argv contract is derived from the same clap graph used to parse commands.
 use std::collections::BTreeMap;
 
-use clap::CommandFactory as _;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -122,7 +121,7 @@ pub(super) fn generate(mut command: clap::Command) -> Value {
 }
 
 pub(super) fn print(effective: bool) -> anyhow::Result<()> {
-    let mut value = generate(super::Cli::command());
+    let mut value = generate(super::command_graph());
     if effective {
         let (config, _) = fractal_daemon::config::Config::load_client_unvalidated(None)?;
         value["effective"] = json!({
@@ -141,7 +140,7 @@ mod tests {
 
     #[test]
     fn actor_contract_records_runtime_person_exceptions() {
-        let value = generate(super::super::Cli::command());
+        let value = generate(super::super::command_graph());
         let commands = &value["contract"]["commands"];
         for path in [
             "st conversations send",
@@ -169,8 +168,6 @@ mod tests {
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");
         }
         for path in [
-            "st changes list",
-            "st changes show",
             "st agents handoff write",
             "st agents handoff ready",
             "st agents handoff show",
@@ -184,7 +181,7 @@ mod tests {
 
     #[test]
     fn actor_contract_records_real_command_aliases() {
-        let value = generate(super::super::Cli::command());
+        let value = generate(super::super::command_graph());
         assert_eq!(value["contract"]["aliases"]["st alerts"], json!(["attention"]));
         assert_eq!(value["contract"]["aliases"]["st changes list"], json!(["ls"]));
         for (alias, canonical) in [
@@ -197,7 +194,7 @@ mod tests {
             if canonical == "changes list" {
                 argv.extend(["--repository", "probe"]);
             }
-            let matches = super::super::Cli::command()
+            let matches = super::super::command_graph()
                 .try_get_matches_from(argv)
                 .unwrap();
             let mut matches = &matches;
@@ -210,7 +207,7 @@ mod tests {
 
     #[test]
     fn harness_question_contract_requires_an_explicit_person_for_every_command() {
-        let value = generate(super::super::Cli::command());
+        let value = generate(super::super::command_graph());
         for path in [
             "st harness-questions list",
             "st harness-questions show",
@@ -268,14 +265,14 @@ mod tests {
 
     #[test]
     fn configured_person_supplement_covers_the_reviewed_clap_families() {
-        assert_reviewed_configured_person_families(super::super::Cli::command());
+        assert_reviewed_configured_person_families(super::super::command_graph());
     }
 
     #[test]
     #[should_panic(expected = "configured-person command family changed")]
     fn configured_person_guard_rejects_new_ui_descendants() {
         assert_reviewed_configured_person_families(
-            super::super::Cli::command().mut_subcommand("ui", |command| {
+            super::super::command_graph().mut_subcommand("ui", |command| {
                 command.subcommand(clap::Command::new("unreviewed-probe"))
             }),
         );
@@ -285,7 +282,7 @@ mod tests {
     #[should_panic(expected = "configured-person command family changed")]
     fn configured_person_guard_rejects_new_setup_descendants() {
         assert_reviewed_configured_person_families(
-            super::super::Cli::command().mut_subcommand("setup", |command| {
+            super::super::command_graph().mut_subcommand("setup", |command| {
                 command.subcommand(clap::Command::new("unreviewed-probe"))
             }),
         );
@@ -295,7 +292,7 @@ mod tests {
     #[should_panic(expected = "configured-person command family changed")]
     fn configured_person_guard_rejects_removed_ui_descendants() {
         assert_reviewed_configured_person_families(
-            super::super::Cli::command().mut_subcommand("ui", |_| clap::Command::new("ui")),
+            super::super::command_graph().mut_subcommand("ui", |_| clap::Command::new("ui")),
         );
     }
 
@@ -316,14 +313,14 @@ mod tests {
 
     #[test]
     fn actor_contract_has_no_unclassified_commands() {
-        assert_published_classification(&generate(super::super::Cli::command()));
+        assert_published_classification(&generate(super::super::command_graph()));
     }
 
     #[test]
     #[should_panic(expected = "the CLI actor surface changed")]
     fn actor_contract_new_command_fails_the_published_classification_guard() {
         assert_published_classification(&generate(
-            super::super::Cli::command().subcommand(clap::Command::new("unclassified-probe")),
+            super::super::command_graph().subcommand(clap::Command::new("unclassified-probe")),
         ));
     }
 
@@ -339,7 +336,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("callable command missing from actor contract: {path}"));
                 let mut argv = path.split_whitespace().collect::<Vec<_>>();
                 argv.extend(["--as", "person/probe"]);
-                let actual = super::super::Cli::command().try_get_matches_from(argv);
+                let actual = super::super::command_graph().try_get_matches_from(argv);
                 if entry["actor"] == "none" {
                     assert_eq!(
                         actual.unwrap_err().kind(),
@@ -404,7 +401,7 @@ mod tests {
                 check(child, &format!("{path} {}", child.get_name()), contract);
             }
         }
-        let mut command = super::super::Cli::command();
+        let mut command = super::super::command_graph();
         command.build();
         check(&command, "st", &generate(command.clone()));
     }

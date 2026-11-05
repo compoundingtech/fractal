@@ -253,6 +253,27 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 
 A `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.
 
+## Agent principal grammar
+
+An agent may declare one optional `principal "person/operator"` child. It takes
+exactly one canonical person ID string, with no properties or body; agent IDs,
+malformed person IDs and duplicate principal children are rejected. `principal`
+is not an agent property. The canonical `intent.desired.desired` tree retains
+the child without adding a separate claim field. Omitting it remains valid.
+This grammar declaration is distinct from the accountable-root contract below.
+
+Pending harness observations with `ask="question"` route to the declared
+principal, otherwise to the daemon's configured `person`. Account ownership,
+helper bindings, mission requesters and declaration authors are not question
+authority. If neither principal exists, global attention retains the prompt
+with an empty person and a configuration diagnostic instead of dropping it.
+Only a live declaration and its running incarnation can produce the item;
+republishing its principal invalidates attention. `under` remains non-owning.
+Permission and review prompts retain their existing ownership and answer
+authorization. This routing does not enable answering unsupported harnesses.
+Supported native question answers require the effective principal as answerer.
+Upgrade readers before publishing the child: older readers reject it.
+
 ## Accountable fleet roots
 
 A top-level agent root may declare `accountable "person/NAME"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.
@@ -467,6 +488,8 @@ The fourteen page indexes are partial on `born_index >= 0` and order by `sent_ke
 ### Maintenance
 
 Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
+
+A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). A read that hears a host's close queues it without waiting for the writer; a background writer records at most 64 per transaction, and its insert trigger adds a pending row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
 
 The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
 
