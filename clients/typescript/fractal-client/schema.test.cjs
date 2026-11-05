@@ -1192,3 +1192,46 @@ test('notice summary bounds match JSON Schema at 200 Unicode code points', async
         assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeLink, 'strict')({ label: 'Result', url }));
     }
 });
+
+test('notice fixtures preserve rich Options, identifiers and lossless timestamps', async () => {
+    const [{ Schema, Option, DateTime }, Rich] = await modules;
+    const fixture = require('../../../docs/st3/client-v0/fixtures/notice-conformance.json');
+    const roundTrip = (schema, wire) => {
+        const decoded = Rich.decodeUnknownSync(schema, 'strict')(wire);
+        assert.deepEqual(Schema.encodeSync(schema)(decoded), wire);
+        return decoded;
+    };
+    const snapshot = roundTrip(Rich.NoticeSnapshot, fixture.snapshot);
+    assert.equal(snapshot.id, fixture.snapshot.id);
+    assert.equal(snapshot.source_id, fixture.snapshot.source_id);
+    assert.equal(snapshot.basis_claim, fixture.snapshot.basis_claim);
+    assert.equal(snapshot.runtime, fixture.snapshot.runtime);
+    assert.equal(snapshot.input.recipient, fixture.snapshot.input.recipient);
+    for (const key of ['seen_at', 'dismissed_at', 'snoozed_until', 'control_revision'])
+        assert.ok(Option.isNone(snapshot[key]), key);
+    const seen = roundTrip(Rich.NoticeSnapshot, { ...fixture.snapshot, seen_at: fixture.valid_timestamps[1], control_revision: 'control-v1' });
+    assert.equal(Option.getOrThrow(seen.seen_at).wire, fixture.valid_timestamps[1]);
+    assert.equal(Option.getOrThrow(seen.control_revision), 'control-v1');
+    for (const value of fixture.valid_delivery) roundTrip(Rich.NoticeDelivery, value);
+    for (const value of fixture.valid_integrity) roundTrip(Rich.NoticeIntegrity, value);
+    for (const { pointer, value } of fixture.invalid_snapshot) {
+        const mutated = structuredClone(fixture.snapshot), parts = pointer.slice(1).split('/');
+        let parent = mutated;
+        for (const key of parts.slice(0, -1)) parent = parent[key];
+        parent[parts.at(-1)] = value;
+        assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeSnapshot, 'strict')(mutated), pointer);
+    }
+    for (const wire of fixture.valid_timestamps) {
+        const decoded = roundTrip(Rich.NoticeTimestamp, wire);
+        assert.equal(decoded.wire, wire);
+        assert.equal(Option.isNone(decoded.instant), wire.slice(17, 19) === '60');
+        if (Option.isSome(decoded.instant)) assert.equal(DateTime.toEpochMillis(decoded.instant.value), Date.parse(wire));
+        roundTrip(Rich.NoticeSnapshot, { ...fixture.snapshot, updated_at: wire });
+    }
+    for (const wire of fixture.invalid_timestamps)
+        assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeTimestamp, 'strict')(wire), wire);
+    const wire = fixture.valid_timestamps[0];
+    assert.throws(() => Schema.encodeSync(Rich.NoticeTimestamp)({ wire, instant: Option.none() }));
+    // Existing timestamp annotations retain the established DateTime.Utc contract.
+    assert.equal(DateTime.toEpochMillis(Rich.decodeUnknownSync(Rich.Timestamp)(wire)), Date.parse(wire));
+});

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load earlier served conversation messages with anchored prepending, an accessible loading state and explicit failure retry.",
+  "replay": {"status": "none", "detail": "No replay or stored data changes."},
+  "schema": {"status": "none", "detail": "Uses the existing older_cursor and public timeline page contract."},
+  "rules": {"status": "none", "detail": "Read-only served state; no protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "Bounded transcript mounting and deferred history remain unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "A failed history page retains the loaded conversation and offers explicit Retry."}
+}

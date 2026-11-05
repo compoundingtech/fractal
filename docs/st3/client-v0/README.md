@@ -35,6 +35,11 @@ Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwin
 constructors and decoding, including Unicode-scalar lengths, URI references and
 UTC timestamps (a leap second is accepted only at 23:59 UTC). Shared
 `notice-conformance.json` fixtures exercise decoding and lossless encoding.
+Effect's opt-in `x-st-codec: lossless-timestamp` decodes to `{ wire, instant }`:
+the original validated RFC3339 spelling and an `Option<DateTime.Utc>` millisecond
+projection (`None` for leap seconds). Encoding reproduces `wire` exactly, including
+microseconds and finer fractions, and refuses inconsistent projections. Only
+`NoticeTimestamp` opts in; the existing `timestamp` codec remains `DateTime.Utc`.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
