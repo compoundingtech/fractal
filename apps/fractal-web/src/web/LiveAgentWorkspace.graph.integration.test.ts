@@ -68,7 +68,7 @@ const eagerGraph = (entry: string, includeLazy = false) => {
 }
 
 describe('conversation eager graph boundary', () => {
-  it('keeps ConversationPane, the kit Transcript/Markdown and refractor outside the production shell graph', () => {
+  it('keeps ConversationPane, the kit Transcript/Markdown and Highlights outside the production shell graph', () => {
     const graph = eagerGraph(resolve(web, 'main.tsx'))
     // Positive witnesses prevent an empty or incorrectly resolved graph from passing.
     expect(graph.files).toContain(resolve(web, 'LiveAgentWorkspace.tsx'))
@@ -77,12 +77,28 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/sidebar/RowOverlays.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/declaration/DeclarationPanel.tsx'))
     expect(graph.files.some(file => /\/(?:ConversationPane|Transcript|Markdown)\.tsx$/.test(file))).toBe(false)
-    expect(graph.dependencies.some(specifier => /^(?:refractor|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.dependencies.some(specifier => /^(?:@pierre\/highlights|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.dependencies).not.toContain('@assistant-ui/react')
     expect(graph.files).toContain(resolve(web, 'ConversationPaneFallback.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(graph.files).not.toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
+  })
+
+  it('keeps the changelog registry out of the eager workspace and AgentUsage graphs', () => {
+    for (const entry of ['main.tsx', '../shell/AgentUsage.tsx']) {
+      const graph = eagerGraph(resolve(web, entry))
+      expect(graph.files).toContain(resolve(web, '../extensions/app-public.ts'))
+      expect(graph.files.some(file => file.includes('/.changelog/'))).toBe(false)
+      expect(graph.files).not.toContain(resolve(web, '../changelog/build.ts'))
+    }
+    // The on-demand development manifest still reaches the real registry; production compiles it.
+    const manifest = eagerGraph(resolve(web, '../changelog/build.ts'))
+    expect(manifest.files).toContain(resolve(web, '../../.changelog/registry.generated.ts'))
+    // Workspace stories can warm code without owning the application's virtual build identity.
+    expect(manifest.dependencies).not.toContain('virtual:build-identity')
   })
 
   it('still reaches the real heavy composition through the on-demand pane', () => {
@@ -92,11 +108,25 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    const withGrammars = eagerGraph(resolve(web, 'ConversationPane.tsx'), true)
-    expect(withGrammars.files).toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    expect(withGrammars.dependencies).toContain('refractor/core')
+    expect(eagerGraph(resolve(web, 'ConversationPane.tsx'), true).dependencies).toContain('@pierre/highlights')
+  })
+
+  it('keeps inline alert answers reachable through the on-demand Alerts tab', () => {
+    const graph = eagerGraph(resolve(web, 'AlertsTab.tsx'))
+    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
+    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AnswerAlert.tsx'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
+    const withHighlights = eagerGraph(resolve(web, 'AlertsTab.tsx'), true)
+    expect(withHighlights.dependencies).toContain('@pierre/highlights')
+    const production = eagerGraph(resolve(web, 'main.tsx'), true)
+    expect(production.files).toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(production.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
   })
 
   it('reaches the real diff viewer only through the on-demand Changes inspector', () => {
@@ -104,11 +134,10 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    const withGrammars = eagerGraph(resolve(web, 'ChangesInspector.tsx'), true)
-    expect(withGrammars.files).toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    expect(withGrammars.dependencies).toContain('refractor/core')
+    expect(eagerGraph(resolve(web, 'ChangesInspector.tsx'), true).dependencies).toContain('@pierre/highlights')
     expect(graph.files).not.toContain(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))

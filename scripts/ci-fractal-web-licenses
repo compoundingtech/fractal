@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Record/check licenses for every registry package in the frozen pnpm v9 lock.
 
-Installed manifests are authoritative. Hoisted installs can nest duplicate versions; scan
-all package-level node_modules, not just the root. For packages omitted by the installer
-(e.g. optional platform binaries), read package.json from the exact npm archive after
-verifying its lockfile integrity. Never use mutable registry license metadata or UNKNOWN.
+Installed manifests and recognized LICENSE files are authoritative. Hoisted installs can
+nest duplicate versions; scan all package-level node_modules, not just the root. For
+packages omitted by the installer (e.g. optional platform binaries), read these files
+from the exact npm archive after verifying its lockfile integrity. Never guess or use UNKNOWN.
 The lock-only mode needs only Python's standard library, no install or network.
 """
 
@@ -24,8 +24,12 @@ ROOT = Path(__file__).resolve().parent.parent
 INVENTORY = Path("buck2/dependencies/licenses.json")
 PROVENANCE = {
     "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
-    "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
+    "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback) or recognized LICENSE fingerprint; missing packages from lock-integrity-verified npm archives",
     "schemaVersion": 1,
+}
+# Apache-2.0 text shipped by @react-aria/optimize-locales-plugin@2.1.0, whose manifest omits license.
+LICENSE_FILE_HASHES = {
+    "7dfe6526888bac51759c99f9a51262ba2711a8c12a067f2181609dd9a4066b84": "Apache-2.0",
 }
 
 
@@ -87,8 +91,13 @@ def lock_packages(text):
     return packages
 
 
-def manifest_license(manifest):
-    value = manifest.get("license") or manifest.get("licenses")
+def manifest_license(manifest, license_file=None):
+    if "license" in manifest:
+        value = manifest["license"]
+    elif "licenses" in manifest:
+        value = manifest["licenses"]
+    else:
+        value = LICENSE_FILE_HASHES.get(hashlib.sha256(license_file).hexdigest()) if license_file is not None else None
     if isinstance(value, list):
         licenses = [license_string(item) for item in value]
         if not licenses:
@@ -115,7 +124,9 @@ def installed_manifests(directory, keys):
             data = json.loads(manifest.read_text())
             key = (data.get("name"), data.get("version"))
             if key in keys:
-                license = manifest_license(data)
+                license_path = path / "LICENSE"
+                license_file = license_path.read_bytes() if "license" not in data and "licenses" not in data and license_path.is_file() else None
+                license = manifest_license(data, license_file)
                 if key in found and found[key] != license:
                     raise ValueError(f"conflicting installed licenses for {key}: {manifest}")
                 found[key] = license
@@ -163,6 +174,10 @@ def archive_manifest(data, integrity, key):
         if not member.isfile():
             raise ValueError(f"archive manifest is not a regular file: {key}")
         manifest = json.load(archive.extractfile(member))
+        if "license" not in manifest and "licenses" not in manifest:
+            license_member = next((member for member in members if member.name == f"{root}/LICENSE" and member.isfile()), None)
+            if license_member is not None:
+                manifest["license"] = manifest_license(manifest, archive.extractfile(license_member).read())
     if (manifest.get("name"), manifest.get("version")) != key:
         raise ValueError(f"archive manifest identity mismatch: {key}")
     return manifest
