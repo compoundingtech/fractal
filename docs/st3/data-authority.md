@@ -602,7 +602,7 @@ The view must be tested separately at identical explicit as_of and recipients. I
 
 The history includes mission/work/run state, two immutable document versions, started/candidate/preview/approved planning, message send/close, cumulative usage and harness transitions. It uses equal acceptance times, reversed and interleaved single-envelope arrival, on-disk restart plus full replay, checkpoint proof, and real production tombstone/delete/replay on isolated stores. All mismatches are accumulated by phase and table instead of stopping at the first planning mismatch. No shared daemon or agent seat is restarted.
 
-Validation command: `cargo test -p fractal --lib every_shared_projection_agrees_after_shuffle_restart_and_checkpoint -- --nocapture`.
+Validation command: `cargo test -p st3 --lib every_shared_projection_agrees_after_shuffle_restart_and_checkpoint -- --nocapture`.
 
 Observed baseline failure: reverse delivery disagrees on planning_sessions, planning_candidates,
 planning_previews, selected document bindings and usage summary in all three phases. Interleaved
@@ -615,7 +615,7 @@ table. The original source-text guard `shared_folds_never_order_by_local_arrival
 literal SQL inspection cannot distinguish shared winner selection from legitimate local
 pagination metadata and requires an implementation-name allowlist. Behavioral shuffle,
 restart, checkpoint, reader and digest comparisons enforce the invariant without pinning SQL
-wording. Run the current checks with `cargo test -p fractal --lib canonical_audit -- --nocapture`.
+wording. Run the current checks with `cargo test -p st3 --lib canonical_audit -- --nocapture`.
 At the original audit baseline, table classification passed; the source guard named 62 shared
 arrival-order clauses; shuffle/restart/checkpoint comparison failed with the divergences above.
 
