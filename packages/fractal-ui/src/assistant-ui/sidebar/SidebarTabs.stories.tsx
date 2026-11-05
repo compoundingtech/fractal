@@ -228,6 +228,16 @@ async function keyboardPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   await expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight)
   await expect(agentsPanel.getBoundingClientRect().bottom).toBeLessThanOrEqual(host.getBoundingClientRect().bottom)
 
+  // The selected panel has its own controls, so Tab skips the panel itself in both directions.
+  // This fixture's row-open button is disabled; reported details is the first enabled control.
+  const firstControl = within(within(agentsPanel).getAllByTestId('taste-agent-row')[0]!).getByRole('button', { name: /^Reported details for / })
+  await expect(agentsPanel).toHaveAttribute('tabindex', '-1')
+  await userEvent.click(tabs[0]!)
+  await userEvent.tab()
+  await expect(firstControl).toHaveFocus()
+  await userEvent.tab({ shift: true })
+  await expect(tabs[0]).toHaveFocus()
+
   // ←/→ move focus and selection together; Home/End reach the ends.
   await userEvent.click(tabs[0]!)
   await userEvent.keyboard('{ArrowRight}')
@@ -253,6 +263,23 @@ async function keyboardPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   await expect(within(section).getByTestId('sidebar-tab-selection')).toHaveTextContent('agents')
   // Selection changes never move a marker or drop a label.
   await assertMarkers(section, plain)
+}
+
+/** A portalled row menu must restore focus inside the same selected sidebar panel after Escape. */
+async function overlayFocusPlay({ canvasElement }: { readonly canvasElement: HTMLElement }) {
+  const section = await within(canvasElement).findByRole('region', { name: /^Sidebar tabs / })
+  const panel = within(section).getByRole('tabpanel', { name: names[0] })
+  const row = within(panel).getAllByTestId('taste-agent-row')[0]!
+  const trigger = within(row).getByRole('button', { name: /^Actions for / })
+  const documentBody = within(canvasElement.ownerDocument.body)
+  await userEvent.click(trigger)
+  const menu = await documentBody.findByRole('menu')
+  await waitFor(() => expect(menu.contains(canvasElement.ownerDocument.activeElement)).toBe(true))
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(documentBody.queryByRole('menu')).toBeNull())
+  await waitFor(() => expect(trigger).toHaveFocus())
+  await expect(panel).toContainElement(trigger)
+  await expect(within(section).getByRole('tab', { name: names[0] })).toHaveAttribute('aria-selected', 'true')
 }
 
 /** At the row's exact natural width (equal tracks, each as wide as the widest tab with its count) every count shows; one pixel less drops every count together, and no label truncates. */
@@ -294,6 +321,7 @@ export default meta
 
 type Story = StoryObj<Args>
 export const Keyboard: Story = { tags: ['critical'], name: 'Keyboard · markers, selection and panel', play: keyboardPlay }
+export const OverlayFocusReturn: Story = { tags: ['critical'], name: 'Panel focus · Escape returns to row action trigger', play: overlayFocusPlay }
 export const CountFit: Story = { tags: ['critical'], name: 'Count fit · counts drop before labels', play: countFitPlay }
 
 /** Both themes with an unreachable machine holding work: ◆3, ?, a single ◆ and Fleet's !. */
