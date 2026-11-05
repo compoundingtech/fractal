@@ -1,11 +1,13 @@
 use super::*;
 use fractal_store::references::{Scope, validate_step_reviewer};
-use fractal_store::store::{pinned_generation_mission_tx, run_generation_ids_tx, step_run_row_tx};
+use fractal_store::store::{
+    flatten_mission_step_specs, pinned_generation_mission_tx, run_generation_ids_tx,
+    step_run_row_tx,
+};
 
 /// Internal hierarchy policy over one caller-owned connection snapshot.
 /// Includes every generation, descendant and enclosing parent step, not sibling runs.
-/// Loop definitions fail closed until loop history validation lands. Start/reassignment
-/// validation is not provided here; neither public parser accepts agent-review.
+/// Loops fail closed; start/reassignment is unavailable and public parsers still reject agent-review.
 #[doc(hidden)]
 pub fn validate_run_reviewer(
     scope: &Scope<'_>,
@@ -44,15 +46,14 @@ pub fn validate_run_reviewer(
             let definition = pinned_generation_mission_tx(connection, &generation)
                 .map_err(internal)?
                 .ok_or_else(|| unresolved(&generation))?;
-            if definition
-                .steps
-                .values()
-                .any(|step| step.loop_spec.is_some())
-            {
+            let specs = flatten_mission_step_specs(&definition);
+            if specs.iter().any(|step| step.loop_spec.is_some()) {
                 return Err(St3Error::new("reviewer-history-unsupported", &subject));
             }
             let view = run_generation_view_tx(connection, &generation).map_err(internal)?;
-            if view.run != subject || view.steps.is_empty() {
+            let expected: BTreeSet<_> = specs.iter().map(|s| s.path.as_str()).collect();
+            let actual: BTreeSet<_> = view.steps.iter().map(|s| s.step.as_str()).collect();
+            if view.run != subject || expected.is_empty() || actual != expected {
                 return Err(unresolved(&generation));
             }
             for step in &view.steps {

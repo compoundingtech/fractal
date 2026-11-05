@@ -38,6 +38,11 @@ mission "looping" state="ready" {
   goal "Do not silently accept unsupported history."
   loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } }
 }
+mission "nested-loop" state="ready" { goal "Reject nested loop history."
+  step "outer" { agentless; mission "nested" { goal "Loop inline."
+    loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } }
+  } }
+}
 "#,
         "declare",
     );
@@ -73,17 +78,8 @@ fn check(store: &Store, run: &str, reviewer: &str) -> String {
 fn event(store: &Store, subject: &str, kind: &str, actor: &str, body: Value) {
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
-    append_claim_tx(
-        &tx,
-        store.origin(),
-        subject,
-        kind,
-        Some(actor),
-        &body,
-        &[],
-        None,
-    )
-    .unwrap();
+    let origin = store.origin();
+    append_claim_tx(&tx, origin, subject, kind, Some(actor), &body, &[], None).unwrap();
     tx.commit().unwrap();
 }
 
@@ -150,9 +146,33 @@ fn agent_review_run_missing_rows_and_unknown_owner_fail_closed() {
 #[test]
 fn agent_review_run_loop_definitions_fail_closed() {
     let (store, _, _) = fixture();
-    let run = store.create_mission_run(&request("looping")).unwrap();
+    for mission in ["looping", "nested-loop"] {
+        let run = store.create_mission_run(&request(mission)).unwrap();
+        assert_eq!(
+            check(&store, &run.subject, FREE),
+            "reviewer-history-unsupported"
+        );
+    }
+}
+
+#[test]
+fn agent_review_run_missing_step_projection_fails_closed() {
+    let (store, parent, _) = fixture();
+    let other = parent
+        .steps
+        .iter()
+        .find(|step| step.step == "other")
+        .unwrap();
+    event(&store, &other.subject, "work.progress", FREE, json!({}));
+    store
+        .connection
+        .write()
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-he933d1015ed6 owner=fractal_missions::store::missions::run_review::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE subject=?1", [&other.subject],
+        )
+        .unwrap();
     assert_eq!(
-        check(&store, &run.subject, FREE),
-        "reviewer-history-unsupported"
+        check(&store, &parent.subject, FREE),
+        "reviewer-owner-unresolved"
     );
 }

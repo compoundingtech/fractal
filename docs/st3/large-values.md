@@ -97,10 +97,9 @@ storage matches the existing identity fixture; its exact-wire TODO must preserve
 pending-replica semantics through any reference/chunk conversion.
 Neither exception creates a production writer or proves encoded byte/cost bounds.
 
-`fractal_missions::store::missions::run_review` owns `lv-hed575cdba946`.
-Its existing inline run/parent keys and creation-claim JSON detect missing child
-projections. Reference/chunk conversion must preserve this fail-closed boundary.
-The exception adds no writer or size/cost guarantee.
+`fractal_missions::store::missions::run_review` owns reader `lv-hed575cdba946`; its `tests` module owns deletion fixture `lv-he933d1015ed6`.
+Existing inline run/step keys and creation-claim JSON detect missing projections. Reference/chunk and reclamation changes must preserve these fail-closed regressions.
+Neither exception adds a production writer or size/cost guarantee.
 
 ### Cold runtime reduction inventory (PR #1706)
 
