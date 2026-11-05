@@ -1728,6 +1728,7 @@ impl Store {
         }
         let mut judged = 0;
         let mut loans = 0;
+        let mut ordinary_claims = BTreeSet::new();
         loop {
             loans += 1;
             let mut connection = self.connection.write();
@@ -1771,7 +1772,22 @@ impl Store {
             // A membership change can queue millions of old verdicts. Ordinary exchanges
             // judge only their fresh work; the paced worker owns that historical backlog.
             let queued = if fresh_only {
-                fresh
+                // Fresh delegations and nonce collisions can requeue another fresh claim
+                // already visited in this pass. Reconcile those IDs, never the old backlog.
+                ordinary_claims.extend(fresh);
+                let mut pending = transaction.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)",
+                )?;
+                let mut queued = Vec::new();
+                for claim in &ordinary_claims {
+                    if pending.query_row([claim], |row| row.get::<_, bool>(0))? {
+                        queued.push(claim.clone());
+                        if queued.len() == JUDGE_CHUNK {
+                            break;
+                        }
+                    }
+                }
+                queued
             } else {
                 transaction
                     .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
@@ -1822,7 +1838,9 @@ impl Store {
                 migration::finish_judging(&transaction)?;
             }
             transaction.commit()?;
-            if drained || (fresh_only && fresh_empty) || max_loans.is_some_and(|max| loans >= max) {
+            if drained || (fresh_only && fresh_empty && queued.is_empty())
+                || max_loans.is_some_and(|max| loans >= max)
+            {
                 return Ok(judged);
             }
         }
