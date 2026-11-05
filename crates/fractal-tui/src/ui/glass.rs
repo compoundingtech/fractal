@@ -5206,17 +5206,13 @@ mod tests {
                 .unwrap()
         };
         let rect = border(&ui);
+        let (x, y) = (rect.x, rect.y);
         assert_eq!((rect.x, rect.width), (44, 1));
         let background = terminal.backend().buffer()[(rect.x, rect.y)].bg;
         mouse(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
         terminal.draw(|frame| ui.render(frame)).unwrap();
         assert_ne!(terminal.backend().buffer()[(rect.x, rect.y)].bg, background);
-        mouse(
-            &mut ui,
-            MouseEventKind::Down(MouseButton::Left),
-            rect.x,
-            rect.y,
-        );
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), x, y);
         mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 60, rect.y);
         terminal.draw(|frame| ui.render(frame)).unwrap();
         assert_eq!(border(&ui).x, 60, "resize is visible before release");
@@ -5227,29 +5223,14 @@ mod tests {
         );
         mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 0, rect.y);
         assert_eq!(ui.sidebar_width, Some(24));
-        mouse(
-            &mut ui,
-            MouseEventKind::Drag(MouseButton::Left),
-            139,
-            rect.y,
-        );
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 139, y);
         assert_eq!(ui.sidebar_width, Some(115));
         mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 139, rect.y);
         terminal.draw(|frame| ui.render(frame)).unwrap();
-        let rect = border(&ui);
+        let Rect { x, y, .. } = border(&ui);
         for _ in 0..2 {
-            mouse(
-                &mut ui,
-                MouseEventKind::Down(MouseButton::Left),
-                rect.x,
-                rect.y,
-            );
-            mouse(
-                &mut ui,
-                MouseEventKind::Up(MouseButton::Left),
-                rect.x,
-                rect.y,
-            );
+            mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), x, y);
+            mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), x, y);
         }
         assert_eq!(ui.sidebar_width, None);
         terminal.draw(|frame| ui.render(frame)).unwrap();

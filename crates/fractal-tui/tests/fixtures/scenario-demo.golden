@@ -273,34 +273,34 @@
 === Terminal ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ~ Atlas Builder                                                            +
- ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
- ▾ Agents 4                             │  Ctrl-C and Ctrl-D need a second press to reach the agent
-   Atlas Builder                        │ scenario harness ready
-   Atlas Docs                           │ $ pnpm -r typecheck
-   Atlas Migrator                       │ packages/api typecheck: Done
-   Atlas Reviewer                       │ packages/web typecheck: Done
- ▾ Missions 1                           │ packages/worker typecheck: src/jobs/syncAvatars.ts(41,18): error TS2554: Expe
-   example/atlas · Rename fetchUser to l│ d 2 arguments, but got 1.
- ▾ Machines 2                           │ packages/worker typecheck: Failed
-   foundry                              │
-   meadow                               │ scenario turn 3 output complete
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
+ / Filter:                       +New│  ~ Atlas Builder                                                               +
+ ▾ Everything else 7                 │  ← Return · Ctrl+\   Atlas Builder · demo terminal
+ ▾ Agents 4                          │  Ctrl-C and Ctrl-D need a second press to reach the agent
+   Atlas Builder                     │ scenario harness ready
+   Atlas Docs                        │ $ pnpm -r typecheck
+   Atlas Migrator                    │ packages/api typecheck: Done
+   Atlas Reviewer                    │ packages/web typecheck: Done
+ ▾ Missions 1                        │ packages/worker typecheck: src/jobs/syncAvatars.ts(41,18): error TS2554: Expecte
+   example/atlas · Rename fetchUser t│ d 2 arguments, but got 1.
+ ▾ Machines 2                        │ packages/worker typecheck: Failed
+   foundry                           │
+   meadow                            │ scenario turn 3 output complete
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
+                                     │
  Keys: ctrl+\ back to Fractal TUI   drag copy   ctrl+alt+r reset modes
 
