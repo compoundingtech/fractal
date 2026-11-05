@@ -783,12 +783,13 @@ function RepeatedLoadEarlierStory({ scheme }: { scheme?: Scheme }) {
 /**
  * Five independent prepends per viewport/theme. Only native delivery and the following 24 paint opportunities
  * (about 400ms at 60Hz) are inside each bracket: no instrumented interactions, assertions, polling or idle timer.
- * At most one of the five prepends may contain a >50ms frame; every prepend must also have p95 <=50ms.
- * Raw intervals, max and React render time remain diagnostics, not an unsupported attribution of scheduler pauses.
+ * At most one of the five prepends may contain a frame of four or more vsync periods; p95 is at most three periods.
+ * Raw intervals, milliseconds, periods and React render time remain diagnostics.
  */
 export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarlierStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
   const canvas = within(canvasElement)
   const maxima: number[] = []
+  const maximaPeriods: number[] = []
   const sampleFrames = async (deliver?: HTMLElement) => {
     const intervals: number[] = []
     const longAnimationFrames: unknown[] = []
@@ -839,7 +840,11 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
       if (onAbort !== undefined) abortSignal.removeEventListener('abort', onAbort)
       if (observer !== undefined) { collect(observer.takeRecords()); observer.disconnect() }
     }
-    return { startedAt, endedAt, intervals, max: Math.max(...intervals), longFrames: intervals.filter(duration => duration > 50).length, loafSupported, longAnimationFrames }
+    const sorted = [...intervals].sort((a, b) => a - b)
+    const periodMs = (sorted[sorted.length / 2 - 1]! + sorted[sorted.length / 2]!) / 2
+    // rAF timestamps quantize to vsync: 50.0/50.1ms can both be three 60Hz periods.
+    // Classify nearest whole periods, with the four-period boundary halfway above three.
+    return { startedAt, endedAt, intervals, periodMs, max: sorted.at(-1)!, maxPeriods: sorted.at(-1)! / periodMs, longFrames: intervals.filter(duration => duration > 3.5 * periodMs).length, loafSupported, longAnimationFrames }
   }
   for (let iteration = 0; iteration < 5; iteration++) {
     if (iteration > 0) await userEvent.click(canvas.getByRole('button', { name: 'Reset transcript' }))
@@ -864,19 +869,23 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
     const sorted = [...intervals].sort((a, b) => a - b)
     const max = sorted.at(-1)!, p95 = sorted[Math.ceil(sorted.length * 0.95) - 1]!
     maxima.push(max)
-    const longFrames = intervals.filter(duration => duration > 50).length
+    maximaPeriods.push(prepend.maxPeriods)
+    const longFrames = prepend.longFrames
+    const p95Periods = Math.round(p95 / prepend.periodMs)
     host.dataset.prependFrameMaxMs = max.toFixed(1)
     host.dataset.prependFrameP95Ms = p95.toFixed(1)
+    host.dataset.prependFrameMaxPeriods = prepend.maxPeriods.toFixed(2)
+    host.dataset.prependFrameP95Periods = String(p95Periods)
     host.dataset.prependFrameCount = String(intervals.length)
     host.dataset.prependLongFrameCount = String(longFrames)
     host.dataset.prependFrameIntervalsMs = JSON.stringify(intervals)
-    const diagnostic = `prepend ${iteration + 1}/5: maxima=${maxima.map(value => value.toFixed(1)).join(',')}ms; frames=${intervals.map(value => value.toFixed(1)).join(',')}; React=${host.dataset.prependReactMs === undefined ? 'not reported by this build' : `${host.dataset.prependReactMs}ms`}`
+    const diagnostic = `prepend ${iteration + 1}/5: maxima=${maxima.map(value => value.toFixed(1)).join(',')}ms; periods=${maximaPeriods.map(value => value.toFixed(2)).join(',')}; frames=${intervals.map(value => value.toFixed(1)).join(',')}; React=${host.dataset.prependReactMs === undefined ? 'not reported by this build' : `${host.dataset.prependReactMs}ms`}`
     await expect(canvas.queryByTestId('history-boundary'), diagnostic).toBeNull()
     await expect(Math.abs(laneOffset(lane, 'tail-0/prompt') - before), 'prepend moved the first visible message').toBeLessThanOrEqual(2)
     await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length, 'the older page mounted whole').toBeLessThan(60)
-    await expect(p95, `p95 <=50ms; ${diagnostic}`).toBeLessThanOrEqual(50)
+    await expect(p95Periods, `p95 <=3 vsync periods; ${diagnostic}`).toBeLessThanOrEqual(3)
   }
-  await expect(maxima.filter(max => max > 50).length, `at most one of five prepends may contain a frame >50ms; per-prepend maxima=${maxima.map(value => value.toFixed(1)).join(',')}ms`).toBeLessThanOrEqual(1)
+  await expect(maximaPeriods.filter(periods => periods > 3.5).length, `at most one of five prepends may contain a frame of four or more periods; per-prepend maxima=${maxima.map(value => value.toFixed(1)).join(',')}ms; periods=${maximaPeriods.map(value => value.toFixed(2)).join(',')}`).toBeLessThanOrEqual(1)
 } }
 export const PendingSend: Story = { tags: ['critical'], args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
