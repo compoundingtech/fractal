@@ -542,6 +542,7 @@ fn fold_missions_inner(
 struct Plan {
     cut: u64,
     frontier: u64,
+    eta_generation: u64,
     time_unix_ms: u128,
     /// When the plan was read: the earliest time any refolded card holds at, from which the
     /// next fold looks for ended leases.
@@ -563,6 +564,7 @@ impl Plan {
         base: &Publication<MissionRows>,
     ) -> anyhow::Result<Publication<MissionRows>> {
         let mut rows = base.rows.clone();
+        rows.eta_generation = self.eta_generation;
         if let Some(((attention, gates), at)) = self.attention {
             rows.attention_runs = attention;
             rows.gates = gates;
@@ -592,6 +594,7 @@ fn missions_from_nothing(store: &Store) -> anyhow::Result<Publication<MissionRow
         let (attention_runs, gates) = store.human_attention()?;
         let rows = MissionRows {
             time_unix_ms: store.projection_time_at(cut)?,
+            eta_generation: store.mission_eta_changes(i64::MAX as u64)?.0,
             attention_runs,
             gates,
             roster: roster_fleet(store, None),
@@ -747,6 +750,8 @@ fn missions_since(
         };
         let changes = store.mission_list_changes(from, cut)?;
         let mut missions = changes.missions;
+        let (eta_generation, eta_missions) = store.mission_eta_changes(rows.eta_generation)?;
+        missions.extend(eta_missions);
         // Worker leases that ended since the last fold show their steps ready again.
         missions.extend(store.missions_with_leases_ended(rows.folded_at_unix_ms, now)?);
         // A quiet renewal moves a lease, and its step's `since`, with no claim.
@@ -778,12 +783,13 @@ fn missions_since(
         let attention = attention.map(|attention| (attention, now));
         if missions.len() > FOLD_CHUNK {
             return Ok(Advance::TooMany(Plan {
-                cut, frontier, time_unix_ms: store.projection_time_at(cut)?,
+                cut, frontier, eta_generation, time_unix_ms: store.projection_time_at(cut)?,
                 at: now, leases, missions, attention, roster,
             }));
         }
         let changed = !missions.is_empty();
         let mut rows = rows.clone();
+        rows.eta_generation = eta_generation;
         if let Some(((attention, gates), at)) = attention {
             rows.attention_runs = attention;
             rows.gates = gates;
