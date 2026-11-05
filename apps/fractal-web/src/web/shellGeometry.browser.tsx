@@ -1,5 +1,5 @@
 import { Agent, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createRoot } from 'react-dom/client'
