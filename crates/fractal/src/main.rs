@@ -7322,6 +7322,21 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if !projected {
         stderr_message("st", format_args!("the replicated projection remains deferred; the daemon will use its last good graph"));
     }
+    // The shard admitted its backlog before the graph admitted its own. Membership the graph
+    // admitted since (a leaver's bounds an older build held) decides envelopes the shard held.
+    if let Ok(shard) = &messages_shard {
+        let readmitted = fractal_daemon::task_cpu::blocking("startup.readmit_messages_shard", || {
+            if shard.fleet_moved_since_admission()? {
+                shard.validate_replication_backlog()?;
+                shard.apply_replication_repairs()?;
+                shard.project_replication_backlog()?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        if let Err(error) = readmitted {
+            stderr_message("st", format_args!("the messages shard's held envelopes wait for its next exchange: {error:#}"));
+        }
+    }
     if admission.unknown != 0 {
         stderr_message("st", format_args!("{} claims waiting for a newer build", admission.unknown));
     }
@@ -7439,6 +7454,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
     )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -7471,6 +7487,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
     spawn_response_expiry(store.clone());
+    // After the shard opened, or failed to: a member without one drains to the graph.
+    spawn_message_outbox(store.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -7573,6 +7591,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     fractal_daemon::api::start_agent_roster(&state);
+    // Nor does the first agent detail read wait for the launcher's identity to be measured.
+    if let Err(error) = fractal_daemon::reconcile::launch_executable()
+        .and_then(|executable| fractal_drivers::harness_admission::executable_identity_ready(&executable))
+    {
+        eprintln!("st3: measuring the launcher's identity: {error:#}");
+    }
     fractal_daemon::api::seat_freshness::start_seat_freshness_push(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
@@ -20804,6 +20828,87 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 error => {
                     stderr_message("st3", format_args!("publication evidence status failed: {error:?}"));
                     return;
+                }
+            }
+        }
+    }));
+}
+
+/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
+/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
+/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
+/// is in this build, a commit costs no more than that. A message a drain could not write (the
+/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
+/// commit, so it never holds up new mail.
+fn spawn_message_outbox(store: Arc<Store>) {
+    const RETRY: Duration = Duration::from_secs(30);
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = store.observe_commits(move |connection| {
+        if connection.is_autocommit() {
+            changed.send_replace(());
+        }
+    });
+    let waiting = |store: Arc<Store>| async move {
+        tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_waiting", || {
+            fractal_store::store::message_outbox::waiting(&store.readers.get())
+        }))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|waiting| waiting)
+    };
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.outbox", async move {
+        let _observer = observer;
+        let mut retry_at: Option<Instant> = None;
+        loop {
+            receiver.borrow_and_update();
+            match waiting(store.clone()).await {
+                Ok((fresh, any)) if fresh || (any && retry_at.is_none_or(|at| Instant::now() >= at)) => {
+                    // New mail alone drains only new mail: a refused message waits out its pause.
+                    let retry_due = any && retry_at.is_none_or(|at| Instant::now() >= at);
+                    let drain_store = store.clone();
+                    match drain_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_drain", || {
+                        if retry_due {
+                            fractal_store::store::message_outbox::drain(&drain_store)
+                        } else {
+                            fractal_store::store::message_outbox::drain_fresh(&drain_store)
+                        }
+                    }))
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => stderr_message("st3", format_args!("message outbox drain failed: {error:#}")),
+                        Err(error) => stderr_message("st3", format_args!("message outbox drain stopped: {error}")),
+                    }
+                    // A new message queued meanwhile has its own commit; what stays waits a while,
+                    // counted from its last try, so new mail does not put its retry off.
+                    retry_at = match waiting(store.clone()).await {
+                        Ok((_, false)) => None,
+                        _ if retry_due || retry_at.is_none() => Some(Instant::now() + RETRY),
+                        _ => retry_at,
+                    };
+                }
+                // Waiting for a retry, or emptied by another drain (a backup's).
+                Ok((_, any)) => {
+                    if !any {
+                        retry_at = None;
+                    }
+                }
+                Err(error) => {
+                    stderr_message("st3", format_args!("message outbox check failed: {error:#}"));
+                    retry_at = Some(Instant::now() + RETRY);
+                }
+            }
+            match retry_at {
+                Some(at) => tokio::select! {
+                    changed = receiver.changed() => if changed.is_err() {
+                        return;
+                    },
+                    () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+                },
+                None => {
+                    if receiver.changed().await.is_err() {
+                        return;
+                    }
                 }
             }
         }

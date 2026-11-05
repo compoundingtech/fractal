@@ -851,7 +851,13 @@ fn validate_reobserved_physical(
     current: &fractal_runtime::PtyObservation,
     peer_belongs: bool,
 ) -> Result<(), St3Error> {
-    if current != captured || !peer_belongs {
+    // The title driver renames this label independently of channel binding. Keep
+    // every identity and binding field fenced, but allow that presentation change.
+    let expected = fractal_runtime::PtyObservation {
+        display_name: current.display_name.clone(),
+        ..captured.clone()
+    };
+    if current != &expected || !peer_belongs {
         return Err(refused(
             "the channel left or replaced the exact physical runtime",
         ));
@@ -1612,9 +1618,46 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn changed_reobservation_is_refused_not_indeterminate() {
-        let captured = fractal_runtime::PtyObservation {
+    fn title_rename_preserves_physical_runtime_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        std::fs::create_dir_all(&state.pty_root).unwrap();
+        let pid = std::process::id();
+        let path = state.pty_root.join("quartz.json");
+        let mut record = json!({
+            "daemonPid": pid,
+            "daemonStartToken": pty_core::registry::read_process_start_token(pid as i32).unwrap(),
+            "createdAt": "generation-1",
+            "tags": {"st3.subject": "agent/example/quartz"}
+        });
+        std::fs::write(&path, record.to_string()).unwrap();
+        let runtime = PhysicalRuntime {
+            id: "quartz".into(),
+            incarnation: format!("{pid}:generation-1"),
+            required_subject_tag: Some("agent/example/quartz".into()),
+        };
+        let captured = observe_physical_runtime(&state, &runtime).unwrap();
+        assert_eq!(captured.display_name, None);
+
+        // The title driver can rename the same PTY while its channel is binding.
+        record["displayName"] = json!("Quartz");
+        let renamed = path.with_extension("renamed");
+        std::fs::write(&renamed, record.to_string()).unwrap();
+        std::fs::rename(renamed, &path).unwrap();
+        assert_eq!(
+            observe_physical_runtime(&state, &runtime)
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Quartz")
+        );
+        validate_physical_runtime(&state, &runtime, &captured, pid).unwrap();
+    }
+
+    fn captured_physical() -> fractal_runtime::PtyObservation {
+        fractal_runtime::PtyObservation {
             name: "canonical-runtime".into(),
             status: "running".into(),
             exit_code: None,
@@ -1622,23 +1665,83 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             created_at: Some("created".into()),
             display_name: Some("original".into()),
             tags: BTreeMap::from([("st3.subject".into(), "agent/example".into())]),
-        };
-        for current in [
-            fractal_runtime::PtyObservation {
-                display_name: Some("renamed".into()),
-                ..captured.clone()
-            },
-            fractal_runtime::PtyObservation {
-                tags: BTreeMap::from([("st3.subject".into(), "agent/replacement".into())]),
-                ..captured.clone()
-            },
-        ] {
-            assert_eq!(
-                validate_reobserved_physical(&captured, &current, true)
-                    .unwrap_err()
-                    .code,
-                "stale-mailbox-session"
-            );
+        }
+    }
+
+    fn assert_reobservation_refused(change: impl FnOnce(&mut fractal_runtime::PtyObservation)) {
+        let captured = captured_physical();
+        let mut current = captured.clone();
+        // A replacement that also changes its label must still be refused.
+        current.display_name = Some("renamed".into());
+        change(&mut current);
+        assert_eq!(
+            validate_reobserved_physical(&captured, &current, true)
+                .unwrap_err()
+                .code,
+            "stale-mailbox-session"
+        );
+    }
+
+    #[test]
+    fn reobserved_canonical_name_change_is_refused() {
+        assert_reobservation_refused(|current| current.name = "replacement".into());
+    }
+
+    #[test]
+    fn reobserved_pid_change_is_refused() {
+        assert_reobservation_refused(|current| current.pid = Some(43));
+        assert_reobservation_refused(|current| current.pid = None);
+    }
+
+    #[test]
+    fn reobserved_generation_change_with_reused_pid_is_refused() {
+        assert_reobservation_refused(|current| current.created_at = Some("replacement".into()));
+        assert_reobservation_refused(|current| current.created_at = None);
+    }
+
+    #[test]
+    fn reobserved_ended_status_is_refused() {
+        assert_reobservation_refused(|current| current.status = "exited".into());
+    }
+
+    #[test]
+    fn reobserved_exit_code_change_is_refused() {
+        assert_reobservation_refused(|current| current.exit_code = Some(0));
+    }
+
+    #[test]
+    fn reobserved_binding_tag_change_is_refused() {
+        assert_reobservation_refused(|current| {
+            current
+                .tags
+                .insert("st3.subject".into(), "agent/replacement".into());
+        });
+        assert_reobservation_refused(|current| current.tags.clear());
+        assert_reobservation_refused(|current| {
+            current.tags.insert("other".into(), "changed".into());
+        });
+    }
+
+    #[test]
+    fn reobserved_peer_outside_runtime_is_refused_after_title_rename() {
+        let captured = captured_physical();
+        let mut current = captured.clone();
+        current.display_name = Some("renamed".into());
+        assert_eq!(
+            validate_reobserved_physical(&captured, &current, false)
+                .unwrap_err()
+                .code,
+            "stale-mailbox-session"
+        );
+    }
+
+    #[test]
+    fn reobserved_title_changes_preserve_custody() {
+        let captured = captured_physical();
+        for display_name in [None, Some("renamed".into())] {
+            let mut current = captured.clone();
+            current.display_name = display_name;
+            validate_reobserved_physical(&captured, &current, true).unwrap();
         }
     }
 

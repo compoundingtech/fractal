@@ -34,9 +34,11 @@ import { NarrowSheet } from '../../../../packages/fractal-ui/src/assistant-ui/co
 import { darkTheme as assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
 import { lightTheme as compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/PinsSection.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
+import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents, useAttention } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
@@ -44,6 +46,7 @@ import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider,
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { formatDuration } from '@fractal/ui/human-time/format'
+import { createLazyChunk, readLazyChunkAssets } from '@fractal/ui/lazy-chunk'
 import { useGatewaySync } from '../data/react.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
@@ -148,31 +151,28 @@ const LiveSidebarTreeView = React.memo((props: {
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
 // A static import would evaluate the kit Transcript/Markdown before the shell paints.
-// Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
-let conversationPaneModule: Promise<typeof ConversationPaneModule> | undefined
-const loadConversationPane = () => {
-  if (conversationPaneModule === undefined) {
-    conversationPaneModule = import('./ConversationPane.tsx').catch(error => {
-      conversationPaneModule = undefined
-      throw error
-    })
-  }
-  return conversationPaneModule
-}
+// Demand and speculative prefetch share one request; a rejection stays until a user retry.
+const conversationChunk = createLazyChunk({ load: () => import('./ConversationPane.tsx'), assets: () => readLazyChunkAssets('conversation') })
 const ConversationPane = React.lazy(() => {
   // An initially selected pane and later shell prefetch must retain the same lazy identity.
   // A second wrapper suspends on an already resolved module during the first seat switch.
   prefetchedConversationPane ??= ConversationPane
-  return loadConversationPane().then(module => ({ default: module.ConversationPane }))
+  return conversationChunk.load().then(module => ({ default: module.ConversationPane }))
 })
 let prefetchedConversationPane: typeof ConversationPane | undefined
 const prefetchConversationPane = () => {
-  const request = loadConversationPane()
+  const request = conversationChunk.load()
   // Preserve this attempt's failure for the requested pane's honest, local error surface.
   // A retry creates a fresh lazy wrapper, not React's permanently rejected cached wrapper.
   prefetchedConversationPane ??= React.lazy(() => request.then(module => ({ default: module.ConversationPane })))
   void request.catch(() => {})
 }
+
+/** The first recovery re-imports in this document; after a second rejected import, reload with fresh feature assets. Drafts and selection are already persisted. */
+const LazyChunkRecoveryAction = (props: { readonly chunk: { readonly recovery: 'retry' | 'reload'; readonly reload: () => Promise<void> }; readonly onRetry: () => void }) =>
+  props.chunk.recovery === 'reload'
+    ? <button type="button" onClick={() => void props.chunk.reload()}>Reload and retry</button>
+    : <button type="button" onClick={props.onRetry}>Try again</button>
 
 /** Acquire visible route demand outside Suspense so the socket read overlaps pane evaluation. */
 const ConversationPaneLoadBoundary = (props: React.ComponentProps<typeof ConversationPaneModule.ConversationPane>) => {
@@ -195,11 +195,11 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
   render() {
     if (this.state.failed) return <div role="alert" aria-hidden={!this.props.visible} {...stylex.props(styles.empty)}>
       <p>This conversation view could not load.</p>
-      <button type="button" onClick={() => {
-        const Pane = React.lazy(() => loadConversationPane().then(module => ({ default: module.ConversationPane })))
+      <LazyChunkRecoveryAction chunk={conversationChunk} onRetry={() => {
+        const Pane = React.lazy(() => conversationChunk.retry().then(module => ({ default: module.ConversationPane })))
         prefetchedConversationPane = Pane
         this.setState({ failed: false, Pane })
-      }}>Try again</button>
+      }} />
     </div>
     const Pane = this.state.Pane
     return <React.Suspense fallback={<ConversationPaneFallback agentName={this.props.agentName} visible={this.props.visible} />}>
@@ -233,38 +233,34 @@ class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof 
 // Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
 const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
-/** Demand and idle intent share one request; a failed preload never poisons the next open. */
-let terminalDetailModule: Promise<typeof TerminalDetailModule> | undefined
 /** Set once the module resolves, so a warm reopen renders it directly instead of suspending a fresh lazy identity. */
 let terminalDetailLoaded: typeof TerminalDetailModule | undefined
-const loadTerminalDetail = () => {
-  terminalDetailModule ??= import('../terminal/TerminalDetail.tsx').then(module => {
+/** Demand and idle intent share one request; a rejection stays until a user retry. */
+const terminalChunk = createLazyChunk({
+  load: () => import('../terminal/TerminalDetail.tsx').then(module => {
     terminalDetailLoaded = module
     return module
-  }).catch(error => {
-    terminalDetailModule = undefined
-    throw error
-  })
-  return terminalDetailModule
-}
-const makeTerminalDetail = () => React.lazy(() =>
-  loadTerminalDetail().then(module => {
+  }),
+  assets: () => readLazyChunkAssets('terminal'),
+})
+const terminalDetail = (load: () => Promise<typeof TerminalDetailModule>) => React.lazy(() =>
+  load().then(module => {
     void module.prepareTerminal()
     return { default: module.TerminalDetail }
   }),
 )
 const prefetchTerminalDetail = () => {
-  void loadTerminalDetail().then(module => module.prepareTerminal()).catch(() => {})
+  void terminalChunk.load().then(module => module.prepareTerminal()).catch(() => {})
 }
 
 /** The terminal grid, fonts and native key encoder stay outside the eager shell; a fresh lazy identity on retry avoids React's permanently rejected module cache. */
 class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `terminal/${string}` }> {
-  state = { failed: false, Detail: makeTerminalDetail() }
+  state = { failed: false, Detail: terminalDetail(() => terminalChunk.load()) }
   static getDerivedStateFromError() { return { failed: true } }
   render() {
     if (this.state.failed) return <div role="alert">
       <p>This terminal view could not load.</p>
-      <button type="button" onClick={() => this.setState({ failed: false, Detail: makeTerminalDetail() })}>Try again</button>
+      <LazyChunkRecoveryAction chunk={terminalChunk} onRetry={() => this.setState({ failed: false, Detail: terminalDetail(() => terminalChunk.retry()) })} />
     </div>
     const Detail = terminalDetailLoaded?.TerminalDetail ?? this.state.Detail
     return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
@@ -274,6 +270,21 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
 }
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
+const makeUsagePane = () => React.lazy(() => import('../monitor/UsagePane.tsx'))
+class UsageCodeBoundary extends React.Component {
+  state = { failed: false, Pane: makeUsagePane() }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    if (this.state.failed) return <div role="alert" {...stylex.props(styles.paneNotice)}>
+      <p>This usage view could not load.</p>
+      <button type="button" onClick={() => this.setState({ failed: false, Pane: makeUsagePane() })}>Try again</button>
+    </div>
+    const Pane = this.state.Pane
+    return <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading usage" /></div>}>
+      <Pane />
+    </React.Suspense>
+  }
+}
 
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
@@ -458,7 +469,16 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
   // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
   const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
-  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
+  const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
+  const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
+  const pinnedItems = React.useMemo(() => {
+    const names = new Map(agents.map(agent => [agent.ref, agent.name]))
+    return pins.state.members.map(({ member }) => ({ id: member, label: names.get(member) ?? member }))
+  }, [agents, pins.state.members])
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({
+    declaration: setDeclarationRef,
+    ...(pins.editable ? { pins: { has: (ref: string) => pinned.has(ref), toggle: pins.toggle } } : {}),
+  }), [pins.editable, pins.toggle, pinned])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -640,6 +660,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
           : null}
       </>}
     <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
+      <PinsSection items={pinnedItems} editable={pins.editable} onOpen={ref => open({ ref })} onUnpin={pins.toggle} detail={pins.state.phase === 'unavailable' ? 'Pins are unavailable. Reconnect to make changes.' : undefined} onRetry={pins.retry} />
       {fleet._tag === 'Waiting' ? <>
         <RosterLoading />
         <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
@@ -820,12 +841,15 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
           <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
         </React.Suspense>
       ) : null}
+      {view._tag === 'Usage' ? (
+        <UsageCodeBoundary />
+      ) : null}
       {view._tag === 'Document' && onOpenDocument !== undefined ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading document" /></div>}>
           <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
         </React.Suspense>
       ) : null}
-      {current === '' && view._tag !== 'Missions' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
+      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
         : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
           : null}
     </div>

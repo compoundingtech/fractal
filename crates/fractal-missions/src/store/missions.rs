@@ -210,6 +210,28 @@ thread_local! {
 
 use fractal_delivery::store::run_eta::step_timestamps;
 
+/// The timing history of the runs in `?1` (and only the step subjects in `?2`, when given): each
+/// current-generation step's lifecycle claims, in canonical order. It starts from the runs' own steps
+/// (`step_runs_run_index`) and seeks each step's claims by subject and kind, so its work follows the
+/// runs read, never the store's whole history of those kinds (#5108).
+pub(crate) fn mission_step_timestamps_sql() -> String {
+    format!(
+        "WITH steps AS MATERIALIZED (
+             SELECT s.subject, s.attempt
+             FROM mission_runs r JOIN step_runs s INDEXED BY step_runs_run_index
+               ON s.run_id=r.id AND s.generation_id=r.current_generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1))
+               AND (?2 IS NULL OR s.subject IN (SELECT value FROM json_each(?2))))
+         SELECT claims.subject, steps.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM steps CROSS JOIN claims INDEXED BY claims_subject_kind_index
+           ON claims.subject=steps.subject
+          AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+              'work.claimed','work.failed','work.person-done','work.person-cancelled')
+         JOIN batches ON batches.id=claims.batch_id
+         ORDER BY claims.subject, {CANONICAL_ORDER}"
+    )
+}
+
 #[test]
 fn step_timestamps_follow_execution_not_lease_intervals() {
     let event = |kind: &str, fields: Value, at| (kind.to_owned(), json!({"fields": fields}), at);
@@ -1656,6 +1678,8 @@ pub trait MissionsStore {
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
     /// First execution opening and authoritative terminal edge of the selected attempt.
     fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
+    /// Remaining duration from bounded, incrementally projected completed-run samples.
+    fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -2113,6 +2137,10 @@ fn set_step_state_guarded(
 }
 
 impl MissionsStore for Store {
+    fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>> {
+        fractal_delivery::store::run_eta::read(&self.readers.get(), run, at_unix_ms)
+    }
+
 
     fn agent_roster_refresher_running(&self) -> bool {
         self.fractal.agent_roster_refresh.get().is_some()
@@ -4712,17 +4740,7 @@ impl MissionsStore for Store {
         }
         let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd9e9bd3ec3b9 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
-             FROM claims JOIN batches ON batches.id=claims.batch_id
-             JOIN step_runs s ON s.subject=claims.subject
-             JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
-             WHERE r.id IN (SELECT value FROM json_each(?1))
-               AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
-               AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
-                   'work.claimed','work.failed','work.person-done','work.person-cancelled')
-             ORDER BY claims.subject, {CANONICAL_ORDER}"
-        ))?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0793121bcb1a owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &mission_step_timestamps_sql())?;
         let rows = statement.query_map(params![serde_json::to_string(&runs)?, subjects.map(serde_json::to_string).transpose()?], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?, row.get::<_, String>(4)?))
@@ -5896,6 +5914,9 @@ impl MissionsStore for Store {
                 }
                 if action == "claim" && rollouts::intake_held(transaction, &actor, &subject)? {
                     return Err(St3Error::new("seat-rollout-draining", "the seat holds new work intake while its rollout drains; existing work may finish"));
+                }
+                if action == "claim" {
+                    fractal_store::store::refresh_intake::admit_claim_tx(transaction, &actor)?;
                 }
                 let current = transaction
                     .query_row(

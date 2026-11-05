@@ -88,6 +88,8 @@ pub mod client_messages;
 #[cfg(any(test, feature = "test-support"))]
 pub mod client_messages_version_benchmark;
 pub mod rollouts;
+pub mod refresh_intake;
+pub mod refresh;
 pub mod publication;
 pub mod publication_facts;
 pub mod seat_status;
@@ -248,6 +250,9 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod message_outbox;
+#[cfg(test)]
+mod message_outbox_tests;
 pub mod relayed_closes;
 #[cfg(test)]
 mod relayed_closes_tests;
@@ -291,6 +296,10 @@ pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
+#[cfg(test)]
+mod run_eta_tests;
+#[cfg(test)]
+mod run_eta_review_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
@@ -3209,6 +3218,7 @@ impl Store {
                 let normalized_actor = actor.map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
                 let actor = normalized_actor.as_deref();
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
+                validate_standing_observer_stop(intent, actor)?;
                 if let Some(options) = owned {
                     let digest = canonical_hash(&(intent, options, actor)).map_err(internal)?;
                     let cache_key = opaque_cache_key(&format!("owned-set-request:{idempotency_key}"));
@@ -17405,6 +17415,34 @@ fn clear_quarantined_claims_tx(
     Ok(())
 }
 
+/// A stop of a repository's standing GitHub observer moves its polling to the next member a watch
+/// declares it on (#5182). Only a person may: an agent moving polling waits on #4607. A host's own
+/// declarations carry no actor.
+fn validate_standing_observer_stop(
+    intent: &NormalizedIntent,
+    actor: Option<&str>,
+) -> Result<(), St3Error> {
+    let Some(actor) = actor.filter(|actor| !actor.starts_with("person/")) else {
+        return Ok(());
+    };
+    match intent
+        .subjects
+        .values()
+        .find(|desired| {
+            desired.kind == "observer"
+                && desired.owner_run.is_none()
+                && crate::graph::standing_github_observer(&desired.subject).is_some()
+                && crate::graph::observer_spec(&desired.desired).is_some_and(|spec| spec.stopped)
+        })
+    {
+        Some(observer) => Err(St3Error::new(
+            "observer-stop-person-only",
+            format!("only a person stops `{}`; `{actor}` cannot", observer.subject),
+        )),
+        None => Ok(()),
+    }
+}
+
 pub fn select_replicated_desired(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
@@ -22491,12 +22529,13 @@ pub fn append_claim_with_commit_context(
             }
             // A seat this member hosts records its own delivery, read and close of graph mail as a
             // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
-            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // recorded_as_mark), and its staging once every other member counts a host's staging
+            // too (marks_switch::staged_switched_tx, read here in this transaction), whoever acts for it:
             // the fences, replays and transition rules above have applied. A write acting for a
             // retired seat or under a delegation stays a claim, which carries its proof, and so
             // does a native read, whose proof links the native turn to its claim
             // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
-            if message_marks::recorded_as_mark(&input.kind)
+            if message_marks::recorded_as_mark(transaction, &input.kind).map_err(internal)?
                 && context.native_receipt.is_none()
                 && !input.fields.contains_key("acting_for")
                 && !input.fields.contains_key("delegation")

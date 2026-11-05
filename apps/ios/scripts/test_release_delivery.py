@@ -259,7 +259,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
             }))
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
         self.write_source("package.json", json.dumps({
-            "private": True, "packageManager": "pnpm@12.15.0", "workspaces": list(packages),
+            "private": True, "packageManager": "pnpm@12.17.0", "workspaces": list(packages),
         }))
         self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
         self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
@@ -1419,7 +1419,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
              json.dumps({"name": "@fractal/client", "version": "2.0.0", "dependencies": {}})),
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
-            ("package.json", (self.source / "package.json").read_text().replace("12.15.0", "12.15.1")),
+            ("package.json", (self.source / "package.json").read_text().replace("12.17.0", "12.17.1")),
             (".pnpmfile.cjs", "module.exports = { hooks: {} };\n"),
             ("megarepo.lock", json.dumps({"version": 1, "members": {}, "test": "changed"})),
             ("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}, "test": "changed"})),

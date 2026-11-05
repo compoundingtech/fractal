@@ -6920,9 +6920,13 @@ async fn previous_release_beside_a_member_recording_message_marks() {
     }
 }
 
-/// A seat hosted on a member of the previous release is read from its lifecycle claims: the
-/// release advertises no seat-freshness reads, so a member of this build never asks it, and
-/// `conversations status` follows the claims the release writes, never `unknown`.
+/// A seat hosted on a member of the previous release, read by a member of this build. A release
+/// that does not record marks (v0.3.25 and earlier) writes its seat's delivery and read as
+/// lifecycle claims and answers no reads of its seat (no `message_offsets`), so this build never
+/// asks it: `conversations status` follows the claims, never `unknown`, and views and lists carry
+/// no `status_from`. A release that records marks (v0.3.26 on: `message_view_reads`) does so once
+/// this build's member reads them too, and answers for them, so this build reads the seat from
+/// the release host: `status_from` names it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
@@ -6945,6 +6949,11 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
     for node in [&mut o, &mut n1] {
         node.start().await;
     }
+    let release_marks = newest_start_advertises(&o, "o", "message_view_reads").await;
+    assert_eq!(
+        newest_start_advertises(&o, "o", "message_offsets").await, release_marks,
+        "a release records marks exactly when it answers reads of its seats"
+    );
     let declaration = root.path().join("old-host-seat.kdl");
     fs::write(&declaration, format!(
         "version 2\nagent \"marks/old-host-seat\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
@@ -6992,8 +7001,15 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    if release_marks {
+        wait_until("the release turns marks on beside a member that reads them", 120, || {
+            let on = doctor_check(&o, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+            async move { on }
+        })
+        .await;
+    }
     for lifecycle in ["delivered", "read"] {
-        let _: Value = o
+        let receipt: Value = o
             .client()
             .post(
                 &format!(
@@ -7007,6 +7023,10 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
             )
             .await
             .unwrap();
+        assert_eq!(
+            receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), release_marks,
+            "{lifecycle}: {receipt}"
+        );
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     loop {
@@ -7021,10 +7041,11 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // The new member's message view and lists read the same claims, and ask the release nothing:
-    // no `status_from`.
+    // The new member's message view and lists read the same: from the release's claims, asking it
+    // nothing (no `status_from`), or from the release host that holds the marks.
+    let status_from = release_marks.then(|| json!({"host": "o", "state": "answered"}));
     let read: Value = n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
-    assert_eq!((&read["status"], read.get("status_from")), (&json!("read"), None), "{read}");
+    assert_eq!((&read["status"], read.get("status_from")), (&json!("read"), status_from.as_ref()), "{read}");
     let listed: Value = n1
         .client()
         .get("/v1/messages?to=agent/marks/old-host-seat&include_closed=true")
@@ -7042,17 +7063,20 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
             .iter()
             .find(|message| message["subject"] == subject.as_str())
             .unwrap_or_else(|| panic!("{messages}"));
-        assert_eq!((&message["status"], message.get("status_from")), (&json!("read"), None), "{message}");
+        assert_eq!((&message["status"], message.get("status_from")), (&json!("read"), status_from.as_ref()), "{message}");
     }
 }
 
 /// One node of the previous release, upgraded in place with mail mid-delivery to a seat it hosts:
 /// it is alone, so it records that seat's delivery, read and close as local marks at once (db
-/// break-up 4b-2), and its staging still as a claim. The release's claims keep counting, the
-/// delivery finishes with no further lifecycle claim but the staging, and upgraded again after a
-/// rollback the marks still count. Rolled back to a release that reads marks (v0.3.25 on), every
-/// message reads as this build left it, so nothing is offered again; to an older one, the release
-/// reads only its own claims, as the release note says.
+/// break-up 4b-2), its staging too. A release that records marks itself (v0.3.26
+/// on) has recorded the release's delivery as a mark already, beside its two stagings' claims; an
+/// older one wrote all three as claims. The release's claims and marks keep counting, the
+/// delivery finishes with no further lifecycle claim, and upgraded again after a rollback the
+/// marks still count. Rolled back to a release that reads staging marks (v0.3.26 on), every
+/// message reads as this build left it, so nothing is offered again. Rolled back to v0.3.25, which
+/// reads every mark but a staging, the mail this build staged reads as sent and would be offered
+/// again; to an older one, the release reads only its own claims. The release note says both.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid_delivery() {
@@ -7096,17 +7120,29 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
         let path = format!("/v1/messages/read/{subject}");
         async move { client.get::<Value>(&path).await.unwrap()["status"].as_str().unwrap().to_owned() }
     };
+    let release_marks = newest_start_advertises(&o, "o", "message_view_reads").await;
+    if release_marks {
+        wait_until("the release turns marks on for a member alone", 120, || {
+            let on = doctor_check(&o, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+            async move { on }
+        })
+        .await;
+    }
     let delivered = send(&o, "delivered-by-release").await;
     let staged = send(&o, "staged-by-release").await;
     let unsent = send(&o, "unsent").await;
     let release_staging = step(&o, &delivered, "staged").await;
-    step(&o, &delivered, "delivered").await;
+    let release_delivery = step(&o, &delivered, "delivered").await;
+    assert_eq!(
+        release_delivery["id"].as_str().unwrap().starts_with("offset-receipt/"), release_marks,
+        "{release_delivery}"
+    );
     step(&o, &staged, "staged").await;
     let lifecycle_claims = |claims: &[Value]| -> usize {
         claims.iter().filter(|claim| claim["kind"].as_str().is_some_and(|kind| kind.starts_with("message.") && kind != "message.sent")).count()
     };
     let claimed = lifecycle_claims(&o.claims().await);
-    assert_eq!(claimed, 3);
+    assert_eq!(claimed, if release_marks { 2 } else { 3 });
     let release_reads_marks = reads_seat_freshness(&o).await;
 
     // Upgraded in place, alone: marks are on at once.
@@ -7117,7 +7153,7 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     loop {
         let doctor: Value = o.client().get("/v1/doctor").await.unwrap();
         let marks = doctor["checks"].as_array().unwrap().iter().find(|check| check["name"] == "message-marks").cloned();
-        if marks.as_ref().is_some_and(|check| check["message"].as_str().unwrap().starts_with("on:")) {
+        if marks.as_ref().is_some_and(|check| check["message"].as_str().unwrap().starts_with("on: this member records its own seats' staging")) {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "marks did not turn on for a member alone: {marks:?}");
@@ -7131,18 +7167,15 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     for (subject, lifecycles) in [(&delivered, &["read", "closed"][..]), (&staged, &["delivered", "read"][..]), (&unsent, &["staged"][..])] {
         for lifecycle in lifecycles {
             let receipt = step(&o, subject, lifecycle).await;
-            // A staging stays a claim (message_marks::RECORDS_STAGED).
-            assert_eq!(
-                receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), *lifecycle != "staged",
-                "{lifecycle}: {receipt}"
-            );
+            // A member alone records its seat's staging as a mark with the rest.
+            assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
         }
     }
     // A repeated staging of mail already delivered answers the release's own staging, and stages
     // nothing again.
     let repeat = step(&o, &delivered, "staged").await;
     assert_eq!(repeat["id"], release_staging["id"], "{repeat}");
-    assert_eq!(lifecycle_claims(&o.claims().await), claimed + 1, "a hosted seat's delivery, read or close wrote a claim");
+    assert_eq!(lifecycle_claims(&o.claims().await), claimed, "a hosted seat's staging, delivery, read or close wrote a claim");
     let upgraded = ["closed", "read", "staged"];
     assert_eq!([status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await], upgraded);
     let listed = |node: &Node| {
@@ -7168,12 +7201,19 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     o.binary = old;
     o.start().await;
     let rolled_back = [status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await];
-    if release_reads_marks {
-        assert_eq!(rolled_back, upgraded, "rolled back to a release that reads marks, mail went back");
+    if release_marks {
+        assert_eq!(rolled_back, upgraded, "rolled back to a release that reads staging marks, mail went back");
         assert_eq!(listed(&o).await, before_rollback, "rolled back, the mailbox's reads changed");
+    } else if release_reads_marks {
+        eprintln!("baseline release reads no staging marks: the mail this build staged reads as sent, as the release note says");
+        assert_eq!(rolled_back, ["closed", "read", "sent"]);
+        let unstaged = before_rollback.iter()
+            .map(|(subject, status)| (subject.clone(), if *subject == unsent { "sent".to_owned() } else { status.clone() }))
+            .collect::<Vec<_>>();
+        assert_eq!(listed(&o).await, unstaged);
     } else {
         eprintln!("baseline release reads no marks: the rollback reads its own claims only, as the release note says");
-        assert_eq!(rolled_back, ["delivered", "staged", "staged"]);
+        assert_eq!(rolled_back, ["delivered", "staged", "sent"]);
     }
 
     // Upgraded again: the marks count again beside the claims.
@@ -7239,6 +7279,12 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
         assert!(off.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{off}");
         assert!(off.contains("o: exchanges with this member outside its fleet membership and has not advertised message_view_reads=1"), "{off}");
     }
+    // The release does not count a host's staging (no message_staged_reads), so beside it this
+    // build records its seat's staging as a claim, whether or not marks are on.
+    if release_reads_marks {
+        let held = marks();
+        assert!(held.contains("stagings stay claims until every other member advertises message_staged_reads=1") && held.contains("has not advertised message_staged_reads=1"), "{held}");
+    }
     let declaration = root.path().join("new-host-seat.kdl");
     fs::write(&declaration, format!(
         "version 2\nagent \"marks/new-host-seat\" {{ host \"n1\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
@@ -7254,6 +7300,21 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
         .await
         .unwrap();
     let subject = receipt["subject"].as_str().unwrap().to_owned();
+    let staging: Value = n1
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "staged", "actor": "agent/marks/new-host-seat", "idempotency_key": "new-host-seat-staged"}),
+        )
+        .await
+        .unwrap();
+    assert!(!staging["id"].as_str().unwrap().starts_with("offset-receipt/"), "a staging beside the release is a claim: {staging}");
+    wait_until("the release reads the seat's staging from its claim", 90, || {
+        let client = o.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.is_ok_and(|view| view["status"] == "staged") }
+    })
+    .await;
     for lifecycle in ["delivered", "read"] {
         let receipt: Value = n1
             .client()
@@ -7292,10 +7353,11 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
     assert_eq!(view["status"], "read", "{view}");
 }
 
-/// Two members of this build: each advertises message view reads, so both record their own seats'
-/// delivery, read and close as marks, which never replicate. The other member reads the seat's
-/// mail from the seat's host, in its message view and its lists, and says so in `status_from`; a
-/// list of open mail leaves out what the host closed (db break-up 4b-4).
+/// Two members of this build: each advertises message view reads and staged reads, so both record
+/// their own seats' staging, delivery, read and close as marks, which never replicate. The other
+/// member reads the seat's mail from the seat's host, in its message view and its lists, staging
+/// included, and says so in `status_from`; a list of open mail leaves out what the host closed (db
+/// break-up 4b-4, and staging).
 #[tokio::test(flavor = "multi_thread")]
 async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     if fractal_daemon::test_support::supervise_test() {
@@ -7315,8 +7377,8 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     }
     assert!(reads_message_views(&a).await && reads_message_views(&b).await);
     for node in [&a, &b] {
-        wait_until("a member of this build turns marks on beside another", 120, || {
-            let on = doctor_check(node, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+        wait_until("a member of this build turns marks on, stagings included, beside another", 120, || {
+            let on = doctor_check(node, "message-marks")["message"].as_str().unwrap().starts_with("on: this member records its own seats' staging");
             async move { on }
         })
         .await;
@@ -7329,7 +7391,7 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     b.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
     let seat = "agent/marks/b-seat";
     let mut subjects = Vec::new();
-    for key in ["b-seat-read", "b-seat-closed"] {
+    for key in ["b-seat-read", "b-seat-closed", "b-seat-staged"] {
         let receipt: Value = b
             .client()
             .post("/v1/messages", &json!({
@@ -7339,8 +7401,10 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
             .unwrap();
         subjects.push(receipt["subject"].as_str().unwrap().to_owned());
     }
-    let (read, closed) = (subjects[0].clone(), subjects[1].clone());
-    for (subject, lifecycles) in [(&read, &["delivered", "read"][..]), (&closed, &["delivered", "read", "closed"][..])] {
+    let (read, closed, staged) = (subjects[0].clone(), subjects[1].clone(), subjects[2].clone());
+    for (subject, lifecycles) in [
+        (&read, &["delivered", "read"][..]), (&closed, &["delivered", "read", "closed"][..]), (&staged, &["staged"][..]),
+    ] {
         for lifecycle in lifecycles {
             let receipt: Value = b
                 .client()
@@ -7390,6 +7454,10 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     let open: Value = a.client().get(&format!("/v1/messages?to={seat}")).await.unwrap();
     assert_eq!(state(&open, &read), Some((json!("read"), answered.clone())), "{open}");
     assert_eq!(state(&open, &closed), None, "b closed it, so a's list of open mail leaves it out: {open}");
+    // The staging b recorded as a mark reads as staged on `a`, from b.
+    let view: Value = a.client().get(&format!("/v1/messages/read/{staged}")).await.unwrap();
+    assert_eq!((&view["status"], &view["status_from"]), (&json!("staged"), &answered), "{view}");
+    assert_eq!(state(&open, &staged), Some((json!("staged"), answered.clone())), "{open}");
     // The seat's own host reads its own marks, with no host to name.
     let own: Value = b.client().get(&format!("/v1/messages/read/{read}")).await.unwrap();
     assert_eq!((own["status"].clone(), own.get("status_from").cloned()), (json!("read"), None), "{own}");
@@ -7446,13 +7514,19 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
 }
 
 /// A fleet of the previous release upgraded to this build, then one member rolled back. Before
-/// the upgrade every member writes lifecycle claims. Once both run this build, the seat's host
-/// records its read as a mark, which the other member reads from it. Rolling the other member
-/// back turns marks off on the host: its next lifecycle write is a claim again, and the
-/// rolled-back member reads it from the claim. Nothing is redelivered on the host. With a
-/// release that has seat-freshness reads, the rolled-back member's delivery status still reads
-/// the mark from the host (db break-up 4b-4). Only this build advertises `message_staged_reads`,
-/// and even beside a member that does, its host's staging is a claim the other member reads.
+/// the upgrade a release that does not record marks (v0.3.25 and earlier) writes lifecycle
+/// claims; one that does (v0.3.26 on) already records the seat's delivery as a mark on its host.
+/// Once both run this build, the seat's host records its read as a mark, which the other member
+/// reads from it. Rolling the other member back to a release without message view reads turns
+/// marks off on the host: its next lifecycle write is a claim again, and the rolled-back member
+/// reads it from the claim. Rolled back to a release with them, marks stay on: the host's next
+/// write is a mark, which the rolled-back member reads from the host. Nothing is redelivered on
+/// the host. With a release that has seat-freshness reads, the rolled-back member's delivery
+/// status still reads the mark from the host (db break-up 4b-4). Only this build advertises
+/// `message_staged_reads`: once every member does, the host records its seat's staging as a mark
+/// too, which the other member reads from it. Rolled back, the host records stagings as claims
+/// again; mail it staged as a mark shows as sent on the rolled-back member until its delivery, and
+/// the host offers nothing again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
@@ -7476,6 +7550,7 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
         node.start().await;
     }
     let release_reads_relay = reads_seat_freshness(&o).await;
+    let release_marks = newest_start_advertises(&o, "o", "message_view_reads").await;
     let declaration = root.path().join("h-seat.kdl");
     fs::write(&declaration, format!(
         "version 2\nagent \"marks/h-seat\" {{ host \"h\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
@@ -7508,8 +7583,16 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
             receipt["id"].as_str().unwrap().to_owned()
         }
     };
-    // The release writes claims, and does not say its reads count a staging mark.
-    assert!(!lifecycle(&h, &before, "delivered").await.starts_with("offset-receipt/"));
+    // A release that does not record marks writes claims; one that does records the delivery as
+    // a mark once its host's barrier has run. Neither says its reads count a staging mark.
+    if release_marks {
+        wait_until("the release host turns marks on beside a release member that reads them", 120, || {
+            let on = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+            async move { on }
+        })
+        .await;
+    }
+    assert_eq!(lifecycle(&h, &before, "delivered").await.starts_with("offset-receipt/"), release_marks);
     assert!(!newest_start_advertises(&h, "o", "message_staged_reads").await);
 
     // Both upgrade: marks turn on, and the host's read is a mark that `o` reads from `h`.
@@ -7526,13 +7609,15 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     for kind in ["delivered", "read"] {
         assert!(lifecycle(&h, &marked, kind).await.starts_with("offset-receipt/"), "{kind}");
     }
-    // Every member says its reads count a staging mark, and a staging is still a claim: nothing
-    // in this build records one as a mark. `o` reads it as staged.
-    wait_until("the host holds o's start advertising message_staged_reads", 60, || {
-        newest_start_advertises(&h, "o", "message_staged_reads")
+    // Every member says its reads count a staging mark, so the host records its seat's staging as
+    // a mark too, which `o` reads from it.
+    wait_until("the host records stagings as marks once o's start says its reads count them", 120, || {
+        let on = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("on: this member records its own seats' staging");
+        async move { on }
     })
     .await;
-    assert!(!lifecycle(&h, &staged, "staged").await.starts_with("offset-receipt/"), "a staging stays a claim");
+    assert!(newest_start_advertises(&h, "o", "message_staged_reads").await);
+    assert!(lifecycle(&h, &staged, "staged").await.starts_with("offset-receipt/"), "a staging is a mark");
     let view = |node: &Node, subject: &str| {
         let client = node.client();
         let path = format!("/v1/messages/read/{subject}");
@@ -7544,9 +7629,9 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     })
     .await;
     assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
-    wait_until("o reads the host's staging from its claim", 60, || {
+    wait_until("o reads the host's staging mark from it", 60, || {
         let read = view(&o, &staged);
-        async move { read.await.is_some_and(|view| view["status"] == "staged") }
+        async move { read.await.is_some_and(|view| view["status"] == "staged" && view["status_from"]["host"] == "h") }
     })
     .await;
 
@@ -7589,12 +7674,53 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     // reminders from its own records.
     let listed: Value = o.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
     assert!(layer(&listed, &older).is_some() && layer(&listed, &winner).is_some(), "{listed}");
-    wait_until("the host turns marks off beside a member that does not read them", 150, || {
-        let off = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("off:");
-        async move { off }
+    if release_marks {
+        // The rolled-back member still reads marks, so the host keeps them on once it holds its start.
+        wait_until("the host holds the rolled-back member's start", 90, || async {
+            !newest_start_advertises(&h, "o", "message_staged_reads").await
+        })
+        .await;
+        assert!(newest_start_advertises(&h, "o", "message_view_reads").await, "the rolled-back member's start");
+        let marks = doctor_check(&h, "message-marks");
+        assert!(marks["message"].as_str().unwrap().starts_with("on:"), "{marks}");
+    } else {
+        wait_until("the host turns marks off beside a member that does not read them", 150, || {
+            let off = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("off:");
+            async move { off }
+        })
+        .await;
+    }
+    assert!(!newest_start_advertises(&h, "o", "message_staged_reads").await, "the rolled-back member's start");
+    // Beside the rolled-back member the host records stagings as claims again, marks on or off.
+    wait_until("the host records stagings as claims again beside the rolled-back member", 150, || {
+        let message = doctor_check(&h, "message-marks")["message"].as_str().unwrap().to_owned();
+        let claims = message.starts_with("off:") || message.contains("stagings stay claims until every other member advertises message_staged_reads=1");
+        async move { claims }
     })
     .await;
-    assert!(!newest_start_advertises(&h, "o", "message_staged_reads").await, "the rolled-back member's start");
+    // The staging the host recorded as a mark: the rolled-back member's reads do not count a host's
+    // staging, so it shows the mail as sent until delivery moves it on, as the release note says.
+    // The host holds it staged and offers nothing again.
+    assert_eq!(view(&o, &staged).await.unwrap()["status"], "sent");
+    assert_eq!(view(&h, &staged).await.unwrap()["status"], "staged");
+    let receipt: Value = h
+        .client()
+        .post("/v1/messages", &json!({"idempotency_key": "h-seat-after-rollback", "from": PERSON, "to": seat, "content": "after"}))
+        .await
+        .unwrap();
+    let after = receipt["subject"].as_str().unwrap().to_owned();
+    assert!(!lifecycle(&h, &after, "staged").await.starts_with("offset-receipt/"), "a staging after the rollback is a claim");
+    wait_until("the rolled-back member reads the host's new staging from its claim", 90, || {
+        let read = view(&o, &after);
+        async move { read.await.is_some_and(|view| view["status"] == "staged") }
+    })
+    .await;
+    assert_eq!(lifecycle(&h, &staged, "delivered").await.starts_with("offset-receipt/"), release_marks);
+    wait_until("the rolled-back member reads the delivery of the mail staged as a mark", 90, || {
+        let read = view(&o, &staged);
+        async move { read.await.is_some_and(|view| view["status"] == "delivered") }
+    })
+    .await;
     if release_reads_relay {
         wait_until("the rolled-back member's delivery status reads the mark from the host", 90, || {
             let client = o.client();
@@ -7607,10 +7733,15 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
         })
         .await;
     }
-    assert!(!lifecycle(&h, &marked, "closed").await.starts_with("offset-receipt/"), "a close after marks turn off");
-    wait_until("the rolled-back member reads the host's close from its claim", 90, || {
+    assert_eq!(
+        lifecycle(&h, &marked, "closed").await.starts_with("offset-receipt/"), release_marks,
+        "a close after the rollback is a mark only while marks stay on"
+    );
+    wait_until("the rolled-back member reads the host's close, from its claim or from the host", 90, || {
         let read = view(&o, &marked);
-        async move { read.await.is_some_and(|view| view["status"] == "closed") }
+        async move {
+            read.await.is_some_and(|view| view["status"] == "closed" && (view["status_from"]["host"] == "h") == release_marks)
+        }
     })
     .await;
     // The host's own records are whole: its marks and the claim after them.
@@ -7791,6 +7922,191 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
 }
 
+/// Leave the message `subject` from `from` in stopped `node`'s message outbox, refused
+/// `attempts` times already: what a sender that queues there (4c-3) leaves when its daemon stops
+/// before the drain, or when the member rolls back from it.
+fn leave_in_outbox(node: &Node, subject: &str, from: &str, attempts: i64) {
+    let claim = ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some(from.into()),
+        fields: serde_json::from_value(json!({
+            "from": from, "to": "agent/fleet-reader", "content": "through the outbox", "status": "sent"
+        }))
+        .unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let queued_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    rusqlite::Connection::open(node.state_dir().join("claims.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO local_message_outbox(subject, claim, queued_at_unix_ms, attempts) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![subject, serde_json::to_string(&claim).unwrap(), queued_at, attempts],
+        )
+        .unwrap();
+}
+
+/// The subjects waiting in `node`'s message outbox; the read fails if the table is missing.
+fn outbox(node: &Node) -> Vec<String> {
+    rusqlite::Connection::open_with_flags(node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .prepare("SELECT subject FROM local_message_outbox ORDER BY subject")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// How many `message.sent` claims about `subject` `node`'s graph holds.
+async fn graph_messages(node: &Node, subject: &str) -> usize {
+    node.claims().await.iter().filter(|claim| claim["subject"] == subject && claim["kind"] == "message.sent").count()
+}
+
+/// The previous release upgrades in place to a build with the message outbox, which stays empty:
+/// the release's mail reads the same, and a backup this build takes restores on the release.
+/// Rolled back, the release runs on the store with the table beside its own and reads its mail;
+/// a message left in the outbox waits through the rollback and reaches the shard once the member
+/// upgrades again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_back() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    let send = |node: &Node, key: &str| {
+        let client = node.client();
+        let key = key.to_owned();
+        async move {
+            let receipt: Value = client
+                .post("/v1/messages", &json!({
+                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "content": format!("graph mail {key}"),
+                }))
+                .await
+                .unwrap();
+            receipt["subject"].as_str().expect("a send receipt names its message").to_owned()
+        }
+    };
+    let listed = |node: &Node| {
+        let client = node.client();
+        async move {
+            let page: MessagePage = client
+                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .await
+                .unwrap();
+            page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
+        }
+    };
+    let first = send(&o, "release-first").await;
+    let second = send(&o, "release-second").await;
+    let path = format!("/v1/messages/{}/claims", first.trim_start_matches("message/"));
+    for lifecycle in ["delivered", "read"] {
+        let _: Value = o
+            .client()
+            .post(&path, &json!({
+                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "idempotency_key": format!("release-{lifecycle}"),
+            }))
+            .await
+            .unwrap();
+    }
+    let mut before = listed(&o).await;
+    assert_eq!(before, [(first, "read".to_owned()), (second, "sent".to_owned())]);
+
+    // Upgrade in place: the mail reads the same, and the outbox is there and empty.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
+    assert!(outbox(&o).is_empty());
+    // A backup of this build names no outbox, and the release restores it.
+    let archive = root.path().join("upgraded.jsonl");
+    let created = o.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    assert!(!fs::read_to_string(&archive).unwrap().contains("local_message_outbox"));
+    o.binary = old.clone();
+    let target = root.path().join("restored-by-release.db");
+    let restored = o
+        .command(&["backup", "restore", "--database", target.to_str().unwrap(), archive.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
+
+    // Roll back with a message left in the outbox: the release runs beside the table, reads its
+    // mail and sends more, and never sees the queued message.
+    o.stop();
+    let left = "message/0000000000000e01";
+    leave_in_outbox(&o, left, "agent/fleet-sender", 0);
+    o.start().await;
+    assert_eq!(listed(&o).await, before, "rollback changed the mail");
+    let third = send(&o, "rolled-back").await;
+    before.push((third, "sent".to_owned()));
+    assert_eq!(listed(&o).await, before);
+    assert_eq!(outbox(&o), [left]);
+
+    // Upgrade again: the left message drains to the shard, once, and follows the graph's mail.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member drains the outbox", 60, || async { outbox(&o).is_empty() }).await;
+    assert_eq!(stream_items(&o, left).await, 1);
+    assert_eq!(graph_messages(&o, left).await, 0);
+    before.push((left.to_owned(), "sent".to_owned()));
+    assert_eq!(listed(&o).await, before);
+}
+
+/// The daemon drains what a stopped member left in its message outbox when it starts: an
+/// agent's message reaches the shard once, a message the shard already holds is only removed,
+/// and a person's message, which the shard refuses, goes to the graph after the retry pause.
+/// The refused row is left refused one time short of the limit, so the test waits for one pause
+/// (30 s), not three; the unit tests count the refusals.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut n = Node::new(root.path(), "n");
+    n.start().await;
+    let held = "message/0000000000000f01";
+    append_stream_item(&n, held).await;
+    n.stop();
+    let eligible = "message/0000000000000f02";
+    let refused = "message/0000000000000f03";
+    // The drain stopped after the shard append, before the delete.
+    leave_in_outbox(&n, held, "agent/fleet-sender", 0);
+    leave_in_outbox(&n, eligible, "agent/fleet-sender", 0);
+    leave_in_outbox(&n, refused, PERSON, fractal_store::store::message_outbox::ATTEMPTS - 1);
+
+    n.start().await;
+    wait_until("the startup drain empties the outbox but for the refused message", 30, || async {
+        outbox(&n) == [refused]
+    })
+    .await;
+    for subject in [held, eligible] {
+        assert_eq!(stream_items(&n, subject).await, 1, "{subject}");
+        assert_eq!(graph_messages(&n, subject).await, 0, "{subject}");
+    }
+    assert_eq!(stream_items(&n, refused).await, 0);
+    assert_eq!(graph_messages(&n, refused).await, 0);
+
+    // Refused once more at startup, it waits out the pause and goes to the graph.
+    wait_until("the refused message goes to the graph", 90, || async { outbox(&n).is_empty() }).await;
+    assert_eq!(graph_messages(&n, refused).await, 1);
+    assert_eq!(stream_items(&n, refused).await, 0);
+    for subject in [held, eligible] {
+        assert_eq!(stream_items(&n, subject).await, 1, "{subject}");
+    }
+}
+
 /// When the previous release predates the messages shard, it is never dialed for it.
 /// Upgrading it in place opens the shard; rolling it back leaves the shard file in place
 /// and new members stop dialing it. If the release already opens the shard, only these
@@ -7873,6 +8189,123 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     ]);
     for node in [&o, &n1] {
         wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
+/// What `node`'s messages shard file holds of `writer`: the envelopes it received, and the claims
+/// it admitted from them. Read from the file, so it answers for a release without test routes.
+fn shard_file_holds(node: &Node, writer: &str) -> (u64, u64) {
+    let connection = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("shards/messages/claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let count = |sql: &str| connection.query_row(sql, [writer], |row| row.get::<_, u64>(0)).unwrap();
+    (
+        count("SELECT COUNT(*) FROM replica_envelopes WHERE writer=?1"),
+        count(
+            "SELECT COUNT(*) FROM claims JOIN replica_envelopes AS envelopes
+             ON envelopes.batch_id=claims.batch_id WHERE envelopes.writer=?1",
+        ),
+    )
+}
+
+/// The replication records `node` holds for a newer build: claims of a kind it does not know.
+async fn held_claim_kinds(node: &Node) -> Vec<String> {
+    let records: Vec<Value> = node.client().get("/v1/replication/records?unresolved=true").await.unwrap();
+    records
+        .iter()
+        .filter(|record| record["error_code"] == "unknown-claim-kind")
+        .map(|record| record["kind"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// A member of this build writes to the messages shard, its first shard write as a keyed member,
+/// and leaves: its leave first bounds its key in the shard at its last shard sequence, in a
+/// `fleet.shard-bounds` of its own. A member of this build that joins after the leave admits the
+/// leaver's envelopes up to that bound. A member of the previous release that joins then holds
+/// the bounds as a claim kind it does not know, and receives the envelopes but fences them by its
+/// stricter rule, so it admits no more than this build. Upgraded in place, it admits the held
+/// bounds, then the envelopes, and its shard agrees with the others'.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_holds_a_leavers_shard_bounds_and_admits_them_when_it_upgrades() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "a").await;
+    let mut n = joined(root.path(), &a, "n", &[]).await;
+    n.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+    wait_for_stream_peers(&n, &["a"], 90).await;
+    // A keyed member's shard signs with its member key; its first message used to fail.
+    let items = ["message/0000000000000e01", "message/0000000000000e02"];
+    for item in items {
+        append_stream_item(&n, item).await;
+        wait_for_stream_item(&a, item, 90).await;
+    }
+    n.st_ok(&["fleet", "leave", "--no-service", "--wait", "2m", "--as", PERSON]);
+    n.stop();
+    wait_until("a admits n's leave", 60, || async {
+        a.claims().await.iter().any(|claim| claim["subject"] == "host/n" && claim["kind"] == "fleet.member-left")
+    })
+    .await;
+    let bounds = a
+        .claims()
+        .await
+        .into_iter()
+        .filter(|claim| claim["subject"] == "host/n" && claim["kind"] == "fleet.shard-bounds")
+        .collect::<Vec<_>>();
+    let [bound] = bounds.as_slice() else { panic!("one bounds claim for the leave: {bounds:?}") };
+    assert_eq!(bound.pointer("/body/fields/shard_high_water"), Some(&json!({"messages": 2})), "{bound}");
+
+    // Both join after the leave, so each first meets n's envelopes with n already gone.
+    let n2 = joined(root.path(), &a, "n2", &[]).await;
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    for item in items {
+        wait_for_stream_item(&n2, item, 90).await;
+    }
+    wait_until("o holds n's shard bounds as an unknown claim kind", 90, || async {
+        held_claim_kinds(&o).await == ["fleet.shard-bounds"]
+    })
+    .await;
+    wait_until("o receives n's shard envelopes", 90, || async {
+        o.state_dir().join("shards/messages/claims.sqlite3").exists() && shard_file_holds(&o, "n").0 == 2
+    })
+    .await;
+    // Give o's shard a few more exchanges to admit them, which it must not.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(shard_file_holds(&o, "n"), (2, 0), "the release fences a leaver's envelopes");
+    let status = o.st_json(&["replication", "status"]);
+    assert_eq!(status["invalid_records"], 0, "{status}");
+
+    // Upgraded in place, o admits the held bounds, and with them n's envelopes.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    for item in items {
+        wait_for_stream_item(&o, item, 90).await;
+    }
+    assert!(held_claim_kinds(&o).await.is_empty(), "the upgrade admits the held bounds");
+    for node in [&a, &n2, &o] {
+        for item in items {
+            assert_eq!(stream_items(node, item).await, 1, "{} holds {item}", node.name);
+        }
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }

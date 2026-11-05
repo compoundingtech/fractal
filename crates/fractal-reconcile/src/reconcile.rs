@@ -535,6 +535,14 @@ pub trait RuntimeControl: Send + Sync + 'static {
         guard()?;
         self.start(member)
     }
+    fn launch_contract(
+        &self,
+        store: &Store,
+        desired: &DesiredSubject,
+        launch: &MemberSpec,
+    ) -> Result<crate::launch_contract::Contract> {
+        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true)
+    }
     /// Proof for the operation in this prepared launch: no operation-owned runtime
     /// remains and no producer can launch later. A returned error or absence alone
     /// is insufficient. Controls do not wait for launch admission to obtain this proof.
@@ -655,8 +663,28 @@ pub fn member_environment(
     executable: &Path,
     recorder: Option<&Path>,
 ) -> Result<BTreeMap<String, String>> {
+    member_environment_from(crate::environment::snapshot()?, declared, executable, recorder)
+}
+
+/// [`member_environment`] from the environment already captured, or `None` while the first
+/// capture runs: a read never waits on the login shell (#5209).
+pub fn member_environment_ready(
+    declared: &BTreeMap<String, String>,
+    executable: &Path,
+    recorder: Option<&Path>,
+) -> Result<Option<BTreeMap<String, String>>> {
+    crate::environment::snapshot_ready()
+        .map(|inherited| member_environment_from(inherited?, declared, executable, recorder))
+        .transpose()
+}
+
+fn member_environment_from(
+    mut inherited: BTreeMap<String, String>,
+    declared: &BTreeMap<String, String>,
+    executable: &Path,
+    recorder: Option<&Path>,
+) -> Result<BTreeMap<String, String>> {
     // Alias-family resolution lives in environment::{overlay,remove_aliases}.
-    let mut inherited = crate::environment::snapshot()?;
     for name in ["ST_AGENT", "ST_SUPERVISOR", "ST3_SUBJECT"] {
         if !declared.contains_key(name)
             && !fractal_drivers::contracts::fractal_env_name(name)
@@ -887,6 +915,14 @@ impl RuntimeControl for NativeRuntime {
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
+    }
+    fn launch_contract(
+        &self,
+        store: &Store,
+        desired: &DesiredSubject,
+        launch: &MemberSpec,
+    ) -> Result<crate::launch_contract::Contract> {
+        crate::contract::capture(store, desired, launch, true)
     }
 
     fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
@@ -7687,21 +7723,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 member
             });
         let member = normalized_member.as_ref().unwrap_or(member);
-        let mut launch_member = member.clone();
-        overlay_runtime_environment(
-            &subject.subject,
-            &mut launch_member.environment,
-            &self.runtime_environment,
-        );
+        let mut launch_member = self.contract_member(subject, member, true)?;
         if launch_member.terminal {
             launch_member.terminal_size = self.launch_geometry()?;
-        }
-        self.bind_account(subject, member, &mut launch_member)?;
-        if let Some(harness) = crate::accounts::harness_driver(&subject.desired)
-            && let Some(variable) = crate::accounts::login_environment_name(harness)
-        {
-            let directory = self.launch_credential_home(harness, &launch_member)?;
-            launch_member.environment.insert(variable.into(), directory);
         }
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
             let operation = self
@@ -7915,6 +7939,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         operation_id: &str,
         prepared: &start_jobs::PreparedStart,
         result: Result<Option<String>>,
+        contract: Option<&Value>,
     ) -> Result<start_jobs::StartCompletion> {
         let subject = &prepared.subject;
         let member = &prepared.member;
@@ -7974,6 +7999,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("reason".into(), Value::String(reason.into())),
         ]);
+        if let Some(contract) = contract {
+            fields.insert("launch_contract".into(), contract.clone());
+        }
         if let Some(harness) = crate::accounts::harness_driver(&subject.desired) {
             fields.insert("harness".into(), Value::String(harness.into()));
             if let Some(variable) = crate::accounts::login_environment_name(harness)
@@ -8135,6 +8163,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(directory.to_string_lossy().into_owned())
     }
 
+    pub fn install_launch_contract_reader(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        crate::contract::install(&self.store, Box::new(move |subject| {
+            let reconciler = weak.upgrade().context("reconciler stopped")?;
+            let member = subject.member.as_ref().context("launch contract needs a member")?;
+            reconciler.contract_member(subject, member, false)
+        }));
+    }
+
+    fn contract_member(&self, subject: &DesiredSubject, member: &MemberSpec, retain_choice: bool) -> Result<MemberSpec> {
+        let mut launch = member.clone();
+        crate::environment::normalize_aliases(&mut launch.environment);
+        overlay_runtime_environment(&subject.subject, &mut launch.environment, &self.runtime_environment);
+        if retain_choice { self.bind_account(subject, member, &mut launch)?; }
+        else { self.bind_account_mode(subject, member, &mut launch, false)?; }
+        if let Some(harness) = crate::accounts::harness_driver(&subject.desired)
+            && let Some(variable) = crate::accounts::login_environment_name(harness)
+        {
+            let directory = self.launch_credential_home(harness, &launch)?;
+            launch.environment.insert(variable.into(), directory);
+        }
+        Ok(launch)
+    }
+
     /// Point a seat whose harness block binds an account (or a pool) at that account's login
     /// directory, and name the account so the seat's usage and limits are read against it. A seat
     /// with no binding keeps the harness's default login: nothing here touches its environment.
@@ -8144,6 +8196,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         launch: &mut MemberSpec,
     ) -> Result<()> {
+        self.bind_account_mode(subject, member, launch, true)
+    }
+
+    fn bind_account_mode(&self, subject: &DesiredSubject, member: &MemberSpec, launch: &mut MemberSpec, retain_choice: bool) -> Result<()> {
         crate::environment::remove_aliases(&mut launch.environment, "ST3_ACCOUNT");
         if subject.kind != "agent" {
             return Ok(());
@@ -8180,7 +8236,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .context("an account binding needs a harness with a login directory")?;
         let seat = self
             .store
-            .account_for_start(&subject.subject, &binding, &member.host, now_ms())
+            .account_for_start(&subject.subject, &binding, &member.host, now_ms(), retain_choice)
             .map_err(|reason| anyhow::anyhow!("{}: {reason}", subject.subject))?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let directory =
@@ -20772,6 +20828,7 @@ pub mod tests {
     mod final_cancel_gate_exit;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod standing_observer_stop;
     mod helper_launcher;
     mod bounded_loop_reads;
     mod incremental_deadlines;
@@ -25980,7 +26037,7 @@ agent "worker" {{
             .unwrap()
             .expect("the seat declares a pool");
         let kept = store
-            .account_for_start("agent/node.worker", &binding, "node", now_ms())
+            .account_for_start("agent/node.worker", &binding, "node", now_ms(), true)
             .unwrap();
         assert_eq!(kept.account.name, "ada/two");
     }
