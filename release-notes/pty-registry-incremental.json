@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reuse unchanged PTY registry metadata across reconciliation passes",
+  "replay": {"status": "none", "detail": "No replay or rebuild."},
+  "schema": {"status": "none", "detail": "No persisted schema change."},
+  "rules": {"status": "none", "detail": "Control actions continue to read fresh metadata and check daemon identity independently of the incremental snapshot."},
+  "compatibility": {"status": "none", "detail": "No wire or client contract change."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Snapshots reuse unchanged metadata while freshly reading PID companions and checking daemon identity, including exited and legacy records. Late or conflicting companions retain upstream ownership semantics and scope teardown fencing. Output and environment payloads are not retained."}
+}

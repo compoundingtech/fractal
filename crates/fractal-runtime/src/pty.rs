@@ -22,6 +22,7 @@ mod legacy_start_closure;
 pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses};
 mod producer;
 
+mod registry_snapshot;
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -268,6 +269,7 @@ pub struct PtyRuntime {
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+    registry_snapshot: std::sync::Arc<Mutex<registry_snapshot::RegistrySnapshot>>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -291,6 +293,7 @@ impl PtyRuntime {
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
             unlaned_seat: None,
+            registry_snapshot: std::sync::Arc::default(),
         }
     }
 
@@ -324,7 +327,9 @@ impl PtyRuntime {
     }
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
-        self.sessions()?.into_iter().map(observation).collect()
+        crate::procfs::require_matching_procfs()?;
+        self.registry_snapshot.lock().map_err(|_| anyhow::anyhow!("PTY snapshot lock poisoned"))?
+            .sessions(&self.root)?.into_iter().map(observation).collect()
     }
 
     /// Observe one immutable runtime id without enumerating the PTY registry.
