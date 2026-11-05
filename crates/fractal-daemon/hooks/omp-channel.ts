@@ -83,6 +83,7 @@ type Frame = {
   deliverAs?: "steer" | "followUp";
   meta?: Record<string, unknown>;
   seat?: { subject?: string; desired?: { display_name?: string }; member?: { display_name?: string; tags?: Record<string, string> } };
+  refresh?: { action?: string; incarnation?: string; owner_sequence?: number; epoch?: number; request_id?: string };
 };
 
 /** A message the channel sent that omp has not been handed yet. */
@@ -158,6 +159,8 @@ type Stash = {
   running?: boolean;
   /** Tool calls announced by `tool_call` and not yet answered by `tool_result`. */
   toolCallsInFlight?: Set<string>;
+  /** Synchronous tool fence; never reset by turn boundaries or channel reconnects. */
+  refresh?: { epoch: number; tools: Map<string, { count: number; overlap: boolean }>; mailbox: number; closed: boolean; fault?: boolean; user?: boolean };
   /** Messages held during a running turn, oldest first. */
   held?: HeldMessage[];
   /** Releases held messages after HOLD_MAX_MS behind a running tool call. */
@@ -498,6 +501,40 @@ export default function (pi: ExtensionAPI) {
       return Array.isArray(snapshot?.running) ? snapshot.running.length : null;
     } catch { return null; }
   };
+  // JS run-to-completion is the gate lock: none of these operations may await.
+  const gate: NonNullable<Stash["refresh"]> = state.refresh ??= { epoch: 0, tools: new Map(), mailbox: 0, closed: false };
+  const owner = Number(state.seq);
+  const managed = Boolean(state.bin && state.identity && state.session &&
+    state.seq && Number.isSafeInteger(owner) && owner >= 0);
+  const advance = () => {
+    if (!Number.isSafeInteger(gate.epoch + 1)) throw new Error("refresh epoch exhausted");
+    gate.epoch += 1;
+  };
+  const refresh = (request: NonNullable<Frame["refresh"]>, ctx: ExtensionContext) => {
+    let result = "refused";
+    // Read jobs only AFTER checking open tools, in this same synchronous critical section.
+    let tools = gate.mailbox;
+    for (const pending of gate.tools.values()) tools += pending.count;
+    const jobs = tools === 0 ? backgroundJobs() : null;
+    if (!managed || gate.fault || gate.user || jobs === null && tools === 0) result = "unsupported";
+    else if (request.action === "activity") result = "activity";
+    else if (request.incarnation === state.session && request.owner_sequence === owner &&
+      request.epoch === gate.epoch) {
+      if (request.action === "close" && !gate.closed && tools === 0 && jobs === 0 &&
+        !state.running && ctx.isIdle()) {
+        advance();
+        gate.closed = true;
+        result = "closed";
+      } else if (request.action === "reopen" && gate.closed) {
+        advance();
+        gate.closed = false;
+        result = "opened";
+      }
+    }
+    return { type: "refresh", request_id: request.request_id, result,
+      receipt: { incarnation: state.session, owner_sequence: owner, epoch: gate.epoch,
+        open_non_person_tools: tools + (jobs ?? 0), gate: gate.closed ? "closed" : "open" } };
+  };
   const applyLabel = async (ctx: ExtensionContext) => {
     if (!state.label) return;
     // Seat replay after reconnect must not append another title change to the session.
@@ -670,6 +707,11 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         if (state.child !== child) return;
+        if (frame.type === "refresh" && frame.refresh) {
+          try { send(refresh(frame.refresh, ctx)); }
+          catch { gate.fault = true; send({ type: "refresh", request_id: frame.refresh.request_id, result: "unsupported" }); }
+          return;
+        }
         if (frame.type === "settled" && typeof frame.meta?.messageId === "string") {
           // The daemon acknowledged read; the graph can no longer replay this native handoff.
           state.accepted?.delete(frame.meta.messageId);
@@ -1034,6 +1076,11 @@ export default function (pi: ExtensionAPI) {
   // together reaches omp as one message.
   const handOff = async (messages: HeldMessage[]) => {
     const [first] = messages;
+    if (managed && gate.closed) {
+      for (const message of messages) message.reply({ type: "failed", meta: message.meta, error: "refresh admission closed" });
+      return;
+    }
+    if (managed) { advance(); gate.mailbox += 1; }
     const content = messages.map((message) => message.content).join("\n\n");
     for (const message of messages) {
       const messageId = message.meta?.messageId;
@@ -1065,6 +1112,8 @@ export default function (pi: ExtensionAPI) {
           message.reply({ type: "failed", meta: message.meta, error: String(error) });
         }
       }
+    } finally {
+      if (managed) gate.mailbox -= 1;
     }
   };
 
@@ -1360,22 +1409,61 @@ export default function (pi: ExtensionAPI) {
   };
   const register = pi.on.bind(pi) as unknown as (
     event: string,
-    handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
+    handler: (event: unknown, ctx: ExtensionContext) => unknown,
   ) => void;
+  const refusedUser = { result: { output: "refresh admission closed", exitCode: 1, cancelled: true, truncated: false } };
+  for (const event of ["user_bash", "user_python"]) register(event, () => {
+    if (!managed) return;
+    try {
+      if (!gate.closed) { advance(); gate.user = true; return; }
+    } catch { gate.fault = true; }
+    return refusedUser;
+  });
   const onWidened = (
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
-  ) => register(event, (payload, ctx) => {
-    if (isSubagent(ctx)) {
-      try {
-        observeSubagent(event, payload, ctx);
-      } catch {
-        // Observability fails open: a subagent's report never takes its session down.
+  ) => register(event, async (payload, ctx) => {
+    try {
+      // Includes subagent tools: their observational events are filtered below, not admission.
+      if (managed && (event === "tool_call" || event === "tool_result" || event === "message_end" || event === "tool_approval_resolved")) {
+        const call = record(event === "message_end" ? record(payload)?.message : payload);
+        if (event === "tool_call" && (typeof call?.toolCallId !== "string" || typeof call.toolName !== "string"))
+          throw new Error("missing tool identity");
+        if (typeof call?.toolCallId === "string") {
+          const root = `${JSON.stringify([ctx.sessionManager.getSessionId(), call.toolCallId])}:`;
+          const key = `${root}${call.toolName}`;
+          const pending = gate.tools.get(key);
+          if (event === "message_end" && call.role === "toolResult") {
+            // Terminal fallback is per dispatch, never a root-tree or turn-end blanket clear.
+            // Overlapping same-name dispatches require their own result/explicit denial.
+            if (pending && !pending.overlap) gate.tools.delete(key);
+          } else if (event === "tool_call") {
+            if (gate.closed) return { block: true, reason: "refresh admission closed" };
+            advance();
+            if (pending) { pending.count += 1; pending.overlap = true; }
+            else gate.tools.set(key, { count: 1, overlap: false });
+          } else if ((event === "tool_result" || event === "tool_approval_resolved" && call.approved === false) && pending) {
+            if (pending.count > 1) pending.count -= 1; else gate.tools.delete(key);
+          }
+        }
       }
-      return;
+      if (isSubagent(ctx)) {
+        try {
+          observeSubagent(event, payload, ctx);
+        } catch {
+          // Observability fails open: a subagent's report never takes its session down.
+        }
+        return;
+      }
+      jobContext = ctx;
+      return await handler(payload, ctx);
+    } catch (error) {
+      if (managed && event === "tool_call") {
+        gate.fault = true;
+        return { block: true, reason: `refresh admission failed: ${String(error)}` };
+      }
+      throw error;
     }
-    jobContext = ctx;
-    return handler(payload, ctx);
   });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this

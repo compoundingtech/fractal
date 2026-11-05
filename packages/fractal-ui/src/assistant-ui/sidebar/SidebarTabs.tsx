@@ -1,7 +1,8 @@
 // The sidebar's one-row tab bar (Agents, Alerts, Missions, Fleet) over the selected tab's content.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import { mergeProps, useFocusRing, useTab, useTabList } from 'react-aria'
+import { Item, useTabListState, type TabListState } from 'react-stately'
 import { accentVars as accent, borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
@@ -25,6 +26,8 @@ export interface SidebarTabsProps {
   readonly tabs: readonly SidebarTab[]
   readonly selectedId: string
   readonly onSelectionChange: (id: string) => void
+  /** The host guarantees a tab stop inside the selected panel, including loading and empty states. */
+  readonly panelHasTabbableContent?: boolean
   /** The selected tab's content; it fills the remaining height, so a scroller inside stays bounded. */
   readonly children: React.ReactNode
 }
@@ -69,11 +72,21 @@ function TabFace({ tab, showCount }: { readonly tab: SidebarTab; readonly showCo
  * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row and labels
  * never truncate; when the row cannot hold every count, all counts drop together and the markers stay.
  */
-export function SidebarTabs({ tabs, selectedId, onSelectionChange, children }: SidebarTabsProps) {
+export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabbableContent = false, children }: SidebarTabsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const [countsFit, setCountsFit] = React.useState(true)
   const bar = React.useRef<HTMLDivElement>(null)
   const replica = React.useRef<HTMLDivElement>(null)
+  const prefix = React.useId()
+  const list = React.useRef<HTMLDivElement>(null)
+  const state = useTabListState({
+    items: tabs,
+    children: tab => <Item key={tab.id} title={sidebarTabName(tab)}>{tab.label}</Item>,
+    selectedKey: selectedId,
+    onSelectionChange: key => onSelectionChange(String(key)),
+  })
+  const { tabListProps } = useTabList({ 'aria-label': 'Sidebar' }, state, list)
+  const { focusProps, isFocusVisible } = useFocusRing()
   React.useLayoutEffect(() => {
     const host = bar.current, row = replica.current
     if (host === null || row === null) return
@@ -85,18 +98,27 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, children }: S
     return () => observer.disconnect()
   }, [])
   return <div ref={bar} data-sidebar-tabs data-sidebar-tab-counts={countsFit ? 'shown' : 'dropped'} {...stylex.props(styles.root)}>
-    {/* Hidden replica of the row with every count, at intrinsic width; outside Tabs, whose collection pass renders its content twice. */}
+    {/* Hidden replica of the row with every count, at intrinsic width and outside the tablist. */}
     <div ref={replica} aria-hidden inert data-sidebar-tabs-measure {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
       {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount /></span>)}
     </div>
-    <Tabs selectedKey={selectedId} onSelectionChange={key => onSelectionChange(String(key))} {...stylex.props(styles.root)}>
-      <TabList aria-label="Sidebar" {...stylex.props(styles.bar, narrow && styles.touch)}>
-        {tabs.map(tab => <Tab key={tab.id} id={tab.id} data-sidebar-tab={tab.id} aria-label={sidebarTabName(tab)} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={countsFit} /></Tab>)}
-      </TabList>
-      {/* One panel per tab with a stable id, so every tab's aria-controls resolves; only the selected one holds content. */}
-      {tabs.map(tab => <TabPanel key={tab.id} id={tab.id} data-sidebar-tab-panel={tab.id} {...stylex.props(styles.panel)}>{tab.id === selectedId ? children : null}</TabPanel>)}
-    </Tabs>
+    <div {...stylex.props(styles.root)}>
+      <div {...tabListProps} ref={list} {...stylex.props(styles.bar, narrow && styles.touch)}>
+        {tabs.map(tab => <SidebarTabButton key={tab.id} tab={tab} state={state} prefix={prefix} narrow={narrow} showCount={countsFit} />)}
+      </div>
+      {/* Static host knowledge avoids a visibility walk on every roster render and subtree mutation. */}
+      {tabs.map(tab => tab.id === selectedId
+        ? <div {...focusProps} key={tab.id} id={`${prefix}-panel-${tab.id}`} role="tabpanel" aria-labelledby={`${prefix}-tab-${tab.id}`} tabIndex={panelHasTabbableContent ? -1 : 0} data-sidebar-tab-panel={tab.id} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.panel)}>{children}</div>
+        : <div key={tab.id} id={`${prefix}-panel-${tab.id}`} role="tabpanel" aria-labelledby={`${prefix}-tab-${tab.id}`} data-sidebar-tab-panel={tab.id} hidden />)}
+    </div>
   </div>
+}
+
+function SidebarTabButton({ tab, state, prefix, narrow, showCount }: { readonly tab: SidebarTab; readonly state: TabListState<SidebarTab>; readonly prefix: string; readonly narrow: boolean; readonly showCount: boolean }) {
+  const ref = React.useRef<HTMLDivElement>(null)
+  const { tabProps, isSelected } = useTab({ key: tab.id }, state, ref)
+  const { focusProps, isFocusVisible } = useFocusRing()
+  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={`${prefix}-tab-${tab.id}`} aria-controls={`${prefix}-panel-${tab.id}`} aria-label={sidebarTabName(tab)} data-sidebar-tab={tab.id} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={showCount} /></div>
 }
 
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } as const
