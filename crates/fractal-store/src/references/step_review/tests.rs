@@ -56,7 +56,7 @@ fn check(store: &Store, step: &StepRunView, requester: &str, reviewer: &str) -> 
         requester,
         reviewer,
     )
-    .map_or_else(|error| error.code, |_| "ok".into())
+    .map_or_else(|error| error.code.to_owned(), |_| "ok".into())
 }
 
 #[test]
