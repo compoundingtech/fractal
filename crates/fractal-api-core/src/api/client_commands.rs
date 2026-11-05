@@ -337,14 +337,14 @@ mod tests {
         };
         let now = client_now_ms();
         let claim = state.store.append_claim(&ClaimInput {
-            subject: "grant/test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
+            subject: "custom/client/retention-test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/retention-phone","person_id":"person/ada",
                 "device_id":"device/test","scopes":["read.projections"],"expires_at_unix_ms":(now + 600_000) as u64})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
         let session = paired_client_session(&state, &claim, "gateway", false).unwrap();
         for (id, terminal_at) in [("retained", now - 1_000), ("forgotten", now - RETENTION_MS - 1_000)] {
-            let mut row = command(); row.expires = terminal_at + 59_000;
+            let mut row = command(); row.expires = terminal_at + 59_000; row.grant = claim.subject.clone();
             row.resource["session_actor"] = json!(session.actor);
             row.finish(&result(), terminal_at, true);
             ROWS.lock().unwrap().insert((state.node.clone(), id.into()), row);
