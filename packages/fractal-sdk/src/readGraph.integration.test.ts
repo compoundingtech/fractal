@@ -38,13 +38,14 @@ it('isolates SDK optional services while bounding the shared client dependency',
     }
   }
   expect(visited.size).toBeGreaterThan(1)
-  // The generated client is deliberately NOT read-only: its one FractalClient class includes
-  // collection reads and mutation methods. Splitting that shared generator is a separate change.
+  // The transport client still includes read and mutation methods; generated schema modules
+  // partition shared read codecs from optional validators without splitting that client class.
   // These are the only client source modules admitted by this SDK boundary (including type edges).
   const clientRoot = resolve(repoRoot, 'clients/typescript/fractal-client')
   expect([...visited].filter((path) => path.startsWith(`${clientRoot}/`))
     .map((path) => relative(clientRoot, path)).sort()).toEqual([
-      'Client.generated.ts', 'Models.generated.ts', 'Schema.generated.ts',
+      'Client.generated.ts', 'Models.generated.ts', 'ReadSchema.generated.ts',
+      'Schema.generated.ts', 'SchemaSupport.generated.ts',
       'errors.ts', 'index.ts', 'subagent-drivers.ts',
     ])
 })

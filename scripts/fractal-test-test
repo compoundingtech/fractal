@@ -3255,6 +3255,16 @@ finally:
         self.assertEqual(len(self.statements()), 4)
         self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
 
+    def test_a_handed_over_run_at_its_top_up_limit_does_not_start_another_copy_or_push(self):
+        self.commit('b.txt', 'feature\n')
+        with self.main_moves_during_the_run([('scripts/st-test', '# a newer base runner\n')]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin',
+                                              extra_env={st_test.HANDOVER_TOP_UP: str(st_test.TOP_UP_ROUNDS)})
+        self.assertIn('after 3 top-up rounds origin/main', str(code))
+        self.assertIn('changed its runner again; the branch is not pushed', str(code))
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+        self.assertEqual(len(self.statements()), 1, 'the completed round signed; no new copy ran')
+
     def test_a_push_run_without_a_git_identity_fails_before_it_waits_for_a_tree(self):
         self.branch_behind(0)
         git(self.work, 'config', '--unset', 'user.name')
@@ -4195,6 +4205,32 @@ if os.environ.get('CI_TEST_FLAKY'):
 
 
 class HandOver(unittest.TestCase):
+    def test_a_tree_wait_handover_during_a_top_up_keeps_the_consumed_rounds(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.dict(st_test.HANDOVER, {'top_up': '2'}, clear=True), \
+             mock.patch.object(st_test.os, 'execve') as execute, contextlib.redirect_stderr(io.StringIO()):
+            st_test.hand_over(st_test.Handover(b'# the accepted base runner\n', 'b' * 40, Path('/q/ticket'), True), ['--all'])
+        _, argv, env = execute.call_args.args
+        self.addCleanup(shutil.rmtree, Path(argv[1]).parent, True)
+        self.assertEqual(env[st_test.HANDOVER_TOP_UP], '2')
+        self.assertEqual(env[st_test.HANDOVER_TICKET], '/q/ticket')
+
+    def test_a_top_up_handover_keeps_its_budget_start_and_settings_without_a_tree_ticket(self):
+        source, commit = b'# the accepted base runner\n', 'b' * 40
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(st_test, 'RUN_STARTED', [1234.5]), \
+             mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_MAX_GB': '170'}, clear=True), \
+             mock.patch.object(st_test.os, 'execve') as execute, contextlib.redirect_stderr(io.StringIO()):
+            st_test.hand_over(st_test.Handover(source, commit, None, False, top_up=2), ['--all', '--push', 'origin'])
+        _, argv, env = execute.call_args.args
+        copied = Path(argv[1])
+        self.addCleanup(shutil.rmtree, copied.parent, True)
+        self.assertEqual(copied.read_bytes(), source)
+        self.assertEqual(argv[2:], ['--all', '--push', 'origin'])
+        self.assertEqual(env[st_test.HANDOVER_TOP_UP], '2')
+        self.assertEqual(env[st_test.HANDOVER_STARTED], '1234.5')
+        self.assertEqual(env[st_test.REEXEC], commit)
+        self.assertEqual(env['ST_TEST_POOL_MAX_GB'], '170')
+        self.assertNotIn(st_test.HANDOVER_TICKET, env)
+
     def test_hand_over_executes_the_new_copy_in_this_process_with_the_ticket_the_start_and_the_settings(self):
         """hand_over replaces the process (the same pid, so the ticket stays this waiter's), passes the ticket, the run's start, the base commit and
         the ST_TEST_* settings the seat scrub dropped, and removes the base copy it ran from, which nothing would remove after the exec."""
@@ -5587,6 +5623,163 @@ class KeyedFleetCompat(StTest):
 
     def fleet_compat_notes(self):
         return [s['predicate']['observed'] for s in self.statements() if 'linux-fleet-compat' in s['predicate']['observed']['checks']]
+
+    def run_with_a_new_default_check(self, fail=False, narrowed=False, rerun=False, branch_edit=False, second_change=False, different_tree=False):
+        """A real old runner signs while main adds fleet-compat to its suite; the push hook asks the new runner's --status."""
+        import ast
+        remote = Path(self.tmp.name) / 'origin.git'
+        advance = Path(self.tmp.name) / 'advance-main.py'
+        advance.write_text(
+            'import subprocess\nfrom pathlib import Path\n'
+            f"subprocess.run(['git', '--git-dir', {str(remote)!r}, 'update-ref', 'refs/heads/main', 'refs/heads/next-main'], check=True)\n"
+            f"with Path({str(self.calls)!r}).open('a') as out: out.write('demo\\n')\n")
+        demo = [sys.executable, str(advance)]
+        fake = Path(self.tmp.name) / 'fake-fleet-compat.py'
+
+        def runner(new):
+            source = (ROOT / 'scripts/st-test').read_text()
+            commands = {'demo': demo, 'rust-tests': LOCAL['rust-tests']}
+            if new:
+                commands['linux-fleet-compat'] = LOCAL['linux-fleet-compat']
+            values = {'LOCAL': repr(commands), 'OPT_IN': "frozenset({'rust-tests'})",
+                      'RUN_FLEET_COMPAT': repr([sys.executable, str(fake), 'fleet-compat'])}
+            if different_tree:
+                values['BUILDS'] = "frozenset({'demo', 'linux-fleet-compat'})"
+            lines = source.splitlines(keepends=True)
+            for node in reversed(ast.parse(source).body):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                    name = node.targets[0].id
+                    if name in values:
+                        lines[node.lineno - 1:node.end_lineno] = [f'{name} = {values[name]}\n']
+            source = ''.join(lines)
+            if new and different_tree:
+                # Take the released slot as another waiter could, before the real allocator runs. Its flock and process scan
+                # must both be clear; the continuation then has to take tree-1, without any cached tree or target from round 0.
+                probe = textwrap.dedent("""
+                    original_acquire_tree = acquire_tree
+                    def acquire_tree(root, size, *args, **kwargs):
+                        released = root / 'tree-0'
+                        assert released.is_dir(), 'the first round must have used the pool'
+                        assert not tree_users(released), 'the completed round left a process in its released tree'
+                        with open(root / 'tree-0.lock', 'a') as held:
+                            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            number, lock = original_acquire_tree(root, size, *args, **kwargs)
+                        assert number == 1, 'the continuation must acquire a different tree'
+                        print('released tree has no processes; continuation acquired tree-1', flush=True)
+                        return number, lock
+
+                    """)
+                source = source.replace("if __name__ == '__main__':", probe + "if __name__ == '__main__':")
+            return source
+
+        old, new = runner(False), runner(True)
+        initial = Path(self.tmp.name) / 'initial-base-runner'
+        initial.write_text(old)
+        git(self.work, 'checkout', '-q', 'main')
+        (self.work / 'scripts/st-test').write_text(old)
+        policy = json.loads((self.work / '.st/evidence-skip-policy.json').read_text())
+        policy['checks']['demo']['kinds']['wrapper']['command'] = demo
+        self.assertFalse(policy['checks']['linux-fleet-compat'].get('enforce', False), 'exercise the shadow check')
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'old runner without the compatibility check')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', '--ff-only', 'main')
+        self.commit('b.txt', 'feature\n')
+        if branch_edit:
+            self.commit('scripts/st-test', "raise SystemExit('the branch runner must not be executed')\n")
+        head = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'checkout', '-q', 'main')
+        (self.work / 'scripts/st-test').write_text(new)
+        git(self.work, 'commit', '-q', '-am', 'add compatibility to the default suite')
+        git(self.work, 'push', '-q', 'origin', 'HEAD:refs/heads/next-main')
+        if second_change:
+            (self.work / 'scripts/st-test').write_text(new + '\n# the next published runner\n')
+            git(self.work, 'commit', '-q', '-am', 'publish another runner change')
+            git(self.work, 'push', '-q', 'origin', 'HEAD:refs/heads/next-main-2')
+            fake.write_text(FAKE_FLEET_COMPAT + '\nimport subprocess\n' +
+                            f"subprocess.run(['git', '--git-dir', {str(remote)!r}, 'update-ref', 'refs/heads/main', 'refs/heads/next-main-2'], check=True)\n")
+        git(self.work, 'checkout', '-q', 'feature')
+
+        accepted = Path(self.tmp.name) / 'accepted-runner'
+        accepted.write_text(new)
+        args = ['--base', 'origin/main', '--repository', 'org/repo', '--toolchain-sha256', hashlib.sha256(b'drv').hexdigest()]
+        # Only branch pushes run the gate: evidence refs must reach the remote before it can accept the branch.
+        hook = self.work / '.git/hooks/pre-push'
+        hook.write_text('#!/bin/sh\nwhile read local_ref local_oid remote_ref remote_oid; do\n'
+                        '  case "$remote_ref" in refs/heads/feature)\n'
+                        f'    exec {shlex.join([sys.executable, str(accepted), *args, "--status"])} ;;\n'
+                        '  esac\ndone\n')
+        hook.chmod(0o700)
+        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, ST_TEST_TMP=str(self.run_tmp),
+                   ST_TEST_TREES='off', ST_EVIDENCE_TARGET='off', ST_EVIDENCE_GOVERN='off',
+                   FAKE_CALLS=str(self.calls), FAKE_TARGET=str(Path(self.tmp.name) / 'target'))
+        if different_tree:
+            env.update(ST_TEST_TREES='2', ST_TEST_POOL=str(Path(self.tmp.name) / 'pool'), ST_TEST_POOL_MAX_GB='0')
+        if fail:
+            env['FAKE_FLEET_COMPAT_FAIL'] = '1'
+        selection = ['--check', 'demo'] if narrowed else ['--all']
+        if rerun:
+            selection.append('--rerun')
+        done = subprocess.run([sys.executable, str(initial), *args, *selection, '--push', 'origin'],
+                              cwd=self.work, env=env, capture_output=True, text=True, timeout=90)
+        return done, head, accepted, args, env
+
+    def test_a_new_default_check_on_main_is_signed_before_a_green_run_pushes(self):
+        done, head, accepted, args, env = self.run_with_a_new_default_check()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.ran(), ['demo', 'fleet-compat'], 'the old valid check is reused; the new check runs once')
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        [note] = self.fleet_compat_notes()
+        self.assertEqual(note['checks']['linux-fleet-compat']['exit_code'], 0)
+        status = subprocess.run([sys.executable, str(accepted), *args, '--status'], cwd=self.work, env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+
+    def test_a_failing_new_default_check_keeps_the_handed_over_branch_unpublished(self):
+        done, _, _, _, _ = self.run_with_a_new_default_check(fail=True)
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.ran(), ['demo', 'fleet-compat'])
+        self.assertRegex(done.stdout, r'linux-fleet-compat\s+FAILED')
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+        self.assertFalse(any(note['checks']['linux-fleet-compat']['exit_code'] == 0 for note in self.fleet_compat_notes()))
+
+    def test_a_narrowed_rerun_hands_over_the_new_suite_without_repeating_its_valid_check(self):
+        done, head, _, _, _ = self.run_with_a_new_default_check(narrowed=True, rerun=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.ran(), ['demo', 'fleet-compat'])
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        [note] = self.fleet_compat_notes()
+        self.assertEqual(note['checks']['linux-fleet-compat']['exit_code'], 0)
+
+    def test_a_top_up_on_another_pool_tree_reuses_notes_and_leaves_no_old_process(self):
+        done, head, _, _, _ = self.run_with_a_new_default_check(different_tree=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.ran(), ['demo', 'fleet-compat'])
+        self.assertRegex(done.stdout, r'demo\s+already signed')
+        self.assertIn('released tree has no processes; continuation acquired tree-1', done.stdout)
+        records = [json.loads(line) for line in (self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()]
+        self.assertEqual([record['pool_tree'] for record in records], [0, 1])
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+
+    def test_a_second_runner_change_keeps_the_round_count_and_reuses_both_signed_checks(self):
+        done, head, _, _, _ = self.run_with_a_new_default_check(second_change=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.ran(), ['demo', 'fleet-compat'])
+        self.assertEqual(done.stderr.count("the base's st-test changed before a top-up"), 2)
+        records = [json.loads(line) for line in (self.home / '.local/state/st-test/runs.jsonl').read_text().splitlines()]
+        self.assertEqual([record['top_up'] for record in records], [0, 1, 2])
+        self.assertEqual(len({record['started'] for record in records}), 1, 'the original start survives both handovers')
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+
+    def test_a_branch_runner_edit_does_not_select_the_top_up_runner(self):
+        done, head, _, _, _ = self.run_with_a_new_default_check(branch_edit=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.ran(), ['demo', 'fleet-compat'])
+        self.assertIn('already signed', done.stdout, 'the old valid check is reused by the accepted base copy')
+        self.assertNotIn('the branch runner must not be executed', done.stderr)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
 
     def test_unsigned_linux_fleet_compat_is_signed_from_linux_gates_fleet_compat_stage_which_runs_once(self):
         code, out, err = self.run_fleet_compat('linux-gate', 'linux-fleet-compat')
