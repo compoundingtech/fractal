@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add the member-local phone-command daemon module without activating phone commands",
+  "replay": {"status": "none", "detail": "Command records are bounded process-local memory; no durable replay is introduced."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, triggers or migrations change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, digests or coordinated member upgrade change."},
+  "compatibility": {"status": "none", "detail": "This module implements the landed phone-command v1 message_id contract but adds no router, capability or collection-stream wiring. It does not activate live phone commands or change the exposed protocol."},
+  "downtime": {"status": "none", "detail": "No additional service interruption is introduced by this inactive module."},
+  "manual": {"status": "none", "detail": "No installation or phone activation steps are required; routing and stream integration are not included."},
+  "recovery": {"status": "none", "detail": "No persistent command state or recovery behavior changes; existing daemon swap-back conditions are unchanged."}
+}
