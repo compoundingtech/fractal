@@ -456,3 +456,85 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
         assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty(), "{status}");
     }
 }
+
+fn refresh_fixture() -> (Renewal, fractal_store::store::refresh_intake::Seal) {
+    let renewal = claimed_step(0);
+    let store = &renewal.store;
+    let source = "version 2\nagent \"node.worker\" { command \"true\" }\n";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &plan.subject_tokens, "refresh-declaration").unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/node.worker".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status":"running","incarnation_id":"current"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let token = fractal_store::store::current_desired_row(&store.readers.get(), "agent/node.worker").unwrap().unwrap().claim_id;
+    let seal = fractal_store::store::refresh_intake::Seal {
+        operation: "refresh-operation".into(), incumbent: "current".into(),
+        desired_token: token, activity_epoch: store.refresh_activity_epoch("agent/node.worker").unwrap(),
+    };
+    (renewal, seal)
+}
+
+// The winner owns the single writer while the opponent is launched. No timing sleeps.
+fn refresh_writer_barrier(store: &Store, winner: impl FnOnce(&Connection) + Send, opponent: impl FnOnce() + Send) {
+    static RACES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _race = RACES.lock().unwrap();
+    let (entered, wait) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || store.connection.batched(move |tx| { winner(tx); entered.send(()).unwrap(); resume.recv().unwrap(); Ok::<_, rusqlite::Error>(()) }).unwrap().unwrap());
+        wait.recv().unwrap();
+        let opponent = scope.spawn(opponent);
+        while smallclaims::windows::holds::report()["waiting"]["writer"].as_u64().unwrap() == 0 { std::thread::yield_now(); }
+        release.send(()).unwrap();
+        opponent.join().unwrap();
+    });
+}
+
+#[test]
+fn refresh_intake_claim_wins_and_held_renew_complete_remain_available() {
+    let (renewal, mut seal) = refresh_fixture();
+    let store = &renewal.store;
+    store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    store.work_action(&renewal.subject, "claim", &request("refresh-claim-wins", None)).unwrap();
+    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    refresh_writer_barrier(store, |_| {}, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    store.work_action(&renewal.subject, "renew", &request("refresh-renew", None)).unwrap();
+    store.work_action(&renewal.subject, "complete", &request("refresh-complete", None)).unwrap();
+    assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
+}
+
+#[test]
+fn refresh_intake_seal_wins_and_owner_unseal_restores_admission() {
+    let (renewal, seal) = refresh_fixture();
+    let store = &renewal.store;
+    store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    refresh_writer_barrier(store, |tx| assert!(fractal_store::store::refresh_intake::seal_tx(tx, "agent/node.worker", &seal).unwrap()), || {
+        assert_eq!(store.work_action(&renewal.subject, "claim", &request("refresh-refused", None)).unwrap_err().code, "refresh-intake-sealed");
+        assert!(!store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
+    });
+    assert!(!store.unseal_refresh_intake("agent/node.worker", "other-operation").unwrap());
+    assert!(store.unseal_refresh_intake("agent/node.worker", &seal.operation).unwrap());
+    store.work_action(&renewal.subject, "claim", &request("refresh-restored", None)).unwrap();
+    assert!(store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
+}
+
+#[test]
+fn refresh_intake_mutation_wins_and_stale_epoch_cannot_seal() {
+    let (renewal, mut seal) = refresh_fixture();
+    let store = &renewal.store;
+    store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    let stale = seal.clone();
+    refresh_writer_barrier(store, |tx| assert!(fractal_store::store::refresh_intake::admit_mutation_tx(tx, "agent/node.worker", "current", "mutation").unwrap()), || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    store.complete_refresh_mutation("agent/node.worker", "current", "mutation").unwrap();
+    assert!(!store.seal_refresh_intake("agent/node.worker", &stale).unwrap());
+    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
+}

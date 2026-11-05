@@ -15,7 +15,7 @@ import { retainPane, workspaceHref, workspaceView, type RetainedPane, type Works
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
 import { RegisteredPortal, usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import * as Aria from 'react-aria-components'
@@ -34,9 +34,11 @@ import { NarrowSheet } from '../../../../packages/fractal-ui/src/assistant-ui/co
 import { darkTheme as assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
 import { lightTheme as compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/PinsSection.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
+import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents, useAttention } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
@@ -109,6 +111,9 @@ const LiveSidebarAgentRow = React.memo((props: {
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
+const compactAgentHeight = { compact: sidebarRowSize }
+const displayOnlyAgentHeight = { compact: sidebarRowSize, touch: sidebarRowSize }
+
 const LiveSidebarTreeView = React.memo((props: {
   readonly binding: SidebarFoldersBinding
   readonly tree: SidebarFoldersBinding['tree']
@@ -140,11 +145,13 @@ const LiveSidebarTreeView = React.memo((props: {
     })
   }, [source, props.agents, props.stale, props.needsYou])
   const accessibleNames = useAtomValue(namesAtom)
+  const agentRowHeight = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
+    accessibleNames.has(node.id) ? (node.parent === undefined ? compactAgentHeight : displayOnlyAgentHeight) : undefined, [accessibleNames])
   const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>, touchDisclosure?: React.ReactNode) =>
     <LiveSidebarAgentRow agentRef={node.parent ?? node.subject} childId={node.childId} active={node.parent === undefined && props.current === node.subject} needsMe={node.parent === undefined && props.needsYou.has(node.subject)} openRef={node.parent === undefined ? node.subject : undefined} touchDisclosure={touchDisclosure} select={props.select} actions={props.actions} />, [props.current, props.needsYou, props.select, props.actions])
   const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
     <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
-  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
+  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} agentRowHeight={agentRowHeight} /></SidebarQueryContext.Provider>
 })
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
@@ -467,7 +474,16 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
   // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
   const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
-  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
+  const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
+  const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
+  const pinnedItems = React.useMemo(() => {
+    const names = new Map(agents.map(agent => [agent.ref, agent.name]))
+    return pins.state.members.map(({ member }) => ({ id: member, label: names.get(member) ?? member }))
+  }, [agents, pins.state.members])
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({
+    declaration: setDeclarationRef,
+    ...(pins.editable ? { pins: { has: (ref: string) => pinned.has(ref), toggle: pins.toggle } } : {}),
+  }), [pins.editable, pins.toggle, pinned])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -637,7 +653,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </header>
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
-  const sidebarBody = <SidebarTabs selectedId={sidebarTab === 'alerts' ? 'alerts' : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' ? 'alerts' : 'agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', ...alertTabMarkers(attention) }]}>
+  // The toolbar/tree and the persistent footer provide tab stops even while loading or empty, on either tab.
+  const sidebarBody = <SidebarTabs panelHasTabbableContent selectedId={sidebarTab === 'alerts' ? 'alerts' : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' ? 'alerts' : 'agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', ...alertTabMarkers(attention) }]}>
     {sidebarTab === 'alerts' ? <AlertsTabCodeBoundary onOpen={ref => { if (ref.startsWith('agent/')) select(ref); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
@@ -649,6 +666,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
           : null}
       </>}
     <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
+      <PinsSection items={pinnedItems} editable={pins.editable} onOpen={ref => open({ ref })} onUnpin={pins.toggle} detail={pins.state.phase === 'unavailable' ? 'Pins are unavailable. Reconnect to make changes.' : undefined} onRetry={pins.retry} />
       {fleet._tag === 'Waiting' ? <>
         <RosterLoading />
         <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
