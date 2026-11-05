@@ -1,6 +1,6 @@
 use super::{Scope, St3Error, agent_review};
 use crate::model::StepRunView;
-use crate::store::{ReferenceGraph, identities, step_timing_events};
+use crate::store::{ReferenceGraph, identities, step_run_row_tx, step_timing_events};
 use rusqlite::Connection;
 use smallclaims::error::internal;
 use std::collections::BTreeSet;
@@ -11,10 +11,10 @@ fn unresolved(subject: &str) -> St3Error {
 
 /// The caller supplies a raw step/assignment/pool view and requester from the same
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
-/// LOCAL step only: not carried source steps, a run, child tree, or parent boundary.
-/// Slice 5b must add those boundaries before any production caller uses this helper.
-/// Slice 5c must verify real person-work delegation before any production caller.
-/// Owner naming failures surface as `lifecycle-unavailable` until slice 5b.
+/// Includes local responsibility and every carried source step.
+/// Before production use, fractal-missions must add the run hierarchy, child runs,
+/// loop rounds, enclosing parent step, and start/reassignment entry point.
+/// Slice 5c (fractal-seats) must verify real person-work delegation.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
     scope: &Scope<'_>,
@@ -37,7 +37,13 @@ pub fn validate_step_reviewer(
         if !actor.starts_with("agent/") {
             return Err(unresolved(actor));
         }
-        let identity = identities::resolve_reference_conn(connection, actor)?;
+        let identity = identities::resolve_reference_conn(connection, actor).map_err(|error| {
+            if error.code == "lifecycle-unavailable" {
+                unresolved(actor)
+            } else {
+                error
+            }
+        })?;
         if !scope.declared_subject(&ReferenceGraph { connection }, &identity)? {
             return Err(unresolved(actor));
         }
@@ -45,6 +51,22 @@ pub fn validate_step_reviewer(
         Ok(())
     };
     include(requester)?;
+    collect_step(connection, step, &mut include, &mut BTreeSet::new())?;
+    let reviewer = agent_review::resolve_reviewer(scope, connection, reviewer)?;
+    agent_review::independent_reviewer(&reviewer, &excluded)?;
+    Ok(excluded)
+}
+
+// Reuse exactly the same local collection for the supplied step and each source.
+fn collect_step(
+    connection: &Connection,
+    step: &StepRunView,
+    include: &mut impl FnMut(&str) -> Result<(), St3Error>,
+    visiting: &mut BTreeSet<String>,
+) -> Result<(), St3Error> {
+    if !visiting.insert(step.subject.clone()) {
+        return Err(unresolved(&step.subject));
+    }
     if !step.agentless
         && step.assigned_to.is_none()
         && step.claimant.is_none()
@@ -67,8 +89,9 @@ pub fn validate_step_reviewer(
     }
     // Read raw history: effective views and carried_claimants_tx intentionally drop
     // responsibility after lease expiry, terminal state, or a later claim.
-    for (_, body, _) in step_timing_events(connection, &step.subject).map_err(internal)? {
-        let fields = body.get("fields").unwrap_or(&body);
+    let events = step_timing_events(connection, &step.subject).map_err(internal)?;
+    for (_, body, _) in &events {
+        let fields = body.get("fields").unwrap_or(body);
         if let Some(actor) = fields.get("claimant").and_then(serde_json::Value::as_str) {
             include(actor)?;
         }
@@ -89,9 +112,26 @@ pub fn validate_step_reviewer(
             .ok_or_else(|| unresolved(&step.subject))?;
         include(&actor)?;
     }
-    let reviewer = agent_review::resolve_reviewer(scope, connection, reviewer)?;
-    agent_review::independent_reviewer(&reviewer, &excluded)?;
-    Ok(excluded)
+    for (kind, body, _) in &events {
+        if kind != "step-run.carried" {
+            continue;
+        }
+        let fields = body.get("fields").unwrap_or(body);
+        let source = fields
+            .get("source_step_run")
+            .and_then(serde_json::Value::as_str)
+            .filter(|source| source.starts_with("step-run/") && !source.contains("${"))
+            .ok_or_else(|| unresolved(&step.subject))?;
+        fractal_schema::registry()
+            .validate_subject(source)
+            .map_err(|_| unresolved(source))?;
+        let source = step_run_row_tx(connection, source)
+            .map_err(internal)?
+            .ok_or_else(|| unresolved(source))?;
+        collect_step(connection, &source, include, visiting)?;
+    }
+    visiting.remove(&step.subject);
+    Ok(())
 }
 
 #[cfg(test)]
