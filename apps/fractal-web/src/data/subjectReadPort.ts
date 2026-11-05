@@ -13,7 +13,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 
 import type { Feed } from './source.ts'
 import { observed, unavailable, waiting } from './source.ts'
-import { redactPublicationDefinition } from '../declarations/model.ts'
+import { redactPublicationDefinition, type MissionDeclarationValue } from '../declarations/model.ts'
 
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
@@ -46,11 +46,16 @@ export const subjectReaderFromAtom = <T>({
   const changes = (ref: string) =>
     Stream.callback<Feed<T>>((output) =>
       Effect.acquireRelease(
-        Effect.sync(() =>
-          registry.subscribe(feed(ref), (state) => Queue.offerUnsafe(output, state), {
+        Effect.sync(() => {
+          const atom = feed(ref)
+          // Registry disposal is scheduled, not synchronous with the last unsubscribe.
+          // Reacquisition must revalidate even before that scheduled removal runs;
+          // an already-mounted consumer still shares its current acquisition.
+          if (registry.ensureNode(atom).canBeRemoved) registry.refresh(atom)
+          return registry.subscribe(atom, (state) => Queue.offerUnsafe(output, state), {
             immediate: true,
-          }),
-        ),
+          })
+        }),
         (unsubscribe) => Effect.sync(unsubscribe),
       ),
     )
@@ -348,7 +353,7 @@ export const gatewaySubjectReads = ({
       ),
       registry: registry,
     })
-  const decodePublicationDefinition = Native.decodeUnknownSync(Native.PublicationDefinition)
+  const decodeMissionDeclaration = Native.decodeUnknownSync(Schema.Union([Native.MissionDeclaration, Native.PublicationDefinition]))
   return {
     resource,
     launch: fromGetter({
@@ -474,9 +479,21 @@ export const gatewaySubjectReads = ({
       getter: ({ client, ref }) => client.agentDeclarationGet(ref, undefined, false),
     }),
     missionDefinition: fromGetter({
-      // This read has no env switch; values are redacted before any feed or cache holds them.
-      decode: (value) => redactPublicationDefinition(decodePublicationDefinition(value)),
-      getter: ({ client, ref }) => client.publicationDefinition(ref),
+      // Only old routers' non-JSON 404s lack this read; a published-mission miss is an API error.
+      decode: (value): MissionDeclarationValue => {
+        const decoded = decodeMissionDeclaration(value)
+        return 'text' in decoded ? decoded : redactPublicationDefinition(decoded)
+      },
+      getter: async ({ client, ref, signal }) => {
+        try {
+          return await client.missionDeclarationGet(ref, undefined, { signal })
+        } catch (cause) {
+          // The generated client maps an empty/non-JSON HTTP error to this code.
+          if (!(cause instanceof ClientError && cause.status === 404 && cause.response.code === 'http-error')) throw cause
+          signal.throwIfAborted()
+          return client.publicationDefinition(ref, { signal })
+        }
+      },
     }),
   }
 }
@@ -509,8 +526,8 @@ export interface SubjectReads {
   readonly document: SubjectReader<Native.DocumentContent>
   readonly glass: SubjectReader<Native.Glass>
   readonly agentDeclaration: SubjectReader<Native.AgentDeclaration>
-  /** Structured mission definition with environment values already redacted. */
-  readonly missionDefinition: SubjectReader<Native.PublicationDefinition>
+  /** Served canonical mission KDL, or an older daemon's redacted structured definition. */
+  readonly missionDefinition: SubjectReader<MissionDeclarationValue>
 }
 /** Effect service providing the source's native subject readers. */
 export class SubjectReadPort extends Context.Service<SubjectReadPort, SubjectReads>()(
