@@ -73,9 +73,8 @@ fn agent_review_step_concrete_boundaries() {
             assert!(step.agentless);
         }
     }
-    let (store, step) = fixture(
-        r#"available-to "agent/example/new"; available-to "agent/example/reviewer""#,
-    );
+    let (store, step) =
+        fixture(r#"available-to "agent/example/new"; available-to "agent/example/reviewer""#);
     assert!(step.claimant.is_none());
     assert_eq!(check(&store, &step, PERSON, REVIEWER), CONFLICT);
     // Applied run-scoped declarations are covered by slice 5b.
