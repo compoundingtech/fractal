@@ -231,3 +231,7 @@ With v15 every fixed seed converges; seeds 2 and 27 are the exact never-trim set
 trim again). Characterization used
 `cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
 The first characterization run failed only the four stale v14 trim expectations.
+
+`claims-v16.json` adds the system-only `runtime.refresh` episode envelope; v1–v15 stay frozen.
+Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
+The simulation selects v16; retention keeps unresolved and current episode state whole.
