@@ -20,7 +20,7 @@ test('read entrypoint loads no mutation or PTY validators, even without tree sha
             return result;
         } });
         const read = await import('@fractal/client/schema/read');
-        assert.ok(read.Agent && read.TimelineEntry && read.CollectionFrame);
+        assert.ok(read.Agent && read.TimelineEntry && read.ReadCollectionFrame && read.ReadCollectionCommand);
         assert.deepEqual(loaded.sort(), ['ReadSchema.generated.ts', 'SchemaSupport.generated.ts']);
     `], { cwd: __dirname, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);

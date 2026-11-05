@@ -1638,7 +1638,8 @@ export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.genera
 
 /// The read closure excludes terminal session/screen operations, not terminal resource metadata.
 pub fn partitioned_models(schema: &Value, operations: &Value) -> Result<Vec<(&'static str, String)>> {
-    let defs = schema["$defs"].as_object().context("schema definitions")?;
+    let mut schema = schema.clone();
+    let defs = schema["$defs"].as_object_mut().context("schema definitions")?;
     let mut pending = BTreeSet::new();
     for read in operations["reads"].as_array().context("read operations")? {
         let id = read["id"].as_str().context("read id")?;
@@ -1659,7 +1660,15 @@ pub fn partitioned_models(schema: &Value, operations: &Value) -> Result<Vec<(&'s
     }
     for stream in operations["streams"].as_array().context("stream operations")? {
         for key in ["command", "frame"] {
-            pending.insert(stream[key].as_str().context("stream model")?.to_owned());
+            let name = stream[key].as_str().context("stream model")?;
+            let mut read_model = defs.get(name).context("stream definition")?.clone();
+            read_model["oneOf"]
+                .as_array_mut()
+                .context("stream union")?
+                .retain(|branch| branch["properties"]["collection"]["const"] != "terminal");
+            let read_name = format!("Read{name}");
+            defs.insert(read_name.clone(), read_model);
+            pending.insert(read_name);
         }
     }
     let mut read_names = BTreeSet::new();
@@ -1668,7 +1677,7 @@ pub fn partitioned_models(schema: &Value, operations: &Value) -> Result<Vec<(&'s
             refs(defs.get(&name).context("read definition")?, &mut pending);
         }
     }
-    let (read, optional, support) = emit_models(schema, Some(&read_names))?;
+    let (read, optional, support) = emit_models(&schema, Some(&read_names))?;
     Ok(vec![
         ("SchemaSupport.generated.ts", support),
         ("ReadSchema.generated.ts", read),

@@ -159,6 +159,8 @@ roster/resource reads. Terminal screen/content and mutation codecs stay on `@fra
 which retains all existing exports and re-exports the same read validator instances. Shared codec
 support preserves strict decoding and unknown-case tracking across both entrypoints. Regeneration
 also writes `ReadSchema.generated.ts` and `SchemaSupport.generated.ts`; never edit them directly.
+`ReadCollectionCommand` and `ReadCollectionFrame` cover collection/conversation stream branches
+without terminal subscriptions/screens; the original complete unions remain on the full surface.
 
 ```ts
 import * as FractalSchema from '@fractal/client/schema'
