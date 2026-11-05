@@ -6,7 +6,7 @@ import { Button } from 'react-aria-components'
 import { EmbraceScrollViewport } from './assistant-ui/EmbraceScrollViewport'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g, motionNumbers } from './assistant-ui/composition-tokens.stylex'
 
 function ScrollStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [count, setCount] = React.useState(40)
@@ -28,6 +28,12 @@ export const scenarioExemptions: readonly string[] = [
 ]
 type Story = StoryObj<typeof meta>
 const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+const frameTime = () => new Promise<number>(resolve => requestAnimationFrame(resolve))
+/** Resolves on the first frame at least `duration` of frame time after the next one. Frames requested earlier run first in each frame. */
+async function framesSpanning(duration: number) {
+  const first = await frameTime()
+  for (let now = first; now - first < duration;) now = await frameTime()
+}
 export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const viewport = canvas.getByTestId('scroll-viewport')
@@ -51,8 +57,11 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
   await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
   await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
-  // The return eases over the standard motion duration (200ms), or lands at once under reduced motion.
-  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1), { timeout: 400 })
+  // The return eases over the standard motion duration (200ms) of frame time from its first frame, or lands at once under
+  // reduced motion. The jump requested that frame before this play does, so the lane has landed once the play's frames span
+  // the duration. A loaded host delays or pauses frames while timers run, so a wall-clock bound failed a lane on course (#4469).
+  await framesSpanning(motionNumbers.standard)
+  await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)
   await expect(canvas.queryByRole('button', { name: 'New messages ↓' })).toBeNull()
 } }
 export const FollowingAndAnchoredLight: Story = { ...FollowingAndAnchored, args: { scheme: 'light' } }

@@ -71,7 +71,11 @@ pub struct Config {
     pub pty_root: Option<PathBuf>,
     /// Owner-local catalog roots supplying declared private-notes carrier provenance.
     pub private_notes_catalogs: Vec<PathBuf>,
+    #[serde(default)]
     pub socket: PathBuf,
+    /// In-memory provenance: explicit config paths never gain discovery fallback.
+    #[serde(skip)]
+    pub socket_is_explicit: bool,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
     /// The one folder agents work in when nothing names another: new agents get a subfolder of
@@ -106,6 +110,9 @@ pub struct Config {
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
+    /// Where the daemon's own diagnostics go. Written only when it differs from the default.
+    #[serde(skip_serializing_if = "LoggingConfig::is_default")]
+    pub logging: LoggingConfig,
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
@@ -119,6 +126,12 @@ pub struct Config {
     /// without the line still loads in older builds and one with it needs the line deleted first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_work_without_asking: Option<bool>,
+    /// `true` makes this member wait after each start, before it starts, restarts, retires or
+    /// records the end of any seat, until it has caught up with a peer (docs/st3/replication.md,
+    /// "After a start"). Absent or `false` acts at once, as before. A build that does not know
+    /// the key rejects a config that has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_for_peers_after_start: Option<bool>,
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
@@ -247,6 +260,22 @@ impl TrimConfig {
         );
         anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
+    }
+}
+
+/// `[logging]`: `stderr_warnings = true` writes every WARN and ERROR the daemon's code logs
+/// through `tracing` to its stderr, and so to the journal, when telemetry export is off. Without
+/// export the daemon installs no subscriber and those lines are lost. Off by default while its
+/// volume is measured.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoggingConfig {
+    pub stderr_warnings: bool,
+}
+
+impl LoggingConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -611,8 +640,8 @@ impl Default for Config {
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("run"));
-        let socket = runtime_dir.join("st3.sock");
-        let client_gateway_socket = runtime_dir.join("st3-client.sock");
+        let socket = runtime_dir.join("fractal.sock");
+        let client_gateway_socket = runtime_dir.join("fractal-client.sock");
         Self {
             node: host_name(),
             access_mode: None,
@@ -631,6 +660,7 @@ impl Default for Config {
             pty_root: None,
             private_notes_catalogs: Vec::new(),
             socket,
+            socket_is_explicit: false,
             client_gateway_socket,
             peer_listen: None,
             work_root: None,
@@ -643,9 +673,11 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
+            logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
+            wait_for_peers_after_start: None,
             fleet: None,
         }
     }
@@ -678,6 +710,10 @@ impl Config {
 
     pub fn lanes_enforced(&self) -> bool {
         self.lanes == Some(Lanes::On)
+    }
+
+    pub fn waits_for_peers_after_start(&self) -> bool {
+        self.wait_for_peers_after_start == Some(true)
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
@@ -786,6 +822,7 @@ impl Config {
         }
         .with_context(|| format!("parse st config {}", selected.display()))?;
         let defaults = Self::default();
+        config.socket_is_explicit = !config.socket.as_os_str().is_empty();
         if config.node.is_empty() {
             config.node = defaults.node;
         }
@@ -805,22 +842,22 @@ impl Config {
         Ok((config, unknown))
     }
 
-    /// Resolve the daemon's published endpoint when this client lacks its runtime directory, or
-    /// when nothing answers at the runtime default and the published link leads to a daemon that
-    /// does (one started with `--socket` elsewhere). Following the link itself would exceed the
-    /// Unix socket address limit for long state paths.
-    pub fn client_socket(&self) -> PathBuf {
+    /// Keep default discovery live through daemon restarts; configured paths remain exact.
+    pub fn client_discovery(&self) -> fractal_client::UnixSocketDiscovery {
         let published = state_socket(&self.state_dir);
-        match env::var_os("XDG_RUNTIME_DIR") {
-            None if self.socket == published => fs::read_link(&self.socket)
-                .ok()
-                .filter(|target| target.is_absolute())
-                .unwrap_or_else(|| self.socket.clone()),
-            Some(runtime) if self.socket == Path::new(&runtime).join("st3.sock") => {
-                fractal_client::runtime_or_published_socket(&self.socket, &published)
-            }
-            _ => self.socket.clone(),
+        let runtime = env::var_os("XDG_RUNTIME_DIR")
+            .map(|directory| PathBuf::from(directory).join("fractal.sock"))
+            .unwrap_or_else(|| published.clone());
+        if !self.socket_is_explicit && (self.socket == runtime || self.socket == published) {
+            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+        } else {
+            fractal_client::UnixSocketDiscovery::Explicit(self.socket.clone())
         }
+    }
+
+    /// Resolve a snapshot for path-only consumers; request clients keep `client_discovery`.
+    pub fn client_socket(&self) -> PathBuf {
+        self.client_discovery().resolve()
     }
 
     /// Merge `STATE/fleet/fleet.toml` from the effective state directory. Call it after
@@ -1001,7 +1038,7 @@ impl Config {
 }
 
 fn state_socket(state_dir: &Path) -> PathBuf {
-    state_dir.join("run/st3.sock")
+    state_dir.join("run/fractal.sock")
 }
 
 /// The daemon's Fabric terminal socket, which `st terminals expose-fabric` has Fabric forward
@@ -1015,6 +1052,23 @@ pub fn terminal_socket(state_dir: &Path) -> PathBuf {
 const SUN_PATH_BYTES: usize = 104;
 #[cfg(not(target_os = "macos"))]
 const SUN_PATH_BYTES: usize = 108;
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+/// Preserve existing instances whose socket directory only fits the shorter legacy name.
+pub fn socket_binding_path(socket: &Path) -> std::borrow::Cow<'_, Path> {
+    if socket.as_os_str().as_bytes().len() >= SUN_PATH_BYTES {
+        let legacy = match socket.file_name().and_then(|name| name.to_str()) {
+            Some("fractal.sock") => Some("st3.sock"),
+            Some("fractal-client.sock") => Some("st3-client.sock"),
+            _ => None,
+        };
+        if let Some(name) = legacy {
+            return std::borrow::Cow::Owned(socket.with_file_name(name));
+        }
+    }
+    std::borrow::Cow::Borrowed(socket)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
 
 pub fn validate_unix_socket_path(socket: &Path, flag: &str) -> Result<()> {
     let length = socket.as_os_str().as_bytes().len();
@@ -1297,6 +1351,16 @@ mod tests {
         }
         assert!(toml::from_str::<Config>("worker_ingress_generation_check='enfroce'").is_err());
         assert!(!toml::to_string(&Config::default()).unwrap().contains("worker_ingress_generation_check"));
+    }
+
+    #[test]
+    fn waiting_for_peers_after_start_is_off_unless_set_true() {
+        assert!(!Config::default().waits_for_peers_after_start());
+        assert!(!toml::from_str::<Config>("").unwrap().waits_for_peers_after_start());
+        assert!(!toml::from_str::<Config>("wait_for_peers_after_start = false").unwrap().waits_for_peers_after_start());
+        assert!(toml::from_str::<Config>("wait_for_peers_after_start = true").unwrap().waits_for_peers_after_start());
+        assert!(toml::from_str::<Config>("wait_for_peers_after_start = \"yes\"").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("wait_for_peers_after_start"));
     }
 
     #[test]
@@ -1669,13 +1733,45 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
+    fn stderr_warnings_are_off_unless_chosen_and_absent_from_a_written_default_config() {
+        let config = Config::default();
+        assert!(!config.logging.stderr_warnings);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[logging]"));
+        let config: Config = toml::from_str("[logging]\nstderr_warnings = true\n").unwrap();
+        assert!(config.logging.stderr_warnings);
+        assert!(toml::to_string(&config).unwrap().contains("[logging]"));
+        assert!(toml::from_str::<Config>("[logging]\nlevel = \"debug\"\n").is_err());
+    }
+
+    #[test]
+    fn client_discovery_preserves_explicit_config_even_at_the_default_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let defaults = Config::default();
+        let socket = toml::Value::String(defaults.socket.to_string_lossy().into_owned());
+        fs::write(&path, format!("socket = {socket}\n")).unwrap();
+        let config = Config::load_unvalidated(Some(&path)).unwrap();
+        assert!(matches!(
+            config.client_discovery(),
+            fractal_client::UnixSocketDiscovery::Explicit(path) if path == defaults.socket
+        ));
+        fs::write(&path, "").unwrap();
+        let config = Config::load_unvalidated(Some(&path)).unwrap();
+        assert!(matches!(
+            config.client_discovery(),
+            fractal_client::UnixSocketDiscovery::Defaults { .. }
+        ));
+    }
+
+    #[test]
     fn defaults_to_a_local_only_daemon() {
         let config = Config::default();
         assert_eq!(config.planner, PlannerSpec::default());
         assert!(config.peer_listen.is_none());
         assert!(config.peers.is_empty());
-        assert!(config.socket.ends_with("st3.sock"));
-        assert!(config.client_gateway_socket.ends_with("st3-client.sock"));
+        assert!(config.socket.ends_with("fractal.sock"));
+        assert!(config.client_gateway_socket.ends_with("fractal-client.sock"));
         assert_ne!(config.socket, config.client_gateway_socket);
     }
 

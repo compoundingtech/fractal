@@ -60,7 +60,7 @@ export const Placeholder: Story = { ...contractFixture, tags: ['critical'], rend
     const section = canvasElement.querySelector(`[data-testid="${testId}"]`)!
     const guidance = await waitFor(() => { const found = section.querySelector<HTMLElement>('[data-testid="composer-placeholder"]'); if (found === null) throw new Error(`No guidance in ${testId}`); return found })
     const input = section.querySelector('textarea')!
-    await expect(section.querySelector('form')).toHaveAccessibleName(`Message composer, ${expected === undefined ? 'Default placeholder example' : 'Custom placeholder example'}`)
+    await expect(section.querySelector('[role="group"][aria-label^="Message composer"]')).toHaveAccessibleName(`Message composer, ${expected === undefined ? 'Default placeholder example' : 'Custom placeholder example'}`)
     await expect(guidance).toBeVisible()
     await expect(guidance.textContent, `${testId} guidance`).not.toMatch(keyboardText)
     await expect(input.placeholder).toBe('')

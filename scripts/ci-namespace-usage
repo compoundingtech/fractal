@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from urllib.parse import quote
 
@@ -12,6 +13,9 @@ UTC = timezone.utc
 LOOKBACK_DAYS = 7
 API_REQUEST_LIMIT = 4000
 API_REMAINING_RESERVE = 500
+# A build host's own runners, named HOST-ci-N or HOST-ci-merge-N. The jobs API carries the job's planned labels, not the labels
+# of the runner that took it, so the name is what tells a local runner from a Namespace one.
+LOCAL_RUNNER = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]*-ci-(?:merge-)?[0-9]+')
 api_requests = 0
 rate_limit = None
 lowest_remaining = None
@@ -34,7 +38,7 @@ def summarize(jobs, start, end):
         name = job.get('runner_name') or ''
         planned = any(label.startswith(('namespace-profile-', 'nscloud-'))
                       for label in job.get('labels', []))
-        known_local = name.startswith(('ci1-', 'hetz2-ci-', 'GitHub Actions '))
+        known_local = name.startswith(('ci1-', 'GitHub Actions ')) or bool(LOCAL_RUNNER.fullmatch(name))
         if not name.startswith('nsc-runner-'):
             if planned and not known_local:
                 # Only flag this day's possible execution, not unrelated old attempts.

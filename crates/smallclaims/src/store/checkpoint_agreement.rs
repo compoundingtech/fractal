@@ -422,8 +422,9 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
-    /// A local trim deleted the day's claims (`[trim] daily_claims`) and stopped; the cut stays
-    /// `trimming` and goes on the next day. The counts are this step's.
+    /// A trim stopped before its end: a local trim deleted the day's claims (`[trim]
+    /// daily_claims`) and goes on the next day, or a trim could not restart the WAL (`TrimWal`)
+    /// and goes on at the next step. The cut stays `trimming`. The counts are this step's.
     TrimDeferred {
         checkpoint: String,
         envelopes: usize,
@@ -470,6 +471,9 @@ pub struct CheckpointStatusView {
     /// Display metadata only; this may differ from the build named by a checkpoint seal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub machine_version: BTreeMap<String, String>,
+    /// Latest local verification attempt, including phases completed before a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_attempt: Option<super::checkpoint_accounting::Attempt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -604,6 +608,7 @@ pub(super) fn checkpoint_executable_digest() -> Result<&'static str> {
 /// order as well as the plan. A build change may fix reader/projection semantics without
 /// changing the drop rules. Rowids, live projections and later claims are not proof inputs.
 fn proof_input_digest(staged: &StagedSet, plan: &StagedPlan) -> Result<String> {
+    let _phase = super::checkpoint_accounting::Phase::start("input_digest", "checkpoint.input_digest");
     staged.proof_input_digest(plan, checkpoint_executable_digest()?, &checkpoint_build(), CHECKPOINT_PROTOCOL)
 }
 
@@ -985,6 +990,14 @@ impl Store {
             return Ok(actions);
         }
         if !verified.contains_key(&self.origin) {
+            // Our first seal lets peers advance, but refreshing it cannot enable verification
+            // while a participant has no seal. Defer the identity walk even if history changed:
+            // once every seal exists we recompute and reseal before comparing terms to verify.
+            if seals.contains_key(&self.origin)
+                && participants.iter().any(|writer| !seals.contains_key(writer))
+            {
+                return Ok(actions);
+            }
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
             // until that history changes. It writes only when a bound grows.
@@ -1077,6 +1090,7 @@ impl Store {
             return Ok(());
         }
         let _completion = super::checkpoint_completion::Completion::outer();
+        let _accounting = super::checkpoint_accounting::Scope::start(&self.checkpoint_verify_latest, checkpoint);
         let staged = self.checkpoint_staged_set(terms.cut_unix_ms, Some(seal_rowid), &context.scratch)?;
         let plan = self.plan_staged_checkpoint(&staged)?;
         if plan.sealed_digest != terms.sealed_digest {
@@ -1093,6 +1107,7 @@ impl Store {
             return Ok(());
         }
         let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
+        let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
         if !proof.passed {
             let input_digest = match input_digest {
                 Some(input) => input,
@@ -1331,6 +1346,7 @@ impl Store {
             participants,
             left,
             machine_version: BTreeMap::new(),
+            verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
         })
     }
 

@@ -36,7 +36,7 @@ const CODEX_CONTROL_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::provider_session::ProviderProcess;
 use crate::{
-    delivery_ledger, ding, driver_diagnostic, harness_context, harness_state, message, run, status,
+    delivery_ledger, ding, driver_diagnostic, harness_context, harness_state, message, run,
 };
 
 const REQUIRED_CODEX_CLIENT_REQUESTS: &[&str] = &[
@@ -578,106 +578,12 @@ struct CodexDeliveryConfig {
     inbox: PathBuf,
     identity: String,
     this_host: String,
-    supervisor: Option<String>,
     /// The codex-cli version the protocol gate admitted, carried for the native-driver
     /// diagnostic's `producerVersion`. `None` only in tests that build a config without a gate.
     producer_version: Option<String>,
     model: Option<String>,
     /// The seat's person's answers to an approval request, from the owning control plane.
     prompt_answers: Option<crate::session_control::PromptAnswers>,
-}
-
-impl CodexDeliveryConfig {
-    fn resolve(catalog_root: &Path, identity: &str) -> Result<Self> {
-        let this_host = run::detect_host();
-        let agent_dir = message::resolve_declared_dir(catalog_root, identity, &this_host)?
-            .with_context(|| {
-                format!(
-                    "Codex native delivery agent '{identity}' is not declared in {}",
-                    catalog_root.display()
-                )
-            })?;
-        let supervisor = crate::discover(catalog_root)
-            .specs
-            .into_iter()
-            .find(|spec| spec.path.parent() == Some(agent_dir.as_path()))
-            .and_then(|spec| spec.supervisor);
-        Ok(Self {
-            control: crate::session_control::SessionControl::Catalog,
-            catalog_root: catalog_root.to_path_buf(),
-            inbox: message::inbox_dir(&agent_dir),
-            agent_dir,
-            identity: identity.to_string(),
-            this_host,
-            supervisor,
-            producer_version: None,
-            model: None,
-            prompt_answers: None,
-        })
-    }
-
-    fn report_protocol_rejection(&self, codex: &str, error: &anyhow::Error) {
-        let _log_guard = log::install(&state_dir(&self.catalog_root, &self.identity));
-        let Some(supervisor) = self.supervisor.as_deref() else {
-            tracing::warn!(
-                "st codex: agent '{}' has no supervisor for a protocol rejection report",
-                self.identity
-            );
-            return;
-        };
-        let subject = format!("Codex protocol rejected: {}", self.identity);
-        let body = format!(
-            "st rejected the installed Codex app-server protocol for agent '{}'. Native delivery did not start. Codex executable: '{}'. Error: {error:#}",
-            self.identity, codex
-        );
-        let mut key_hash = Sha256::new();
-        key_hash.update(b"st2.codex-protocol-rejection.v1");
-        // Hash the original report wording so an upgrade does not publish the same failure twice.
-        key_hash.update(body.replacen("st rejected", "st2 rejected", 1).as_bytes());
-        let idempotency_key = format!("st2.codex-protocol-rejection.v1:{:x}", key_hash.finalize());
-        let tags = ["codex-protocol".to_string(), "launch-rejected".to_string()];
-        // Both endpoints are declaration keys, never routes: this runtime names itself by exact
-        // key, and `supervisor` is the positional edge the org chart walks, so a parent that
-        // declares an `address` still receives the report.
-        let endpoints =
-            message::declared_selector(&self.catalog_root, &self.identity, &self.this_host)
-                .and_then(|sender| {
-                    let recipient = message::declared_selector(
-                        &self.catalog_root,
-                        supervisor,
-                        &self.this_host,
-                    )?;
-                    Ok((sender, recipient))
-                });
-        let (sender, recipient) = match endpoints {
-            Ok(endpoints) => endpoints,
-            Err(resolve_error) => {
-                tracing::warn!(
-                    "st codex: failed to resolve the endpoints of agent '{}' protocol rejection report: {resolve_error:#}",
-                    self.identity
-                );
-                return;
-            }
-        };
-        if let Err(report_error) = message::send_to_resolved_inbox(
-            &self.catalog_root,
-            &recipient,
-            &self.this_host,
-            &sender,
-            Some(&subject),
-            None,
-            &tags,
-            &body,
-            Some(&idempotency_key),
-            None,
-        ) {
-            tracing::warn!(
-                "st codex: failed to report agent '{}' protocol rejection to supervisor '{}': {report_error:#}",
-                self.identity,
-                supervisor
-            );
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,7 +658,6 @@ struct CodexInboxDelivery {
     next_presence_refresh: Instant,
     next_context_transcript_refresh: Instant,
     head: Option<message::Message>,
-    suppressed: bool,
     ledger: delivery_ledger::Ledger,
     pending: Option<PendingCodexDelivery>,
     pending_snapshot: Option<PendingCodexSnapshot>,
@@ -808,15 +713,11 @@ impl CodexInboxDelivery {
         }
         let (wake_tx, wake) = mpsc::channel();
         crate::push_mailbox::watch(&config.agent_dir, wake_tx.clone());
-        // Scoped to inbox + status: this pump's own process group writes runtime records (presence
-        // refreshes, harness-state transitions) into the same agent dir, and those must not wake it.
+        // Watch only inbox delivery inputs: this pump's own harness-state writes must not wake it.
         let watcher = crate::watch::watch_delivery_inputs_with_status(
             &config.agent_dir,
             wake_tx,
-            matches!(
-                config.control,
-                crate::session_control::SessionControl::Catalog
-            ),
+            false,
         );
         let identity = config.identity.clone();
         let ledger = delivery_ledger::Ledger::open(
@@ -864,22 +765,11 @@ impl CodexInboxDelivery {
         // sequence: HC-T04 leaves the numbers unfenced on purpose, because the worst a straggler
         // can publish here is a reading older than the reader thinks — which `observedAtMs`
         // already says — rather than a live state that is not live.
-        let context_writer = if matches!(
-            config.control,
-            crate::session_control::SessionControl::Graph(_)
-        ) {
-            harness_context::Writer::new_paths(
-                &config.agent_dir,
-                config.identity.clone(),
-                harness_context::Harness::Codex,
-            )
-        } else {
-            harness_context::Writer::new(
-                &config.agent_dir,
-                config.identity.clone(),
-                harness_context::Harness::Codex,
-            )
-        };
+        let context_writer = harness_context::Writer::new_paths(
+            &config.agent_dir,
+            config.identity.clone(),
+            harness_context::Harness::Codex,
+        );
         let context = match context_writer {
             Ok(writer) => Some(CodexContextProducer::new(
                 writer.with_session(runtime.incarnation()),
@@ -923,7 +813,6 @@ impl CodexInboxDelivery {
             next_presence_refresh: Instant::now(),
             next_context_transcript_refresh: Instant::now(),
             head: None,
-            suppressed: false,
             ledger,
             pending: None,
             pending_snapshot: None,
@@ -1420,10 +1309,6 @@ impl CodexInboxDelivery {
         }
         if now >= self.next_presence_refresh {
             // Session-owned observed state stays fresh only while this wrapper has evidence.
-            // Catalog control also preserves its product's status lease; graph control has no file.
-            self.config
-                .control
-                .refresh(&status::status_path(&self.config.agent_dir));
             if self.harness_evidence {
                 let _ = self.harness_writer.heartbeat();
             }
@@ -1463,22 +1348,12 @@ impl CodexInboxDelivery {
             self.snapshot_attempts = 0;
             self.verified_snapshot = None;
         }
-        self.suppressed = matches!(
-            self.config.control,
-            crate::session_control::SessionControl::Catalog
-        ) && self
-            .config
-            .control
-            .held(&status::status_path(&self.config.agent_dir));
         self.next_inbox_refresh = Instant::now() + INBOX_REFRESH_FALLBACK;
         Ok(())
     }
 
     fn delivery_held(&self) -> bool {
-        match &self.config.control {
-            crate::session_control::SessionControl::Catalog => self.suppressed,
-            crate::session_control::SessionControl::Graph(gate) => gate.held(),
-        }
+        self.config.control.held()
     }
 
     fn maybe_request(&mut self, state: &CodexControlState) -> Result<Option<Value>> {
@@ -1610,13 +1485,8 @@ impl CodexInboxDelivery {
 
     fn maybe_snapshot_request(&mut self, state: &CodexControlState) -> Result<Option<Value>> {
         self.refresh_if_due()?;
-        // A graph hold blocks input, not a read-only status snapshot. Catalog DND retains
-        // its historical suppression rule.
-        let catalog_held = matches!(
-            self.config.control,
-            crate::session_control::SessionControl::Catalog
-        ) && self.suppressed;
-        if self.pending.is_some() || !state.subscribed || catalog_held {
+        // A graph hold blocks input, not a read-only status snapshot.
+        if self.pending.is_some() || !state.subscribed {
             return Ok(None);
         }
         if self
@@ -2790,117 +2660,6 @@ fn required_string<'a>(message: &'a Value, pointer: &str, method: &str) -> Resul
         .with_context(|| format!("{method} has no non-empty {pointer}"))
 }
 
-/// Run one authored Codex argv behind a dedicated app server and initialized control connection.
-pub fn run_controlled(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    codex_argv: Vec<String>,
-) -> Result<()> {
-    run_controlled_with_required_resume(catalog_root, identity, runtime_id, codex_argv, None, None)
-}
-
-/// Run one host-owned cold-residency attempt under its exact incarnation.
-pub fn run_controlled_residency_attempt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    codex_argv: Vec<String>,
-    resume_generation: crate::residency::Generation,
-    required_incarnation: String,
-) -> Result<()> {
-    anyhow::ensure!(
-        !required_incarnation.is_empty(),
-        "Codex required runtime incarnation is empty"
-    );
-    run_controlled_with_required_resume(
-        catalog_root,
-        identity,
-        runtime_id,
-        codex_argv,
-        Some(resume_generation),
-        Some(required_incarnation),
-    )
-}
-
-fn run_controlled_with_required_resume(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    codex_argv: Vec<String>,
-    required_resume_generation: Option<crate::residency::Generation>,
-    required_incarnation: Option<String>,
-) -> Result<()> {
-    anyhow::ensure!(
-        !codex_argv.is_empty(),
-        "Codex controlled launch argv is empty"
-    );
-    anyhow::ensure!(
-        required_resume_generation.is_some() == required_incarnation.is_some(),
-        "Codex residency launch has an incomplete attempt fence"
-    );
-    // Install before any protocol preflight child exists. A SIGTERM in the preflight window must
-    // set the stop flag instead of leaving a detached app server and stale socket behind.
-    crate::provider_session::install_signal_handler();
-    let state_dir = state_dir(catalog_root, &identity);
-    secure_dir(&state_dir)?;
-    let _owner_lock = acquire_owner_lock(&state_dir)?;
-    let binding_path = state_dir.join("binding.json");
-    let resume_thread = match required_resume_generation {
-        Some(generation) => Some(required_residency_resume(
-            &state_dir,
-            &identity,
-            &runtime_id,
-            generation,
-            &codex_argv[1..],
-        )?),
-        None => load_resume_thread(&binding_path, &identity, &runtime_id)?,
-    };
-
-    let mut delivery = CodexDeliveryConfig::resolve(catalog_root, &identity)?;
-    match ensure_supported_protocol(&codex_argv[0]) {
-        // The admitted version is the one fact the gate learns that outlives it: the diagnostic
-        // record names the producer it was measured against, exactly as the OpenCode driver does.
-        Ok(version) => delivery.producer_version = Some(version),
-        Err(error) => {
-            delivery.report_protocol_rejection(&codex_argv[0], &error);
-            return Err(error);
-        }
-    }
-
-    let mut diagnostics = WrapperDiagnostics::open(&state_dir, &identity, &runtime_id)?;
-    diagnostics.record("ownerAcquired", json!({}))?;
-
-    let result = run_controlled_owned(
-        catalog_root,
-        &state_dir,
-        identity,
-        runtime_id,
-        codex_argv,
-        delivery,
-        resume_thread,
-        required_incarnation,
-        &mut diagnostics,
-    );
-    match result {
-        Ok(()) => {
-            diagnostics.record("completed", json!({}))?;
-            Ok(())
-        }
-        Err(error) => {
-            let error_text = format!("{error:#}");
-            if let Err(diagnostic_error) =
-                diagnostics.record("failed", json!({ "error": error_text }))
-            {
-                return Err(error).context(format!(
-                    "persisting Codex wrapper failure diagnostic: {diagnostic_error:#}"
-                ));
-            }
-            Err(error)
-        }
-    }
-}
-
 /// Run the native Codex driver with explicit private state paths.
 ///
 /// The claims-graph runtime uses this entry point without an st2 catalog. The driver keeps the
@@ -2933,7 +2692,7 @@ pub fn run_controlled_paths(
     } else {
         codex_argv
     };
-    // Install before any protocol preflight child exists, exactly as the catalog entry point does.
+    // Install before any protocol preflight child exists.
     crate::provider_session::install_signal_handler();
     let producer_version = ensure_supported_protocol(&codex_argv[0])?;
     secure_dir(driver_root)?;
@@ -2951,7 +2710,6 @@ pub fn run_controlled_paths(
         inbox,
         identity: identity.clone(),
         this_host: run::detect_host(),
-        supervisor: None,
         producer_version: Some(producer_version),
         model: None,
         prompt_answers,
@@ -3097,7 +2855,6 @@ pub fn adopt_controlled_paths(
         inbox,
         identity: identity.clone(),
         this_host: run::detect_host(),
-        supervisor: None,
         producer_version: Some(producer_version),
         model: declared_codex_model(&codex_argv[1..]),
         prompt_answers,

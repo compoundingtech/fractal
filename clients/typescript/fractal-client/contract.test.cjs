@@ -242,7 +242,7 @@ test('push registration commands use paired credentials and a local response wit
 test('phone commands preserve typed bodies, full ids, reactive wait and normal envelopes', async () => {
     const wire = require('../../../docs/st3/client-v0/fixtures/device-command.json');
     const report = require('../../../docs/st3/client-v0/fixtures/device-command-result.json');
-    const command = { api_version: 'st3.client.v0', device: wire.value.device_id, kind: 'phone.navigate', args: wire.value.args, ttl_ms: 30000 };
+    const command = { api_version: 'st3.client.v0', device: wire.value.device_id, kind: wire.value.command_kind, args: wire.value.args, ttl_ms: 30000 };
     const calls = [];
     const controller = new AbortController();
     const client = new FractalClient({
@@ -296,6 +296,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'resources.list': return [{}, {}, options];
             case 'agent-declaration.get': return ['agent/example', undefined, false, options];
             case 'publication.definition': return ['mission/example', options];
+            case 'mission-declaration.get': return ['mission/example', undefined, options];
             case 'subject.definition': return ['mission/example', false, options];
             case 'conversation-content.chunk': return ['session/example', 'reference', 0, options];
             case 'conversation.changes': case 'timeline.list': return ['session/example', {}, options];
@@ -1051,6 +1052,19 @@ test('canonical publication read encodes mission and schedule subjects and prese
         assert.deepEqual(result.value.declaration, declaration);
         assert.equal(calls.at(-1), 'https://example.test/v1/client/publication-definition?subject=' + encodeURIComponent(subject));
     }
+});
+
+test('mission declaration read encodes exact revisions and preserves served text', async () => {
+    const calls = [];
+    const value = { mission: 'mission/example/readback', revision: 'revision/one&two', published_at: 123, text: 'version 2\n', legacy: true };
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : value));
+    } });
+    assert.deepEqual((await client.missionDeclarationGet(value.mission, value.revision)).value, value);
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/mission-declaration?mission=' + encodeURIComponent(value.mission) + '&revision=' + encodeURIComponent(value.revision));
+    await client.missionDeclarationGet(value.mission);
+    assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
 });
 
 test('terminal exact filters encode subjects and refuse an old server ignoring filters', async () => {

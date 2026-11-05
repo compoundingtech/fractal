@@ -14,5 +14,9 @@ pub use fractal_secrets::*;
 
 pub mod declaration_syntax;
 pub mod gate_parse;
+pub mod gate_render;
+pub mod loop_render;
+pub mod declaration_render;
+pub mod mission_render;
 pub mod provenance;
 pub mod mission;

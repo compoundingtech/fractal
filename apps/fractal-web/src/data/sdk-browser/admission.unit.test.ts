@@ -1,4 +1,6 @@
 import { makeAdmission } from '@fractal/sdk/admission'
+import * as Atom from 'effect/reactivity/Atom'
+import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it } from 'vitest'
 
 import { makeVisibilityPolicy } from './admission.ts'
@@ -43,4 +45,53 @@ it('retains hidden-pane policy through a close and keeps lane eviction isolated'
   admission.open('shared-b')
   expect(admission.open('shared-c')).toEqual({ _tag: 'Full' })
   expect(admission.open('next-conversation', 'conversation')).toEqual({ _tag: 'Admitted', evict: 'conversation' })
+})
+
+it('admits against current interest ownership before a released pane finalizes', () => {
+  const registry = AtomRegistry.make()
+  let finalized = false
+  const interest = Atom.make((get) => {
+    get.addFinalizer(() => { finalized = true })
+  })
+  const policy = makeVisibilityPolicy<string>((key) =>
+    key === 'outgoing' ? !registry.ensureNode(interest).canBeRemoved : undefined,
+  )
+  const admission = makeAdmission({ cap: 1, policy })
+  try {
+    const release = registry.mount(interest)
+    policy.setVisible({ key: 'outgoing', visible: true })
+    admission.open('outgoing')
+    expect(admission.open('blocked')).toEqual({ _tag: 'Full' })
+    release()
+    expect(finalized).toBe(false)
+    expect(admission.open('incoming')).toEqual({ _tag: 'Admitted', evict: 'outgoing' })
+
+    // A same-turn handoff reuses the interest, but must immediately protect it again.
+    admission.close('incoming')
+    const releaseReacquired = registry.mount(interest)
+    admission.open('outgoing')
+    expect(admission.open('blocked')).toEqual({ _tag: 'Full' })
+    releaseReacquired()
+  } finally {
+    registry.dispose()
+  }
+})
+
+it('protects interest held through a mounted dependent atom', () => {
+  const registry = AtomRegistry.make()
+  const interest = Atom.make(() => undefined)
+  const dependent = Atom.make((get) => get(interest))
+  const policy = makeVisibilityPolicy<string>((key) =>
+    key === 'outgoing' ? !registry.ensureNode(interest).canBeRemoved : undefined,
+  )
+  const admission = makeAdmission({ cap: 1, policy })
+  try {
+    registry.mount(dependent)
+    policy.setVisible({ key: 'outgoing', visible: true })
+    admission.open('outgoing')
+    expect(registry.ensureNode(interest).listeners.size).toBe(0)
+    expect(admission.open('incoming')).toEqual({ _tag: 'Full' })
+  } finally {
+    registry.dispose()
+  }
 })

@@ -6,13 +6,43 @@ pub async fn fleet_publish_endpoints(
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let written = blocking_store(move || {
-        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"))
+        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"), None)
     })
     .await?;
     if written {
         signal_changed(&state);
     }
     Ok(Json(json!({ "published": written })))
+}
+
+#[derive(Deserialize)]
+pub struct FleetTransportChange {
+    actor: String,
+    mutation_id: String,
+    mode: String,
+    endpoints: Vec<Value>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+pub async fn change_transports(
+    State(state): State<AppState>,
+    Json(request): Json<FleetTransportChange>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "invalid-transport-actor")?;
+    if request.mutation_id.is_empty() {
+        return Err(ApiError::bad(St3Error::new("invalid-transport-mutation", "mutation_id is required")));
+    }
+    if request.dry_run {
+        return Ok(Json(json!({"authorized": true})));
+    }
+    let store = state.store.clone();
+    let written = blocking_store(move || store.publish_fleet_endpoints(
+        &request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"),
+        Some((&actor, &request.mutation_id)),
+    )).await?;
+    signal_changed(&state);
+    Ok(Json(json!({"published": written})))
 }
 
 /// Publish the configured trust root, not an exporter's proposed replacement key.
@@ -241,7 +271,12 @@ pub async fn fleet_leave_claim(
 ) -> Result<Json<ClaimRecord>, ApiError> {
     concrete_person(&request.person)?;
     let store = state.store.clone();
-    let claim = blocking_action(move || store.leave_fleet(&request.person)).await?;
+    let claim = blocking_action(move || {
+        let shard_high_water = crate::store::messages_shard::leave_high_water(&store)
+            .map_err(smallclaims::error::internal)?;
+        store.leave_fleet(&request.person, &shard_high_water)
+    })
+    .await?;
     signal_changed(&state);
     Ok(Json(claim))
 }
@@ -348,4 +383,35 @@ pub async fn fleet_admission_residue(
     blocking_store(move || store.fleet_admission_residue())
         .await
         .map(Json)
+}
+
+#[derive(Deserialize)]
+pub struct AdmissionOverrideRequest {
+    actor: String,
+    peers: Vec<String>,
+    reason: String,
+    idempotency_key: String,
+}
+
+/// Let this member act on its seats' placement, for its current daemon start, without the named
+/// peers it cannot reach. Only this member reads it, so it is recorded here, where it is needed.
+pub async fn admission_override(
+    State(state): State<AppState>,
+    Json(request): Json<AdmissionOverrideRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "invalid-admission-override-actor")?;
+    let store = state.store.clone();
+    let host = state.node.clone();
+    let configured = state.configured_peers.clone();
+    let (claim, appended) = blocking_action(move || {
+        let input = crate::reconcile::member_admission::override_input(
+            &store, &host, &actor, request.peers, &request.reason, &configured, request.idempotency_key,
+        )?;
+        store.append_claim_outcome(&input)
+    })
+    .await?;
+    if appended {
+        signal_claim_changed(&state, crate::reconcile::member_admission::OVERRIDE_KIND);
+    }
+    Ok(Json(claim))
 }

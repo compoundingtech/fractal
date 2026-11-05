@@ -32,9 +32,11 @@ Before inspecting an existing CLI's version or service status, the archive
 installer checks command ownership without executing it. An unrelated `fractal`
 file or symlink is refused and left untouched. Owned command layouts include the
 signed macOS app link, historical `fractal -> st3` links, and a physical executable
-with both `st` and `st3` reverse aliases. The macOS app helper still requires its
-app or historical link layout; recognizing a physical command's ownership does
-not add a physical-to-app conversion path.
+with both `st` and `st3` reverse aliases. A valid `.fractal-install.json` beside
+`bin/fractal` also establishes ownership without aliases; keep it with its matching
+executable (see [upgrading](../guides/upgrading.md)). Invalid or symlinked ownership
+receipts stop installation rather than falling back to aliases. The macOS app
+helper accepts its app or historical link layout, or a valid ownership receipt.
 
 The download installer records the selected release tag and the verified binary's
 commit in `RELEASE.json` beside the Linux executable. On macOS the receipt is
@@ -42,8 +44,8 @@ beside the signed application bundle, named `SmallTalk.app.RELEASE.json`; it doe
 not change the app's signature. `fractal --version` displays, for example,
 `fractal v0.3.18 (abcdef123)` only when the receipt matches the executable's
 embedded commit. Missing, unreadable, corrupt, or stale receipts fall back to the
-baked crate version and commit. `fractal --version --json` always reports the
-unchanged machine version, not the installed release tag.
+baked crate version and commit. `fractal --version --json` reports the unchanged
+`machine_version` and the embedded `commit`, not the installed release tag.
 
 Nix flake packages and Home Manager install the built package directly, without
 running the download installer or writing a release receipt. They therefore

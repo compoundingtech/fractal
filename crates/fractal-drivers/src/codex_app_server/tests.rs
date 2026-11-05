@@ -1,4 +1,5 @@
 use super::*;
+use crate::status;
 
 #[test]
 fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
@@ -52,18 +53,9 @@ fn protocol_schema_gate_accepts_codex_0164_error_union() {
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The stop flag is process-global, so every test that exercises a reader of it —
-/// [`initialize_control`] above all — holds this lock against the one test that flips
-/// the flag: parallel readers would otherwise observe the raised flag and fail their
-/// `no stop raised in tests` expectations.
-fn stop_flag_tests() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-        std::sync::LazyLock::new(std::sync::Mutex::default);
-    match LOCK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
+// The stop flag is process-global, so every test that exercises a reader of it —
+// [`initialize_control`] above all — holds this lock against the tests that flip it.
+use crate::provider_session::stop_flag_tests;
 
 #[test]
 fn a_stop_during_the_websocket_handshake_ends_startup_gracefully() {
@@ -617,70 +609,6 @@ fn protocol_schema_gate_requires_distinct_credential_and_stable_quota_error_word
 }
 
 #[test]
-fn protocol_rejection_reaches_the_declared_supervisor_once() {
-    let tmp = tempfile::tempdir().unwrap();
-    let worker = tmp.path().join("agents/h/worker/agent.kdl");
-    let supervisor = tmp.path().join("agents/h/cos/agent.kdl");
-    fs::create_dir_all(worker.parent().unwrap()).unwrap();
-    fs::create_dir_all(supervisor.parent().unwrap()).unwrap();
-    fs::write(
-        &worker,
-        r#"agent "worker" {
-  host "h"
-  supervisor "h.cos"
-  command "true"
-}
-"#,
-    )
-    .unwrap();
-    fs::write(
-        &supervisor,
-        r#"agent "cos" {
-  host "h"
-  command "true"
-}
-"#,
-    )
-    .unwrap();
-    let mut incompatible = compatible_protocol_schemas();
-    incompatible
-        .protocol
-        .pointer_mut("/definitions/ThreadActiveFlag/enum")
-        .unwrap()
-        .as_array_mut()
-        .unwrap()
-        .push(Value::String("waitingOnFutureInput".into()));
-    let codex = write_fake_codex(
-        tmp.path(),
-        "codex-rejected",
-        "codex-cli 0.150.1",
-        &incompatible,
-    );
-    let argv = vec![codex.display().to_string()];
-
-    for _ in 0..2 {
-        let error = run_controlled(
-            tmp.path(),
-            "h.worker".into(),
-            "h.worker".into(),
-            argv.clone(),
-        )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("ThreadActiveFlag changed"));
-    }
-
-    let inbox = message::list_inbox(&message::inbox_dir(supervisor.parent().unwrap())).unwrap();
-    assert_eq!(inbox.len(), 1, "the rejection report was not idempotent");
-    assert_eq!(inbox[0].from.as_deref(), Some("h.worker"));
-    assert_eq!(
-        inbox[0].subject.as_deref(),
-        Some("Codex protocol rejected: h.worker")
-    );
-    assert!(inbox[0].body.contains("Native delivery did not start"));
-    assert!(inbox[0].body.contains("ThreadActiveFlag changed"));
-}
-
-#[test]
 fn unknown_thread_status_remains_a_hold_not_a_terminal_system_error() {
     let mut state = subscribed_state(CodexObservedState::Idle);
     state.observe_thread_status("futureStatus", None);
@@ -1202,14 +1130,15 @@ fn captured_delivery_frames_carrying_no_token_count_publish_no_record() {
 
 fn delivery_config(root: &Path) -> CodexDeliveryConfig {
     let agent_dir = root.join("agents/h/worker");
+    let gate = crate::session_control::DeliveryGate::default();
+    gate.update(false, Duration::from_secs(3600));
     CodexDeliveryConfig {
-        control: crate::session_control::SessionControl::Catalog,
+        control: crate::session_control::SessionControl::Graph(gate),
         catalog_root: root.to_path_buf(),
         inbox: message::inbox_dir(&agent_dir),
         agent_dir,
         identity: "h.worker".into(),
         this_host: "h".into(),
-        supervisor: None,
         producer_version: Some("codex-cli 0.153.0".into()),
         model: None,
         prompt_answers: None,
@@ -1415,8 +1344,8 @@ fn pump_publishes_observations_and_stops_heartbeating_on_evidence_loss() {
     assert_eq!(observed.state, Activity::Active);
     assert_eq!(observed.harness.as_deref(), Some("codex"));
 
-    // An indeterminate projection writes nothing and stops the heartbeat: the presence
-    // refresh still runs, but the record's bytes stay untouched and age toward unknown.
+    // An indeterminate projection writes nothing and stops the heartbeat: the due
+    // heartbeat leaves the record untouched so it ages toward unknown.
     delivery.observe_harness(&CodexObservedState::Held {
         reason: CodexHoldReason::NotLoaded,
         turn_id: None,
@@ -1424,8 +1353,8 @@ fn pump_publishes_observations_and_stops_heartbeating_on_evidence_loss() {
     let before = fs::read(&record_path).unwrap();
     delivery.refresh_if_due().unwrap();
     assert!(
-        status::read_state(&status::status_path(&agent_dir)) != status::State::Offline,
-        "presence refresh must still run"
+        !status::status_path(&agent_dir).exists(),
+        "native control writes no status lease"
     );
     assert_eq!(
         fs::read(&record_path).unwrap(),
@@ -1670,7 +1599,7 @@ fn delivery_hold_release_and_expiry_each_admit_one_offer() {
 }
 
 #[test]
-fn review_compaction_and_dnd_hold_the_unread_fifo_head() {
+fn review_compaction_and_graph_hold_the_unread_fifo_head() {
     let tmp = tempfile::tempdir().unwrap();
     let config = delivery_config(tmp.path());
     let filename =
@@ -1685,7 +1614,8 @@ fn review_compaction_and_dnd_hold_the_unread_fifo_head() {
         assert!(config.inbox.join(&filename).is_file());
     }
 
-    status::set_state(&status::status_path(&config.agent_dir), status::State::Dnd).unwrap();
+    let crate::session_control::SessionControl::Graph(gate) = &config.control;
+    gate.update(true, Duration::from_secs(3600));
     delivery.next_inbox_refresh = Instant::now();
     assert_eq!(
         delivery
@@ -1978,7 +1908,7 @@ fn selected_model_capacity_is_retryable_in_the_same_codex_session() {
 }
 
 #[test]
-fn idle_session_refreshes_stale_presence_without_inbox_activity() {
+fn idle_native_session_leaves_stale_catalog_presence_untouched() {
     let tmp = tempfile::tempdir().unwrap();
     let config = delivery_config(tmp.path());
     let presence = status::status_path(&config.agent_dir);
@@ -1990,14 +1920,16 @@ fn idle_session_refreshes_stale_presence_without_inbox_activity() {
         .unwrap();
     assert_eq!(status::read_state(&presence), status::State::Unknown);
 
+    let before = std::fs::read(&presence).unwrap();
+    let modified = std::fs::metadata(&presence).unwrap().modified().unwrap();
     let mut delivery = inbox_delivery(tmp.path(), config);
     delivery.refresh_if_due().unwrap();
 
-    assert_eq!(status::read_state(&presence), status::State::Available);
-    assert!(
-        std::fs::read_to_string(&presence)
-            .unwrap()
-            .contains("\nv1 ")
+    assert_eq!(status::read_state(&presence), status::State::Unknown);
+    assert_eq!(std::fs::read(&presence).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&presence).unwrap().modified().unwrap(),
+        modified
     );
     assert!(delivery.head.is_none());
 }
@@ -4637,39 +4569,6 @@ fn residency_resume_rejects_missing_corrupt_foreign_and_stale_checkpoints() {
         )
         .is_err(),
         "a corrupt residency checkpoint was accepted"
-    );
-}
-
-#[test]
-fn mandatory_residency_failure_does_not_spawn_a_provider_child() {
-    let _stop_exclusive = stop_flag_tests();
-    let tmp = tempfile::tempdir().unwrap();
-    let marker = tmp.path().join("provider-started");
-    let codex = tmp.path().join("codex");
-    fs::write(
-        &codex,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
-
-    let error = run_controlled_residency_attempt(
-        tmp.path(),
-        "h.worker".into(),
-        "h.worker".into(),
-        vec![codex.display().to_string(), "boot".into()],
-        crate::residency::Generation(2),
-        "attempt-test".into(),
-    )
-    .unwrap_err();
-
-    assert!(
-        error.to_string().contains("residency checkpoint"),
-        "{error:#}"
-    );
-    assert!(
-        !marker.exists(),
-        "a provider process started before mandatory resume validation"
     );
 }
 

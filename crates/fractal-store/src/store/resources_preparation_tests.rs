@@ -999,6 +999,16 @@ fn tombstone(transaction: &Transaction<'_>, id: &str) {
         .unwrap();
 }
 
+/// Run the deferred rebuild one claim at a time until nothing is deferred; the calls it took.
+fn finish_deferred(transaction: &Transaction<'_>) -> usize {
+    let mut calls = 1;
+    while super::preparation::flush_deferred(transaction, std::time::Duration::ZERO).unwrap() {
+        calls += 1;
+        assert!(calls < 10_000, "the deferred rebuild makes progress");
+    }
+    calls
+}
+
 fn queued(transaction: &Transaction<'_>, queue: &str) -> bool {
     transaction
         .query_row(
@@ -1037,7 +1047,7 @@ fn a_trim_s_delete_defers_its_subject_and_a_reader_meanwhile_gets_the_rebuilt_an
     assert!(queued(&transaction, "deferred"));
     let meanwhile = snapshot(&transaction, SUBJECTS[0]);
     assert_eq!(meanwhile, before);
-    assert!(!super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap(), "one subject, rebuilt");
+    finish_deferred(&transaction);
     assert!(!queued(&transaction, "deferred"));
     assert_eq!(snapshot(&transaction, SUBJECTS[0]), meanwhile, "the reader's answer was the rebuilt one");
     assert_parity(&transaction, "after the deferred rebuild");
@@ -1085,3 +1095,460 @@ fn a_new_claim_on_a_deferred_subject_rebuilds_it_at_once() {
     transaction.commit().unwrap();
 }
 
+
+/// What rebuild_subject did before it folded in memory: advance() for every claim in canonical
+/// order. It is the reference the one-pass fold must equal, column for column.
+fn rebuild_claim_by_claim(transaction: &Transaction<'_>, subject: &str) {
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf715f4927637 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation WHERE subject=?1", [subject]).unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h437d619987cd owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_claims WHERE subject=?1", [subject]).unwrap();
+    let supported: bool = transaction
+        .query_row(
+            "SELECT substr(?1,1,9)='resource/' OR EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='resource.observed')",
+            [subject],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !supported {
+        return;
+    }
+    let ids = transaction
+        .prepare(/* sqlite-large-value: allow-for-now lv-hb6c32b931cc3 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject=?1 ORDER BY {CANONICAL_ORDER}"
+        ))
+        .unwrap()
+        .query_map([subject], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for id in ids {
+        let key = super::preparation::sort_key(transaction, &id).unwrap();
+        super::preparation::advance(transaction, subject, &id, key).unwrap();
+    }
+}
+
+/// A subject's preparation row and claim keys, every column with its SQLite type.
+type Rows = (Vec<Vec<rusqlite::types::Value>>, Vec<(String, Vec<u8>)>);
+
+fn preparation_rows(connection: &Connection, subject: &str) -> Rows {
+    let row = connection
+        .prepare(
+            "SELECT subject,actual,kind,observed_at,actual_key,kind_key,observation_key,attribution
+             FROM local_resource_preparation WHERE subject=?1",
+        )
+        .unwrap()
+        .query_map([subject], |row| (0..8).map(|column| row.get(column)).collect())
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<Vec<_>>>>()
+        .unwrap();
+    let claims = connection
+        .prepare("SELECT claim_id,sort_key FROM local_resource_preparation_claims WHERE subject=?1 ORDER BY claim_id")
+        .unwrap()
+        .query_map([subject], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    (row, claims)
+}
+
+fn assert_one_pass_matches_claim_by_claim(transaction: &Transaction<'_>, context: &str) {
+    for subject in SUBJECTS {
+        rebuild_claim_by_claim(transaction, subject);
+        let expected = preparation_rows(transaction, subject);
+        super::preparation::rebuild_subject(transaction, subject).unwrap();
+        assert_eq!(preparation_rows(transaction, subject), expected, "{context}: {subject}");
+    }
+}
+
+/// Every shape the fold distinguishes, as (subject, accepted time, kind, body): openers and
+/// attribution receipts of every attribution_only type, compact item states laid over
+/// observations, a state transition, and excluded claims.
+fn fold_shapes() -> Vec<(usize, &'static str, &'static str, Value)> {
+    let item_state = fractal_schema::github_plugin::ITEM_STATE;
+    vec![
+        (0, "9", "resource.observed", json!({"legacy":"flat","facts":{"flat":true}})),
+        (0, "10", "resource.observed", json!({"fields":{"kind":"vcs.pull-request","facts":{"state":"open","number":7,"opened_by":"agent/example-first"}}})),
+        (0, "11", item_state, json!({"fields":{"item_kind":"vcs.pull-request","state":"open","head_sha":"a1","required_checks":{"state":"pending","source":"example","failed":[],"counted":3}}})),
+        (0, "12", "resource.observed", json!({"fields":{"attribution_only":true,"kind":"vcs.pull-request","facts":{"opened_by":"agent/example-receipt","repository":"example/repo"}}})),
+        (0, "13", item_state, json!({"fields":{"state":"closed","merged":true,"required_checks":{"state":"success"}}})),
+        (0, "14", "resource.observed", json!({"fields":{"attribution_only":false,"kind":"custom.example","facts":{"phase":"false receipt"}}})),
+        (0, "14", "resource.observed", json!({"fields":{"attribution_only":2,"kind":"custom.integer","facts":{"phase":"two"}}})),
+        (0, "15", "resource.observed", json!({"fields":{"attribution_only":0.5,"kind":"custom.real","facts":{"phase":"half"}}})),
+        (0, "15", "resource.observed", json!({"fields":{"attribution_only":"text","kind":"custom.text"}})),
+        (0, "16", "resource.observed", json!({"fields":{"attribution_only":null,"kind":null,"facts":{"nested_null":null}}})),
+        (0, "17", "person.delegation-set", json!({"fields":{"person":"person/example","extra":1}})),
+        (0, "18", "person.delegation-set", json!({"fields":{"later":true}})),
+        (0, "19", "intent.desired", json!({"fields":{"excluded_desired":true}})),
+        (0, "20", "harness.observed", json!({"fields":{"excluded_harness":true}})),
+        (1, "21", "resource.observed", json!({"fields":{"kind":"vcs.issue","attribution_only":true,"facts":{"opened_by":"agent/example-only"}}})),
+        (1, "22", "resource.observed", json!({"fields":{"kind":"vcs.issue","attribution_only":1.0,"facts":{"opened_by_run":"run/example"}}})),
+        (1, "25", "resource.observed", json!({"fields":{"kind":"vcs.issue","attribution_only":2,"facts":{"later_integer":true}}})),
+        (2, "23", "reconcile.fault", json!({"fields":{"excluded":true}})),
+        (0, "24", "resource.observed", json!({"fields":{"kind":"vcs.pull-request","facts":{"latest":true}}})),
+    ]
+}
+
+proptest! {
+    #![proptest_config(parity_config())]
+
+    /// The one-pass rebuild writes exactly the rows advance() wrote claim by claim, whatever
+    /// order the claims arrive in, over every shape the fold distinguishes: openers and
+    /// attribution receipts of every attribution_only type, compact item states laid over
+    /// observations, a state transition, excluded and repaired claims, and deleted ones.
+    #[test]
+    fn a_one_pass_rebuild_writes_what_advance_wrote_claim_by_claim(
+        ranks in proptest::collection::vec(any::<u64>(), 19),
+        deleted in proptest::collection::vec(any::<bool>(), 19),
+    ) {
+        let store = Store::open_memory("example-one-pass").unwrap();
+        let rows = fold_shapes();
+        let mut order: Vec<_> = (0..rows.len()).collect();
+        order.sort_by_key(|&index| (ranks[index], index));
+        let mut ids = vec![String::new(); rows.len()];
+        for index in order {
+            let (subject, time, kind, body) = &rows[index];
+            ids[index] = append_wire(&store, SUBJECTS[*subject], time, kind, body.clone());
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            assert_one_pass_matches_claim_by_claim(&transaction, &format!("after claim {index}"));
+            transaction.commit().unwrap();
+        }
+        change(&store, "repair the newest observation", |transaction| {
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h7cbf8f6d01f5 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&ids[18]]).unwrap();
+            assert_one_pass_matches_claim_by_claim(transaction, "repaired");
+        });
+        change(&store, "delete claims, leaving gaps", |transaction| {
+            for (id, _) in ids.iter().zip(&deleted).filter(|(_, deleted)| **deleted) {
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h0d1d3d43ff50 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [id]).unwrap();
+            }
+            assert_one_pass_matches_claim_by_claim(transaction, "after deletes");
+        });
+    }
+}
+
+/// A trim's deferred rebuild of a subject goes through the one-pass fold and still matches a
+/// canonical read.
+#[test]
+fn a_deferred_rebuild_folds_in_one_pass_and_matches_the_canonical_read() {
+    let store = Store::open_memory("example-deferred-one-pass").unwrap();
+    let middle = superseded_middle(&store);
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    tombstone(&transaction, &middle);
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hfbb3e24fb245 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    flush(&transaction).unwrap();
+    rebuild_claim_by_claim(&transaction, SUBJECTS[0]);
+    let expected = preparation_rows(&transaction, SUBJECTS[0]);
+    finish_deferred(&transaction);
+    assert_eq!(preparation_rows(&transaction, SUBJECTS[0]), expected);
+    assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
+    transaction.rollback().unwrap();
+}
+
+/// Each subject's rows as a whole rebuild writes them, in a transaction that is then rolled back.
+fn whole_rebuilt_rows(store: &Store) -> Vec<Rows> {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let rows = SUBJECTS
+        .iter()
+        .map(|subject| {
+            super::preparation::rebuild_subject(&transaction, subject).unwrap();
+            preparation_rows(&transaction, subject)
+        })
+        .collect();
+    transaction.rollback().unwrap();
+    rows
+}
+
+fn current_rows(connection: &Connection) -> Vec<Rows> {
+    SUBJECTS.iter().map(|subject| preparation_rows(connection, subject)).collect()
+}
+
+fn staged(connection: &Connection) -> bool {
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM local_resource_preparation_rebuild)", [], |row| row.get(0)).unwrap()
+}
+
+/// Admit every fold shape in a shuffled order, then delete some claims as a trim would, so each
+/// subject that lost one is deferred.
+fn deferred_shapes(store: &Store, ranks: &[u64], deleted: &[bool]) {
+    let rows = fold_shapes();
+    let mut order: Vec<_> = (0..rows.len()).collect();
+    order.sort_by_key(|&index| (ranks[index], index));
+    let mut ids = vec![String::new(); rows.len()];
+    for index in order {
+        let (subject, time, kind, body) = &rows[index];
+        ids[index] = append_wire(store, SUBJECTS[*subject], time, kind, body.clone());
+    }
+    // Not through `change`: its parity check rebuilds every subject, which ends a deferral.
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    for (id, _) in ids.iter().zip(deleted).filter(|(_, deleted)| **deleted) {
+        tombstone(&transaction, id);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-ha0d48a2a03f2 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [id]).unwrap();
+    }
+    flush(&transaction).unwrap();
+    transaction.commit().unwrap();
+}
+
+proptest! {
+    #![proptest_config(parity_config())]
+
+    /// A deferred rebuild split into steps of one claim, each its own transaction, ends in exactly
+    /// the rows a whole rebuild of each subject writes, whatever order the claims arrived in and
+    /// whichever a trim deleted; and a new claim arriving at any step still ends there.
+    #[test]
+    fn a_staged_rebuild_ends_in_the_rows_a_whole_rebuild_writes(
+        ranks in proptest::collection::vec(any::<u64>(), 19),
+        deleted in proptest::collection::vec(any::<bool>(), 19),
+        arrival in proptest::option::of(0_usize..24),
+    ) {
+        let store = Store::open_memory("example-staged").unwrap();
+        deferred_shapes(&store, &ranks, &deleted);
+        let mut steps = 0;
+        loop {
+            if arrival == Some(steps) {
+                let mut writer = store.connection.write();
+                let transaction = writer.transaction().unwrap();
+                let body = json!({"fields":{"kind":"custom.example","facts":{"phase":"arrived mid-rebuild"}}});
+                append_claim_tx(&transaction, &store.origin, SUBJECTS[0], "resource.observed", None, &body, &[], None).unwrap();
+                flush(&transaction).unwrap();
+                transaction.commit().unwrap();
+            }
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            let more = super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap();
+            transaction.commit().unwrap();
+            steps += 1;
+            prop_assert!(steps < 100, "the staged rebuild makes progress");
+            if !more {
+                break;
+            }
+        }
+        let connection = store.readers.get();
+        prop_assert!(!staged(&connection), "a finished rebuild leaves no stage");
+        prop_assert_eq!(current_rows(&connection), whole_rebuilt_rows(&store));
+    }
+}
+
+/// A subject too long for one budget is staged and resumed in the next transaction; a new claim
+/// on it rebuilds it whole at once and drops the stage, which no later step may resume.
+#[test]
+fn a_staged_rebuild_resumes_across_transactions_and_a_new_claim_drops_its_stage() {
+    let store = Store::open_memory("example-staged-resume").unwrap();
+    let observation = |phase: usize| json!({"fields":{"kind":"custom.example","facts":{"phase":phase}}});
+    let ids: Vec<_> = (0..6).map(|phase| append_wire(&store, SUBJECTS[0], &(10 + phase).to_string(), "resource.observed", observation(phase))).collect();
+    let step = || {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        let more = super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap();
+        let state = (more, staged(&transaction), queued(&transaction, "deferred"));
+        transaction.commit().unwrap();
+        state
+    };
+    {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        tombstone(&transaction, &ids[2]);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h20ff92cef130 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&ids[2]]).unwrap();
+        flush(&transaction).unwrap();
+        transaction.commit().unwrap();
+    }
+    let before = snapshot(&store.readers.get(), SUBJECTS[0]);
+    assert_eq!(step(), (true, true, true), "one claim of five folded, staged");
+    assert_eq!(step(), (true, true, true), "resumed from the stage, in a new transaction");
+    assert_eq!(snapshot(&store.readers.get(), SUBJECTS[0]), before, "readers keep the row until the swap");
+    {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        append_claim_tx(&transaction, &store.origin, SUBJECTS[0], "resource.observed", None, &observation(9), &[], None).unwrap();
+        flush(&transaction).unwrap();
+        assert!(!staged(&transaction), "the new claim's rebuild dropped the stage");
+        assert!(!queued(&transaction, "deferred"));
+        transaction.commit().unwrap();
+    }
+    assert_eq!(step(), (false, false, false), "nothing is left to resume");
+    assert_eq!(current_rows(&store.readers.get()), whole_rebuilt_rows(&store));
+}
+
+/// A stage is resumed only by the process that made it: opening the store drops it, and the
+/// subject's walk starts again from its first claim.
+#[test]
+fn opening_the_store_drops_a_stage_and_the_walk_starts_again() {
+    let store = Store::open_memory("example-staged-open").unwrap();
+    let middle = superseded_middle(&store);
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    tombstone(&transaction, &middle);
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8deeb7e7a0e2 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    flush(&transaction).unwrap();
+    assert!(super::preparation::flush_deferred(&transaction, std::time::Duration::ZERO).unwrap());
+    assert!(staged(&transaction));
+    super::preparation::open(&transaction).unwrap();
+    assert!(!staged(&transaction), "open dropped the stage");
+    assert!(queued(&transaction, "deferred"), "and kept the deferral");
+    // From the first claim again: the two kept claims, the deleted one's row, then the swap.
+    assert_eq!(finish_deferred(&transaction), 4);
+    assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
+    transaction.rollback().unwrap();
+}
+
+/// A walk that finds fewer claims than the subject has, because a kept claim lost its key row,
+/// rebuilds the subject whole from its claims rather than writing a fold that misses one.
+#[test]
+fn a_walk_that_misses_a_claim_rebuilds_the_subject_whole() {
+    let store = Store::open_memory("example-staged-missing").unwrap();
+    let middle = superseded_middle(&store);
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    tombstone(&transaction, &middle);
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5520c75fb611 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    flush(&transaction).unwrap();
+    let newest: String = transaction
+        .query_row("SELECT claim_id FROM local_resource_preparation_claims WHERE subject=?1 ORDER BY sort_key DESC LIMIT 1", [SUBJECTS[0]], |row| row.get(0))
+        .unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h08bdc31fea82 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_claims WHERE claim_id=?1", [&newest]).unwrap();
+    finish_deferred(&transaction);
+    assert!(!queued(&transaction, "deferred"));
+    let rows = preparation_rows(&transaction, SUBJECTS[0]);
+    assert!(rows.1.iter().any(|(claim, _)| *claim == newest), "the whole rebuild restored its row");
+    super::preparation::rebuild_subject(&transaction, SUBJECTS[0]).unwrap();
+    assert_eq!(rows, preparation_rows(&transaction, SUBJECTS[0]));
+    transaction.rollback().unwrap();
+}
+
+/// Times the claim-by-claim and one-pass rebuilds of the largest subjects in a copy of a store
+/// (by claims and by actual size), and checks that every subject in it rebuilds to the same
+/// rows both ways. It never commits.
+/// FRACTAL_PREPARATION_BENCH_STORE=/copy/claims.sqlite3 cargo test -p fractal-store --lib
+///   a_one_pass_rebuild_on_a_store_copy -- --ignored --nocapture
+#[test]
+#[ignore = "manual: needs FRACTAL_PREPARATION_BENCH_STORE, a copy of a store"]
+fn a_one_pass_rebuild_on_a_store_copy() {
+    let path = std::env::var("FRACTAL_PREPARATION_BENCH_STORE").expect("FRACTAL_PREPARATION_BENCH_STORE");
+    let mut connection = Connection::open(path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let largest = |sql: &str| {
+        transaction
+            .prepare(/* sqlite-large-value: allow-for-now lv-h29af83d2853e owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ sql)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let mut subjects = largest(
+        "SELECT subject FROM local_resource_preparation_claims GROUP BY subject ORDER BY count(*) DESC LIMIT 10",
+    );
+    subjects.extend(largest(
+        "SELECT subject FROM local_resource_preparation ORDER BY length(actual) DESC LIMIT 10",
+    ));
+    for subject in &subjects {
+        let start = std::time::Instant::now();
+        rebuild_claim_by_claim(&transaction, subject);
+        let before = start.elapsed();
+        let expected = preparation_rows(&transaction, subject);
+        let start = std::time::Instant::now();
+        super::preparation::rebuild_subject(&transaction, subject).unwrap();
+        let after = start.elapsed();
+        let (row, claims) = preparation_rows(&transaction, subject);
+        assert_eq!((&row, &claims), (&expected.0, &expected.1), "{subject}");
+        let actual = match row.first().map(|row| &row[1]) {
+            Some(rusqlite::types::Value::Text(actual)) => actual.len(),
+            _ => 0,
+        };
+        eprintln!("{subject}: claims={} actual_bytes={actual} claim_by_claim={before:?} one_pass={after:?}", claims.len());
+    }
+    let every = largest("SELECT DISTINCT subject FROM local_resource_preparation_claims");
+    let (mut before, mut after) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    for subject in &every {
+        let start = std::time::Instant::now();
+        rebuild_claim_by_claim(&transaction, subject);
+        before += start.elapsed();
+        let expected = preparation_rows(&transaction, subject);
+        let start = std::time::Instant::now();
+        super::preparation::rebuild_subject(&transaction, subject).unwrap();
+        after += start.elapsed();
+        assert_eq!(preparation_rows(&transaction, subject), expected, "{subject}");
+    }
+    eprintln!("every subject: {} equal; claim_by_claim={before:?} one_pass={after:?}", every.len());
+    transaction.rollback().unwrap();
+}
+
+/// Defers every subject in a copy of a store, rebuilds them all through the staged walk with a
+/// trim's 20 ms budget, and reports each transaction's time and how many subjects fell back to a
+/// whole rebuild; then checks every subject's rows against a whole rebuild. It never commits.
+/// FRACTAL_PREPARATION_BENCH_STORE=/copy/claims.sqlite3 cargo test -p fractal-store --lib
+///   a_staged_rebuild_on_a_store_copy -- --ignored --nocapture
+#[test]
+#[ignore = "manual: needs FRACTAL_PREPARATION_BENCH_STORE, a copy of a store"]
+fn a_staged_rebuild_on_a_store_copy() {
+    let path = std::env::var("FRACTAL_PREPARATION_BENCH_STORE").expect("FRACTAL_PREPARATION_BENCH_STORE");
+    let mut connection = Connection::open(path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    super::preparation::create_schema(&transaction).unwrap();
+    let subjects = |sql: &str| {
+        transaction
+            .prepare(/* sqlite-large-value: allow-for-now lv-h32202a30ba60 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ sql)
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let every = subjects("SELECT DISTINCT subject FROM local_resource_preparation_claims ORDER BY subject");
+    // A subject whose kept key rows do not cover its claims takes the whole-rebuild fallback.
+    let uncovered = subjects(
+        "SELECT subject FROM (SELECT DISTINCT subject FROM local_resource_preparation_claims) prepared
+         WHERE (SELECT COUNT(*) FROM claims WHERE claims.subject=prepared.subject)
+            != (SELECT COUNT(*) FROM local_resource_preparation_claims rows JOIN claims ON claims.id=rows.claim_id
+                AND claims.subject=rows.subject WHERE rows.subject=prepared.subject)",
+    );
+    transaction
+        .execute(/* sqlite-large-value: allow-for-now lv-hd12fc35f6d00 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_resource_preparation_deferred(subject) SELECT DISTINCT subject FROM local_resource_preparation_claims", [])
+        .unwrap();
+    let mut steps = Vec::new();
+    let started = std::time::Instant::now();
+    loop {
+        let step = std::time::Instant::now();
+        let more = super::preparation::flush_deferred(&transaction, std::time::Duration::from_millis(20)).unwrap();
+        steps.push(step.elapsed());
+        if !more {
+            break;
+        }
+    }
+    let total = started.elapsed();
+    let mut sorted = steps.clone();
+    sorted.sort();
+    let percentile = |p: usize| sorted[(sorted.len() * p / 100).min(sorted.len() - 1)];
+    eprintln!(
+        "staged: {} subjects, {} uncovered {:?}; {} transactions, total {total:?}, p50 {:?}, p99 {:?}, max {:?}",
+        every.len(), uncovered.len(), uncovered.iter().take(5).collect::<Vec<_>>(), steps.len(), percentile(50), percentile(99), sorted.last().unwrap(),
+    );
+    let staged: Vec<_> = every.iter().map(|subject| preparation_rows(&transaction, subject)).collect();
+    for (subject, staged) in every.iter().zip(staged) {
+        super::preparation::rebuild_subject(&transaction, subject).unwrap();
+        assert_eq!(preparation_rows(&transaction, subject), staged, "{subject}");
+    }
+    eprintln!("every subject: {} equal to a whole rebuild", every.len());
+    transaction.rollback().unwrap();
+}
+
+/// A staged rebuild's step seeks past its key in (subject, sort_key) and joins only the claims it
+/// reads, so a step costs the claims it folds however long the subject's history is.
+#[test]
+fn a_staged_rebuild_step_seeks_its_claims_without_scanning_the_subject() {
+    let store = Store::open_memory("example-staged-plan").unwrap();
+    let connection = store.readers.get();
+    let plan = connection
+        .prepare(/* sqlite-large-value: allow-for-now lv-h56c3f7754656 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", *super::preparation::WALK))
+        .unwrap()
+        .query_map(["resource/example-plan", "key"], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|step| step.starts_with("SEARCH prepared USING COVERING INDEX local_resource_preparation_claims_order (subject=? AND sort_key>?)")),
+        "{plan:?}"
+    );
+    assert!(!plan.iter().any(|step| step.contains("TEMP B-TREE") || step.starts_with("SCAN")), "{plan:?}");
+}

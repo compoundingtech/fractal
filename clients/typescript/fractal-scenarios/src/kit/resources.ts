@@ -134,7 +134,7 @@ export const work = (ctx: FactoryContext, input: WorkInput): Work => {
 
 export interface AttentionInput {
   readonly key: string
-  readonly kind: 'agent-request' | 'unread-message' | 'human-gate' | 'fault'
+  readonly kind: 'agent-request' | 'unread-message' | 'human-gate' | 'fault' | 'harness-prompt'
   readonly person: CastPerson
   readonly source: string
   readonly title: string

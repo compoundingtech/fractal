@@ -241,8 +241,10 @@ impl Fixture {
         Self {
             state: NativeLoopState {
                 mailbox_fence: Some(owner.clone()),
-                // The daemon has answered for as long as `check`'s attach window has run.
-                claude_attachment_answered: Some(Instant::now() - Duration::from_secs(30)),
+                // Claude has started (its SessionStart) and the daemon has answered for longer than
+                // the attach window: an unattached channel is blocked.
+                claude_attachment_answered: Some(Instant::now() - Duration::from_secs(90)),
+                claude_session_started_ms: Some(current_unix_ms().unwrap() as u64 - 90_000),
                 ..Default::default()
             },
             mailbox: NativeMailbox {
@@ -270,6 +272,31 @@ impl Fixture {
             &mut self.state,
         )
         .await
+    }
+
+    /// One check whose driver settled `ago` before now.
+    async fn check_since(&mut self, ago: Duration) -> Result<()> {
+        check_claude_attachment(
+            &self.client,
+            &self.control.owner.subject,
+            &self.control.owner.incarnation,
+            &self.mailbox,
+            Instant::now() - ago,
+            &mut self.state,
+        )
+        .await
+    }
+
+    /// The newest diagnostic's reason and the cause JSON at its end, if any.
+    fn last_reason(&self) -> (String, Option<Value>) {
+        let reason = self.control.store
+            .claims_for(&self.control.owner.subject, Some("harness.diagnostic"))
+            .unwrap()
+            .last()
+            .map(|claim| claim.body["fields"]["reason"].as_str().unwrap().to_owned())
+            .unwrap_or_default();
+        let cause = reason.split_once(" cause=").map(|(_, json)| serde_json::from_str(json).unwrap());
+        (reason, cause)
     }
 
     async fn wait_ready(&self, ready: bool) {
@@ -1612,4 +1639,97 @@ async fn a_check_the_daemon_is_too_slow_to_answer_does_not_block_the_channel() {
     assert_eq!(f.state.claude_attachment_phase, "attached");
     assert_eq!(f.phases(), ["starting", "recovered"]);
     f.unchanged_owner();
+}
+
+/// Operations' capture of a parked seat on a loaded host (#4789), seconds after its driver settled:
+/// the plugin check until +12, Claude started (SessionStart) at +33, its channel server at +56. The
+/// old 20 s window from the driver's settle replaced such a session at +34 and +47 while it was
+/// still starting; the window now counts from Claude's own start.
+#[tokio::test]
+async fn a_claude_still_starting_is_never_blocked_and_its_window_counts_from_its_session_start() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let now = current_unix_ms().unwrap() as u64;
+    // +47 s: no SessionStart yet, the daemon answering throughout.
+    f.state.claude_session_started_ms = None;
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(47));
+    f.check_since(Duration::from_secs(47)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // Claude's first native hook is seen: its start is recorded once, from this check.
+    f.state.claude_readiness_fallback.native_state_seen = true;
+    f.check_since(Duration::from_secs(48)).await.unwrap();
+    let session = f.state.claude_session_started_ms.expect("SessionStart recorded");
+    assert!(session >= now);
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // 59 s after SessionStart (+92): still within the window.
+    f.state.claude_session_started_ms = Some(now - 59_000);
+    f.check_since(Duration::from_secs(92)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    assert!(!f.phases().contains(&"blocked".to_owned()));
+    // 61 s after it, the daemon answering throughout, with no channel: blocked, and the cause says
+    // the channel never initialized.
+    f.state.claude_session_started_ms = Some(now - 61_000);
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(94));
+    f.check_since(Duration::from_secs(94)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    let (reason, cause) = f.last_reason();
+    assert!(reason.starts_with("claude-channel-unattached: the current Claude session has no live"), "{reason}");
+    let cause = cause.expect("a blocked diagnostic names its cause");
+    assert_eq!(cause["kind"], "channel-not-initialized");
+    assert_eq!(cause["session_started_at_ms"], now - 61_000);
+}
+
+/// The capture's third session: SessionStart at +33, the channel at +56, 23 s later. It attaches
+/// without ever being reported blocked.
+#[tokio::test]
+async fn a_channel_that_comes_up_within_the_window_after_session_start_is_never_blocked() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let now = current_unix_ms().unwrap() as u64;
+    f.state.claude_session_started_ms = Some(now - 23_000);
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(56));
+    f.check_since(Duration::from_secs(56)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    f.set_attached(true).await;
+    f.check_since(Duration::from_secs(57)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert!(!f.phases().contains(&"blocked".to_owned()), "{:?}", f.phases());
+}
+
+/// A Claude that never reaches SessionStart within the start bound is stalled, not blocked on a
+/// channel: the cause says so, with what the driver chose at launch, a failed plugin check and a
+/// project server named `st` included.
+#[tokio::test]
+async fn a_claude_that_never_starts_is_stalled_with_its_launch_in_the_cause() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    f.state.claude_session_started_ms = None;
+    f.state.claude_channel_launch = Some(fractal_drivers::claude_session::ChannelLaunch {
+        route: "inline-development".into(),
+        plugin_check_error: Some("`claude plugin list --json` failed with status 1: keychain locked".into()),
+        plugin_check_ms: 12_300,
+        launched_at_ms: Some(1_000),
+        project_st_server: true,
+    });
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(301));
+    f.check_since(Duration::from_secs(299)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting", "within the five-minute bound");
+    f.check_since(Duration::from_secs(301)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "stalled");
+    let claim = f.control.store.claims_for(&f.control.owner.subject, Some("harness.diagnostic")).unwrap().pop().unwrap();
+    assert_eq!(claim.body["fields"]["status"], "stalled");
+    assert_eq!(claim.body["fields"]["severity"], "error");
+    assert_eq!(claim.body["fields"]["code"], "claude-channel-unattached");
+    let (reason, cause) = f.last_reason();
+    assert!(reason.starts_with("claude-channel-unattached: Claude did not start (no SessionStart) within 300 s"), "{reason}");
+    let cause = cause.unwrap();
+    assert_eq!(cause["kind"], "claude-not-started");
+    assert_eq!(cause["route"], "inline-development");
+    assert_eq!(cause["plugin_check_error"], "`claude plugin list --json` failed with status 1: keychain locked");
+    assert_eq!(cause["project_st_server"], true);
+    assert_eq!(cause["plugin_check_ms"], 12_300);
+    // The store folds an open status other than `starting` to blocked, as every member does, older
+    // ones included: the seat shows its channel fault.
+    let harness = f.control.store.current_harness(&f.control.owner.subject).unwrap();
+    assert_eq!(harness.map(|harness| harness.state).as_deref(), Some("blocked"));
 }

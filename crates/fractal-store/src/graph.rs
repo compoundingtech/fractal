@@ -1927,6 +1927,15 @@ fn validate_account_binding(
     Ok(())
 }
 
+/// The observer name of `observer/github/OWNER/REPO`, the one standing observer every watch of
+/// that repository uses, in the lowercase spelling its subject has.
+pub(crate) fn standing_github_observer(subject: &str) -> Option<String> {
+    let repository = subject.strip_prefix("observer/github/")?;
+    let (owner, repo) = repository.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/'))
+        .then(|| format!("github/{}", repository.to_ascii_lowercase()))
+}
+
 fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
     let subject = one_string_with_children(node)?;
@@ -1941,10 +1950,30 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
         return Err(St3Error::new("empty-stop-reason", "a stop reason cannot be blank"));
     }
+    // A person stops a repository's standing GitHub observer so that a watch on another member
+    // declares it there, which then polls on from the observer's cursor (#5182). It declares
+    // what a host writes when the observer falls unused, which every build reads, so it carries
+    // no reason. Publication admits it from a person only.
+    if let Some(name) = standing_github_observer(&subject)
+        && context.owner_run.is_none()
+    {
+        if reason.is_some() {
+            return Err(St3Error::new(
+                "observer-stop-reason",
+                format!("a stop of `{subject}` takes no reason: it declares the observer stopped, as a host does when nothing uses it"),
+            ));
+        }
+        let mut observer = KdlNode::new("observer");
+        observer.entries_mut().push(kdl::KdlEntry::new(name));
+        let mut body = KdlDocument::new();
+        body.nodes_mut().push(KdlNode::new("stop"));
+        observer.set_children(body);
+        return parse_structure(&observer, "observer", context);
+    }
     if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
         return Err(St3Error::new(
             "invalid-stop-subject",
-            format!("stop requires a full agent, exec, or PTY subject; got `{subject}`"),
+            format!("stop requires a full agent, exec, or PTY subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
         ));
     }
     let kind = subject.split('/').next().unwrap_or_default();
@@ -2386,6 +2415,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "capacity",
         "handles-faults",
         "accountable",
+        "principal",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -2436,6 +2466,17 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "agent-authority",
     ] {
         unique_child(document, child)?;
+    }
+    if let Some(principal) = unique_child(document, "principal")? {
+        ensure_no_properties(principal)?;
+        ensure_no_children(principal)?;
+        let person = one_string(principal)?;
+        if !fractal_schema::accountable::person(&person) {
+            return Err(St3Error::new(
+                "invalid-agent-principal",
+                "principal must name one concrete person/NAME",
+            ));
+        }
     }
     if let Some(accountable) = unique_child(document, "accountable")? {
         ensure_no_properties(accountable)?;
@@ -5113,6 +5154,63 @@ agent "seat" {
         }
         let unchanged = crate::store::analyze_mission_revision(&spec(""), &spec(""), "person/requester").unwrap_err();
         assert_eq!(unchanged.code, "unchanged-mission-revision");
+    }
+
+    #[test]
+    fn agent_principal_is_optional_and_retained_in_canonical_desired_state() {
+        for person in [None, Some("person/operator"), Some("person/operator-2_name.test")] {
+            let principal = person.map_or(String::new(), |person| format!("principal {person:?};"));
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ {principal} command \"true\" }}"
+            );
+            let intent = parse_intent(&source, "node").unwrap();
+            let children = intent.subjects["agent/example/worker"].desired["children"]
+                .as_array()
+                .unwrap();
+            let principals = children.iter()
+                .filter(|child| child["name"] == "principal")
+                .collect::<Vec<_>>();
+            match person {
+                None => assert!(principals.is_empty()),
+                Some(person) => assert_eq!(
+                    principals,
+                    vec![&json!({ "name": "principal", "arguments": [person] })],
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn agent_principal_rejects_noncanonical_people_and_invalid_shapes() {
+        for principal in [
+            "principal",
+            "principal #true",
+            "principal 42",
+            "principal \"person/operator\" \"person/other\"",
+            "principal \"agent/example/worker\"",
+            "principal \"operator\"",
+            "principal \"person/\"",
+            "principal \"person/..\"",
+            "principal \"person/operator/child\"",
+            "principal \"person/operator name\"",
+            "principal \"person/operator*\"",
+            "principal \"person/operator\" extra=\"value\"",
+            "principal person=\"person/operator\"",
+            "principal \"person/operator\" {}",
+            "principal \"person/operator\" { name \"operator\"; }",
+            "principal \"person/operator\"; principal \"person/operator\"",
+            "principal \"person/operator\"; principal \"person/other\"",
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ {principal}; command \"true\" }}"
+            );
+            assert!(parse_intent(&source, "node").is_err(), "{principal}");
+        }
+        let error = parse_intent(
+            "version 2\nagent \"example/worker\" principal=\"person/operator\" { command \"true\" }",
+            "node",
+        ).unwrap_err();
+        assert_eq!(error.code, "unknown-property");
     }
 
     #[test]

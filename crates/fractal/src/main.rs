@@ -88,6 +88,7 @@ mod release_version;
 mod follow_tests;
 mod presentation;
 mod actor_contract;
+mod inspection_actor;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -178,6 +179,11 @@ const CLI_ENVIRONMENT_NAMES: [(&str, &str); 5] = [
     ("ST3_INCARNATION", "FRACTAL_INCARNATION"),
 ];
 
+/// The canonical argv graph, including attribution-only operational read options.
+fn command_graph() -> clap::Command {
+    inspection_actor::augment(Cli::command())
+}
+
 fn cli_command() -> clap::Command {
     // Resolve each family once, not once per argument, to warn once per conflict.
     // Leave legacy bindings untouched unless the preferred alias is actually present.
@@ -186,7 +192,7 @@ fn cli_command() -> clap::Command {
             (old, fractal_drivers::contracts::env(old).map(|_| new))
         })
     });
-    let mut command = cli_command_with_bindings(Cli::command(), &bindings);
+    let mut command = cli_command_with_bindings(command_graph(), &bindings);
     // Materialize inherited globals before hiding only web's copies. They remain
     // parseable so the explicit refusal below still reports unsupported options.
     command.build();
@@ -609,6 +615,22 @@ enum FleetCommand {
     Transports {
         #[command(subcommand)]
         command: FleetTransportsCommand,
+    },
+    /// Let this member start, restart and retire its agents without peers it cannot reach. With
+    /// `wait_for_peers_after_start` on, a member waits after each start to catch up with a peer
+    /// before acting on where its agents run; this releases the named peers for the current daemon
+    /// start only. Run it on the member.
+    AdmitWithout {
+        /// A peer this member stops waiting for. Repeat it for several.
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        /// Why the member may go on without them.
+        #[arg(long)]
+        reason: String,
+        /// The person or agent applying it.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: String,
     },
     /// Show this node, the fleet's members, and open invites.
     Status,
@@ -1070,6 +1092,9 @@ struct FleetModeArgs {
 enum FleetTransportsCommand {
     /// Expose Fabric, then announce it. Requires a listening member with a port.
     Add {
+        /// The person or agent applying this change.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         #[arg(value_parser = ["fabric"])]
         transport: String,
         /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
@@ -1084,6 +1109,9 @@ enum FleetTransportsCommand {
     },
     /// Withdraw Fabric's endpoint, then unexpose it. Keep at least one usable transport.
     Remove {
+        /// The person or agent applying this change.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         #[arg(value_parser = ["fabric"])]
         transport: String,
         /// Leave the daemon and replication worker restarts to the operator.
@@ -1092,6 +1120,9 @@ enum FleetTransportsCommand {
     },
     /// Prefer an enabled transport without changing exposure or removing any carrier.
     Prefer {
+        /// The person or agent applying this change.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         #[arg(value_parser = ["tailscale", "fabric"])]
         transport: String,
         /// Leave the daemon and replication worker restarts to the operator.
@@ -1374,6 +1405,9 @@ struct MissionPublishArgs {
 
 #[derive(Args)]
 struct MissionCheckArgs {
+    /// Attribute gate execution to this person or agent.
+    #[arg(long = "as", value_parser = parse_actor_subject)]
+    actor: Option<String>,
     /// KDL file to check; use `-` to read standard input.
     file: PathBuf,
     /// The workspace a run would use: `${ST_WORKSPACE}` and relative gate workspaces stand for
@@ -1405,6 +1439,9 @@ enum GateCommand {
     },
     /// Whether a cargo test target passes at a ref, built in a worktree fractal keeps between checks.
     CargoTest {
+        /// Attribute this local execution in its output.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         /// The test target, as `cargo test --test TARGET` names it.
         target: String,
         #[arg(long)]
@@ -2404,6 +2441,9 @@ enum RepairCommand {
 enum MigrateCommand {
     /// Migrate the default host after its Fractal services have been staged disabled.
     Host(migrate_cli::HostArgs),
+    /// Print the discovered or journal-recorded launchd domain without changing the host.
+    #[command(hide = true)]
+    LaunchdDomain,
 }
 
 #[cfg(test)]
@@ -2797,6 +2837,11 @@ enum AgentsCommand {
     /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
     /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
     Lane { subject: String },
+    /// Raise one agent's lane for a command's run and hold it while standard input stays open
+    /// (docs/st3/seat-lanes.md, "Bursts"). Prints one line per answer: `waiting REASON` as the reason
+    /// changes, then `granted CORES MEMORY`; or `none WHY` when the agent holds no lane here, or
+    /// `refused WHY` for a burst that can never fit. Closing standard input gives it back.
+    Burst(AgentBurstArgs),
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
@@ -2945,7 +2990,7 @@ fn rename_proof_verdict(
     }
 }
 
-fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
+fn offline_rename_proof(command: &Command, matches: &clap::ArgMatches) -> Option<ExitCode> {
     let args = match command {
         Command::Agents { command: AgentsCommand::RenameId(args) }
         | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
@@ -2956,6 +3001,10 @@ fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
     }) = &args.command else {
         return None;
     };
+    if let Err(error) = inspection_actor::attribute(matches) {
+        stderr_message("st", format_args!("{error:#}"));
+        return Some(ExitCode::FAILURE);
+    }
     let (verdict, code) = rename_proof_verdict(file, fleet_anchor, after_revision.as_deref());
     println!("{verdict}");
     Some(ExitCode::from(code))
@@ -2969,7 +3018,7 @@ fn offline_rename_proof_arguments(arguments: &[std::ffi::OsString]) -> Option<Ex
     }
     let matches = cli_command().try_get_matches_from_mut(arguments).ok()?;
     let cli = Cli::from_arg_matches(&matches).ok()?;
-    offline_rename_proof(&cli.command)
+    offline_rename_proof(&cli.command, &matches)
 }
 
 async fn run_identity_rename(
@@ -3641,6 +3690,27 @@ struct AgentResumeArgs {
     /// How long to wait for the agent to resume its native session.
     #[arg(long, default_value = "10m")]
     timeout: String,
+}
+
+#[derive(Args)]
+struct AgentBurstArgs {
+    /// Exact agent subject or its identity without the `agent/` prefix.
+    #[arg(value_parser = parse_agent_start_identity)]
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
+    subject: String,
+    /// The lane's cores while the burst holds.
+    #[arg(long)]
+    cores: u32,
+    /// The lane's memory while the burst holds, such as 24G.
+    #[arg(long)]
+    memory: String,
+    /// What asks, shown while it waits and holds.
+    #[arg(long, default_value = "a command")]
+    reason: String,
+    /// The agent itself: only an agent asks for its own lane's burst.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_agent_actor)]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -4972,7 +5042,7 @@ fn read_contract_inventory_for_command(mut command: clap::Command) -> Value {
 }
 
 fn read_contract_inventory_json() -> Value {
-    read_contract_inventory_for_command(Cli::command())
+    read_contract_inventory_for_command(command_graph())
 }
 
 fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
@@ -5131,8 +5201,9 @@ fn cli_main() -> ExitCode {
     // Only the fixture's own entry point sets this. The installed fractal binary cannot enable it with an
     // argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell = fixture()
-        .then(fractal_daemon::test_support::initialize_fixture);
+    if fixture() {
+        fractal_daemon::test_support::initialize_fixture();
+    }
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { fractal_drivers::reexec::take_resume_environment() };
     if fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV).is_some() {
@@ -5172,7 +5243,10 @@ fn cli_main() -> ExitCode {
         Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion && json_version => {
             println!(
                 "{}",
-                json!({ "machine_version": fractal_drivers::version::machine_version() })
+                json!({
+                    "machine_version": fractal_drivers::version::machine_version(),
+                    "commit": fractal_drivers::version::build_commit(),
+                })
             );
             return ExitCode::SUCCESS;
         }
@@ -5184,6 +5258,10 @@ fn cli_main() -> ExitCode {
     };
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
+    if let Err(error) = inspection_actor::attribute(&matches) {
+        stderr_message("st", format_args!("{error:#}"));
+        return ExitCode::FAILURE;
+    }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
@@ -5400,7 +5478,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         .as_deref()
         .map(Endpoint::parse)
         .transpose()?
-        .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
+        .unwrap_or_else(|| Endpoint::DiscoveredUnix(config.client_discovery()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -5709,6 +5787,9 @@ async fn run(cli: Cli) -> Result<()> {
             config.as_deref(),
         );
     }
+    if matches!(&cli.command, Command::Migrate { command: MigrateCommand::LaunchdDomain }) {
+        return migrate_cli::print_launchd_domain();
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -5830,7 +5911,7 @@ async fn run(cli: Cli) -> Result<()> {
         .as_deref()
         .map(Endpoint::parse)
         .transpose()?
-        .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
+        .unwrap_or_else(|| Endpoint::DiscoveredUnix(config.client_discovery()));
     let _ = DAEMON_WAIT.set(Duration::from_secs(cli.daemon_wait));
     let client = cli_client(&endpoint);
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
@@ -5909,24 +5990,15 @@ async fn run(cli: Cli) -> Result<()> {
             ) {
                 client
             } else {
-                let actor = match fractal_drivers::contracts::env("ST_AGENT")
-                    .filter(|agent| agent.starts_with("agent/"))
-                {
-                    Some(agent) => agent,
-                    None => parse_person_subject(config.person.as_deref().context(
-                        "Git change sync needs a configured person or the current agent seat",
-                    )?)
-                    .map_err(anyhow::Error::msg)?,
+                let change_cli::ChangesCommand::Sync { actor, .. } = &arguments.command else {
+                    unreachable!()
                 };
-                let Endpoint::Unix(socket) = &endpoint else {
-                    anyhow::bail!("Git change control commands require the trusted local Unix socket");
-                };
-                let named = if actor.starts_with("agent/") {
-                    Client::unix_agent(socket, actor)?
-                } else {
-                    Client::unix_as(socket, actor)?
-                };
-                named.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                let actor = configured_actor(
+                    actor.as_deref(),
+                    config.person.as_deref(),
+                    "changes sync",
+                )?;
+                execution_client(&endpoint, actor)?
             };
             change_cli::run(&client, arguments, cli.json).await
         }
@@ -5940,13 +6012,13 @@ async fn run(cli: Cli) -> Result<()> {
                 // A read relayed to the poller is made as a person or agent.
                 Some(actor) => {
                     let actor = actor.map(str::to_owned).or_else(|| config.person.clone());
-                    let named = match (&endpoint, actor) {
-                        (Endpoint::Unix(socket), Some(actor)) if actor.starts_with("agent/") => {
-                            Client::unix_agent(socket, actor)?.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                    let named = match (endpoint.unix_socket(), actor) {
+                        (Some(socket), Some(actor)) if actor.starts_with("agent/") => {
+                            Client::unix_agent(socket.as_ref(), actor)?.with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
                         }
-                        (Endpoint::Unix(socket), Some(actor)) => {
-                            Client::unix_as(socket, parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
-                                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        (Some(socket), Some(actor)) => {
+                            Client::unix_as(socket.as_ref(), parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
+                                .with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
                         }
                         _ => client.clone(),
                     };
@@ -6040,6 +6112,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
         }
+        Command::Migrate { command: MigrateCommand::LaunchdDomain } => migrate_cli::print_launchd_domain(),
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
@@ -6097,12 +6170,16 @@ async fn run_gate(command: GateCommand) -> Result<()> {
             reference,
         } => github_gates::check_passed(&repo, &reference, &check).await,
         GateCommand::CargoTest {
+            actor,
             target,
             package,
             reference,
             repository,
             worktree,
         } => {
+            if let Some(actor) = actor {
+                eprintln!("Executing gate cargo-test as {actor}");
+            }
             tokio::task::spawn_blocking(move || {
                 fractal_daemon::gate_kinds::cargo_test(&fractal_daemon::gate_kinds::CargoTest {
                     target: &target,
@@ -6149,11 +6226,26 @@ fn guard_mutating_cli_actor(
     }
     let actor = match command {
         Command::Apply(args) => Some(args.actor.as_str()),
+        Command::Changes(change_cli::ChangesArgs {
+            command: change_cli::ChangesCommand::Sync { actor, .. },
+        }) | Command::Gate {
+            command: GateCommand::CargoTest { actor, .. },
+        } => actor.as_deref(),
+        Command::Fleet { command: FleetCommand::AdmitWithout { actor, .. } } => Some(actor.as_str()),
+        Command::Fleet { command: FleetCommand::Transports { command } } => {
+            let (FleetTransportsCommand::Add { actor, .. }
+                | FleetTransportsCommand::Remove { actor, .. }
+                | FleetTransportsCommand::Prefer { actor, .. }) = command;
+            Some(actor.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("a harness transport change needs explicit --as {own}")
+            })?)
+        }
         Command::Missions { command } => match command {
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
@@ -6834,7 +6926,7 @@ fn select_private_gateway(
     };
     config.client_gateway_socket = parent
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("st3-client.sock");
+        .join("fractal-client.sock");
     if gateway_path_for_comparison(&config.client_gateway_socket)?
         == gateway_path_for_comparison(&Config::default().client_gateway_socket)?
     {
@@ -6872,6 +6964,9 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    if let Some(person) = &config.person {
+        let _ = store.question_principal_default.set(person.clone());
+    }
     if admitted.is_some() {
         fractal_daemon::node_identity::record_store_writer(
             config, admitted.as_deref(), &config.node,
@@ -6955,6 +7050,64 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Audit the operation projection on a blocking thread. The audit reads in pages of at most
+/// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
+/// run and never delays a WAL restart for long. The store keeps the result for doctor.
+async fn audit_operations(store: &Arc<Store>) -> anyhow::Result<Vec<String>> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.audit", || {
+        store.operation_projection_drift()
+    }))
+    .await
+    .unwrap_or_else(|error| Err(anyhow::anyhow!("the operation audit stopped: {error}")))
+}
+
+/// Count the envelopes this node admitted before it knew their writer's key or end, on a blocking
+/// thread, in pages that each take their own short read snapshot. The store keeps the count for
+/// doctor; a failure is kept there too, and doctor reports it.
+async fn count_fleet_residue(store: &Arc<Store>) {
+    let counting = store.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("fleet.admission_residue", || {
+        counting.audit_fleet_admission_residue()
+    }))
+    .await
+    {
+        store.fleet_residue_stopped(format!("the count stopped: {error}"));
+    }
+}
+
+/// Repair what an audit found, and say whether anything changed.
+async fn repair_operation_drift(store: &Arc<Store>, audit: anyhow::Result<Vec<String>>) -> bool {
+    let drift = match audit {
+        Ok(drift) if drift.is_empty() => return false,
+        Ok(drift) => drift,
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            return false;
+        }
+    };
+    let store = store.clone();
+    match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("operations.repair_drift", || {
+        store.repair_operation_projection_drift_from_audit(&drift)
+    }))
+    .await
+    {
+        Ok(Ok(true)) => {
+            stderr_message("st3", format_args!("rebuilt an operation projection that drifted"));
+            true
+        }
+        Ok(Ok(false)) => false,
+        Ok(Err(error)) => {
+            stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+            false
+        }
+        Err(error) => {
+            stderr_message("st3", format_args!("operation projection check stopped: {error}"));
+            false
+        }
+    }
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
@@ -7018,6 +7171,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::otel::Unit::Daemon,
         Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
+    if config.logging.stderr_warnings && fractal_daemon::telemetry::stderr_warnings() {
+        stderr_message("st3", format_args!("[logging] stderr_warnings: WARN and ERROR lines go to stderr"));
+    }
     if fractal_daemon::otel::metrics_enabled() {
         fractal_daemon::reconcile::init_metrics();
     }
@@ -7041,12 +7197,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     };
     config.validate()?;
     fractal_daemon::resource::configure_github(&config)?;
-    validate_unix_socket_path(&config.socket, "--socket")?;
-    validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
+    validate_unix_socket_path(&fractal_daemon::config::socket_binding_path(&config.socket), "--socket")?;
+    validate_unix_socket_path(
+        &fractal_daemon::config::socket_binding_path(&config.client_gateway_socket),
+        "--client-gateway-socket",
+    )?;
     let startup = begin_admitted_startup(&config, &state_identity)?;
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
-    let state_socket = config.state_dir.join("run/st3.sock");
+    let state_socket = config.state_dir.join("run/fractal.sock");
     state_identity.verify_store_directory(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
@@ -7163,6 +7322,21 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if !projected {
         stderr_message("st", format_args!("the replicated projection remains deferred; the daemon will use its last good graph"));
     }
+    // The shard admitted its backlog before the graph admitted its own. Membership the graph
+    // admitted since (a leaver's bounds an older build held) decides envelopes the shard held.
+    if let Ok(shard) = &messages_shard {
+        let readmitted = fractal_daemon::task_cpu::blocking("startup.readmit_messages_shard", || {
+            if shard.fleet_moved_since_admission()? {
+                shard.validate_replication_backlog()?;
+                shard.apply_replication_repairs()?;
+                shard.project_replication_backlog()?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        if let Err(error) = readmitted {
+            stderr_message("st", format_args!("the messages shard's held envelopes wait for its next exchange: {error:#}"));
+        }
+    }
     if admission.unknown != 0 {
         stderr_message("st", format_args!("{} claims waiting for a newer build", admission.unknown));
     }
@@ -7179,7 +7353,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
@@ -7279,7 +7453,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -7293,13 +7468,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     fractal_daemon::config::set_daemon_config(args_config.as_deref());
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
-    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
+    // Five seconds finds gaps between short readers without polling on every write.
+    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store), Duration::from_secs(5));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.marks_switch", refresh_marks_switch(store.clone(), state.configured_peers.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
@@ -7310,6 +7487,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
     spawn_response_expiry(store.clone());
+    // After the shard opened, or failed to: a member without one drains to the graph.
+    spawn_message_outbox(store.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -7361,32 +7540,50 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .await;
         }
     }));
-    // The first diagnostic report and delayed repair share one operation audit. Later reports
-    // audit current state independently; no request waits for this startup report.
+    // Doctor reports the envelopes admitted before this node knew better from this count, made
+    // at startup and then every period, and again when doctor finds membership moved since.
+    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
+    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
+    // often doctor runs while fleet rows replicate.
+    {
+        let store = store.clone();
+        tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
+            let mut wait = Duration::from_secs(30);
+            let mut counted: Option<tokio::time::Instant> = None;
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = store.fleet_residue_wanted.notified() => {
+                        if let Some(counted) = counted {
+                            tokio::time::sleep_until(counted + Duration::from_secs(60)).await;
+                        }
+                    }
+                }
+                count_fleet_residue(&store).await;
+                counted = Some(tokio::time::Instant::now());
+                wait = fractal_daemon::store::OPERATION_AUDIT_PERIOD;
+            }
+        }));
+    }
+    // The first diagnostic report and delayed repair share one operation audit. After it the
+    // daemon audits again every period, and after any repair, so doctor reports a recent audit
+    // instead of reading every operation itself. No request waits for an audit.
     if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let drift = match audit.await {
-                Ok(Ok(drift)) => drift,
-                Ok(Err(error)) => {
-                    stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
-                    return;
-                }
-                Err(error) => {
-                    stderr_message("st3", format_args!("operation projection check stopped: {error}"));
-                    return;
-                }
+            let mut audit = match audit.await {
+                Ok(audit) => audit,
+                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
             };
-            match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
-                store.repair_operation_projection_drift_from_audit(&drift)
-            }))
-            .await
-            {
-                Ok(Ok(true)) => stderr_message("st3", format_args!("rebuilt an operation projection that drifted")),
-                Ok(Ok(false)) => {}
-                Ok(Err(error)) => stderr_message("st3", format_args!("operation projection check failed: {error:#}")),
-                Err(error) => stderr_message("st3", format_args!("operation projection check stopped: {error}")),
+            loop {
+                if repair_operation_drift(&store, audit).await {
+                    // Audit once more at once, so doctor reports what the repair left; anything
+                    // still drifted waits for the next period's repair.
+                    let _ = audit_operations(&store).await;
+                }
+                tokio::time::sleep(fractal_daemon::store::OPERATION_AUDIT_PERIOD).await;
+                audit = audit_operations(&store).await;
             }
         }));
     }
@@ -7394,9 +7591,17 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     fractal_daemon::api::start_agent_roster(&state);
+    // Nor does the first agent detail read wait for the launcher's identity to be measured.
+    if let Err(error) = fractal_daemon::reconcile::launch_executable()
+        .and_then(|executable| fractal_drivers::harness_admission::executable_identity_ready(&executable))
+    {
+        eprintln!("st3: measuring the launcher's identity: {error:#}");
+    }
     fractal_daemon::api::seat_freshness::start_seat_freshness_push(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
+    // Native observation lifetimes also end when no successor reconnects after driver loss.
+    let _question_lifecycle = fractal_daemon::api::mailbox::start_question_lifecycle(&state);
     // Nor does an attention window fold every person's attention.
     fractal_daemon::api::start_attention_list(&state);
     // Nor does a missions window fold the missions it shows.
@@ -7480,8 +7685,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
-            stderr_message("st", format_args!("local API listening at {}", config.socket.display()));
-            stderr_message("st", format_args!("paired client gateway listening at {}", config.client_gateway_socket.display()));
+            stderr_message("st", format_args!("local API listening at {}", fractal_daemon::config::socket_binding_path(&config.socket).display()));
+            stderr_message("st", format_args!("paired client gateway listening at {}", fractal_daemon::config::socket_binding_path(&config.client_gateway_socket).display()));
         }
     };
     let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
@@ -8405,6 +8610,7 @@ async fn attach_terminal(
 fn endpoint_label(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Unix(socket) => socket.display().to_string(),
+        Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix discovery").display().to_string(),
         Endpoint::Http(url) => url.clone(),
         Endpoint::Fabric(endpoint) => endpoint.to_string(),
     }
@@ -8501,11 +8707,12 @@ async fn fabric_route(
         .with_context(|| {
             format!("`{owner}` advertises no Fabric node, and no Fabric peer of this machine has its name")
         })?;
+    let protocol = fractal_daemon::terminal_fabric::owner_protocol(&view.members, owner, &peer, &fleet_id);
     Ok((
         fractal_daemon::terminal_fabric::FabricTarget {
             fabric,
             peer,
-            protocol: fractal_daemon::terminal_fabric::protocol(&fleet_id),
+            protocol,
         },
         fractal_daemon::terminal_fabric::RouteRequest::new(runtime_id, subject, incarnation),
     ))
@@ -8823,7 +9030,7 @@ fn trace_scalar(value: &Value) -> String {
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
     let socket = match endpoint {
-        Endpoint::Unix(socket) => socket,
+        Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix endpoint"),
         Endpoint::Fabric(endpoint) => {
             let mut client = GeneratedClient::fabric(endpoint.clone());
             if let Some(credential) = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL") {
@@ -8839,14 +9046,14 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
             "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
         ),
     };
-    if let Some(startup) = fractal_daemon::startup::read(socket)
+    if let Some(startup) = fractal_daemon::startup::read(socket.as_ref())
         && startup.status == "starting"
         // A bound API can already answer before both listeners have published `serving`.
         // Try the connection before interpreting an observation as an outage.
-        && std::os::unix::net::UnixStream::connect(socket).is_err()
+        && std::os::unix::net::UnixStream::connect(socket.as_ref()).is_err()
     {
         if startup.full_replay() {
-            if let Some(outage) = fractal_daemon::client::DaemonUnreachable::during_startup(socket)
+            if let Some(outage) = fractal_daemon::client::DaemonUnreachable::during_startup(socket.as_ref())
                 && outage.full_replay()
             {
                 return Err(outage.into());
@@ -8855,12 +9062,17 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
             stderr_message("st", format_args!("{}", startup.summary()));
         }
     }
-    Ok(person
-        .map_or_else(
-            || GeneratedClient::unix(socket),
-            |person| GeneratedClient::unix_as(socket, person),
-        )
-        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
+    let client = match endpoint {
+        Endpoint::DiscoveredUnix(identity) => person.map_or_else(
+            || GeneratedClient::discovered_unix(identity.clone()),
+            |person| GeneratedClient::discovered_unix_as(identity.clone(), person),
+        ),
+        _ => person.map_or_else(
+            || GeneratedClient::unix(socket.as_ref()),
+            |person| GeneratedClient::unix_as(socket.as_ref(), person),
+        ),
+    };
+    Ok(client.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
 async fn run_now(
@@ -9042,7 +9254,13 @@ async fn run_devices_fabric(
                 );
             }
             fabric
-                .expose_socket(&service, &config.client_gateway_socket)
+                .expose_socket(
+                    &service,
+                    &fractal_client::default_unix_socket(
+                        &config.client_gateway_socket,
+                        &config.client_gateway_socket,
+                    ),
+                )
                 .await
                 .context("Fabric could not expose the client gateway; nothing changed")?;
             GatewayExposure {
@@ -9612,6 +9830,21 @@ fn with_device_presence(
         out.push('\n');
     }
     out
+}
+
+/// Carry execution attribution on the trusted local request, as mutation clients do.
+fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
+    let Some(socket) = endpoint.unix_socket() else {
+        anyhow::bail!("execution attribution requires the trusted local Unix socket");
+    };
+    let client = if actor.starts_with("agent/") {
+        Client::unix_agent(socket.as_ref(), actor)?
+    } else {
+        Client::unix_as(socket.as_ref(), actor)?
+    };
+    Ok(client
+        .with_endpoint(endpoint.clone())
+        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
 /// The actor of a terminal or client-v0 command: an explicit person or agent, else the harness's
@@ -11700,10 +11933,37 @@ fn render_performance(view: &Value) -> String {
             );
         }
     }
+    if let Some(count) = view["wal_escalations"]["count"].as_u64() {
+        let last = &view["wal_escalations"]["last"];
+        let _ = write!(out, "WAL ESCALATIONS  {count} since start");
+        if let Some(age) = last["age_ms"].as_u64() {
+            let held = last["held_ms"].as_u64().map_or_else(|| "did not take the writer".to_owned(), |ms| format!("held the writer {ms} ms"));
+            let restarted = if last["restarted"].as_bool() == Some(true) { "restarted" } else { "did not restart" };
+            let _ = write!(out, " · last {}s ago at {} frames, {held}, {restarted}", age / 1000, last["frames"]);
+        }
+        let _ = writeln!(out);
+    }
+    if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
+        let reserve = &view["lane_bursts"]["reserve"];
+        let seat = reserve["subject"].as_str().unwrap_or("a seat");
+        let reserve = match (reserve["full"].as_u64(), reserve["kept"].as_u64()) {
+            (Some(full), Some(kept)) if full == kept => format!(" · {} kept from starts for a burst (last judged for {seat})", show_gib(full)),
+            (Some(full), Some(kept)) => format!(" · {} kept from starts for a burst ({} while one is held; last judged for {seat})",
+                show_gib(full), show_gib(kept)),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start{reserve}",
+            view["lane_bursts"]["held"], view["lane_bursts"]["waiting"]);
+    }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
     out
+}
+
+/// Bytes as the lane reasons show them: GiB with one decimal.
+fn show_gib(bytes: u64) -> String {
+    format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
 }
 
 async fn doctor_request<T: serde::de::DeserializeOwned>(
@@ -11776,7 +12036,7 @@ async fn run_doctor(
         );
         return Ok(());
     }
-    let readiness = client.socket_path().and_then(fractal_daemon::startup::read);
+    let readiness = client.socket_path().as_deref().and_then(fractal_daemon::startup::read);
 
     if args.performance {
         let mut report: Value =
@@ -12529,12 +12789,13 @@ async fn resolve_member_subject(
     if subject.contains('/') {
         return Ok(literal);
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         return Ok(literal);
     };
     let discovered = completion::LocalTarget::discover(&[]);
     let target = completion::LocalTarget {
-        socket: socket.clone(),
+        socket: socket.into_owned(),
+        discovery: match endpoint { Endpoint::DiscoveredUnix(identity) => Some(identity.clone()), _ => None },
         caller: discovered.as_ref().and_then(|target| target.caller.clone()),
         person: discovered.and_then(|target| target.person),
     };
@@ -15565,6 +15826,15 @@ fn parse_queue_move_actor(actor: &str) -> std::result::Result<String, String> {
     parsed.map_err(|_| "a queue move needs a complete `person/NAME` or `agent/PATH` subject".into())
 }
 
+/// An explicit `agent/PATH` subject, for a command only an agent runs for itself.
+fn parse_agent_actor(actor: &str) -> std::result::Result<String, String> {
+    if actor.strip_prefix("agent/").is_some_and(|name| !name.is_empty() && !name.ends_with('/')) {
+        Ok(actor.to_owned())
+    } else {
+        Err("only an agent acts here: give its explicit `agent/PATH` subject".into())
+    }
+}
+
 fn parse_publication_actor(actor: &str) -> std::result::Result<String, String> {
     let valid = actor
         .strip_prefix("person/")
@@ -15720,6 +15990,17 @@ struct NativeLoopState {
     claude_attachment_terminal: Option<ClaudeAttachmentTerminal>,
     #[serde(default)]
     claude_readiness_fallback: ClaudeReadinessFallback,
+    /// What this driver chose when it launched Claude's channel, carried across re-exec with the
+    /// provider it launched, for the cause an unattached diagnostic names.
+    #[serde(default)]
+    claude_channel_launch: Option<fractal_drivers::claude_session::ChannelLaunch>,
+    /// When the attach clock first started for this incarnation (Unix ms): the driver's settle.
+    #[serde(default)]
+    claude_attach_started_ms: Option<u64>,
+    /// When Claude's first native hook (SessionStart) was seen for this incarnation (Unix ms). The
+    /// attach window counts from it; until then Claude is still starting.
+    #[serde(default)]
+    claude_session_started_ms: Option<u64>,
     /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
     #[serde(default)]
     claude_attachment_admissions: AdmissionBucket,
@@ -16445,6 +16726,29 @@ impl NativeObservations {
                         },
                     ).await?;
                 }
+                "harness-question" => {
+                    let observation: fractal_drivers::omp_questions::Observation =
+                        serde_json::from_value(event.payload["event"].clone())?;
+                    let submitted: Result<Value> = client.post(
+                        "/v1/harness-questions/native",
+                        &json!({
+                            "agent": subject, "runtime_incarnation": event.runtime_incarnation,
+                            "event": observation,
+                        }),
+                    ).await;
+                    if let Err(error) = submitted {
+                        // A disabled receiver or superseded binding must not park unrelated
+                        // native events behind an observation it will never admit. An API outage
+                        // still retains this event for exact replay; refusal invents no closure.
+                        if !matches!(fractal_daemon::client::api_error_code(&error), Some(
+                            "foreign-harness-question" | "unsupported-capability"
+                            | "stale-incarnation" | "stale-mailbox-session" | "not-found"
+                            | "runtime-not-local"
+                        )) {
+                            return Err(error);
+                        }
+                    }
+                }
                 "harness-timeline" => {
                     let operation: fractal_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
@@ -17040,7 +17344,7 @@ fn accept_managed_channel_frame(
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
-            "timeline" | "context" | "turn" | "subagent" => observer.is_some(),
+            "timeline" | "context" | "turn" | "subagent" | "question.open" | "question.closed" => observer.is_some(),
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
             "delivery_ready" | "retry_pending_ask" | "diagnostic" => true,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -17920,9 +18224,15 @@ fn write_driver_log(subject: &str, line: &str) -> Result<()> {
     fractal_daemon::client::write_driver_log(subject, line)
 }
 
+/// Renew each claim this incarnation holds. The caller runs only while its provider does, so
+/// the driver is the proof that `incarnation` is live; the daemon's own check, which judges the
+/// claim's incarnation by its runtime records, guards the renewal itself. Asking the daemon for
+/// the seat's current harness first would let a record another host made of its own old runtime
+/// stop a live seat's renewals (#4743).
 async fn renew_claimed_work(
     client: &Client,
     subject: &str,
+    incarnation: &str,
     minute: u64,
     retry: &mut fractal_daemon::client::DriverRetry,
 ) -> Result<()> {
@@ -17930,27 +18240,10 @@ async fn renew_claimed_work(
         .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     update_renewal_retry_lease(retry, &work, subject, current_unix_ms()?);
-    // Most resident seats hold no work. Only a held claim needs the status reduction
-    // that proves its harness incarnation is still live before renewing the lease.
-    if !work.iter().any(|step| step.work_claim_is_held_by(subject)) {
-        return Ok(());
-    }
-    let status: StatusResponse = client
-        .get(&format!(
-            "/v1/status?subject={}&harness_only=true",
-            urlencoding::encode(subject)
-        ))
-        .await?;
-    let harness = status
-        .subjects
-        .iter()
-        .find(|candidate| candidate.subject == subject)
-        .and_then(|candidate| candidate.harness.as_ref());
     let mut failure = None;
-    for step in work
-        .into_iter()
-        .filter(|step| work_claim_has_active_harness(step, subject, harness))
-    {
+    for step in work.into_iter().filter(|step| {
+        step.work_claim_is_held_by(subject) && step.claim_incarnation.as_deref() == Some(incarnation)
+    }) {
         // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
@@ -18032,15 +18325,6 @@ async fn claim_has_driver(
         .find(|candidate| candidate.subject == subject)
         .and_then(|candidate| candidate.harness.as_ref());
     Some(claim_has_active_harness(Some(incarnation), harness))
-}
-
-fn work_claim_has_active_harness(
-    step: &StepRunView,
-    subject: &str,
-    harness: Option<&CurrentHarnessView>,
-) -> bool {
-    step.work_claim_is_held_by(subject)
-        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
 }
 
 fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
@@ -18556,19 +18840,39 @@ async fn check_claude_attachment(
     } else {
         state.claude_attachment_answered = None;
     }
+    let now_ms = current_unix_ms()? as u64;
+    let started_ms = *state.claude_attach_started_ms.get_or_insert_with(|| {
+        now_ms.saturating_sub(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    });
+    if state.claude_channel_launch.is_none() {
+        state.claude_channel_launch = fractal_drivers::claude_session::channel_launch();
+    }
+    // Claude's first native hook is its SessionStart: the attach window counts from it, since a
+    // loaded host's Claude can take half a minute to start and half a minute more to bring its
+    // channel server up (#4789).
+    if state.claude_readiness_fallback.native_state_seen {
+        state.claude_session_started_ms.get_or_insert(now_ms);
+    }
+    let answered = state.claude_attachment_answered;
+    let session = state.claude_session_started_ms.map(|at| {
+        Instant::now() - Duration::from_millis(now_ms.saturating_sub(at))
+    });
     let phase = match &checked {
         Ok(attachment) if attachment.attached => "attached",
-        Ok(_)
-            if state.claude_attachment_phase == "blocked"
-                || state.claude_attachment_answered.is_some_and(|answered| {
-                    started.max(answered).elapsed() >= claude_attachment_window()
-                }) =>
-        {
-            "blocked"
+        Ok(_) if state.claude_attachment_phase == "blocked" => "blocked",
+        Ok(_) => match session {
+            Some(session) if answered.is_some_and(|answered| session.max(answered).elapsed() >= claude_attachment_window()) => "blocked",
+            Some(_) => "starting",
+            None if answered.is_some() && started.elapsed() >= claude_start_bound() => "stalled",
+            None => "starting",
+        },
+        Err(_) if matches!(state.claude_attachment_phase.as_str(), "attached" | "blocked" | "stalled") => {
+            match state.claude_attachment_phase.as_str() {
+                "attached" => "attached",
+                "blocked" => "blocked",
+                _ => "stalled",
+            }
         }
-        Ok(_) => "starting",
-        Err(_) if state.claude_attachment_phase == "attached" => "attached",
-        Err(_) if state.claude_attachment_phase == "blocked" => "blocked",
         Err(_) => "starting",
     };
     // Its reason would describe the daemon, so a failed check never republishes a settled phase.
@@ -18586,7 +18890,7 @@ async fn check_claude_attachment(
         // Not reconciled: a later tick publishes whatever the phase is by then.
         return Ok(());
     }
-    let reason = claude_attachment_reason(&checked);
+    let reason = claude_attachment_reason(&checked, phase, &claude_attachment_cause(phase, started_ms, state));
     let input =
         claude_attachment_diagnostic(fence, state.claude_attachment_episode, phase, &reason);
     let input_digest = claude_attachment_input_digest(&input)?;
@@ -18629,12 +18933,14 @@ fn finish_claude_attachment_publication(
     published
 }
 
-/// How long a Claude seat may start before an unattached channel is reported as blocked, counted
-/// from the later of the driver's settle and the daemon's first answer to its checks.
+/// How long a started Claude has to bring its channel up before an unattached channel is reported
+/// as blocked, counted from the later of Claude's SessionStart and the daemon's first answer to
+/// the driver's checks. Measured on a loaded host: the channel server came about 23 s after
+/// Claude started (#4789).
 /// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
 /// the boot canaries need not wait out the production window.
 fn claude_attachment_window() -> Duration {
-    const DEFAULT_MS: u64 = 20_000;
+    const DEFAULT_MS: u64 = 60_000;
     let cap = std::env::var("ST3_CLAUDE_ATTACH_WINDOW_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -18680,12 +18986,55 @@ async fn checked_claude_attachment(
     .context("the channel attachment check exceeded two seconds")?
 }
 
-fn claude_attachment_reason(checked: &Result<fractal_daemon::mailbox::Attachment>) -> String {
-    match checked {
+fn claude_attachment_reason(checked: &Result<fractal_daemon::mailbox::Attachment>, phase: &str, cause: &Option<Value>) -> String {
+    let reason = match checked {
         Ok(attachment) if attachment.attached => "claude-channel-attached: the current Claude channel is initialized and subscribed.".into(),
+        Ok(_) if phase == "stalled" => format!("claude-channel-unattached: Claude did not start (no SessionStart) within {} s of the driver's start; mail is held in the graph, and st restarts the harness on a long backoff.", claude_start_bound().as_secs()),
         Ok(_) => "claude-channel-unattached: the current Claude session has no live, initialized channel subscription; mail is held in the graph until attachment. The driver rechecks attachment and st will restart the harness with bounded retries if the channel stays missing.".into(),
         Err(error) => format!("claude-channel-unattached: attachment could not be verified; mail is held while the driver retries: {error:#}"),
+    };
+    // The cause rides at the end of the reason as JSON, inside the closed diagnostic schema (an
+    // older member holds a claim with an unknown field until it upgrades): channel recovery reads
+    // it back (fractal-reconcile channel_recovery.rs, CAUSE_MARKER).
+    match cause {
+        Some(cause) => format!("{reason} {CLAUDE_CAUSE_MARKER}{cause}"),
+        None => reason,
     }
+}
+
+/// Where the cause JSON starts in an unattached diagnostic's reason.
+const CLAUDE_CAUSE_MARKER: &str = "cause=";
+
+/// Why the channel is not up, for a blocked or stalled phase: what this driver chose at launch and
+/// when each step happened. Only values fixed for the episode, so a retried publication carries
+/// the same reason.
+fn claude_attachment_cause(phase: &str, started_ms: u64, state: &NativeLoopState) -> Option<Value> {
+    if !matches!(phase, "blocked" | "stalled") {
+        return None;
+    }
+    let launch = state.claude_channel_launch.clone().unwrap_or_default();
+    Some(json!({
+        "kind": if phase == "stalled" { "claude-not-started" } else { "channel-not-initialized" },
+        "route": if launch.route.is_empty() { "unknown" } else { launch.route.as_str() },
+        "plugin_check_error": launch.plugin_check_error,
+        "project_st_server": launch.project_st_server,
+        "plugin_check_ms": launch.plugin_check_ms,
+        "driver_started_at_ms": started_ms,
+        "launched_at_ms": launch.launched_at_ms,
+        "session_started_at_ms": state.claude_session_started_ms,
+    }))
+}
+
+/// How long a Claude may take to start (its SessionStart) before the seat is reported stalled:
+/// the driver's preparation took up to 33 s on a loaded host, Claude's own start after it more
+/// (#4789). `ST3_CLAUDE_START_BOUND_MS` can only shorten it.
+fn claude_start_bound() -> Duration {
+    const DEFAULT_MS: u64 = 5 * 60_000;
+    let cap = std::env::var("ST3_CLAUDE_START_BOUND_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0);
+    Duration::from_millis(cap.map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS)))
 }
 
 fn report_claude_attachment(
@@ -18703,10 +19052,10 @@ fn report_claude_attachment(
     report["reason"] = json!(match terminal {
         Some(fault) => format!(
             "{}; attachment diagnostic publication is parked: {}. The durable graph fence has not been corrected; recovery requires an authorized replacement binding.",
-            claude_attachment_reason(checked),
+            claude_attachment_reason(checked, "", &None),
             fault.reason
         ),
-        None => claude_attachment_reason(checked),
+        None => claude_attachment_reason(checked, "", &None),
     });
     report["attachment_diagnostic_publication"] = match terminal {
         Some(fault) => {
@@ -18742,7 +19091,7 @@ fn claude_attachment_diagnostic(
         fields: BTreeMap::from([
             (
                 "severity".into(),
-                json!(if phase == "blocked" {
+                json!(if matches!(phase, "blocked" | "stalled") {
                     "error"
                 } else {
                     "warning"
@@ -18819,7 +19168,7 @@ async fn publish_pending_claude_attachment(
             .and_then(Value::as_str)
             .context("the pending Claude attachment diagnostic has no reason")?;
         Ok(
-            matches!(pending.phase.as_str(), "starting" | "blocked" | "attached")
+            matches!(pending.phase.as_str(), "starting" | "blocked" | "stalled" | "attached")
                 && pending.input_digest == claude_attachment_input_digest(&pending.input)?
                 && serde_json::to_value(&pending.input)?
                     == serde_json::to_value(claude_attachment_diagnostic(
@@ -20017,11 +20366,13 @@ mod wal_pin_tracker_tests;
 #[cfg(test)]
 mod wal_checkpoint_reporting_tests;
 
+#[cfg(test)]
+mod wal_escalation_tests;
+
 /// Page copying runs off the writer queue; TRUNCATE joins it before taking SQLite's writer
 /// lock. Recycling has no SQLite busy wait for readers; it can wait its FIFO turn.
-fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
-    // Five seconds finds gaps between short readers without polling on every write.
-    const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+/// A WAL that keeps growing past `WalEscalation::frames` is restarted (`Store::recycle_wal`).
+fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>, interval: Duration) {
     const WAL_CHECKPOINT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
     // Backfill can take tens of seconds even with a zero busy timeout. A detached native
@@ -20038,13 +20389,14 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
             };
             let mut connection = None;
             let mut last_error_log: Option<Instant> = None;
-            let mut retry_interval = WAL_CHECKPOINT_INTERVAL;
             let mut ordinary_outcomes = WalCheckpointLogBucket::default();
             let mut abnormal_outcomes = WalCheckpointLogBucket::default();
             let mut pin = WalPinTracker::default();
+            let mut growth = smallclaims::store::wal_escalation::WalGrowth::default();
+            let mut retry_interval = interval;
             loop {
                 std::thread::sleep(retry_interval);
-                retry_interval = WAL_CHECKPOINT_INTERVAL;
+                retry_interval = interval;
                 let started = Instant::now();
                 let trace_started = std::time::SystemTime::now();
                 // A weak reference does not keep the Store alive between attempts at shutdown.
@@ -20058,14 +20410,23 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                         None => rusqlite::Connection::open(&path)
                             .context("open WAL checkpoint connection")?,
                     };
-                    let result = store.checkpoint_idle_wal_report(&connection);
+                    let result = store.recycle_wal(&connection, &mut growth);
                     Ok::<_, anyhow::Error>((connection, result))
                     })
                 }));
                 let result = match attempt {
                     Ok(Ok((returned, result))) => {
                         connection = Some(returned);
-                        result.context("recycle idle WAL")
+                        result.context("recycle idle WAL").map(|(report, restart)| {
+                            if let Some(restart) = restart {
+                                stderr_message("st3", format_args!("WAL checkpoint escalated to a restart {}", json!({
+                                    "frames": restart.frames, "restarted": restart.recycled,
+                                    "copy_ms": restart.passive_ms, "writer_wait_ms": restart.writer_wait_ms,
+                                    "held_ms": restart.truncate_ms,
+                                })));
+                            }
+                            report
+                        })
                     }
                     Ok(Err(error)) => Err(error),
                     Err(_) => {
@@ -20193,12 +20554,13 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
         let worker = store.clone();
         // Ok(Some(fault)): the job stopped on a fault already persisted, which it must not rewrap.
         let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
-            let initial = worker.signature_migration()?;
+            let state = || fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_state", || worker.signature_migration());
+            let initial = state()?;
             let mut phase = initial.phase.clone();
             if !initial.done() && initial.fault.is_none() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
             loop {
                 let page_started = std::time::Instant::now();
-                let report = worker.advance_signature_migration()?;
+                let report = fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_page", || worker.advance_signature_migration())?;
                 if report.phase != phase {
                     stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
                     phase = report.phase.clone();
@@ -20207,31 +20569,32 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                     return Ok(Some(fault));
                 }
                 if report.phase == "judging" {
-                    worker.advance_signature_judgment()?;
+                    fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_judgment", || worker.advance_signature_judgment())?;
                 }
                 // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
                 // each page gets an equally long quiet interval (at most 50% worker duty).
                 let page_elapsed = page_started.elapsed();
                 std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-                if worker.signature_migration()?.done() {
-                    let complete = worker.signature_migration()?;
+                if state()?.done() {
+                    let complete = state()?;
                     if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                     loop {
                         let retired_started = std::time::Instant::now();
-                        if !worker.retire_legacy_signature_page()? { break; }
+                        if !fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_retire", || worker.retire_legacy_signature_page())? { break; }
                         std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                     }
                     // A resume or a trust-root change can leave a large verdict backlog. Ordinary
                     // passes take only a slice of it; this job drains the rest at the same duty.
                     // Each seal hands its claims here too, so a drain of a few verdicts is
                     // ordinary work: only a backlog worth reporting is logged.
-                    if worker.verdicts_pending()? {
+                    let pending = || fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_verdicts_pending", || worker.verdicts_pending());
+                    if pending()? {
                         let drain_started = std::time::Instant::now();
                         let mut judged = 0;
-                        while worker.verdicts_pending()? {
+                        while pending()? {
                             let loan_started = std::time::Instant::now();
-                            judged += worker.advance_signature_judgment()?;
-                            if let Some(fault) = worker.signature_migration()?.fault { return Ok(Some(fault)); }
+                            judged += fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_judgment", || worker.advance_signature_judgment())?;
+                            if let Some(fault) = state()?.fault { return Ok(Some(fault)); }
                             std::thread::sleep(loan_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                         }
                         if judged >= SIGNATURE_BACKLOG_REPORTED || drain_started.elapsed() >= Duration::from_secs(5) {
@@ -20288,6 +20651,21 @@ async fn import_retired_identities(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Decide, at startup and every minute after, whether this member records its seats' lifecycle
+/// as local marks: once every other member, and every configured peer, reads marks and asks hosts
+/// for them (store/marks_switch.rs). A member that joins without that turns it off again within a
+/// minute.
+async fn refresh_marks_switch(store: Arc<Store>, peers: Vec<String>) {
+    loop {
+        let (worker, peers_now) = (store.clone(), peers.clone());
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.marks_switch", || worker.refresh_marks_switch(&peers_now))).await;
+        if !matches!(result, Ok(Ok(_))) {
+            stderr_message("st3", format_args!("message marks switch check failed: {result:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
 
@@ -20426,7 +20804,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
         loop {
             receiver.borrow_and_update();
             let read_store = store.clone();
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
             {
                 Ok(Ok(true)) => {
                     if receiver.changed().await.is_err() {
@@ -20435,7 +20813,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match page_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("publication.advance_evidence", || {
+                    match page_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("publication.advance_evidence", || {
                         page_store.advance_publication_evidence()
                     }))
                     .await
@@ -20450,6 +20828,87 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 error => {
                     stderr_message("st3", format_args!("publication evidence status failed: {error:?}"));
                     return;
+                }
+            }
+        }
+    }));
+}
+
+/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
+/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
+/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
+/// is in this build, a commit costs no more than that. A message a drain could not write (the
+/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
+/// commit, so it never holds up new mail.
+fn spawn_message_outbox(store: Arc<Store>) {
+    const RETRY: Duration = Duration::from_secs(30);
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = store.observe_commits(move |connection| {
+        if connection.is_autocommit() {
+            changed.send_replace(());
+        }
+    });
+    let waiting = |store: Arc<Store>| async move {
+        tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_waiting", || {
+            fractal_store::store::message_outbox::waiting(&store.readers.get())
+        }))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|waiting| waiting)
+    };
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.outbox", async move {
+        let _observer = observer;
+        let mut retry_at: Option<Instant> = None;
+        loop {
+            receiver.borrow_and_update();
+            match waiting(store.clone()).await {
+                Ok((fresh, any)) if fresh || (any && retry_at.is_none_or(|at| Instant::now() >= at)) => {
+                    // New mail alone drains only new mail: a refused message waits out its pause.
+                    let retry_due = any && retry_at.is_none_or(|at| Instant::now() >= at);
+                    let drain_store = store.clone();
+                    match drain_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_drain", || {
+                        if retry_due {
+                            fractal_store::store::message_outbox::drain(&drain_store)
+                        } else {
+                            fractal_store::store::message_outbox::drain_fresh(&drain_store)
+                        }
+                    }))
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => stderr_message("st3", format_args!("message outbox drain failed: {error:#}")),
+                        Err(error) => stderr_message("st3", format_args!("message outbox drain stopped: {error}")),
+                    }
+                    // A new message queued meanwhile has its own commit; what stays waits a while,
+                    // counted from its last try, so new mail does not put its retry off.
+                    retry_at = match waiting(store.clone()).await {
+                        Ok((_, false)) => None,
+                        _ if retry_due || retry_at.is_none() => Some(Instant::now() + RETRY),
+                        _ => retry_at,
+                    };
+                }
+                // Waiting for a retry, or emptied by another drain (a backup's).
+                Ok((_, any)) => {
+                    if !any {
+                        retry_at = None;
+                    }
+                }
+                Err(error) => {
+                    stderr_message("st3", format_args!("message outbox check failed: {error:#}"));
+                    retry_at = Some(Instant::now() + RETRY);
+                }
+            }
+            match retry_at {
+                Some(at) => tokio::select! {
+                    changed = receiver.changed() => if changed.is_err() {
+                        return;
+                    },
+                    () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+                },
+                None => {
+                    if receiver.changed().await.is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -20502,7 +20961,7 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     stderr_message("st3", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
@@ -20537,7 +20996,7 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_clock", || {
+        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry_clock", || {
             clock_store.idempotency_clock_limit()
         }))
         .await
@@ -20685,6 +21144,36 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         {
             stderr_message("st3", format_args!("usage response trim failed: {error:#}"));
         }
+        // Message marks a further-along record supersedes, and those of messages gone (message_marks.rs).
+        let marks_store = store.clone();
+        let marks = match marks_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("message_marks.trim", || {
+            fractal_daemon::store::message_marks::trim(&marks_store, now_ms(), LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("message mark trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("message mark trim stopped: {error}"));
+                0
+            }
+        };
+        // A seat's host's relayed closes this member's own records now cover (relayed_closes.rs).
+        let relayed_store = store.clone();
+        let relayed = match relayed_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("relayed_closes.trim", || {
+            fractal_daemon::store::relayed_closes::trim(&relayed_store, LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("relayed close trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("relayed close trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -20718,7 +21207,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows, {marks} message marks and {relayed} relayed closes, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),

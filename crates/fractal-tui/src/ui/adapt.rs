@@ -36,8 +36,8 @@ pub struct Extras {
     /// model holds is a cache from an earlier run, and nothing built on it is shown as current.
     pub attention_live: bool,
     pub agents_live: bool,
-    /// st's own counts, when it serves them.
-    pub summary: Option<fractal_client::Summary>,
+    /// Counts and their source cut, scoped to the current connection.
+    pub summary: Option<(fractal_client::Summary, fractal_client::Snapshot)>,
     pub inventory_supported: Option<bool>,
     pub inventory_partial: Vec<String>,
     /// Objectives and budgets read on demand while the Usage view shows, and the history of
@@ -48,6 +48,15 @@ pub struct Extras {
     pub slo_stale: Option<String>,
     /// Where the exported observation history is read, from the same `slo.list` read.
     pub slo_otel_url: Option<String>,
+}
+
+impl Extras {
+    pub fn reset_connection(&mut self) {
+        self.summary = None;
+        self.live = false;
+        self.attention_live = false;
+        self.agents_live = false;
+    }
 }
 
 fn age(then: &str, now: &str) -> String {
@@ -248,7 +257,12 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         behind,
         missions_followed: extras.missions_followed,
         settled: extras.attention_live && extras.agents_live,
-        active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
+        active_missions: extras.summary.as_ref().map(|(summary, _)| summary.active_missions as usize),
+        inbox_alerts: extras.summary.as_ref()
+            .filter(|(_, summary)| model.now.truncated && model.now.snapshot.as_ref().is_some_and(|attention| {
+                summary.host_id == attention.host_id && summary.store_index >= attention.store_index
+            }))
+            .and_then(|(summary, _)| summary.alerts.map(|alerts| alerts as usize)),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
@@ -1040,6 +1054,39 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_badge_inbox_uses_summary_only_for_truncated_attention() {
+        let mut model = Model::default();
+        model.now = window(Vec::new());
+        let snapshot = model.now.snapshot.clone().unwrap();
+        let mut extras = Extras {
+            summary: Some((serde_json::from_value(serde_json::json!({
+                "id": "summary", "kind": "summary", "revision": "one",
+                "updated_at": "2026-11-02T00:00:00Z",
+                "needs_you": 251, "alerts": 251, "working_agents": 0,
+                "active_missions": 0,
+                "machines": {"connected": 0, "indirect": 0, "offline": 0}
+            })).unwrap(), snapshot)),
+            ..Extras::default()
+        };
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        model.now.truncated = true;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, Some(251));
+        model.now.snapshot.as_mut().unwrap().store_index = 2;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        extras.summary.as_mut().unwrap().1.store_index = 2;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, Some(251));
+        extras.summary.as_mut().unwrap().1.host_id = "host/other".into();
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        extras.summary.as_mut().unwrap().1.host_id = model.now.snapshot.as_ref().unwrap().host_id.clone();
+        extras.summary.as_mut().unwrap().0.alerts = None;
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+        extras.summary.as_mut().unwrap().0.alerts = Some(0);
+        extras.reset_connection();
+        assert!(extras.summary.is_none());
+        assert_eq!(world(&model, "person/example", &extras).inbox_alerts, None);
+    }
 
     #[test]
     fn identity_labels_show_fallback_ids_only_once() {

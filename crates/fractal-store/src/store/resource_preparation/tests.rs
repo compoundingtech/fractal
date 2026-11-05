@@ -93,7 +93,7 @@ fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, boo
 
 #[test]
 fn a_shared_cache_frontier_blocks_an_unrelated_sequence_publication_but_wal_does_not() {
-    let memory = Store::open_memory("sequence-lock").unwrap();
+    let memory = Store::open_shared_memory("sequence-lock").unwrap();
     let directory = tempfile::tempdir().unwrap();
     let file = Store::open(&directory.path().join("claims.sqlite3"), "sequence-lock").unwrap();
     for store in [&memory, &file] {
@@ -121,7 +121,7 @@ fn a_shared_cache_frontier_blocks_an_unrelated_sequence_publication_but_wal_does
 
 #[test]
 fn preparation_never_pins_shared_cache_before_an_unrelated_publication() {
-    let memory = Store::open_memory("preparation-lock").unwrap();
+    let memory = Store::open_shared_memory("preparation-lock").unwrap();
     let directory = tempfile::tempdir().unwrap();
     let file = Store::open(&directory.path().join("claims.sqlite3"), "preparation-lock").unwrap();
     for store in [&memory, &file] {

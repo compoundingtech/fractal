@@ -15,6 +15,8 @@ pub fn add_evidence(
     evidence: &mut Vec<String>,
     proof: &DelegationProof,
 ) -> Result<(), St3Error> {
+    // The instruction is a person's message, which the messages shard refuses: it is always a
+    // graph claim. Only a delegated step's target may be a stream item (`message_sent_in`).
     let instruction = message_sent(connection, &proof.message)?;
     for reference in [&instruction.id, &proof.policy] {
         if !evidence.contains(reference) {

@@ -30,6 +30,7 @@ sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 fractal-runtime = { path = "../fractal-runtime" }
 fractal-drivers = { path = "../fractal-drivers" }
+fractal-schema = { path = "../fractal-schema" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.27"

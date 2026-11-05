@@ -393,7 +393,8 @@ pub fn domains(db: &Connection, subject: &str, recipient: &str) -> Qualified<(bo
         message_desired_recipient_match!(),
         "),
           EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
-          WHERE subject=?3 AND kind='message.closed')",
+          WHERE subject=?3 AND kind='message.closed')
+          OR EXISTS(SELECT 1 FROM local_message_marks WHERE message=?3 AND kind='message.closed')",
     );
     let normalized = normalize_message_party(recipient);
     let bare = message_bare_recipient(&normalized);

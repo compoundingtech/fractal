@@ -2433,15 +2433,6 @@ fn add_profile_module(
     Ok(normalized)
 }
 
-pub(crate) fn read_provider_component(root: &Path, relative: &Path) -> Result<Vec<u8>> {
-    let mut files = BTreeMap::new();
-    let normalized = add_profile_module(root, relative, &mut files)?;
-    files
-        .remove(&normalized)
-        .map(|file| file.bytes)
-        .context("admitted provider component disappeared")
-}
-
 fn add_regular(
     root: &Path,
     path: &Path,

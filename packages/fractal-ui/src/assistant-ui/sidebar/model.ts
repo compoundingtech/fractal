@@ -61,6 +61,8 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly statusSince?: number
   readonly lastActivityAt?: number
   readonly needsMe?: boolean
+  /** Only a reported harness question, not general open attention. */
+  readonly asking?: boolean
   readonly freshness: 'live' | 'stale' | 'unobserved'
   readonly unread?: number
   readonly usage: SidebarUsage
@@ -86,6 +88,8 @@ export interface SidebarActions {
   readonly split?: (ref: string, placement: 'right' | 'below') => void
   /** Host-owned canonical declaration view for an agent or mission ref; the row offers it only when set. */
   readonly declaration?: (ref: string) => void
+  /** Present only when the host can edit Pins; rows offer Pin/Unpin for the stable agent ref and its attached mission, never subagents. */
+  readonly pins?: { readonly has: (ref: string) => boolean; readonly toggle: (ref: string) => void }
 }
 
 export interface SidebarSubagent { readonly id: string; readonly subagent_type?: string; readonly work_id?: string; readonly session_id?: string; readonly started_at?: string; readonly lease_expires_at: string }
@@ -94,6 +98,7 @@ export const statuses = {
   waiting: { label: 'Needs you', tone: 'amber' },
   idle: { label: 'Idle', tone: 'gray' },
   pending: { label: 'Pending', tone: 'gray' },
+  failed: { label: 'Failed', tone: 'red' },
   stale: { label: 'Stale observation', tone: 'gray' },
   offline: { label: 'Offline', tone: 'gray' },
   ended: { label: 'Ended', tone: 'gray' },

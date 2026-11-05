@@ -62,8 +62,8 @@ characters; a document trail has at most 32 entries. `error_code` is 1–128 ASC
 digits, `_`, `.` or `-`.
 
 Inspection reads phone-local route, connection, foreground and held-window state. Navigation
-changes phone-local UI only. Message-read addresses an existing message by its message ID and uses
-the existing mark-read handler, scope checks and action fence/idempotency. Issuance does not grant
+changes phone-local UI only. Message-read addresses a message by its ID and must use
+the phone's existing mark-read handler, scope checks and action fence/idempotency. Issuance does not grant
 the phone extra authority: a limited phone can refuse a write even when its issuer may request it.
 Result content is command-specific JSON, not a new resource or stream frame.
 

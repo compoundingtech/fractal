@@ -109,3 +109,10 @@ export function useScenarioSlice<TKind extends SliceKind, TResult>(kind: TKind, 
   }) as WireSlice<TKind>, [slice, atMs, kind, world.now, world.slices.sync])
   return React.useMemo(() => project === undefined ? wire : project(wire), [wire, project])
 }
+
+/** Epoch ms on the scenario clock: the display clock for relative times over served instants. */
+export const useScenarioNow = (): number => {
+  const context = React.useContext(ScenarioContext)
+  if (context === undefined) throw new Error('useScenarioNow requires ScenarioProvider')
+  return context.world.now + context.atMs
+}

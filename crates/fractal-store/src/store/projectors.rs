@@ -57,6 +57,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::open },
     Hook { name: "arrangements", run: arrangements::open },
     Hook { name: "limits", run: limits::open_limits },
+    Hook { name: "run-eta", run: run_eta::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
@@ -151,6 +152,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
     Hook { name: "arrangements", run: arrangements::flush },
+    Hook { name: "run-eta", run: run_eta::flush },
     Hook { name: "ordered-membership", run: ordered_membership::flush },
 ];
 
@@ -166,6 +168,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
+    Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
@@ -179,12 +182,15 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/directive-notes", run: directive_notes::rebuild },
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
+    ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
 
+/// Run each hook in order. Inside a staged writer lend each is its own stage, named after it, so
+/// a long hold says which domain's catch-up it spent its time in.
 pub fn run_hooks(hooks: &[Hook], transaction: &Transaction<'_>) -> Result<()> {
-    hooks.iter().try_for_each(|hook| (hook.run)(transaction))
+    hooks.iter().try_for_each(|hook| holds::stage(hook.name, || (hook.run)(transaction)))
 }
 
 /// Run each projector that takes `claim`'s kind, in the registry's order.

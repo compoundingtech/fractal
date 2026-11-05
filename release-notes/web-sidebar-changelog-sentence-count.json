@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the sidebar changelog within the complete-sentence contract",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Spell out the question-mark key so punctuation does not create an extra changelog sentence."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

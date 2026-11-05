@@ -38,6 +38,7 @@
 "custom.client.action-result" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
+"member.admission-override" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }
 "agent.renamed" = { class = "durable" }
@@ -69,6 +70,7 @@
 "fleet.member-endpoints" = { class = "current", pending = "the membership fold reads every endpoint claim" }
 "fleet.member-left" = { class = "durable" }
 "fleet.member-removed" = { class = "durable" }
+"fleet.shard-bounds" = { class = "durable" }
 "gate.head-bound" = { class = "durable" }
 "gate.remediation-attached" = { class = "durable" }
 "gate.requested" = { class = "durable" }
@@ -173,6 +175,7 @@
 "runtime.observed" = { class = "current", pending = "only the seat status history rule retains its sources" }
 "runtime.readiness-deadline-reached" = { class = "transition", window = "7d", log = "local" }
 "runtime.reconcile-decision" = { class = "current" }
+"runtime.refresh" = { class = "current", pending = "retain authoritative episode state until a seat/incumbent checkpoint rule preserves unresolved episodes" }
 "runtime.restart-window-reset" = { class = "transition", window = "7d", pending = "restart windows read every reset" }
 "schedule.occurrence-cancelled" = { class = "durable" }
 "schedule.occurrence-reached" = { class = "durable" }
@@ -218,6 +221,7 @@
 "work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
 "work.released" = { class = "durable" }
+"work.handoff-returned" = { class = "durable" }
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }
 "work.submitted" = { class = "durable" }
 "workspace.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }

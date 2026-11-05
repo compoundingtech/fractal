@@ -12,5 +12,5 @@ mod route;
 pub use local::{LocalTerminal, connect_pty_session, open_local_terminal};
 pub use route::{
     FabricTarget, ROUTE_LINE_LIMIT, ROUTE_TIMEOUT, RouteAnswer, RouteError, RouteRequest,
-    open_route, owner_peer, protocol,
+    open_route, owner_peer, owner_protocol, protocol,
 };

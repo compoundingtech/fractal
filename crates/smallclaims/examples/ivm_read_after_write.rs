@@ -1,4 +1,4 @@
-//! Run with normal Cargo configuration: cargo run -p smallclaims --example ivm_read_after_write
+//! Run with cargo run -p smallclaims --features test-support --example ivm_read_after_write
 //! Claims-only example, not a production admission/authority adapter.
 use anyhow::{Result, bail};
 use serde_json::json;

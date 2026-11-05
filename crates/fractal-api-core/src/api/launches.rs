@@ -1220,7 +1220,7 @@ fn record_planning_event(
         .map_err(ApiError::bad)?;
     state
         .store
-        .rebuild_planning_projection()
+        .rebuild_planning_projection(&session.id)
         .map_err(ApiError::internal)?;
     Ok(())
 }

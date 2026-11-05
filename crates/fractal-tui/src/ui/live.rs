@@ -732,7 +732,7 @@ pub fn run(context: Context) -> Result<()> {
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     // Another member's objectives are not this one's: drop them until it answers.
                     extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
-                    extras.live = false;
+                    extras.reset_connection();
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
@@ -813,7 +813,7 @@ pub fn run(context: Context) -> Result<()> {
                     }
                     if window == Window::Summary {
                         extras.summary = items.iter().find_map(|item| match item {
-                            Resource::Summary(summary) => Some(summary.clone()),
+                            Resource::Summary(summary) => Some((summary.clone(), snapshot.clone())),
                             _ => None,
                         });
                         changed = true;

@@ -13,7 +13,7 @@ import { screenAt } from '../kit/screen.ts'
 import type { Slice } from '../kit/slice.ts'
 import { parseTimestamp } from '../kit/time.ts'
 import { liveSync } from '../kit/variants.ts'
-import type { Slices, WorldDefinition } from '../kit/world.ts'
+import type { AuthoredSlices, WorldDefinition } from '../kit/world.ts'
 import { adoptNarrativeRecording } from './narrativeAdoption.ts'
 
 const SEED = 22
@@ -65,7 +65,7 @@ export const syntheticLongDebugRabbitHole: WorldDefinition = {
   slices: (ctx) => build(ctx),
 }
 
-const build = (ctx: FactoryContext): Slices => {
+const build = (ctx: FactoryContext): AuthoredSlices => {
   const builder = ctx.cast.agents[0]!
   const person = ctx.cast.people[0]!
   const mission = ctx.cast.missions[0]!

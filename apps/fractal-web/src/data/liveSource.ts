@@ -1,4 +1,5 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
+import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
@@ -14,8 +15,8 @@ import {
   type FractalOptions,
   type SyncStatus,
   syncStatusFromFailure,
-  openPtySession,
-} from '@fractal/sdk/effect'
+} from '@fractal/sdk/read'
+import { loadMutations, loadPty } from './lazySdk.ts'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -70,6 +71,7 @@ import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './s
 import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
 import { gatewayNativeDetails } from './nativeDetailsSource.ts'
+import { gatewayObjectives } from './objectivesSource.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -174,6 +176,7 @@ export const liveSource = ({
     baseUrl,
     // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
+    ...(options.socket === undefined ? {} : { socket: options.socket }),
   })
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
@@ -193,6 +196,8 @@ export const liveSource = ({
     registry,
   })
   const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const followInterests = new Map<string, () => boolean>()
+  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -256,7 +261,10 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
-      Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections })),
+      Layer.provide(BrowserFractalPlatform({
+        adoptEarlyCollections,
+        hasInterest: (key) => followInterests.get(key)?.(),
+      })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -354,6 +362,9 @@ export const liveSource = ({
     const syncData = Atom.keepAlive(Atom.make<FeedSync<A>>(syncLatest))
     let unmount: (() => void) | undefined
     const data = Atom.make<Feed<A>>(latest)
+    // Registry disposal is deferred. Admission must use current demand, not wait
+    // for the outgoing interest's finalizer before freeing its warm socket slot.
+    const hasInterest = () => visible && !registry.ensureNode(interest).canBeRemoved
     const following = Atom.make((get): Feed<A> => {
       let active = true
       if (readRejection !== undefined)
@@ -403,12 +414,17 @@ export const liveSource = ({
       const resolving = resolve(get)
       const previous = previousFiber
       spec = undefined
+      let boundKey: string | undefined
       let freshnessFiber: Fiber.Fiber<void, unknown> | undefined
       let initialReadFiber: Fiber.Fiber<void> | undefined
       let initialReadDeadlineFiber: Fiber.Fiber<void> | undefined
       let initialReadConnectionFiber: Fiber.Fiber<void> | undefined
       const fiber = runtime.runFork(
         Effect.gen(function* () {
+          // Finish atom acquisition before transport callbacks can reenter the registry.
+          // In particular, eviction must not unsubscribe while the new interest's mount
+          // is still installing its ownership and has not returned its release handle.
+          yield* Effect.yieldNow
           // Release the old socket slot before binding the replacement owner.
           if (previous !== undefined) yield* Fiber.interrupt(previous)
           if (readRejection !== undefined) {
@@ -427,6 +443,8 @@ export const liveSource = ({
           const boundSpec = yield* resolving
           spec = boundSpec
           const key = followKey(boundSpec)
+          boundKey = key
+          followInterests.set(key, hasInterest)
           const startInitialRead = () => {
             if (initialRead === undefined || initialReadFiber !== undefined || !active
               || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
@@ -567,13 +585,15 @@ export const liveSource = ({
                     initialReadFiber?.interruptUnsafe()
                     initialReadDeadlineFiber?.interruptUnsafe()
                     initialReadConnectionFiber?.interruptUnsafe()
+                    if (boundKey !== undefined && followInterests.get(boundKey) === hasInterest)
+                      followInterests.delete(boundKey)
                     if (!active) return
                     ended = true
                     // Interest can return between SDK eviction and this finalizer. Its
                     // acquisition saw ended=false, so completion must hand demand back
                     // to a new run too. Wait until this fiber finishes before refreshing.
-                    if (visible && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
-                      if (!active || !visible || !ended || terminalFailure || readRejection !== undefined) return
+                    if (hasInterest() && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
+                      if (!active || !hasInterest() || !ended || terminalFailure || readRejection !== undefined) return
                       ingest.flush()
                       registry.refresh(following)
                     })
@@ -750,6 +770,12 @@ export const liveSource = ({
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
+        const loaded = yield* loadMutations.pipe(Effect.result)
+        if (loaded._tag === 'Failure') return {
+          _tag: 'Refused' as const, reason: 'snapshot-unavailable' as const,
+          detail: loaded.failure.message,
+        }
+        const { makeMutations } = loaded.success
         const fractal = yield* Fractal
         const statuses = yield* SubscriptionRef.get(fractal.syncStatuses)
         let freshest: typeof Snapshot.Type | undefined
@@ -763,7 +789,7 @@ export const liveSource = ({
             freshest = decoded.value
         }
         if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
-        return yield* fractal.snapshot.pipe(
+        return yield* makeMutations({ ...options, fetch }).snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
             _tag: 'Refused', reason: 'snapshot-unavailable',
@@ -1127,8 +1153,10 @@ export const liveSource = ({
     },
     source: {
       mode: 'live',
+      pins: sidebarPins(client),
       subjectReads,
       nativeDetails,
+      objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,
@@ -1174,7 +1202,9 @@ export const liveSource = ({
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
-        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
+        open: (options) => loadPty.pipe(
+          Effect.flatMap(({ openPtySession }) => openPtySession({ ...options, baseUrl, fetch })),
+        ),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({

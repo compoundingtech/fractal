@@ -587,6 +587,16 @@
       "verification": "real CLI over a private Unix socket; plain and JSON output, and a refused unknown agent"
     },
     {
+      "command": "st agents burst",
+      "description": "Raise one agent's lane for a command's run and hold it while standard input stays open",
+      "tests": [
+        "crates/fractal/tests/client_v0_cli.rs::agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the_agent_asks",
+        "crates/fractal-reconcile/src/reconcile/tests/lane_burst_tests.rs::a_burst_that_fits_raises_the_seats_lane_and_comes_down_once_given_back",
+        "crates/fractal-reconcile/src/reconcile/tests/lane_burst_tests.rs::bursts_wait_in_the_order_they_asked_and_one_that_can_never_fit_is_refused"
+      ],
+      "verification": "real CLI over a private Unix socket: none without lanes, none from a daemon without the route, another agent refused; the planner grants in order, refuses what can never fit, and lowers the lane when given back"
+    },
+    {
       "command": "st agents ls",
       "description": "List operational agents; use --all for stopped and historical agents",
       "tests": [
@@ -1190,6 +1200,14 @@
         "crates/fractal/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
       ],
       "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
+    },
+    {
+      "command": "st fleet admit-without",
+      "description": "Let this member start, restart and retire its agents without peers it cannot reach, for its current daemon start only",
+      "tests": [
+        "crates/fractal/tests/placement_handoff.rs::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override"
+      ],
+      "verification": "real CLI over private Unix socket; an unknown peer is refused, an agent actor's override names this member's start and releases its seats"
     },
     {
       "command": "st fleet anchor show",

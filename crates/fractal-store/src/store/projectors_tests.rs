@@ -30,6 +30,7 @@ fn open_installs_each_domain_in_order() {
             "agent-messages",
             "arrangements",
             "limits",
+            "run-eta",
         ]
     );
 }
@@ -89,7 +90,7 @@ fn replicated_claims_project_arrangements_and_ordered_memberships_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements", "ordered-membership"]
+        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements", "run-eta", "ordered-membership"]
     );
 }
 
@@ -97,7 +98,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "run-eta", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -110,6 +111,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/directive-notes",
             "full-replay/custom",
             "full-replay/arrangements",
+            "full-replay/run-eta",
             "full-replay/ordered-membership",
             "full-replay/flush",
         ]
@@ -134,4 +136,26 @@ fn ordered_membership_is_registered_last_in_every_phase_that_projects_it() {
         &phases[phases.len() - 2..],
         ["full-replay/ordered-membership", "full-replay/flush"]
     );
+}
+
+/// A replicated projection pass charges each flush hook, and the lease-renewal reapply after them,
+/// to its own stage of the writer lend, so a long hold names the domain that caught up in it. The
+/// staged lends are kept process-wide; CI runs each test in its own process (nextest).
+#[test]
+fn a_projection_pass_stages_each_flush_hook_by_name() {
+    use crate::store::glasses_tests_shared_delivery::{input, sync};
+    let source = crate::store::Store::open_memory("example-source").unwrap();
+    let target = crate::store::Store::open_memory("example-target").unwrap();
+    source.append_claim(&input(1, "example")).unwrap();
+    sync(&source, &target);
+    let staged = smallclaims::windows::holds::recent_staged();
+    let stages = staged
+        .iter()
+        .rev()
+        .map(|(stages, _)| stages.iter().map(|(stage, _)| *stage).collect::<Vec<_>>())
+        .find(|stages| stages.contains(&"incremental"))
+        .unwrap_or_else(|| panic!("no staged projection lend: {staged:?}"));
+    for stage in names(projectors::FLUSH).into_iter().chain(["lease-renewals", "commit"]) {
+        assert!(stages.contains(&stage), "{stage} in {stages:?}");
+    }
 }

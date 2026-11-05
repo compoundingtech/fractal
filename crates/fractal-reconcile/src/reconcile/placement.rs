@@ -12,6 +12,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
+        // Retiring a seat as placed elsewhere waits until this member has caught up since it
+        // started: an old declaration can name another host too.
+        if !self.member_admitted_for(&subject.subject)? {
+            return Ok(());
+        }
         if subject.kind == "stop"
             && self
                 .store
