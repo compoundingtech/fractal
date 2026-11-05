@@ -13,7 +13,6 @@ fn unresolved(subject: &str) -> St3Error {
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
 /// LOCAL step only: not carried source steps, a run, child tree, or parent boundary.
 /// Slice 5b must add those boundaries before any production caller uses this helper.
-/// Slice 5c must verify real person-work delegation before any production caller.
 /// Owner naming failures surface as `lifecycle-unavailable` until slice 5b.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
