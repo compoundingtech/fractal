@@ -14,7 +14,7 @@ pub const WIRE_DEFINITIONS: &[&str] = &[
     "Agent", "Arrangement", "Runtime", "Machine", "Session", "Device", "Launch",
     "LaunchVariant", "Mission", "Work", "Attention",
     "Message", "Resource", "TimelineEntry", "TerminalScreen", "Capabilities",
-    "ErrorEnvelope", "SyncPeer",
+    "ErrorEnvelope", "SyncPeer", "SloList", "SloHistory", "UsagePeriod",
 ];
 const MIN_MS: i64 = -62_135_596_800_000;
 const MAX_MS: i64 = 253_402_300_799_999;
@@ -102,6 +102,9 @@ pub enum WireValue {
     Capabilities(crate::Capabilities),
     ErrorEnvelope(crate::ErrorEnvelope),
     SyncPeer(crate::SyncPeer),
+    SloList(crate::SloList),
+    SloHistory(crate::SloHistory),
+    UsagePeriod(crate::UsagePeriod),
 }
 
 pub fn load_index(path: impl AsRef<Path>) -> Result<Index> {
@@ -119,7 +122,7 @@ pub fn load_slice(path: impl AsRef<Path>) -> Result<Slice> {
 pub fn parse_slice(json: &str) -> Result<Slice> {
     let slice: Slice = serde_json::from_str(json).context("decode scenario slice")?;
     ensure!(slice.format == "st3.scenario.slice.v1", "unsupported scenario slice format: {}", slice.format);
-    ensure!(["roster", "conversation", "sync", "terminal", "details", "attention"].contains(&slice.slice.as_str()), "unknown slice: {}", slice.slice);
+    ensure!(["roster", "conversation", "sync", "terminal", "details", "attention", "objectives"].contains(&slice.slice.as_str()), "unknown slice: {}", slice.slice);
     Ok(slice)
 }
 
@@ -180,6 +183,9 @@ impl Slice {
                 "Capabilities" => WireValue::Capabilities(crate::Capabilities::deserialize(value)?),
                 "ErrorEnvelope" => WireValue::ErrorEnvelope(crate::ErrorEnvelope::deserialize(value)?),
                 "SyncPeer" => WireValue::SyncPeer(crate::SyncPeer::deserialize(value)?),
+                "SloList" => WireValue::SloList(crate::SloList::deserialize(value)?),
+                "SloHistory" => WireValue::SloHistory(crate::SloHistory::deserialize(value)?),
+                "UsagePeriod" => WireValue::UsagePeriod(crate::UsagePeriod::deserialize(value)?),
                 _ => WireValue::Resource(Box::new(crate::Resource::deserialize(value)?)),
             };
             out.push(DecodedValue { pointer, value: decoded });
@@ -204,6 +210,12 @@ impl Slice {
             }
             "sync" => {
                 if let Some(value) = state.get("capabilities") { add("/state/capabilities".into(), "Capabilities", value)?; }
+                &[]
+            }
+            "objectives" => {
+                add("/state/list".into(), "SloList", state.get("list").context("missing state field: list")?)?;
+                add_list(&mut add, "/state/histories", array(state, "histories")?, "SloHistory")?;
+                add("/state/usage".into(), "UsagePeriod", state.get("usage").context("missing state field: usage")?)?;
                 &[]
             }
             other => bail!("unknown slice: {other}"),

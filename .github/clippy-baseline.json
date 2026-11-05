@@ -10,7 +10,7 @@
       "clippy::collapsible_if": 5,
       "clippy::items_after_test_module": 2,
       "clippy::needless_borrow": 2,
-      "clippy::too_many_arguments": 9,
+      "clippy::too_many_arguments": 8,
       "clippy::useless_format": 1
     },
     "fractal": {
@@ -31,9 +31,6 @@
     "fractal-client": {
       "clippy::large_enum_variant": 1,
       "clippy::manual_is_multiple_of": 1
-    },
-    "fractal-client-codegen": {
-      "clippy::useless_format": 2
     },
     "fractal-feed": {
       "clippy::filter_map_bool_then": 1,

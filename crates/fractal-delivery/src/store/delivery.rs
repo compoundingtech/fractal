@@ -776,11 +776,19 @@ impl DeliveryStore for Store {
             recipient: Option<&str>,
             include_history: bool,
         ) -> Result<Vec<MessageView>> {
-        let messages = self.messages(recipient, include_history)?;
+        let mut messages = self.messages(recipient, include_history)?;
         Ok(if include_history {
             messages
         } else {
-            selected_actionable_messages(&self.readers.get(), messages)?
+            // A message a seat's host closed is not a reminder's winner, as one closed here is not.
+            let connection = self.readers.get();
+            let mut kept = Vec::with_capacity(messages.len());
+            for message in messages.drain(..) {
+                if !fractal_store::store::relayed_closes::closed(&connection, &message.subject)? {
+                    kept.push(message);
+                }
+            }
+            selected_actionable_messages(&connection, kept)?
         })
     }
 

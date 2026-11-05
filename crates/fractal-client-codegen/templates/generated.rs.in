@@ -1130,6 +1130,16 @@ pub struct PublicationDefinition {
     pub token: String,
 }
 
+/// Canonical redacted KDL from one immutable published mission revision.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionDeclaration {
+    pub mission: String,
+    pub revision: String,
+    pub published_at: u64,
+    pub text: String,
+    pub legacy: bool,
+}
+
 /// Applied desired state, not the original declaration file or a proposed mission revision.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SubjectDefinition {
@@ -1695,6 +1705,8 @@ pub struct Work {
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]
+    pub execution_waited_ms: u64,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
     pub blocked_reason: Option<String>,
     #[serde(default)]
@@ -1777,6 +1789,9 @@ pub struct Agent {
     pub fault: Option<String>,
     #[serde(default)]
     pub incarnation_id: Option<String>,
+    /// Live owner-local launch identity; not part of the cached roster snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_contract: Option<Value>,
     #[serde(default)]
     pub current_session_id: Option<String>,
     #[serde(default)]
