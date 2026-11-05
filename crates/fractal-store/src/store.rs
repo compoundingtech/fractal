@@ -88,6 +88,7 @@ pub mod client_messages;
 #[cfg(any(test, feature = "test-support"))]
 pub mod client_messages_version_benchmark;
 pub mod rollouts;
+pub mod refresh_intake;
 pub mod publication;
 pub mod publication_facts;
 pub mod seat_status;
