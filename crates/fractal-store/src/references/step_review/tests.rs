@@ -133,7 +133,7 @@ fn agent_review_step_local_history_survives_new_claim() {
                 json!({"fields": {"attempt": 1, "claimant": "agent/example/new"}}),
             ),
         ] {
-            event(&store, &step, kind, Some("agent/example/old"), &body);
+            event(&store, &step, kind, Some(PERSON), &body);
         }
         for worker in ["agent/example/old", "agent/example/new"] {
             assert_eq!(check(&store, &step, PERSON, worker), CONFLICT);
