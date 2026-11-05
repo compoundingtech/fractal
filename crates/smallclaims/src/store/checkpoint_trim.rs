@@ -71,6 +71,11 @@ pub type TrimLogHook = Box<dyn FnMut(&str) + Send>;
 /// while it goes on, unless a test sets another interval. Both are reset once when the run stops.
 pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How many deleted envelopes a trim's run holds for the replication snapshot before it patches
+/// it without waiting for the interval, so the run's heap stays fixed whatever the history
+/// (tests/checkpoint_memory.rs). A paced run deletes about this many in a minute and a half.
+pub const TRIM_SNAPSHOT_PATCH_ENVELOPES: usize = 4_096;
+
 /// What a trim's run owes the views and the replication snapshot: a refold and a patched
 /// snapshot at most every [`TRIM_VIEW_REFOLD_INTERVAL`] while it deletes, and when it stops,
 /// however it stops, one forget of the views and one more patch.
@@ -98,7 +103,8 @@ impl<'a> TrimViews<'a> {
     }
 
     /// A chunk deleted rows: if the last catch-up is an interval old, replication patches its
-    /// snapshot, builds the next one on from it, and the views refold.
+    /// snapshot, builds the next one on from it, and the views refold. Between catch-ups the
+    /// snapshot is also patched whenever enough deleted envelopes are held.
     fn deleted(&mut self, envelopes: &[EnvelopeTombstone]) {
         self.pending = true;
         self.trimmed.extend(envelopes.iter().map(|envelope| ReplicaEnvelopeId {
@@ -110,6 +116,8 @@ impl<'a> TrimViews<'a> {
             self.patch_snapshot();
             self.store.runtime.claims_trimmed();
             self.refolded = std::time::Instant::now();
+        } else if self.trimmed.len() >= TRIM_SNAPSHOT_PATCH_ENVELOPES {
+            self.patch_snapshot();
         }
     }
 
