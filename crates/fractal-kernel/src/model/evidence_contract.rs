@@ -4,20 +4,20 @@ use std::collections::BTreeMap;
 
 // No Serialize/Deserialize: this contract is not a mission publication surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum EvidenceType {
+pub enum EvidenceType {
     Text,
     Subject,
     Document,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct EvidenceSpec {
+pub struct EvidenceSpec {
     pub evidence_type: EvidenceType,
     pub equals: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct EvidenceContract {
+pub struct EvidenceContract {
     evidence_contract: BTreeMap<String, EvidenceSpec>,
 }
 
