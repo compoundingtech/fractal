@@ -55,12 +55,6 @@ impl Episode {
     pub fn resolved(&self) -> bool {
         matches!(self.phase, Phase::Completed | Phase::Superseded)
     }
-    pub fn next_deadline_ms(&self) -> Option<u128> {
-        DEADLINES
-            .iter()
-            .find(|(_, age)| !self.resolved() && self.age < *age)
-            .map(|(delay, _)| self.first_pending_ms.saturating_add(*delay))
-    }
     /// Time is supplied by the caller, including after recovery; never read a wall clock.
     pub fn reduce(&mut self, event: Event, now_ms: u128) -> Result<()> {
         anyhow::ensure!(!self.resolved(), "refresh already resolved");
@@ -117,15 +111,13 @@ impl Episode {
         Ok(())
     }
 }
-fn load(connection: &Connection, seat: &str, incumbent: &str) -> Result<Option<Episode>> {
+fn load(db: &Connection, seat: &str, incumbent: &str) -> Result<Option<Episode>> {
     let sql = canonical_sql(
         "SELECT body FROM claims WHERE subject=?1 AND kind='runtime.refresh'
          AND json_extract(body,'$.fields.episode.incumbent')=?2
          ORDER BY CANONICAL_DESC(claims) LIMIT 1",
     );
-    let body = connection
-        .query_row(&sql, params![seat, incumbent], |r| r.get::<_, String>(0))
-        .optional()?;
+    let body = db.query_row(/* sqlite-large-value: allow-for-now lv-h56a3a258cc3e owner=fractal_store::store::refresh TODO=trace-statement-and-value-representation */ &sql, params![seat, incumbent], |r| r.get::<_, String>(0)).optional()?;
     body.map(|body| {
         let mut value: Value = serde_json::from_str(&body)?;
         anyhow::ensure!(value["fields"]["version"] == 1, "unsupported refresh version");
@@ -133,10 +125,9 @@ fn load(connection: &Connection, seat: &str, incumbent: &str) -> Result<Option<E
     })
     .transpose()
 }
-fn persist(tx: &Transaction<'_>, origin: &str, e: &Episode) -> Result<()> {
+fn persist(tx: &Transaction<'_>, origin: &str, e: &Episode) -> Result<ClaimRecord> {
     let body = json!({"fields": {"version": 1, "episode": e}});
-    append_claim_tx(tx, origin, &e.seat, "runtime.refresh", None, &body, &[], None)?;
-    Ok(())
+    append_claim_tx(tx, origin, &e.seat, "runtime.refresh", None, &body, &[], None)
 }
 impl Store {
     pub fn refresh_episode(&self, seat: &str, incumbent: &str) -> Result<Option<Episode>> {

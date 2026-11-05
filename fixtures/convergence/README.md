@@ -232,6 +232,6 @@ trim again). Characterization used
 `cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
 The first characterization run failed only the four stale v14 trim expectations.
 
-`claims-v16.json` adds the system-only `runtime.refresh` episode envelope; v1–v15 stay frozen.
+`claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
-The simulation selects v16; retention keeps unresolved and current episode state whole.
+Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.

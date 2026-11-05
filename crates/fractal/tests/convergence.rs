@@ -1778,15 +1778,14 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v15, every fixed
-/// seed converges, and all but seeds 2 and 27 trim a checkpoint: adding `fleet.shard-bounds`
-/// shifts the draws. Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[2, 27];
+/// Corpus v16 shifts shared RNG draws through kind selection and optional action fields.
+/// All 32 fixed seeds converge; 30 trim. Preserve exact equality with the measured never-trim set.
+const NEVER_TRIMS: &[u64] = &[2, 34];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v15 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v16 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
