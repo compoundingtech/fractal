@@ -661,6 +661,17 @@
       }
     },
     "PublicationDefinition": {"type": "object", "additionalProperties": false, "description": "Canonical publication values with resolved compiler defaults; requires read.declarations.", "required": ["kind", "subject", "declaration", "revision", "token"], "properties": {"kind": {"const": "publication-definition"}, "subject": {"type": "string", "pattern": "^(agent|mission|schedule)/[^\\s]+$"}, "declaration": {"type": "object", "additionalProperties": true}, "revision": {"$ref": "#/$defs/Revision"}, "token": {"type": "string", "minLength": 1}}},
+    "MissionDeclaration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mission", "revision", "published_at", "text", "legacy"],
+      "properties": {
+        "mission": {"type": "string", "pattern": "^mission/[^\\s]+$"},
+        "revision": {"$ref": "#/$defs/Revision"},
+        "published_at": {"type": "integer", "minimum": 0},
+        "text": {"type": "string"},
+        "legacy": {"type": "boolean", "description": "Contains removed loop shapes that the current parser rejects."}
+      }
+    },
     "SubjectDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -706,6 +717,7 @@
             { "$ref": "#/$defs/DocumentReferences" },
             { "$ref": "#/$defs/SubjectDefinition" },
             { "$ref": "#/$defs/PublicationDefinition" },
+            { "$ref": "#/$defs/MissionDeclaration" },
             { "$ref": "#/$defs/AgentWorkspace" },
             { "$ref": "#/$defs/Page" },
             { "$ref": "#/$defs/OrderedMembershipPage" },
@@ -2130,6 +2142,7 @@
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
             "fault": { "type": ["string", "null"], "description": "Current member reconcile failure; cleared by a successful pass." },
             "incarnation_id": { "type": ["string", "null"] },
+            "launch_contract": { "type": ["object", "null"], "description": "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. Omitted on roster rows and non-owning hosts." },
             "current_session_id": { "type": ["string", "null"] },
             "todo": { "oneOf": [{ "$ref": "#/$defs/AgentTodo" }, { "type": "null" }], "description": "Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible." },
             "presentation": { "$ref": "#/$defs/AgentPresentation", "description": "st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons." },

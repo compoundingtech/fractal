@@ -1,5 +1,6 @@
 import { selectedFaviconState, tabTitle, useTabMetadata } from './useTabMetadata.ts'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
+import { prefetchChangelog } from '../changelog/load.ts'
 import { sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
@@ -273,6 +274,21 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
 }
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
+const makeUsagePane = () => React.lazy(() => import('../monitor/UsagePane.tsx'))
+class UsageCodeBoundary extends React.Component {
+  state = { failed: false, Pane: makeUsagePane() }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    if (this.state.failed) return <div role="alert" {...stylex.props(styles.paneNotice)}>
+      <p>This usage view could not load.</p>
+      <button type="button" onClick={() => this.setState({ failed: false, Pane: makeUsagePane() })}>Try again</button>
+    </div>
+    const Pane = this.state.Pane
+    return <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading usage" /></div>}>
+      <Pane />
+    </React.Suspense>
+  }
+}
 
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
@@ -401,7 +417,17 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     if (node === null || !rosterObserved) return
     const cancelTiming = measureEnd('sidebar_interactive')
     const cancelCapture = ux?.rosterCommitted()
-    return () => { cancelTiming(); cancelCapture?.() }
+    let cancelIdle: (() => void) | undefined
+    const cancelPaint = afterNextPaint(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        const idle = window.requestIdleCallback(prefetchChangelog)
+        cancelIdle = () => window.cancelIdleCallback(idle)
+      } else {
+        const timer = window.setTimeout(prefetchChangelog, 0)
+        cancelIdle = () => window.clearTimeout(timer)
+      }
+    })
+    return () => { cancelTiming(); cancelCapture?.(); cancelPaint(); cancelIdle?.() }
   }, [ux, rosterObserved])
   const current = initialAgentFromUrl(location) ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
@@ -809,12 +835,15 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
           <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
         </React.Suspense>
       ) : null}
+      {view._tag === 'Usage' ? (
+        <UsageCodeBoundary />
+      ) : null}
       {view._tag === 'Document' && onOpenDocument !== undefined ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading document" /></div>}>
           <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
         </React.Suspense>
       ) : null}
-      {current === '' && view._tag !== 'Missions' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
+      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
         : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
           : null}
     </div>

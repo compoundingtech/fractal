@@ -61,7 +61,9 @@
           };
         mkHmModuleEval = extraConfig: nixpkgs.lib.evalModules {
           specialArgs = {
-            inherit pkgs;
+            pkgs = if extraConfig.darwinFixture or false then
+              pkgs // { stdenv = pkgs.stdenv // { hostPlatform = pkgs.stdenv.hostPlatform // { isLinux = false; isDarwin = true; }; }; }
+              else pkgs;
             lib = pkgs.lib // {
               hm.dag = rec {
                 entryBetween = before: after: data: { inherit before after data; };
@@ -95,6 +97,8 @@
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
               config.home.file = extraConfig.homeFiles or { };
+              config.launchd.agents = lib.optionalAttrs (extraConfig ? launchdDomain)
+                (lib.genAttrs [ "smalltalk" "smalltalk-apply" "fractal" "fractal-apply" ] (_: { domain = extraConfig.launchdDomain; }));
               config.xdg.configFile = lib.recursiveUpdate (extraConfig.configFiles or { })
                 (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
@@ -105,7 +109,7 @@
                 socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/fractal/seats/claude.kdl ];
-              } // builtins.removeAttrs extraConfig [ "forceLegacyConfig" "homeFiles" "configFiles" ];
+              } // builtins.removeAttrs extraConfig [ "forceLegacyConfig" "homeFiles" "configFiles" "darwinFixture" "launchdDomain" ];
             })
           ];
         };
@@ -1487,7 +1491,7 @@
           assert preflight.after == [ ];
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
-          assert legacyPreflight.data == preflight.data;
+          assert pkgs.stdenv.hostPlatform.isDarwin || legacyPreflight.data == preflight.data;
           assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
@@ -1683,6 +1687,74 @@
               ''
             ) [ "stage" "completed" ]
             ) + "touch $out"
+          );
+        checks.hm-launchd-domain-guards =
+          let
+            fixture = domain: phase: (mkHmModuleEval {
+              darwinFixture = true; launchdDomain = domain; fractalMigration.phase = phase;
+              binary.path = "/fixture/fractal";
+            }).config;
+            query = pkgs.writeShellScript "domain-query" ''printf '%s\n' "$DOMAIN"; exit "''${QUERY_EXIT:-0}"'';
+            manager = pkgs.writeShellScript "launchctl-fixture" ''
+              printf '%s\n' "$*" >> "$CALLS"
+              case "$2" in "$DOMAIN"/*) ;; *) exit 99 ;; esac
+              [ "$1" = disable ] || exit 113
+            '';
+          in pkgs.runCommand "hm-launchd-domain-guards" {} (
+            pkgs.lib.concatMapStrings (domain:
+              let
+                stage = fixture domain "stage";
+                completed = fixture domain "completed";
+                wrapper = builtins.head completed.launchd.agents.fractal.config.ProgramArguments;
+              in assert domain != "user" || pkgs.lib.hasInfix "<string>Background</string>"
+                stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert pkgs.lib.hasInfix "<string>${builtins.unsafeDiscardStringContext wrapper}</string>" stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert stage.xdg.configFile."st3/launchd-staged".enable && !completed.xdg.configFile."st3/launchd-staged".enable; ''
+                export DOMAIN="${domain}/$(id -u)" CALLS="$PWD/calls"
+                rm -rf config state
+                substitute ${pkgs.writeText "stage-preflight" stage.home.activation.fractalMigrationPreflight.data} preflight \
+                  --replace-fail /fixture/fractal ${query}
+                ${pkgs.runtimeShell} preflight
+                if DOMAIN="wrong/$(id -u)" ${pkgs.runtimeShell} preflight; then exit 1; fi
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} preflight; then exit 1; fi
+                substitute ${pkgs.writeText "stage-disable" stage.home.activation.fractalStageDisabled.data} disable \
+                  --replace-fail /fixture/fractal ${query} --replace-fail /bin/launchctl ${manager}
+                : > "$CALLS"
+                ${pkgs.runtimeShell} disable
+                test "$(wc -l < "$CALLS")" -eq 4
+                # Read the emitted wrapper's guard; never execute a real manager or daemon.
+                guard=$(${pkgs.gnugrep}/bin/grep -E '^/nix/store/.*-fractal-migration-ready$' ${wrapper})
+                mkdir -p config/fractal state/fractal
+                for directory in config/fractal state/fractal; do
+                  printf '%s\n' arn:lmig:smalltalk:2026-10-16-state-dirs-fractal > "$directory/.fractal-migration-completed"
+                done
+                substitute "$guard" guard \
+                  --replace-fail /fixture/fractal ${query} --replace-fail /bin/launchctl ${manager} \
+                  --replace-fail /home/example/.config "$PWD/config" --replace-fail /home/example/.local/state "$PWD/state"
+                touch config/.fractal-host-cutover.json
+                ${pkgs.runtimeShell} guard
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} guard; then exit 1; fi
+                if DOMAIN="wrong/$(id -u)" ${pkgs.runtimeShell} guard; then exit 1; fi
+                rm config/.fractal-host-cutover.json
+                if ${pkgs.runtimeShell} guard; then exit 1; fi
+                rm config/fractal/.fractal-migration-completed state/fractal/.fractal-migration-completed
+                # Isolate domain policy without weakening the real migrationReady proof.
+                substitute guard policy --replace-fail ${pkgs.diffutils}/bin/cmp ${pkgs.coreutils}/bin/true
+                ln -s fractal config/st3
+                touch config/st3/launchd-staged
+                for marker in config/fractal/.fractal-migration-completed state/fractal/.fractal-migration-completed config/fractal/config.home-manager.toml; do
+                  touch "$marker"
+                  if ${pkgs.runtimeShell} policy; then exit 1; fi
+                  rm "$marker"
+                done
+                ${pkgs.runtimeShell} policy
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} policy; then exit 1; fi
+                rm config/st3/launchd-staged
+                if [ ${domain} = gui ]; then QUERY_EXIT=1 ${pkgs.runtimeShell} policy
+                elif ${pkgs.runtimeShell} policy; then exit 1; fi
+                if ${pkgs.runtimeShell} guard; then exit 1; fi
+              ''
+            ) [ "gui" "user" ] + "touch $out"
           );
         checks.fractal-aliases =
           let

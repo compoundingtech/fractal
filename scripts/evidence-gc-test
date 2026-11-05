@@ -1018,6 +1018,42 @@ sys.exit(gc.main(sys.argv[1:]))
         self.assertEqual(done.returncode, 2)
         self.assertIn('has no .st/evidence-retention.json', done.stderr)
 
+    def test_this_repository_s_cap_holds_the_measured_live_set_and_the_cap_never_changes_the_plan(self):
+        """The 2026-11-05 dry run's live set (73,782 records, docs/st3/gate-evidence.md) is under this repository's cap_records, so a
+        nightly run exits 0; one record over the cap exits 3 with the alert. The cap is only the alert: the same world plans the same
+        deletions whether its cap alerts or not."""
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
+        retention_path = ROOT / '.fractal/evidence-retention.json'
+        try:
+            retention_path.lstat()
+        except FileNotFoundError:
+            retention_path = ROOT / '.st/evidence-retention.json'
+        main_file = evidence_gc.load_retention(retention_path.read_text())
+
+        def status(protected):
+            args = mock.Mock(resume_state=None, plan_out=None, apply=False, remote=None)
+            plan = {'protected_records': protected, 'retention': main_file, 'unresolved_heads': [], 'delete': [], 'migrate': [], 'groups': []}
+            with mock.patch('builtins.print') as printed:
+                code = evidence_gc.execute_plan(args, plan, None)
+            return code, json.loads(printed.call_args.args[0])
+
+        self.assertEqual(status(73782), (0, {'protected_records': 73782, 'retention': main_file, 'unresolved_heads': []}))
+        code, summary = status(main_file['cap_records'] + 1)
+        self.assertEqual(code, 3)
+        self.assertIn('is over the cap', summary['alert'])
+        old, recent, pr = self.world()
+        for n in range(2):  # two live records: over a cap of 1, not over one of 1000
+            self.both(pr[0], pr[1], 28 - n / 10)
+        self.both(old[0], 'a' * 40, 10)
+        plans = []
+        for cap in (1, 1000):
+            out = self.f.root / f'plan-{cap}.json'
+            code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=1, cap_records=cap), '--plan-out', str(out))
+            self.assertEqual(code, 3 if cap == 1 else 0, result)
+            plans.append(json.loads(out.read_text())['delete'])
+        self.assertEqual(plans[0], plans[1])
+        self.assertTrue(plans[0], 'the world has a dead tree to delete')
+
     def test_the_retention_file_is_read_from_main(self):
         old, recent, pr = self.world()
         kept = self.record(old[0], 'a' * 40, 10)
