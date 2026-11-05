@@ -211,25 +211,28 @@ describe('conversation history paging through the SDK and liveSource', () => {
     } finally { await ctx.close() }
   })
 
-  it('discards an in-flight page when an authoritative replace changes the window', async () => {
+  it('releases an invalidated request without letting its finalizer clear a replacement request', async () => {
     const ctx = await open()
     try {
       const loading = ctx.load()
       await until(() => ctx.gateway.requests.length === 1)
       ctx.gateway.frame([entry(10)], true, 'cursor/replaced')
       await until(() => ctx.ids()[0] === 'timeline-entry/10')
+      expect(ctx.read().older).toBeUndefined()
+      const replacementLoad = ctx.load()
+      const concurrent = ctx.load()
+      await until(() => ctx.gateway.requests.length === 2 && ctx.read().older?._tag === 'Loading')
+      expect(ctx.gateway.requests[1]!.url.searchParams.get('cursor')).toBe('cursor/replaced')
       ctx.gateway.page(0, [entry(3), entry(4)])
       await loading
       await drain()
       expect(ctx.ids()).toEqual(['timeline-entry/10'])
       expect(ctx.read()).toMatchObject({ hasOlder: true, olderCursor: 'cursor/replaced' })
-      expect(ctx.read().older).toBeUndefined()
-
-      const replacementLoad = ctx.load()
-      await until(() => ctx.gateway.requests.length === 2)
-      expect(ctx.gateway.requests[1]!.url.searchParams.get('cursor')).toBe('cursor/replaced')
+      expect(ctx.read().older?._tag).toBe('Loading')
+      const afterObsoleteCompletion = ctx.load()
+      expect(ctx.gateway.requests).toHaveLength(2)
       ctx.gateway.page(1, [entry(9)])
-      await replacementLoad
+      await Promise.all([replacementLoad, concurrent, afterObsoleteCompletion])
       await until(() => ctx.read().items.length === 2)
       expect(ctx.ids()).toEqual(['timeline-entry/9', 'timeline-entry/10'])
     } finally { await ctx.close() }

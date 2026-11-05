@@ -852,6 +852,7 @@ export const liveSource = ({
             if (event.value.replace) {
               generation += 1
               older = undefined
+              olderRequest = undefined
               sessionId = event.value.sessionId
             }
             timeline.apply(event.value)
@@ -892,8 +893,10 @@ export const liveSource = ({
           if (generation !== requestedGeneration) return
           older = { _tag: 'Failed', detail: cause instanceof Error ? cause.message : String(cause) }
         } finally {
-          olderRequest = undefined
-          if (generation === requestedGeneration) publishPending()
+          if (generation === requestedGeneration) {
+            olderRequest = undefined
+            publishPending()
+          }
         }
       })()
       return olderRequest
