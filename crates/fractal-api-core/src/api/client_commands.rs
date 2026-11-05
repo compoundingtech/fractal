@@ -291,4 +291,26 @@ mod tests {
         sweep(&mut rows, "capacity-test", 90 + RETENTION_MS);
         assert!(admit(&rows, "capacity-test", "device/test").is_ok());
     }
+    #[test]
+    fn pending_capacity_is_per_device_and_member() {
+        let mut row = command(); row.resource["device_id"] = json!("device/test");
+        let mut rows = BTreeMap::new();
+        for index in 0..MAX_PENDING_PER_DEVICE { rows.insert(("pending-capacity".into(), index.to_string()), row.clone()); }
+        assert!(admit(&rows, "pending-capacity", "device/test").is_err());
+        assert!(admit(&rows, "pending-capacity", "device/other").is_ok());
+        assert!(admit(&rows, "other-member", "device/test").is_ok());
+        rows.get_mut(&("pending-capacity".into(), "0".into())).unwrap().finish(&result(), 99, true);
+        assert!(admit(&rows, "pending-capacity", "device/test").is_ok());
+    }
+    #[test]
+    fn open_stream_controls_deadline_state_and_drop_clears_foreground() {
+        let session = ClientSession::for_tests("client/test-phone", "person/ada", "gateway");
+        let guard = super::super::client_presence::open_stream("deadline-state", &session, &Default::default(), 0);
+        let mut row = command(); row.resource["session_actor"] = json!(session.actor);
+        let mut rows = BTreeMap::from([(("deadline-state".into(), "test".into()), row)]);
+        sweep(&mut rows, "deadline-state", 99); assert_eq!(rows.values().next().unwrap().resource["state"], "pending");
+        sweep(&mut rows, "deadline-state", 100); assert_eq!(rows.values().next().unwrap().resource["state"], "expired");
+        drop(guard);
+        assert!(!super::super::client_presence::has_open_stream("deadline-state", &session.actor));
+    }
 }
