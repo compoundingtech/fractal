@@ -1,6 +1,6 @@
 {
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
-  "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
+  "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback) or recognized LICENSE fingerprint; missing packages from lock-integrity-verified npm archives",
   "schemaVersion": 1,
   "lockfileSha256": "e52d2ee39cfa4f44230c39b64c4dc234fc6a02223f374f7ef6560c418bfc2806",
   "packages": [
