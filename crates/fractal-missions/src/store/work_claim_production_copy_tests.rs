@@ -2,11 +2,13 @@
 //! (#5010). Ignored: set `ST3_WORK_CLAIM_PRODUCTION_COPY` to a disposable, checkpointed copy of
 //! a store. The test writes to it. For each of the agents the copy holds the most mail for, it
 //! starts one spontaneous step, claims it and completes it, twice, and prints one JSON receipt
-//! with each action's longest writer hold and how long the step's wake took to read on a reader.
+//! with each action's longest writer hold, the SQLite work its writer job did, and how long the
+//! step's wake took to read on a reader.
 
 use super::*;
 use crate::model::WorkStartRequest;
 use crate::store::adhoc_work::AdhocWorkStore;
+use fractal_store::store::WORK_ACTION_WRITER_WORK;
 use std::time::Instant;
 
 fn held_ms<T>(work: impl FnOnce() -> T) -> (T, f64) {
@@ -72,6 +74,16 @@ fn work_claim_writer_hold_on_production_copy() {
                     "wall_ms": wall.elapsed().as_micros() as f64 / 1000.0,
                     "error": result.as_ref().err().map(ToString::to_string),
                 });
+                // What the action's writer job read and wrote, to tell a cold hold from more work.
+                if let Some(work) = WORK_ACTION_WRITER_WORK.lock().unwrap().get(&format!("{key}:{action}")) {
+                    receipt[action]["writer"] = json!({
+                        "statements": work.statements,
+                        "vm_steps": work.vm_steps,
+                        "fullscan_steps": work.fullscan_steps,
+                        "sorts": work.sorts,
+                        "autoindex_rows": work.autoindex_rows,
+                    });
+                }
                 if let Ok(mut view) = result {
                     let read = Instant::now();
                     fractal_store::store::enrich_step_wake_at(&store.readers.get(), &mut view, now_ms()).unwrap();
