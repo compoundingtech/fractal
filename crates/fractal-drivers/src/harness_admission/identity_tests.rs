@@ -139,3 +139,43 @@ fn a_ready_identity_is_measured_off_the_caller_and_again_when_the_binary_changes
     assert_ne!(changed, measured);
     assert_eq!(changed, Some(executable_identity_with(&binary, &no_runtime).unwrap()));
 }
+
+#[test]
+fn a_ready_identity_the_cache_declines_still_answers_and_is_not_rehashed_per_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("future-dated");
+    fs::write(&binary, "a launcher with a future timestamp").unwrap();
+    // A clock-skewed write: never settled, so the racy-git rule keeps it out of the cache.
+    File::options().write(true).open(&binary).unwrap()
+        .set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(3600))).unwrap();
+    let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the launcher has no shebang") };
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap(), None);
+    identity_measurements_settled();
+    let expected = executable_identity_with(&binary, &no_runtime).unwrap();
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap(), Some(expected.clone()));
+    // Still unsettled, so no new measurement starts: the next read answers the same identity.
+    let measuring_this = IDENTITY_MEASURING.0.lock().unwrap().iter().any(|dependencies| dependencies[0].path == binary);
+    assert!(!measuring_this, "a read must not start another measurement of it");
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap(), Some(expected));
+}
+
+#[test]
+fn a_ready_identity_reports_a_failed_measurement_instead_of_staying_pending() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("bin")).unwrap();
+    let binary = directory.path().join("bin/tool");
+    fs::write(&binary, "a packaged tool").unwrap();
+    // The manifest is found by a stat, then cannot be read while the identity is hashed.
+    let manifest = directory.path().join("package.json");
+    fs::write(&manifest, "{}").unwrap();
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).unwrap();
+    if File::open(&manifest).is_ok() {
+        return; // A privileged user reads it anyway; there is no failure to report.
+    }
+    let later = || SystemTime::now() + Duration::from_secs(120);
+    let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the tool has no shebang") };
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap(), None);
+    identity_measurements_settled();
+    let error = executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap_err();
+    assert!(format!("{error:#}").contains("ermission denied"), "{error:#}");
+}

@@ -767,21 +767,77 @@ fn executable_identity_ready_recorded(
     if let Some(identity) = cached_identity(&dependencies) {
         return Ok(Some(identity));
     }
-    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !measuring.contains(&dependencies) {
-        measuring.push(dependencies.clone());
-        thread::spawn(move || {
-            let measured = recorded_at().duration_since(UNIX_EPOCH).map_err(anyhow::Error::from)
-                .and_then(|now| measure_identity(&files, &probes, dependencies.clone(), settled_before(now)));
-            if let Err(error) = measured {
-                eprintln!("st3: measuring an executable's identity: {error:#}");
-            }
-            let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            measuring.retain(|pending| *pending != dependencies);
-            IDENTITY_MEASURING.1.notify_all();
-        });
+    // A completed measurement of these exact files answers even when the racy-git rule kept it
+    // out of the cache, and so does its error. Measure once more only when its files have since
+    // settled, so the identity reaches the cache; a future-dated file is not re-hashed per read.
+    let measured = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter().find(|entry| entry.dependencies == dependencies)
+        .map(|entry| (entry.result.clone(), entry.settled));
+    let Some((result, settled)) = measured else {
+        start_measurement(files, probes, dependencies, recorded_at);
+        return Ok(None);
+    };
+    if !settled && dependencies_settled(&dependencies, settled_before(recorded_at().duration_since(UNIX_EPOCH)?)) {
+        start_measurement(files, probes, dependencies, recorded_at);
     }
-    Ok(None)
+    result.map(Some).map_err(anyhow::Error::msg)
+}
+
+/// Measure these files on a background thread unless that is already happening, and keep the
+/// result (or its error) for the ready path.
+fn start_measurement(
+    files: Vec<(PathBuf, bool)>,
+    probes: Vec<PathBuf>,
+    dependencies: Vec<IdentityDependency>,
+    recorded_at: fn() -> SystemTime,
+) {
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if measuring.contains(&dependencies) {
+        return;
+    }
+    measuring.push(dependencies.clone());
+    thread::spawn(move || {
+        let (result, settled) = match recorded_at().duration_since(UNIX_EPOCH) {
+            Ok(now) => {
+                let before = settled_before(now);
+                let settled = dependencies_settled(&dependencies, before);
+                (measure_identity(&files, &probes, dependencies.clone(), before), settled)
+            }
+            Err(error) => (Err(error.into()), false),
+        };
+        if let Err(error) = &result {
+            eprintln!("st3: measuring an executable's identity: {error:#}");
+        }
+        let mut ready = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        ready.retain(|entry| entry.dependencies != dependencies);
+        if ready.len() == 128 {
+            ready.remove(0);
+        }
+        ready.push(ReadyIdentity {
+            dependencies: dependencies.clone(),
+            result: result.map_err(|error| format!("{error:#}")),
+            settled,
+        });
+        drop(ready);
+        let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        measuring.retain(|pending| *pending != dependencies);
+        IDENTITY_MEASURING.1.notify_all();
+    });
+}
+
+/// A background measurement's outcome, for files the cache may have declined to keep.
+struct ReadyIdentity {
+    dependencies: Vec<IdentityDependency>,
+    result: Result<String, String>,
+    settled: bool,
+}
+
+static IDENTITY_READY: Mutex<Vec<ReadyIdentity>> = Mutex::new(Vec::new());
+
+/// Whether every dependency's timestamps precede `settled_before` (the racy-git rule).
+fn dependencies_settled(dependencies: &[IdentityDependency], settled_before: i128) -> bool {
+    dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
+        [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before))
 }
 
 /// Wait until no background identity measurement is running, so a reader that saw `None` can
@@ -903,9 +959,7 @@ fn measure_identity(
     }
     let identity = format!("{hash:x}", hash = hash.finalize());
     // Do not retain a result if any dependency changed while bytes were being read.
-    let settled = dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
-        [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before));
-    if settled && dependencies == identity_snapshot(probes)? {
+    if dependencies_settled(&dependencies, settled_before) && dependencies == identity_snapshot(probes)? {
         let mut cache = IDENTITY_CACHE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
