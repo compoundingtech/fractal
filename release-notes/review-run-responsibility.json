@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Prepare internal reviewer independence checks over run and child responsibility",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or projection changes; the dormant helper reads one caller-owned snapshot."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No active gate policy changes. Public mission parsers still reject agent review."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Internal validation includes all run generations, descendant runs and the starting parent step. Loop definitions fail closed; start/reassignment policy remains unavailable."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No production caller dispatches to this helper; no runtime or restart-time effect."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert removes internal preparation and its tests; no data recovery is needed."
+  }
+}

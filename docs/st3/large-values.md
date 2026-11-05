@@ -97,6 +97,12 @@ storage matches the existing identity fixture; its exact-wire TODO must preserve
 pending-replica semantics through any reference/chunk conversion.
 Neither exception creates a production writer or proves encoded byte/cost bounds.
 
+The internal run-review reader's `lv-h84adec0f28b1` is owned by
+`fractal_missions::store::missions::run_review`. It reads existing variable
+run/parent keys and creation-claim JSON to detect missing child projections.
+These remain inline; reference/chunk conversion must preserve that fail-closed
+history boundary. This exception adds no writer or size/cost guarantee.
+
 ### Cold runtime reduction inventory (PR #1706)
 
 The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
