@@ -10,6 +10,7 @@ import { surfaceVars as surface, textVars as textColor, borderVars as border, in
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
+import { isSupportedFenceLanguage } from './pierre-languages.generated'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -170,10 +171,10 @@ const subscribeHighlights = (notify: () => void) => {
 }
 
 export function HighlightedSource({ code, language }: { code: string; language: string }) {
-  const normalized = language.toLowerCase()
+  const normalized = language.trim().toLowerCase()
   const canonical = Object.hasOwn(languageAliases, normalized) ? languageAliases[normalized]! : normalized
   const highlights = React.useSyncExternalStore(
-    canonical ? subscribeHighlights : subscribePlainSource, highlightsSnapshot, plainSourceSnapshot,
+    isSupportedFenceLanguage(canonical) ? subscribeHighlights : subscribePlainSource, highlightsSnapshot, plainSourceSnapshot,
   )
   const lines = React.useMemo(() => highlights?.isSupportedLanguage(canonical)
     ? highlights.codeToTokens(code, { lang: canonical, theme: syntaxTheme }).tokens

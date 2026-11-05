@@ -111,6 +111,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_message_marks",
         "local_message_staged",
         "local_message_mark_events",
+        // Member-local messages a graph write queued for the messages shard.
+        "local_message_outbox",
         // A seat's host's closes as it relayed them: never replicated, outside every digest.
         "local_relayed_message_closes",
         "coordination_sends",
@@ -144,6 +146,10 @@ fn every_persistent_table_has_a_projection_scope() {
         "account_limit_seats",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local duration windows and dirty runs, rebuilt from canonical claims.
+        "local_run_eta_pending",
+        "local_run_eta_dirty",
+        "local_run_eta_samples",
         // Member-local preparation state and queues, rebuildable from canonical claims.
         "local_resource_preparation",
         "local_resource_preparation_claims",

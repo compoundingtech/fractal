@@ -191,7 +191,7 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
   unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
-  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (45,000), and an
+  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (150,000), and an
   optional `reason` that says why (JSON has no comments).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
@@ -228,6 +228,10 @@ about 2.5 times that live set. The plan leaves 15,541 refs.
 **Measured 2026-10-29**, the first run that kept every live tree's per-crate `rust-tests` keys: 57,529 refs, 28,790
 records. The live set was 21,518 records (7,399 crate keys of 532 live trees among them), over the cap of 20,000, so the
 run exited 3. `cap_records` is 45,000, about twice that live set.
+
+**Measured 2026-11-05**, a dry run after GC had been paused since 2026-11-01: 265,030 refs, 139,285 records. The live set
+was 73,782 records (4,216 more in grace), over the cap of 45,000, so the run exited 3; the plan deletes 1,514 dead trees and
+2,375 dead input keys (113,366 refs), leaving 151,664 refs. `cap_records` is 150,000, about twice that live set.
 
 **On the remote.** A dead group goes whole or not at all. First go the names whose record keeps another name in its
 own group: a note beside its tag, a migrated or duplicate first-layout name. No record leaves any group, so no verdict
@@ -1932,12 +1936,18 @@ with the branch as it was (`git merge --abort`); so does a checkout that gained 
 before it pushes: it fetches the base, merges it in when the gate would now judge the merge (as above, with your git identity, never a rebase), and
 asks the base's verifier about EVERY check of the suite for the head, as `--status` does. What is covered is not run again; what is not (a check whose
 tree the merge changed, a crate whose key main's `.st/rust-test-inputs.json` moved, the whole-tree checks a narrowed `--check rust-tests --crate X`
-run did not select once it merged) is signed in the same pool tree, and the branch is pushed at once when nothing is missing, so main has no time
-to move a protected file between a green run and its push (2026-10-29: a run's three checks were green and its push was refused, main having moved a
+run did not select once it merged) is signed in the same pool tree, and the branch is pushed as soon as coverage is complete
+(2026-10-29: a run's three checks were green and its push was refused, main having moved a
 protected file during the run). It does this at most `TOP_UP_ROUNDS` (3) times after the run itself, each against the base as it is then (`fractal-test:
 top-up round 1 of 3: origin/main is at <sha>, merged into the branch as <sha>; signing what <sha> lacks: linux-gate, rust-tests (2 crates: ...)`), and
 then fails, exit 2, with `main is moving too fast; run again`: the notes it signed are pushed, the branch is not. A conflict in a top-up merge stops the
-run the same way (`git merge --abort`, the branch as it was, not pushed). When the base did not move and a check the round signed is still not covered
+run the same way (`git merge --abort`, the branch as it was, not pushed). If the fetched base changed `scripts/st-test`, the green run finishes its lanes,
+confirms its notes on the remote and releases its tree before continuing in that base's runner to plan the top-up. The continuation acquires a pool
+lock before preparing its tree. Another run can take or evict the old tree meanwhile; valid notes remain reusable on a different tree. The new runner asks about its own whole suite, including newly added local checks
+such as `linux-fleet-compat`, rather than carrying the old runner's check list into the push. It keeps the process, original start time, admission order
+and consumed top-up rounds; changing runners does not reset the three-round bound. Notes that still cover the new base are reused, including after
+an original `--rerun` or narrowed selection; a newly required check that fails leaves the branch unpublished.
+When the base did not move and a check the round signed is still not covered
 (a note the verifier finds too old, say), signing again would change nothing: the run ends as before, pushing a merge it made and not a head that is not
 covered. A narrowed run that merged nothing pushes only its notes, as before. The branch goes to the branch of the same name on REMOTE (never forced,
 through the pre-push hook as any push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a
