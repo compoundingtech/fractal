@@ -14,17 +14,52 @@ pub(crate) fn install(store: &Store, prepare: Prepare) {
 }
 
 pub fn declared(store: &Store, desired: &DesiredSubject) -> Result<Contract> {
-    let preparation = store.extension::<Preparation>();
-    let member = match preparation.0.get() {
-        Some(prepare) => prepare(desired)?,
-        None => desired.member.clone().context("launch contract needs a member")?,
-    };
+    let member = prepared(store, desired)?;
     capture(store, desired, &member, false)
 }
 
+/// The declared contract if every executable it names is already measured, or `None` while one
+/// is measured in the background. A read never streams an executable's bytes (#5209).
+pub fn declared_ready(store: &Store, desired: &DesiredSubject) -> Result<Option<Contract>> {
+    let member = prepared(store, desired)?;
+    let ready = Measures {
+        environment: &|declared, executable| crate::reconcile::member_environment_ready(declared, executable, None),
+        identity: &|path, resolve| fractal_drivers::harness_admission::executable_identity_ready_with(path, resolve),
+    };
+    capture_with(store, desired, &member, false, &ready)
+}
+
+fn prepared(store: &Store, desired: &DesiredSubject) -> Result<MemberSpec> {
+    match store.extension::<Preparation>().0.get() {
+        Some(prepare) => prepare(desired),
+        None => desired.member.clone().context("launch contract needs a member"),
+    }
+}
+
+/// How a capture reads the member's environment and executable identities: waiting for them, or
+/// `None` while one is still measured off the caller.
+struct Measures<'a> {
+    environment: &'a EnvironmentMeasure,
+    identity: &'a IdentityMeasure,
+}
+
+type EnvironmentMeasure = dyn Fn(&BTreeMap<String, String>, &Path) -> Result<Option<BTreeMap<String, String>>>;
+type IdentityMeasure = dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>) -> Result<Option<String>>;
+
 pub(crate) fn capture(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool) -> Result<Contract> {
+    let blocking = Measures {
+        environment: &|declared, executable| crate::reconcile::member_environment(declared, executable, None).map(Some),
+        identity: &|path, resolve| fractal_drivers::harness_admission::executable_identity_with(path, resolve).map(Some),
+    };
+    capture_with(store, desired, member, running, &blocking)?
+        .context("a blocking measurement always answers")
+}
+
+fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool, measures: &Measures<'_>) -> Result<Option<Contract>> {
     let executable = crate::reconcile::launch_executable()?;
-    let mut environment = crate::reconcile::member_environment(&member.environment, &executable, None)?;
+    let Some(mut environment) = (measures.environment)(&member.environment, &executable)? else {
+        return Ok(None);
+    };
     if let Some(path) = environment.get_mut("PATH") {
         *path = std::env::join_paths(std::env::split_paths(path).map(|entry|
             if entry.is_absolute() { entry } else { Path::new(&member.cwd).join(entry) }))?.to_string_lossy().into_owned();
@@ -45,11 +80,17 @@ pub(crate) fn capture(store: &Store, desired: &DesiredSubject, member: &MemberSp
             argv.get(position).context("launch has no program")?
         }
     };
-    let binaries = BTreeMap::from([("launcher", executable), ("provider", resolve(provider)?)])
-        .into_iter().map(|(role, path)| Ok((role.to_owned(),
-            fractal_drivers::harness_admission::executable_identity_with(&path, &resolve)?)))
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    crate::launch_contract::capture_effective(store, desired, &binaries, &environment, running)
+    let mut binaries = BTreeMap::new();
+    for (role, path) in [("launcher", executable), ("provider", resolve(provider)?)] {
+        // Start every pending measurement before answering, so one later read finds them all.
+        binaries.insert(role.to_owned(), (measures.identity)(&path, &resolve)?);
+    }
+    let Some(binaries) = binaries.into_iter().map(|(role, identity)| identity.map(|identity| (role, identity)))
+        .collect::<Option<BTreeMap<_, _>>>()
+    else {
+        return Ok(None);
+    };
+    crate::launch_contract::capture_effective(store, desired, &binaries, &environment, running).map(Some)
 }
 
 /// Running identity is exclusively the receipt for the observed incarnation, never its token's
@@ -67,14 +108,16 @@ pub fn running(store: &Store, subject: &str, incarnation: &str) -> Result<Option
 /// A local diagnostic, not a snapshot assertion about files on another host.
 pub fn status(store: &Store, desired: &DesiredSubject, incarnation: Option<&str>) -> serde_json::Value {
     let running = incarnation.map(|id| running(store, &desired.subject, id)).transpose();
-    match (declared(store, desired), running) {
-        (Ok(declared), Ok(running)) => {
+    match (declared_ready(store, desired), running) {
+        (Ok(Some(declared)), Ok(running)) => {
             let running = running.flatten();
             let drift = running.as_ref().and_then(|running| declared.drift(running));
             serde_json::json!({"declared":declared,"running":running,"drift":drift})
         }
+        // An executable is still being measured; a later read reports the declared contract.
+        (Ok(None), Ok(running)) => serde_json::json!({"declared":null,"running":running.flatten(),"drift":null,"pending":true}),
         (declared, running) => serde_json::json!({
-            "declared":declared.as_ref().ok(), "running":running.as_ref().ok().and_then(Option::as_ref).and_then(Option::as_ref),
+            "declared":declared.as_ref().ok().and_then(Option::as_ref), "running":running.as_ref().ok().and_then(Option::as_ref).and_then(Option::as_ref),
             "drift":null, "error":declared.err().or_else(|| running.err()).map(|error| error.to_string())
         }),
     }
