@@ -444,6 +444,13 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
   A person's device-signed message and an external assistant's message stay graph claims.
 - **No checkpoint.** Nothing in the shard is superseded, so it is never sealed or trimmed and
   has no checkpoint or answers routes.
+- **The outbox.** SQLite commits one database file at a time, so a message sent inside a graph
+  transaction is queued in the graph's member-local `local_message_outbox` in that transaction,
+  and the daemon writes it to the shard after the commit (at startup, then after each commit
+  that leaves one there), exactly once by subject. A message the shard refuses three times, and
+  every message on a member whose shard did not open, is appended to the graph as a legacy
+  claim, so none is lost. In this build nothing queues messages and the drainer is idle; a
+  later release queues them, and a rollback from it to this build still drains what it left.
 - **Backups.** A claim backup carries the shard once it holds a stream item or a lifecycle
   row, as archive version `5`; see [claim backups](backups.md#the-messages-shard).
 
