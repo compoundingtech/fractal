@@ -55,8 +55,8 @@ pub(crate) fn independent_reviewer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClaimInput, IdentityKind, NormalizedIntent, RenameRequest};
-    use crate::store::identities::IdentityStore;
+    use crate::model::{ClaimInput, NormalizedIntent};
+    use crate::store::identities::{IdentityKind, IdentityStore, RenameRequest};
     use crate::store::{ClaimCommitContext, Store, append_claim_with_commit_context};
     use serde_json::json;
     use std::collections::BTreeMap;
