@@ -100,7 +100,7 @@ pub fn validate_args(kind: &str, args: &Value) -> Result<(), ApiError> {
 }
 fn sweep(rows: &mut BTreeMap<(String, String), Command>, member: &str, now: u128) {
     for ((node, _), row) in rows.iter_mut().filter(|((node, _), _)| node == member) {
-        row.expire(now, super::client_presence::has_open_stream(node, row.resource["session_actor"].as_str().unwrap_or_default()));
+        row.expire(now, super::client_presence::has_collection_stream(node, row.resource["session_actor"].as_str().unwrap_or_default()));
     }
     rows.retain(|_, row| row.terminal_at.is_none_or(|at| now.saturating_sub(at) < RETENTION_MS));
 }
@@ -195,7 +195,7 @@ pub fn report(state: &AppState, session: &ClientSession, request: DeviceResultRe
         let mut rows = ROWS.lock().map_err(|_| storage_error())?;
         let row = rows.get_mut(&(state.node.clone(), request.command_id.clone())).ok_or_else(missing)?;
         authorize_read(row, &session)?;
-        row.finish(&request, client_now_ms(), super::client_presence::has_open_stream(&state.node, &session.actor));
+        row.finish(&request, client_now_ms(), super::client_presence::has_collection_stream(&state.node, &session.actor));
         row.resource.clone()
     };
     changed(&state.node);
@@ -303,14 +303,20 @@ mod tests {
         assert!(admit(&rows, "pending-capacity", "device/test").is_ok());
     }
     #[test]
-    fn open_stream_controls_deadline_state_and_drop_clears_foreground() {
+    fn only_collection_streams_control_foreground_deadline_state() {
+        use super::super::client_presence::{self, StreamCategory};
         let session = ClientSession::for_tests("client/test-phone", "person/ada", "gateway");
-        let guard = super::super::client_presence::open_stream("deadline-state", &session, &Default::default(), 0);
-        let mut row = command(); row.resource["session_actor"] = json!(session.actor);
-        let mut rows = BTreeMap::from([(("deadline-state".into(), "test".into()), row)]);
-        sweep(&mut rows, "deadline-state", 99); assert_eq!(rows.values().next().unwrap().resource["state"], "pending");
-        sweep(&mut rows, "deadline-state", 100); assert_eq!(rows.values().next().unwrap().resource["state"], "expired");
-        drop(guard);
-        assert!(!super::super::client_presence::has_open_stream("deadline-state", &session.actor));
+        for category in [StreamCategory::Conversation, StreamCategory::Terminal, StreamCategory::Collections] {
+            let guard = client_presence::open_stream("deadline-state", &session, &Default::default(), 0, category);
+            let mut row = command(); row.resource["session_actor"] = json!(session.actor);
+            let mut rows = BTreeMap::from([(("deadline-state".into(), "test".into()), row)]);
+            sweep(&mut rows, "deadline-state", 99); assert_eq!(rows.values().next().unwrap().resource["state"], "pending");
+            sweep(&mut rows, "deadline-state", 100);
+            assert_eq!(rows.values().next().unwrap().resource["state"], if category == StreamCategory::Collections { "expired" } else { "not-foreground" });
+            assert_eq!(client_presence::list("deadline-state", 100)[0]["connected"], true);
+            drop(guard);
+            assert!(!client_presence::has_collection_stream("deadline-state", &session.actor));
+            assert!(client_presence::list("deadline-state", 100).is_empty());
+        }
     }
 }
