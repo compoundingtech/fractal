@@ -84,17 +84,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     for (hash, path) in keys {
         // Bound: only the newest 64 terminal runs per hash, including unusable runs.
         // Work is bounded by those runs' own claims, never by older step histories.
-        let mut candidates = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc23992ea4eed owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("WITH recent AS MATERIALIZED (
-            SELECT r.id,r.current_generation_id,r.status,
-            (SELECT CAST(claims.accepted_at_unix_ms AS INTEGER) FROM claims JOIN batches ON batches.id=claims.batch_id
-             WHERE claims.subject='mission-run/'||r.id AND claims.kind='mission-run.state'
-             AND json_extract(claims.body,'$.fields.phase')='terminal' ORDER BY {CANONICAL_ORDER} LIMIT 1) AS ended
-            FROM mission_runs r WHERE r.phase='terminal'
-            AND EXISTS(SELECT 1 FROM step_runs WHERE run_id=r.id AND generation_id=r.current_generation_id AND definition_hash=?1)
-            ORDER BY ended DESC,r.id DESC LIMIT ?3)
-            SELECT s.subject,s.run_id,s.attempt FROM recent r JOIN step_runs s ON s.run_id=r.id
-            AND s.generation_id=r.current_generation_id WHERE s.definition_hash=?1 AND s.step_path=?2
-            AND r.status='completed' AND s.status='completed'"))?;
+        let mut candidates = tx.prepare_cached(&candidates_sql())?;
         let mut rows = candidates.query(params![hash, path, SAMPLE_LIMIT])?;
         while let Some(row) = rows.next()? {
             let (subject, run, attempt): (String, String, u32) =
@@ -109,8 +99,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             let (Some(start), Some(end)) = step_timestamps(&events, attempt) else {
                 continue;
             };
-            let asks = tx.prepare_cached("SELECT subject,body,accepted_at_unix_ms FROM claims
-                WHERE kind='work.person-asked' AND (subject=?1 OR json_extract(body,'$.fields.origin_step')=?1)")?
+            let asks = tx.prepare_cached(ASKS_SQL)?
                 .query_map([&subject], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut holds = Vec::new();
@@ -155,6 +144,32 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7dd9271f11ac owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_dirty", [])?;
     Ok(())
 }
+
+/// The selected attempts of `?2` in the newest `?3` terminal runs of definition `?1`. It reads the
+/// definition's own runs through `step_runs_definition_index`: reading every terminal run per
+/// definition made a first open on a long history take minutes (#5239).
+pub(super) fn candidates_sql() -> String {
+    /* sqlite-large-value: allow-for-now lv-hc23992ea4eed owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ format!("WITH recent AS MATERIALIZED (
+            SELECT r.id,r.current_generation_id,r.status,
+            (SELECT CAST(claims.accepted_at_unix_ms AS INTEGER) FROM claims JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject='mission-run/'||r.id AND claims.kind='mission-run.state'
+             AND json_extract(claims.body,'$.fields.phase')='terminal' ORDER BY {CANONICAL_ORDER} LIMIT 1) AS ended
+            FROM (SELECT DISTINCT run_id,generation_id FROM step_runs INDEXED BY step_runs_definition_index
+                  WHERE definition_hash=?1) h
+            CROSS JOIN mission_runs r ON r.id=h.run_id AND r.current_generation_id=h.generation_id
+            WHERE r.phase='terminal'
+            ORDER BY ended DESC,r.id DESC LIMIT ?3)
+            SELECT s.subject,s.run_id,s.attempt FROM recent r JOIN step_runs s ON s.run_id=r.id
+            AND s.generation_id=r.current_generation_id WHERE s.definition_hash=?1 AND s.step_path=?2
+            AND r.status='completed' AND s.status='completed'")
+}
+
+/// The person asks a step made itself or that name it as their origin, each through its own index;
+/// one `OR` read every ask in the store per sampled step.
+pub(super) const ASKS_SQL: &str = "SELECT subject,body,accepted_at_unix_ms FROM claims
+    WHERE kind='work.person-asked' AND subject=?1
+    UNION ALL SELECT subject,body,accepted_at_unix_ms FROM claims
+    WHERE kind='work.person-asked' AND json_extract(body,'$.fields.origin_step')=?1 AND subject<>?1";
 
 #[cfg(test)]
 thread_local! {

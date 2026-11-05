@@ -1232,6 +1232,9 @@ CREATE INDEX IF NOT EXISTS step_runs_run_index ON step_runs(run_id, generation_i
 -- it scanned every mission run, then built a throwaway index on parent_step_run for each level:
 -- 3.6 to 4.7 ms a call, 1,213 calls in one run-tree rebuild on a real store.
 CREATE INDEX IF NOT EXISTS step_runs_generation_index ON step_runs(generation_id);
+-- The runs that ran one step definition. Without it the run-ETA window for each definition scanned
+-- every terminal run: 29 ms a definition, about 2 minutes for 4,152 on a real store's first open.
+CREATE INDEX IF NOT EXISTS step_runs_definition_index ON step_runs(definition_hash, run_id, generation_id);
 CREATE INDEX IF NOT EXISTS mission_runs_parent_step_index ON mission_runs(parent_step_run)
 WHERE parent_step_run IS NOT NULL;
 CREATE INDEX IF NOT EXISTS step_runs_assignee_index ON step_runs(assignee, status);

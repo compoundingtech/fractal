@@ -51,6 +51,8 @@ pub(super) fn fixture(history: i64) -> Connection {
             phase TEXT,status TEXT,mission_id TEXT DEFAULT 'mission');
         CREATE TABLE step_runs(subject TEXT PRIMARY KEY,run_id TEXT,generation_id TEXT,
             definition_hash TEXT,step_path TEXT,attempt INTEGER,status TEXT);
+        CREATE INDEX step_runs_run_index ON step_runs(run_id,generation_id,step_path);
+        CREATE INDEX step_runs_definition_index ON step_runs(definition_hash,run_id,generation_id);
         CREATE TABLE claims(store_index INTEGER PRIMARY KEY,id TEXT,subject TEXT,kind TEXT,
             body TEXT,accepted_at_unix_ms TEXT,batch_id TEXT DEFAULT 'batch');
         CREATE INDEX claim_subject ON claims(subject,kind,accepted_at_unix_ms);
@@ -212,4 +214,150 @@ fn eta_nonterminal_changes_do_not_dirty_or_refold_samples() {
         super::run_eta::flush(&tx).unwrap();
         assert_eq!(retained(&tx), (1, 10));
     }
+}
+
+/// The window's candidates as #5154 read them: every terminal run, then whether it ran the
+/// definition. Kept only to prove the indexed read answers the same.
+fn candidates_by_scanning_every_run() -> String {
+    format!("WITH recent AS MATERIALIZED (
+        SELECT r.id,r.current_generation_id,r.status,
+        (SELECT CAST(claims.accepted_at_unix_ms AS INTEGER) FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject='mission-run/'||r.id AND claims.kind='mission-run.state'
+         AND json_extract(claims.body,'$.fields.phase')='terminal' ORDER BY {} LIMIT 1) AS ended
+        FROM mission_runs r WHERE r.phase='terminal'
+        AND EXISTS(SELECT 1 FROM step_runs WHERE run_id=r.id AND generation_id=r.current_generation_id AND definition_hash=?1)
+        ORDER BY ended DESC,r.id DESC LIMIT ?3)
+        SELECT s.subject,s.run_id,s.attempt FROM recent r JOIN step_runs s ON s.run_id=r.id
+        AND s.generation_id=r.current_generation_id WHERE s.definition_hash=?1 AND s.step_path=?2
+        AND r.status='completed' AND s.status='completed'", super::CANONICAL_ORDER)
+}
+
+const ASKS_BY_ONE_OR: &str = "SELECT subject,body,accepted_at_unix_ms FROM claims
+    WHERE kind='work.person-asked' AND (subject=?1 OR json_extract(body,'$.fields.origin_step')=?1)";
+
+/// `runs` terminal and working runs over shared and single-run definitions, two paths, stale
+/// generations, failed runs, tied end times and person asks by subject and by origin.
+fn history(runs: i64) -> Connection {
+    let c = fixture(0);
+    for n in 0..runs {
+        let (run, phase) = (format!("r-{n}"), if n % 7 == 3 { "working" } else { "terminal" });
+        let status = if n % 5 == 4 { "failed" } else { "completed" };
+        c.execute(
+            "INSERT INTO mission_runs(id,current_generation_id,phase,status) VALUES(?1,'current',?2,?3)",
+            rusqlite::params![run, phase, status],
+        )
+        .unwrap();
+        // One definition shared by every tenth run, overflowing the window; the rest by a few.
+        let hash = if n % 10 == 0 { "shared".to_owned() } else { format!("h-{}", n % (runs / 3)) };
+        let end = (n * 37) % 1000 + 10;
+        for (path, generation) in [("build", "current"), ("test", "current"), ("build", "stale")] {
+            if path == "test" && n % 2 == 0 {
+                continue;
+            }
+            let step = format!("s-{n}-{path}-{generation}");
+            c.execute(
+                "INSERT INTO step_runs VALUES(?1,?2,?3,?4,?5,1,?6)",
+                rusqlite::params![step, run, generation, hash, path, if n % 11 == 6 { "failed" } else { "completed" }],
+            )
+            .unwrap();
+            claim(&c, &step, "work.claimed", json!({"attempt":1}), 1);
+            claim(&c, &step, "step-run.state", json!({"attempt":1,"status":"completed"}), end);
+            if n % 13 == 0 {
+                claim(&c, &format!("ask-{step}"), "work.person-asked",
+                    json!({"origin_step":step,"origin_attempt":1,"request":{"type":"decision"}}), end - 5);
+            }
+            if n % 17 == 0 {
+                claim(&c, &step, "work.person-asked", json!({"attempt":1,"origin_step":step}), end - 3);
+            }
+        }
+        claim(&c, &format!("mission-run/{run}"), "mission-run.state", json!({"phase":"terminal"}), end);
+    }
+    c
+}
+
+fn rows(c: &Connection, sql: &str, params: impl rusqlite::Params) -> Vec<(String, String, String)> {
+    let mut rows = c
+        .prepare(sql)
+        .unwrap()
+        .query_map(params, |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, rusqlite::types::Value>(2).map(|v| format!("{v:?}"))?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn eta_indexed_candidates_and_asks_answer_as_the_scanning_reads_for_every_definition() {
+    let c = history(1500);
+    let keys = rows(&c, "SELECT DISTINCT definition_hash,step_path,'' FROM step_runs", []);
+    assert!(keys.len() > 600, "{}", keys.len());
+    let (mut candidates, mut full) = (0, 0);
+    for (hash, path, _) in &keys {
+        let args = rusqlite::params![hash, path, super::run_eta::SAMPLE_LIMIT];
+        let expected = rows(&c, &candidates_by_scanning_every_run(), args);
+        assert_eq!(rows(&c, &super::run_eta::candidates_sql(), args), expected, "{hash} {path}");
+        candidates += expected.len();
+        full += usize::from(expected.len() >= 40);
+    }
+    assert!(candidates > 1000 && full > 0, "{candidates} {full}");
+    let steps = rows(&c, "SELECT subject,'','' FROM step_runs", []);
+    let mut asks = 0;
+    for (step, _, _) in &steps {
+        let expected = rows(&c, ASKS_BY_ONE_OR, [step]);
+        assert_eq!(rows(&c, super::run_eta::ASKS_SQL, [step]), expected, "{step}");
+        asks += expected.len();
+    }
+    assert!(asks > 100, "{asks}");
+}
+
+/// The first open on a long history read every terminal run once per definition, and every
+/// person ask once per sampled step (#5239). Both must seek their own rows on the real schema.
+#[test]
+fn eta_backfill_seeks_each_definitions_runs_and_each_steps_asks() {
+    let store = super::Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let plan = |sql: &str| {
+        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let unbound = std::iter::repeat_n(rusqlite::types::Null, statement.parameter_count());
+        statement
+            .query_map(rusqlite::params_from_iter(unbound), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("; ")
+    };
+    let candidates = plan(&super::run_eta::candidates_sql());
+    assert!(
+        candidates.contains("SEARCH step_runs USING COVERING INDEX step_runs_definition_index (definition_hash=?)")
+            && candidates.contains("SEARCH r USING INDEX sqlite_autoindex_mission_runs_1 (id=?)"),
+        "{candidates}"
+    );
+    let asks = plan(super::run_eta::ASKS_SQL);
+    assert!(
+        asks.contains("claims_person_ask_origin_step_index") && !asks.contains("claims_kind_index"),
+        "{asks}"
+    );
+}
+
+/// Before and after for #5239: `cargo test -p fractal-store --lib eta_backfill_cost -- --ignored
+/// --nocapture`. Prints the first open, a rebuild and the flush after deleting a quarter of the runs.
+#[test]
+#[ignore]
+fn eta_backfill_cost_at_scale() {
+    let runs = 4000;
+    let mut c = history(runs);
+    let timed = |what: &str, c: &mut Connection, work: &dyn Fn(&rusqlite::Transaction<'_>)| {
+        let tx = c.transaction().unwrap();
+        let started = std::time::Instant::now();
+        work(&tx);
+        println!("{what}: {:.2}s", started.elapsed().as_secs_f64());
+        tx.commit().unwrap();
+    };
+    timed("first open", &mut c, &|tx| super::run_eta::open(tx).unwrap());
+    timed("rebuild", &mut c, &|tx| super::run_eta::rebuild(tx).unwrap());
+    timed("flush after deleting 1000 terminal runs", &mut c, &|tx| {
+        tx.execute("DELETE FROM mission_runs WHERE phase='terminal' AND CAST(substr(id,3) AS INTEGER)%4=1", []).unwrap();
+        super::run_eta::flush(tx).unwrap();
+    });
 }
