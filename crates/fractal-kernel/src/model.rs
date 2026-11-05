@@ -108,7 +108,7 @@ pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 
 /// What a refused send or reply says: factual replies stay in the conversation,
 /// while every new question or decision uses a native work ask.
-pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print in the chat to reply to the person. Any new question or decision for the person goes through a native `work ask`, even when the person is present. Use `work update` only for information the person asked for";
+pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. Any new question or decision for the person goes through a native `work ask`, even when the person is present. Use `work update` only for information the person asked for";
 
 /// Refuse a message addressed to a person. `recipient` is the canonical recipient subject.
 /// Messages to agents are unchanged.
@@ -3484,7 +3484,7 @@ mod person_inbox_tests {
             assert_eq!(error.code, PERSON_HAS_NO_INBOX_CODE);
             assert_eq!(error.message, PERSON_HAS_NO_INBOX);
         }
-        let chat = PERSON_HAS_NO_INBOX.find("print in the chat").unwrap();
+        let chat = PERSON_HAS_NO_INBOX.find("print your answer in the chat").unwrap();
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work ask`").unwrap());
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work update`").unwrap());
         assert!(PERSON_HAS_NO_INBOX.contains("Any new question or decision for the person"));

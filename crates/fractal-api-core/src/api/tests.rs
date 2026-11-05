@@ -7784,7 +7784,7 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
         assert_eq!(body["code"], "person-has-no-inbox", "{key}");
         let text = body["message"].as_str().unwrap();
         assert!(text.starts_with("people do not have inboxes: print your answer in the chat"), "{text}");
-        let chat = text.find("print in the chat").unwrap();
+        let chat = text.find("print your answer in the chat").unwrap();
         assert!(chat < text.find("work ask").unwrap() && chat < text.find("work update").unwrap());
         assert!(text.contains("Any new question or decision for the person"), "{text}");
         assert!(text.contains("even when the person is present"), "{text}");
