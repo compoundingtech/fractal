@@ -16,6 +16,10 @@ pub use smallclaims::replication::{
     ReplicationStatus, ReplicationTimings, UnhealthyProjection,
 };
 
+// Dormant until the complete agent-review policy is activated; never a serde gate variant.
+#[allow(dead_code)]
+mod evidence_contract;
+
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
 /// The diagnostic code of a call Claude's auto mode classifier denied.
