@@ -20,7 +20,7 @@
 use super::*;
 use crate::peer::{MAX_READ_MESSAGES, MessageMarksAnswer, SEAT_FRESHNESS_READS_FEATURE};
 use crate::model::StatusFrom;
-use crate::store::message_marks;
+use crate::store::{message_marks, relayed_closes};
 use std::collections::HashMap;
 
 /// How long `conversations status` waits for the recipient's host.
@@ -345,13 +345,15 @@ async fn read_paced(
 /// A message's host, and what it answered or, with the message, why it did not.
 type Heard = (String, Result<MessageMarksAnswer, (String, String)>);
 
-/// What each message's host said, as a status over the seats this member places on that host.
+/// What each message's host said, as a status over the seats this member places on that host. A
+/// close a host answered is queued for the client selectors (`relayed_closes`), which this read
+/// does not wait for.
 fn settle(
-    store: &Store,
+    store: &Arc<Store>,
     heard: Vec<Heard>,
 ) -> BTreeMap<String, Relayed> {
     let mut seats = BTreeMap::<String, Result<BTreeSet<String>, String>>::new();
-    heard
+    let settled: BTreeMap<String, Relayed> = heard
         .into_iter()
         .map(|(host, heard)| match heard {
             Ok(answer) => {
@@ -374,7 +376,25 @@ fn settle(
             }
             Err((subject, reason)) => (subject, Relayed::Unknown { host, reason }),
         })
-        .collect()
+        .collect();
+    let closes = settled
+        .iter()
+        .filter_map(|(subject, relayed)| match relayed {
+            Relayed::Answered { host, held: true, status: Some("closed"), latest: Some((receipt, at)) } => {
+                Some(relayed_closes::RelayedClose {
+                    message: subject.clone(),
+                    host: host.clone(),
+                    receipt: receipt.clone(),
+                    closed_at_unix_ms: *at,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    if let Err(error) = relayed_closes::queue(store, closes) {
+        tracing::warn!(error = %format!("{error:#}"), "could not queue relayed closes");
+    }
+    settled
 }
 
 /// [`read`] from a thread outside the runtime, such as a doctor worker, through the runtime

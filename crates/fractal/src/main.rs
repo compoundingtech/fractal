@@ -88,6 +88,7 @@ mod release_version;
 mod follow_tests;
 mod presentation;
 mod actor_contract;
+mod inspection_actor;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -178,6 +179,11 @@ const CLI_ENVIRONMENT_NAMES: [(&str, &str); 5] = [
     ("ST3_INCARNATION", "FRACTAL_INCARNATION"),
 ];
 
+/// The canonical argv graph, including attribution-only operational read options.
+fn command_graph() -> clap::Command {
+    inspection_actor::augment(Cli::command())
+}
+
 fn cli_command() -> clap::Command {
     // Resolve each family once, not once per argument, to warn once per conflict.
     // Leave legacy bindings untouched unless the preferred alias is actually present.
@@ -186,7 +192,7 @@ fn cli_command() -> clap::Command {
             (old, fractal_drivers::contracts::env(old).map(|_| new))
         })
     });
-    let mut command = cli_command_with_bindings(Cli::command(), &bindings);
+    let mut command = cli_command_with_bindings(command_graph(), &bindings);
     // Materialize inherited globals before hiding only web's copies. They remain
     // parseable so the explicit refusal below still reports unsupported options.
     command.build();
@@ -2966,7 +2972,7 @@ fn rename_proof_verdict(
     }
 }
 
-fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
+fn offline_rename_proof(command: &Command, matches: &clap::ArgMatches) -> Option<ExitCode> {
     let args = match command {
         Command::Agents { command: AgentsCommand::RenameId(args) }
         | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
@@ -2977,6 +2983,10 @@ fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
     }) = &args.command else {
         return None;
     };
+    if let Err(error) = inspection_actor::attribute(matches) {
+        stderr_message("st", format_args!("{error:#}"));
+        return Some(ExitCode::FAILURE);
+    }
     let (verdict, code) = rename_proof_verdict(file, fleet_anchor, after_revision.as_deref());
     println!("{verdict}");
     Some(ExitCode::from(code))
@@ -2990,7 +3000,7 @@ fn offline_rename_proof_arguments(arguments: &[std::ffi::OsString]) -> Option<Ex
     }
     let matches = cli_command().try_get_matches_from_mut(arguments).ok()?;
     let cli = Cli::from_arg_matches(&matches).ok()?;
-    offline_rename_proof(&cli.command)
+    offline_rename_proof(&cli.command, &matches)
 }
 
 async fn run_identity_rename(
@@ -5014,7 +5024,7 @@ fn read_contract_inventory_for_command(mut command: clap::Command) -> Value {
 }
 
 fn read_contract_inventory_json() -> Value {
-    read_contract_inventory_for_command(Cli::command())
+    read_contract_inventory_for_command(command_graph())
 }
 
 fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
@@ -5230,6 +5240,10 @@ fn cli_main() -> ExitCode {
     };
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
+    if let Err(error) = inspection_actor::attribute(&matches) {
+        stderr_message("st", format_args!("{error:#}"));
+        return ExitCode::FAILURE;
+    }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
@@ -11860,13 +11874,26 @@ fn render_performance(view: &Value) -> String {
         let _ = writeln!(out);
     }
     if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
-        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start",
+        let reserve = &view["lane_bursts"]["reserve"];
+        let seat = reserve["subject"].as_str().unwrap_or("a seat");
+        let reserve = match (reserve["full"].as_u64(), reserve["kept"].as_u64()) {
+            (Some(full), Some(kept)) if full == kept => format!(" · {} kept from starts for a burst (last judged for {seat})", show_gib(full)),
+            (Some(full), Some(kept)) => format!(" · {} kept from starts for a burst ({} while one is held; last judged for {seat})",
+                show_gib(full), show_gib(kept)),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start{reserve}",
             view["lane_bursts"]["held"], view["lane_bursts"]["waiting"]);
     }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
     out
+}
+
+/// Bytes as the lane reasons show them: GiB with one decimal.
+fn show_gib(bytes: u64) -> String {
+    format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
 }
 
 async fn doctor_request<T: serde::de::DeserializeOwned>(
@@ -20981,6 +21008,21 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 0
             }
         };
+        // A seat's host's relayed closes this member's own records now cover (relayed_closes.rs).
+        let relayed_store = store.clone();
+        let relayed = match relayed_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("relayed_closes.trim", || {
+            fractal_daemon::store::relayed_closes::trim(&relayed_store, LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("relayed close trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("relayed close trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -21014,7 +21056,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows and {marks} message marks, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows, {marks} message marks and {relayed} relayed closes, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),
