@@ -186,7 +186,7 @@ export interface RosterDecode {
 /** A roster whose latest frame decoded completely. */
 export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false }
 
-/** The loaded conversation window; older history is a boundary, not an available fetch operation. */
+/** The loaded conversation window and its served older-history boundary. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
   /** OMP task-block summaries with addressable child transcripts, never roster session IDs. */
@@ -194,6 +194,8 @@ export interface ConversationPage {
   /** Header values include their native source and as_of; absence is not inferred. */
   readonly header?: Readonly<Record<string, unknown>>
   readonly hasOlder: boolean
+  readonly olderCursor?: string
+  readonly older?: { readonly _tag: 'Loading' } | { readonly _tag: 'Failed'; readonly detail: string }
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }
   /** Incremental boundary relative to this exact preceding projection. */
@@ -344,6 +346,8 @@ export interface DataSource {
   readonly conversationInterest?: (agentRef: string) => Atom.Atom<void>
   /** Explicit pointer/focus intent; live admits it only after a visible thread's first-page frame. */
   readonly prefetchConversation?: (agentRef: string) => void
+  /** Fetch the served page before the loaded window; concurrent requests share one operation. */
+  readonly loadOlder?: (agentRef: string) => Promise<void>
   /** Explicit terminal-toggle pointer/focus intent; live retains a read-only viewer. */
   readonly prefetchTerminal?: (terminalRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */

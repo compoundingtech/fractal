@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, spyOn, userEvent, waitFor, within } from 'storybook/test'
-import { Transcript, type TranscriptAvailability, type TranscriptHistory, type TranscriptProps, type TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { Transcript, type TranscriptAvailability, type TranscriptHistory, type TranscriptOlderRequest, type TranscriptProps, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { TranscriptEmptyState } from './assistant-ui/composition/TranscriptFeedback'
 import { EmbraceRuntimeProvider, RuntimeAdoptedIds } from './assistant-ui/EmbraceRuntime'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
@@ -14,6 +14,7 @@ import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
+import { committedTranscriptHistory } from './story-play'
 
 const now = Date.parse('2026-01-15T12:01:00Z')
 const at = '2026-01-15T12:00:00Z'
@@ -86,6 +87,15 @@ export const scenarioExemptions: readonly string[] = [
   'HasOlderWithoutLoad:contract-fixture',
   'Interrupted:contract-fixture',
   'InterruptedLight:contract-fixture',
+  'LoadEarlierFailed:contract-fixture',
+  'LoadEarlierFailedLight:contract-fixture',
+  'LoadEarlierIdle:contract-fixture',
+  'LoadEarlierIdleLight:contract-fixture',
+  'LoadEarlierLoading:contract-fixture',
+  'LoadEarlierLoadingLight:contract-fixture',
+  'LoadEarlierPaging:contract-fixture',
+  'LoadEarlierPagingLight:contract-fixture',
+  'LoadEarlierPagingLong:contract-fixture',
   'Loading:contract-fixture',
   'LoadingLight:contract-fixture',
   'LongCommandRow:contract-fixture',
@@ -674,6 +684,164 @@ export const HasOlderWithoutLoad: Story = { tags: ['critical'], args: { history:
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
 } }
 export const HasOlderLight: Story = { ...HasOlderWithoutLoad, args: { ...HasOlderWithoutLoad.args, scheme: 'light' } }
+/** Prose long enough that a few turns overflow the lane, so the older page lands above the reader's line. */
+function pagingTurn(id: string): TranscriptTurn {
+  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${id}/prompt`, role: 'user', text: `Prompt ${id}: keep my reading position.`, attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' } }
+  const answer: TextItem = { _tag: 'Text', id: `${id}/answer`, role: 'assistant', text: `Answer ${id}. ${'The reader keeps this line while older history arrives above it. '.repeat(8)}`, attachments: [], streaming: false, at, sender: { kind: 'agent', label: 'Assistant' } }
+  return { id, prompt, items: [answer], work: workLogTurnFromItems([prompt, answer], { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }), senderCaptions: { [answer.id]: 'Assistant' } }
+}
+const pagingTurns = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => pagingTurn(`${prefix}-${index}`))
+const pagingRequests = fn()
+/**
+ * A host with a data source's paging contract: `loadOlder` returns a promise that the Deliver/Fail controls settle explicitly,
+ * and request state reaches the kit as `older`. A browser runner can drive the same controls. `initial` starts in a request
+ * state for screenshots; `fill` gives a one-turn tail the whole lane so the boundary stays in view without scrolling.
+ */
+function LoadEarlierStory({ scheme = 'dark', tail, older, initial, fill = false }: { scheme?: Scheme; tail: number; older: number; initial?: TranscriptOlderRequest; fill?: boolean }) {
+  const tailTurns = React.useMemo(() => pagingTurns('tail', tail), [tail])
+  const olderTurns = React.useMemo(() => pagingTurns('older', older), [older])
+  const [request, setRequest] = React.useState<TranscriptOlderRequest | undefined>(initial)
+  const [loaded, setLoaded] = React.useState(false)
+  const settle = React.useRef<((outcome: 'delivered' | 'failed') => void) | undefined>(undefined)
+  const loadOlder = React.useCallback(() => new Promise<void>(resolve => {
+    pagingRequests()
+    setRequest({ _tag: 'Loading' })
+    settle.current = outcome => {
+      settle.current = undefined
+      if (outcome === 'delivered') { setLoaded(true); setRequest(undefined) } else setRequest({ _tag: 'Failed' })
+      resolve()
+    }
+  }), [])
+  const onLoadEarlier = React.useCallback(() => { void loadOlder() }, [loadOlder])
+  const data = React.useMemo<TranscriptStoryData>(() => ({ turns: loaded ? [...olderTurns, ...tailTurns] : tailTurns, sync: { _tag: 'Live', since: now - 5000 } }), [loaded, olderTurns, tailTurns])
+  const history: TranscriptHistory = loaded ? { _tag: 'Complete' } : { _tag: 'HasOlder', onLoadEarlier, ...(request === undefined ? {} : { older: request }) }
+  return <main data-scheme={scheme} data-testid="paging-host" {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <div><button type="button" onClick={() => settle.current?.('failed')}>Fail older page</button><button type="button" onClick={() => settle.current?.('delivered')}>Deliver older page</button></div>
+    <div {...stylex.props(fill ? styles.frame : styles.paging)}><RuntimeTranscript data={data} onRetry={() => {}} history={history} /></div>
+  </main>
+}
+/** Screenshotable boundary states: a one-turn tail filling the lane, no interaction, each request state from first paint. */
+const boundaryRender = (initial?: TranscriptOlderRequest): Story['render'] => args => <LoadEarlierStory scheme={args.scheme} tail={1} older={4} initial={initial} fill />
+const boundaryPlay = (state: string, note: string, button: string): Story['play'] => async ({ canvasElement }) => {
+  const boundary = await within(canvasElement).findByTestId('history-boundary')
+  await expect(boundary).toHaveAttribute('data-state', state)
+  await expect(within(boundary).getByTestId('history-boundary-note')).toHaveTextContent(note)
+  await expect(within(boundary).getByRole('button', { name: button })).toBeVisible()
+}
+export const LoadEarlierIdle: Story = { tags: ['critical'], render: boundaryRender(), play: boundaryPlay('idle', 'Earlier messages not loaded', 'Load earlier messages') }
+export const LoadEarlierIdleLight: Story = { ...LoadEarlierIdle, args: { scheme: 'light' } }
+export const LoadEarlierLoading: Story = { tags: ['critical'], render: boundaryRender({ _tag: 'Loading' }), play: boundaryPlay('loading', 'Earlier messages not loaded', 'Loading earlier messages…') }
+export const LoadEarlierLoadingLight: Story = { ...LoadEarlierLoading, args: { scheme: 'light' } }
+export const LoadEarlierFailed: Story = { tags: ['critical'], render: boundaryRender({ _tag: 'Failed' }), play: boundaryPlay('failed', "Couldn't load earlier messages", 'Retry') }
+export const LoadEarlierFailedLight: Story = { ...LoadEarlierFailed, args: { scheme: 'light' } }
+/** The reader's first visible message, measured from the lane's top edge. */
+const laneOffset = (lane: HTMLElement, id: string) => lane.querySelector(`[data-item-id="${id}"]`)!.getBoundingClientRect().top - lane.getBoundingClientRect().top
+/** Loading is a focusable, busy, pressed-once button; failure is inline with Retry; a delivered page removes the boundary and keeps the reader's line. */
+export const LoadEarlierPaging: Story = { tags: ['critical'], render: args => <LoadEarlierStory scheme={args.scheme} tail={3} older={4} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  pagingRequests.mockClear()
+  const lane = await canvas.findByTestId('transcript-scroll')
+  const boundary = await canvas.findByTestId('history-boundary')
+  // The reader scrolls up to the boundary; reader input owns the position from here.
+  lane.scrollTop = 0
+  await nextFrame()
+  await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
+  await expect(pagingRequests).toHaveBeenCalledTimes(1)
+  await expect(boundary).toHaveAttribute('aria-busy', 'true')
+  const pending = within(boundary).getByRole('button', { name: 'Loading earlier messages…' })
+  await expect(pending).toHaveAttribute('aria-disabled', 'true')
+  await userEvent.click(pending)
+  await expect(pagingRequests).toHaveBeenCalledTimes(1)
+  await userEvent.click(canvas.getByRole('button', { name: 'Fail older page' }))
+  await expect(within(boundary).getByTestId('history-boundary-note')).toHaveTextContent("Couldn't load earlier messages")
+  await expect(boundary).toHaveAttribute('aria-busy', 'false')
+  await userEvent.click(within(boundary).getByRole('button', { name: 'Retry' }))
+  await expect(pagingRequests).toHaveBeenCalledTimes(2)
+  await nextFrame()
+  const before = laneOffset(lane, 'tail-0/prompt')
+  await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+  await waitFor(() => expect(canvas.queryByTestId('history-boundary')).toBeNull())
+  await waitFor(() => expect(lane.querySelector('[data-item-id="older-3/answer"]')).not.toBeNull())
+  await nextFrame()
+  await expect(Math.abs(laneOffset(lane, 'tail-0/prompt') - before), 'prepend moved the first visible message').toBeLessThanOrEqual(2)
+  await expect(lane.scrollTop).toBeGreaterThan(0)
+  await expect(canvas.getByText('New messages ↓'), 'older history is not news').not.toBeVisible()
+} }
+export const LoadEarlierPagingLight: Story = { ...LoadEarlierPaging, args: { scheme: 'light' } }
+/** Reset outside the measurement so each repetition starts with the same fully mounted tail. */
+function RepeatedLoadEarlierStory({ scheme }: { scheme?: Scheme }) {
+  const [iteration, setIteration] = React.useState(0)
+  const root = React.useRef<HTMLDivElement>(null)
+  return <div ref={root}>
+    <button type="button" onClick={() => setIteration(value => value + 1)}>Reset transcript</button>
+    <React.Profiler id="history-prepend" onRender={(_id, _phase, duration) => {
+      const host = root.current?.querySelector<HTMLElement>('[data-testid="paging-host"]')
+      if (host?.dataset.prependMeasuring === 'true') host.dataset.prependReactMs = String(Number(host.dataset.prependReactMs ?? 0) + duration)
+    }}><LoadEarlierStory key={iteration} scheme={scheme} tail={30} older={30} /></React.Profiler>
+  </div>
+}
+/**
+ * Five independent prepends per viewport/theme. Only native delivery and the following 24 paint opportunities
+ * (about 400ms at 60Hz) are inside each bracket: no instrumented interactions, assertions, polling or idle timer.
+ * A single shared-runner scheduling outlier is tolerated; sustained stalls fail p95 <=50ms or >50ms count <=1.
+ * Raw intervals, max and React render time remain diagnostics, not an unsupported attribution of scheduler pauses.
+ */
+export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarlierStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
+  const canvas = within(canvasElement)
+  for (let iteration = 0; iteration < 5; iteration++) {
+    if (iteration > 0) await userEvent.click(canvas.getByRole('button', { name: 'Reset transcript' }))
+    await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
+    const lane = await committedTranscriptHistory(canvasElement, 30, abortSignal)
+    lane.scrollTop = 0
+    const boundary = await canvas.findByTestId('history-boundary')
+    await nextFrame()
+    await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
+    await nextFrame()
+    const before = laneOffset(lane, 'tail-0/prompt')
+    const deliver = canvas.getByRole('button', { name: 'Deliver older page' })
+    const host = canvas.getByTestId('paging-host')
+    const intervals: number[] = []
+    let frame = 0
+    const { promise, resolve, reject } = Promise.withResolvers<void>()
+    const onAbort = () => reject(new Error('Prepend measurement aborted'))
+    delete host.dataset.prependReactMs
+    host.dataset.prependMeasuring = 'true'
+    try {
+      if (abortSignal.aborted) throw new Error('Prepend measurement aborted')
+      abortSignal.addEventListener('abort', onAbort, { once: true })
+      frame = requestAnimationFrame(start => {
+        let last = start
+        const record = (time: number) => {
+          intervals.push(time - last)
+          last = time
+          if (intervals.length === 24) resolve()
+          else frame = requestAnimationFrame(record)
+        }
+        deliver.click()
+        frame = requestAnimationFrame(record)
+      })
+      await promise
+    } finally {
+      cancelAnimationFrame(frame)
+      abortSignal.removeEventListener('abort', onAbort)
+      host.dataset.prependMeasuring = 'false'
+    }
+    const sorted = [...intervals].sort((a, b) => a - b)
+    const max = sorted.at(-1)!, p95 = sorted[Math.ceil(sorted.length * 0.95) - 1]!
+    const longFrames = intervals.filter(duration => duration > 50).length
+    host.dataset.prependFrameMaxMs = max.toFixed(1)
+    host.dataset.prependFrameP95Ms = p95.toFixed(1)
+    host.dataset.prependFrameCount = String(intervals.length)
+    host.dataset.prependLongFrameCount = String(longFrames)
+    host.dataset.prependFrameIntervalsMs = JSON.stringify(intervals)
+    const diagnostic = `prepend ${iteration + 1}/5: frames=${intervals.map(value => value.toFixed(1)).join(',')}; React=${host.dataset.prependReactMs === undefined ? 'not reported by this build' : `${host.dataset.prependReactMs}ms`}`
+    await expect(canvas.queryByTestId('history-boundary'), diagnostic).toBeNull()
+    await expect(Math.abs(laneOffset(lane, 'tail-0/prompt') - before), 'prepend moved the first visible message').toBeLessThanOrEqual(2)
+    await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length, 'the older page mounted whole').toBeLessThan(60)
+    await expect(p95, `p95 <=50ms; ${diagnostic}`).toBeLessThanOrEqual(50)
+    await expect(longFrames, `at most one shared-runner frame >50ms; ${diagnostic}`).toBeLessThanOrEqual(1)
+  }
+} }
 export const PendingSend: Story = { tags: ['critical'], args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
   await expect(prompt).toHaveAttribute('data-send-state', 'pending')
@@ -1099,7 +1267,7 @@ export const NoGreenAllStates: Story = { tags: ['critical'], render: args => <No
 export const NoGreenAllStatesLight: Story = { ...NoGreenAllStates, args: { scheme: 'light' } }
 const styles = stylex.create({
   root: { height: '100vh', width: '100%', minWidth: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
-  frame: { flex: '1 1 0', minHeight: 0 }, cell: { height: '720px', display: 'flex', flexDirection: 'column' }, detail: { padding: s.lg, maxHeight: g.previewMax, overflow: 'auto', fontSize: t.metaSize },
+  frame: { flex: '1 1 0', minHeight: 0 }, cell: { height: '720px', display: 'flex', flexDirection: 'column' }, paging: { height: '420px', flexShrink: 0, display: 'flex', flexDirection: 'column' }, detail: { padding: s.lg, maxHeight: g.previewMax, overflow: 'auto', fontSize: t.metaSize },
   thread: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }, composerDock: { flexShrink: 0, boxSizing: 'border-box', width: '100%', maxWidth: g.lane, marginInline: 'auto', padding: s.lg },
   all: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: s.lg, padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
 })
