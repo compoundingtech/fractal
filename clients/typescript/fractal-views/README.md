@@ -74,11 +74,23 @@ This seam changes no storage, schema or wire format. Mixed parents, declared
 defaults/reset, availability, optimistic application and revision/cycle-cut
 settlement belong to format-v2 work, not this API.
 
+`node scripts/check-sidebar-fixtures.mjs` gates every sidebar JSON fixture and
+seed snapshot recursively before publication. The TypeScript runner invokes the
+same gate before replay. `node --test scripts/check-sidebar-fixtures.test.mjs`
+exercises the public-data policy and schema checks. Subjects use `person/test`,
+`agent/test/*`, or numbered `machine/test-*` / `host/test-*` identities; the
+retained legacy `machine/retained` is synthetic. Folder IDs use the fixed
+zero-prefixed UUID family. New case names use `synthetic-case-N`, labels use
+`Synthetic Folder N` / `Synthetic Resource N`, and revisions use `claim/test-N`.
+Unknown schema keywords fail closed, so extending the behavior format requires
+updating its validator and public-identity policy together.
+
 From the repository root with Node 24 and Corepack (or `nix develop .#web`):
 
 ```sh
 corepack enable # Outside the Nix web shell
 pnpm install --frozen-lockfile
+node scripts/check-sidebar-fixtures.mjs
 pnpm --filter @fractal/views test
 pnpm --filter @fractal/views typecheck
 ```
