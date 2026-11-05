@@ -25,7 +25,7 @@ fn window(tx: &Transaction<'_>, hash: &str, path: &str) -> rusqlite::Result<Vec<
 }
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hfb40761381a8 owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ "
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h2ab181ca837b owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_run_eta_mission_changes (mission_id TEXT PRIMARY KEY,changed_index INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_run_eta_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_run_eta_terminal_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
@@ -33,6 +33,8 @@ CREATE TRIGGER IF NOT EXISTS run_eta_terminal_pending AFTER INSERT ON local_run_
  INSERT OR IGNORE INTO local_run_eta_terminal_pending VALUES(NEW.run_id); END;
 CREATE INDEX IF NOT EXISTS local_run_eta_mission_changed ON local_run_eta_mission_changes(changed_index);
 CREATE INDEX IF NOT EXISTS step_runs_eta_remaining ON step_runs(definition_hash,step_path,run_id,generation_id) WHERE status NOT IN('completed','failed','cancelled','skipped');
+-- Prevent the v3 parent from replacing v4 triggers when reopening a fresh v4 store.
+INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');
 ")?;
     if tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_triggers_v4')",
