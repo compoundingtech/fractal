@@ -13,7 +13,7 @@ import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { Feed, Fleet } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { Agent, decodeUnknownSync } from '@fractal/client/schema'
-import { openAgent } from '@fractal/sdk/effect'
+import { openAgent } from '@fractal/sdk/read'
 import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))

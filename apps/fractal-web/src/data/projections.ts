@@ -9,7 +9,7 @@
  */
 import * as Fractal from '@fractal/client/schema'
 import { classifySubagentDriver } from '@fractal/client'
-import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/effect'
+import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/read'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
 import * as Schema from 'effect/Schema'

@@ -1,6 +1,6 @@
 /** Constant generated rows over the deterministic fixture world. */
 import type { Agent, Attention, Mission, TerminalScreen } from '@fractal/client/schema'
-import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 
 import type { ProposedMissionFields } from '../missions/model.ts'
