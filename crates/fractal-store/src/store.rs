@@ -248,6 +248,9 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod relayed_closes;
+#[cfg(test)]
+mod relayed_closes_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};

@@ -1515,6 +1515,8 @@ pub struct MissionRunSummary {
     pub current_steps: Vec<Value>,
     pub must_act: String,
     pub state_since: String,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default)]
     pub outcome: Option<MissionRunOutcome>,
@@ -1555,6 +1557,8 @@ pub struct MissionStep {
     #[serde(default)]
     pub keep_open: bool,
     pub since: String,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     #[serde(default)]
     pub last_progress: Option<String>,
     #[serde(default)]
@@ -1691,6 +1695,8 @@ pub struct Work {
     pub nudged_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_elapsed_ms: u64,
+    #[serde(default)]
+    pub execution_waited_ms: u64,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     pub blocked_reason: Option<String>,

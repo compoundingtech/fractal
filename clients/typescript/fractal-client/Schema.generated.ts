@@ -3081,6 +3081,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "blockers": optionalKey(Schema.Array(Id)),
   "claim_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
+  /** Authoritative terminal transition of the selected attempt, in Unix milliseconds. */
+  "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Authoritative terminal transition of the selected attempt, in Unix milliseconds." }),
   "constraints": optionalKey(Schema.Array(Schema.String)),
   "goals": optionalKey(Schema.Array(Schema.String)),
   "id": Id,
@@ -3099,6 +3101,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "since": Timestamp,
+  /** First execution opening of the selected attempt, in Unix milliseconds. */
+  "started_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "First execution opening of the selected attempt, in Unix milliseconds." }),
   "state": WorkState,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "wake": Schema.OptionFromOptionalNullOr(MissionWake, NULL_NONE),
@@ -3116,6 +3120,8 @@ export type MustActEncoded = typeof MustAct.Encoded
 export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "after": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
   "blocker": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE),
+  /** First terminal transition, in Unix milliseconds; unaffected by outcome edits. */
+  "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "First terminal transition, in Unix milliseconds; unaffected by outcome edits." }),
   "current_steps": Schema.Array(Schema.Struct({ "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "id": StepRunId, /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
 "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }), "since": Timestamp, "state": WorkState, "title": Schema.OptionFromNullOr(Schema.String) })),
   "deadline": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
@@ -3128,6 +3134,8 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "phase": Schema.String,
   "progress": Schema.Struct({ "done": Schema.Int, "total": Schema.Int }),
   "requester": ActorRef,
+  /** Run creation, in Unix milliseconds. */
+  "started_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Run creation, in Unix milliseconds." }),
   "state_since": Timestamp,
   "status": Schema.String,
   /** The run's steps: for an open run or a mission's latest run, and for every run in a mission detail read. */
@@ -3535,6 +3543,8 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "definition_id": Revision,
   "execution_elapsed_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))),
   "execution_started_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
+  /** Accumulated execution wait against this attempt's wait budget. */
+  "execution_waited_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))).annotate({ description: "Accumulated execution wait against this attempt's wait budget." }),
   "gate_kind": Schema.OptionFromOptionalNullOr(Schema.Literals(["watch","predicate","command","llm","human","mixed","run"]), NULL_NONE),
   "generation_id": Id,
   "goals": Schema.Array(Schema.String),

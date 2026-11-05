@@ -9413,3 +9413,15 @@ async fn the_work_fence_still_refuses_an_incarnation_that_is_not_live() {
     seat.cedar_observes("running", Some("on-cedar-next"));
     assert!(!seat.refused("renew", MOVED_SEAT, "on-cedar-next", "other-lease").await.is_empty());
 }
+
+#[test]
+fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
+    const G: u64 = 1 << 30;
+    let line = |reserve: serde_json::Value| render_performance(&serde_json::json!({"lane_bursts": {"held": 0, "waiting": 1, "dropped_by_lease": 0, "reserve": reserve}}))
+        .lines().find(|line| line.starts_with("LANE BURSTS")).unwrap().to_owned();
+    assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 16 * G})),
+        "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (last judged for agent/elm)");
+    assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
+        "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
+    assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
+}
