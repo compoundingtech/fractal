@@ -193,9 +193,11 @@ pub fn report(state: &AppState, session: &ClientSession, request: DeviceResultRe
         || request.result.as_ref().is_some_and(|v| serde_json::to_vec(v).map_or(true, |b| b.len() > 8192)) { return Err(validation("invalid device result")); }
     let resource = {
         let mut rows = ROWS.lock().map_err(|_| storage_error())?;
+        let now = client_now_ms();
+        sweep(&mut rows, &state.node, now);
         let row = rows.get_mut(&(state.node.clone(), request.command_id.clone())).ok_or_else(missing)?;
         authorize_read(row, &session)?;
-        row.finish(&request, client_now_ms(), super::client_presence::has_collection_stream(&state.node, &session.actor));
+        row.finish(&request, now, super::client_presence::has_collection_stream(&state.node, &session.actor));
         row.resource.clone()
     };
     changed(&state.node);
@@ -318,5 +320,40 @@ mod tests {
             assert!(!client_presence::has_collection_stream("deadline-state", &session.actor));
             assert!(client_presence::list("deadline-state", 100).is_empty());
         }
+    }
+    #[test]
+    fn report_enforces_terminal_retention_before_original_deadline_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState {
+            seat_admission: Default::default(),
+            store: Arc::new(Store::open(&root.path().join("graph.db"), "report-retention").unwrap()),
+            notify: Arc::new(Notify::new()), event_notify: watch::channel(0u64).0,
+            node: "report-retention".into(), state_dir: root.path().into(),
+            pty_root: root.path().join("pty"), pty_binary: root.path().join("unused"),
+            fleet_id: None, configured_peers: vec![], client_relay: None,
+            native_session_home: None, planner_default: Default::default(),
+            harness_question_sink: None, owning_person: None,
+            assistant_receipts: Default::default(), private_notes: Default::default(),
+        };
+        let now = client_now_ms();
+        let claim = state.store.append_claim(&ClaimInput {
+            subject: "grant/test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
+            fields: serde_json::from_value(json!({"session_actor":"client/retention-phone","person_id":"person/ada",
+                "device_id":"device/test","scopes":["read.projections"],"expires_at_unix_ms":(now + 600_000) as u64})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = paired_client_session(&state, &claim, "gateway", false).unwrap();
+        for (id, terminal_at) in [("retained", now - 1_000), ("forgotten", now - RETENTION_MS - 1_000)] {
+            let mut row = command(); row.expires = terminal_at + 59_000;
+            row.resource["session_actor"] = json!(session.actor);
+            row.finish(&result(), terminal_at, true);
+            ROWS.lock().unwrap().insert((state.node.clone(), id.into()), row);
+        }
+        let mut request = result(); request.command_id = "retained".into(); request.outcome = "failed".into();
+        let retained = report(&state, &session, request).unwrap();
+        assert_eq!(retained["state"], "completed"); assert_eq!(retained["result"], json!({"ok":true}));
+        let mut request = result(); request.command_id = "forgotten".into();
+        assert_eq!(report(&state, &session, request).unwrap_err().status, StatusCode::NOT_FOUND);
+        ROWS.lock().unwrap().remove(&(state.node.clone(), "retained".into()));
     }
 }
