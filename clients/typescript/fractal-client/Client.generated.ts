@@ -465,6 +465,15 @@ export class FractalClient {
         return this.request('DELETE', '/v1/client/push-registration', undefined, undefined, undefined, requestOptions);
     }
 
+    /** Issue one expiring foreground command; never retried or replayed by the client. */
+    async deviceCommand(command: DeviceCommandRequest, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> {
+        return this.request('POST', '/v1/client/device-commands', command, undefined, undefined, requestOptions);
+    }
+
+    async deviceResult(result: DeviceResult, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> {
+        return this.request('POST', '/v1/client/device-results', result, undefined, undefined, requestOptions);
+    }
+
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {
         return this.request<PairingChallenge>('POST', '/v1/client/pairings', request, undefined, undefined, requestOptions);
     }
