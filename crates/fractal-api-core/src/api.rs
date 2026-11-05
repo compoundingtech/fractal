@@ -8490,6 +8490,15 @@ impl DoctorClock {
         Self { total, check }
     }
 
+    #[cfg(test)]
+    fn with_clock_for_test(
+        total: Duration,
+        check: Duration,
+        now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Self {
+        Self { total: smallclaims::read_budget::ReadBudget::with_clock_for_test("/v1/doctor", total, now), check }
+    }
+
     /// Run one check under its own deadline. A check whose deadline passed reports `timeout`
     /// with its elapsed time, whatever it returned; an error fails this check alone.
     pub(crate) fn checks(

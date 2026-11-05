@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "The doctor total-budget test starts with an already expired zero-duration budget rather than assuming two sleeping checks start before a real deadline. It retains the late-work and timeout assertions; no product deadline, retry or behavior change."
+    "detail": "The doctor total-budget test advances an injected monotonic clock inside the first two checks, then verifies a third check is skipped. The clock injection is available only under test or test-support; normal budgets still use the system monotonic clock. No product deadline, retry or behavior change."
   },
   "downtime": {
     "status": "none",
