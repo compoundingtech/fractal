@@ -22,7 +22,10 @@ pub fn decode_notice<T: NoticeModel>(value: serde_json::Value) -> anyhow::Result
             .build(&schema)
             .expect("supported notice schema")
     });
-    let mut envelope = serde_json::json!({"model": T::NAME, "value": value});
+    let mut fields = serde_json::Map::new();
+    fields.insert("model".into(), T::NAME.into());
+    fields.insert("value".into(), value);
+    let mut envelope = serde_json::Value::Object(fields);
     VALIDATOR
         .validate(&envelope)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -970,7 +973,12 @@ impl TryFrom<String> for NoticeTimestamp {
         if !(PATTERN.is_match(&value)) {
             return Err("pattern".into());
         }
-        if !(chrono::DateTime::parse_from_rfc3339(&value).is_ok()) {
+        if !(chrono::DateTime::parse_from_rfc3339(&value).is_ok_and(|instant| {
+            value.get(17..19) != Some("60") || {
+                let utc = instant.with_timezone(&chrono::Utc);
+                chrono::Timelike::hour(&utc) == 23 && chrono::Timelike::minute(&utc) == 59
+            }
+        })) {
             return Err("date-time".into());
         }
         Ok(Self(value))

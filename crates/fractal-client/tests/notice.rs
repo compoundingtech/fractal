@@ -69,4 +69,24 @@ fn notice_fixture_models() {
     round_trip::<NoticeFence>(
         &serde_json::json!({"notice_id": id, "source_revision": "v1", "control_revision": null}),
     );
+    for (timestamp, accepted) in [
+        ("2026-10-01T10:00:59Z", true),
+        ("2026-10-01T10:00:60Z", false),
+        ("2016-12-31T23:59:60Z", true),
+        ("2016-12-31T23:59:60.5Z", true),
+    ] {
+        let scalar = Value::String(timestamp.into());
+        assert_eq!(
+            serde_json::from_value::<NoticeTimestamp>(scalar.clone()).is_ok(),
+            accepted
+        );
+        assert_eq!(decode_notice::<NoticeTimestamp>(scalar).is_ok(), accepted);
+        let mut nested = fixture["snapshot"].clone();
+        nested["input"]["created_at"] = Value::String(timestamp.into());
+        assert_eq!(
+            serde_json::from_value::<NoticeSnapshot>(nested.clone()).is_ok(),
+            accepted
+        );
+        assert_eq!(decode_notice::<NoticeSnapshot>(nested).is_ok(), accepted);
+    }
 }

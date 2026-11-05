@@ -23,7 +23,10 @@ pub fn decode_notice<T: NoticeModel>(value: serde_json::Value) -> anyhow::Result
         schema["oneOf"] = serde_json::json!(branches);
         jsonschema::options().should_validate_formats(true).build(&schema).expect("supported notice schema")
     });
-    let mut envelope = serde_json::json!({"model": T::NAME, "value": value});
+    let mut fields = serde_json::Map::new();
+    fields.insert("model".into(), T::NAME.into());
+    fields.insert("value".into(), value);
+    let mut envelope = serde_json::Value::Object(fields);
     VALIDATOR.validate(&envelope).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(serde_json::from_value(envelope["value"].take())?)
 }
@@ -148,7 +151,8 @@ fn emit(name: &str, node: &Value, out: &mut String) -> Result<()> {
         match node["format"].as_str() {
             Some("date-time") => check(
                 out,
-                "chrono::DateTime::parse_from_rfc3339(&value).is_ok()",
+                // jsonschema 0.33's private is_valid_time permits :60 only at UTC 23:59.
+                "chrono::DateTime::parse_from_rfc3339(&value).is_ok_and(|instant| value.get(17..19) != Some(\"60\") || { let utc = instant.with_timezone(&chrono::Utc); chrono::Timelike::hour(&utc) == 23 && chrono::Timelike::minute(&utc) == 59 })",
                 "date-time",
             )?,
             Some("uri-reference") => pattern_check(
