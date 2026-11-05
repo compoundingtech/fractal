@@ -248,6 +248,9 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod relayed_closes;
+#[cfg(test)]
+mod relayed_closes_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -287,6 +290,7 @@ pub mod document_index_tests;
 pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
+pub mod run_eta;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
@@ -7039,6 +7043,7 @@ impl Store {
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
+                | "work.handoff-returned"
                 | "work.extended"
                 | "subagent.appeared"
                 | "subagent.renewed"
@@ -17529,7 +17534,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -18005,6 +18010,16 @@ pub fn project_mission_run_update(
             .optional()
             .map_err(internal)?;
         if current_attempt != Some(claim_attempt) {
+            return Ok(());
+        }
+        if claim.kind == "work.handoff-returned" {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE step_runs SET assignee=?2, available_to='[]', status='ready', lease_owner=NULL,
+                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, readiness_epoch=?3,
+                 updated_at_unix_ms=?4 WHERE subject=?1",
+                params![claim.subject, fields["handoff_to"].as_str(), fields["readiness_epoch"].as_u64(),
+                    claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
             return Ok(());
         }
         if claim.kind == "work.released"
@@ -20105,6 +20120,11 @@ fn enrich_step_wake_with(
             .collect(),
         delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
             harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
+        staging_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working"
+                && current_incarnation_key == wake_incarnation_key
+                && matches!(harness.driver.as_deref(), Some("pi" | "omp"))
         }),
     };
     let failure = connection
