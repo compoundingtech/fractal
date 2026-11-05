@@ -575,8 +575,11 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
         self.assertIn('end typescript-client child diagnostics', done.stderr)
 
     def test_empty_first_entry_and_unexported_path_are_reported_without_external_tools(self):
+        # Bash 5.2 bypasses command_not_found_handle when PATH is wholly empty.
+        # ':' keeps the current-directory-only search while exercising the real
+        # missing-command dispatch on both 5.2 and 5.3.
         for prefix, prepend, declaration in [
-                ('PATH=; export PATH; ', '', 'declare -x PATH=""'),
+                ('PATH=:; export PATH; ', '', 'declare -x PATH=":"'),
                 ('', '', f'declare -x PATH=":{self.tools}"'),
                 ('export -n PATH; ', str(self.tools), f'declare -- PATH="{self.tools}:{self.tools}"')]:
             with self.subTest(prefix=prefix):
@@ -585,6 +588,18 @@ class ChildShellDiagnosticsTest(unittest.TestCase):
                 self.assertIn(declaration, done.stderr)
                 self.assertIn(f'empty={str(not prepend).lower()}', done.stderr)
                 self.assertIn('end typescript-client child diagnostics', done.stderr)
+
+    def test_empty_path_reporter_uses_only_builtins(self):
+        # Test the reporter's zero-length PATH independently of that dispatch
+        # difference, still through the exported function in the child shell.
+        done = self.run_child(PROBE_PREPEND='',
+                              PROBE_COMMAND='PATH=; export PATH; command_not_found_handle pnpm')
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('declare -x PATH=""', done.stderr)
+        self.assertIn("child PATH first entry='' empty=true", done.stderr)
+        self.assertIn('end typescript-client child diagnostics', done.stderr)
+        self.assertFalse(self.record.exists())
+        self.assertEqual(done.stdout, '')
 
     def test_handler_is_not_installed_without_the_runner_opt_in(self):
         env = dict(self.environment)
