@@ -225,8 +225,8 @@ lifecycle timestamps, not elapsed execution time or an ETA.
 Run summaries also expose optional nullable `eta` on published cards and detail reads.
 Its exact shape is `{remaining_low_ms, remaining_high_ms, basis: {method, samples}, as_of}`.
 Durations are integer milliseconds (p25/p75); `as_of` is the integer Unix-millisecond
-publication cut, not an estimated finish timestamp. Completed samples match the current
-definition hash and step path; person-held time is excluded, but queueing and agent waits
+publication cut, not an estimated finish timestamp. Candidate samples come only from the newest 64 terminal runs per
+definition hash (first terminal time, then subject); unusable candidates are not replaced by older runs. Step paths match; person-held time is excluded, but queueing and agent waits
 count. Remaining steps sum along declared dependency critical paths (`critical-path`),
 or sequentially when no dependencies are declared (`per-step`). `samples` is the smallest
 sample count among remaining steps, including one or two prior runs; zero means no remaining steps and zero remaining duration. A missing sample or
