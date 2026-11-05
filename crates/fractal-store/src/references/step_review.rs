@@ -1,4 +1,3 @@
-//! Concrete step responsibility only; hierarchical boundaries are assembled by missions.
 use super::{Scope, St3Error, agent_review};
 use crate::model::StepRunView;
 use crate::store::{ReferenceGraph, identities, step_timing_events};
@@ -7,17 +6,14 @@ use smallclaims::error::internal;
 use std::collections::BTreeSet;
 
 fn unresolved(subject: &str) -> St3Error {
-    St3Error::new(
-        "reviewer-owner-unresolved",
-        format!("review responsibility `{subject}` is unresolved"),
-    )
+    St3Error::new("reviewer-owner-unresolved", subject)
 }
 
-/// Internal cross-crate adapter for missions; no production gate dispatch calls this.
 /// The caller supplies a raw step/assignment/pool view and requester from the same
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
 /// LOCAL step only: not carried source steps, a run, child tree, or parent boundary.
 /// Slice 5b must add those boundaries before any production caller uses this helper.
+/// Slice 5c must verify real person-work delegation before any production caller.
 /// Owner naming failures surface as `lifecycle-unavailable` until slice 5b.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
@@ -77,10 +73,14 @@ pub fn validate_step_reviewer(
             include(actor)?;
         }
     }
-    let mut submissions = connection
-        .prepare_cached("SELECT actor FROM claims WHERE subject=?1 AND kind='work.submitted'")
+    // Any agent writing work on this step contributed; over-exclusion is safer.
+    let mut work = connection
+        .prepare_cached(
+            "SELECT actor FROM claims WHERE subject=?1 AND kind GLOB 'work.*'
+         AND (actor GLOB 'agent/*' OR (actor IS NULL AND kind='work.submitted'))",
+        )
         .map_err(internal)?;
-    let actors = submissions
+    let actors = work
         .query_map([&step.subject], |row| row.get::<_, Option<String>>(0))
         .map_err(internal)?;
     for actor in actors {

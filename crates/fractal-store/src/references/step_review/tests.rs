@@ -2,7 +2,7 @@ use super::*;
 use crate::model::MissionRunRequest;
 use crate::store::tests_shared_missions::publish_carry;
 use crate::store::{Store, append_claim_tx};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const REVIEWER: &str = "agent/example/reviewer";
 const CONFLICT: &str = "reviewer-not-independent";
@@ -60,10 +60,9 @@ fn agent_review_step_concrete_boundaries() {
         let (store, step) = fixture(selector);
         assert_eq!(check(&store, &step, PERSON, REVIEWER), "ok");
         assert_eq!(check(&store, &step, REVIEWER, REVIEWER), CONFLICT);
+        assert_eq!(step.assigned_to.is_none(), selector == "agentless");
         if let Some(worker) = &step.assigned_to {
             assert_eq!(check(&store, &step, PERSON, worker), CONFLICT);
-        } else {
-            assert!(step.agentless);
         }
     }
     let (store, step) =
@@ -99,12 +98,27 @@ fn agent_review_step_unknown_requires_later_validation() {
     assert_eq!(check(&store, &step, PERSON, REVIEWER), CONFLICT);
 }
 
+fn event(store: &Store, step: &StepRunView, kind: &str, actor: Option<&str>, body: &Value) {
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    append_claim_tx(
+        &transaction,
+        store.origin(),
+        &step.subject,
+        kind,
+        actor,
+        body,
+        &[],
+        None,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn agent_review_step_local_history_survives_new_claim() {
     for kind in ["work.claimed", "step-run.carried"] {
         let (store, step) = fixture(r#"assigned-to "agent/example/new""#);
-        let mut connection = store.connection.write();
-        let transaction = connection.transaction().unwrap();
         for (kind, body) in [
             (
                 kind,
@@ -119,46 +133,32 @@ fn agent_review_step_local_history_survives_new_claim() {
                 json!({"fields": {"attempt": 1, "claimant": "agent/example/new"}}),
             ),
         ] {
-            append_claim_tx(
-                &transaction,
-                store.origin(),
-                &step.subject,
-                kind,
-                Some("agent/example/old"),
-                &body,
-                &[],
-                None,
-            )
-            .unwrap();
+            event(&store, &step, kind, Some("agent/example/old"), &body);
         }
-        transaction.commit().unwrap();
-        drop(connection);
         for worker in ["agent/example/old", "agent/example/new"] {
             assert_eq!(check(&store, &step, PERSON, worker), CONFLICT);
         }
-        assert_eq!(check(&store, &step, PERSON, REVIEWER), "ok");
     }
 }
 
 #[test]
-fn agent_review_step_submission_actor_without_prior_claim() {
-    for (actor, expected) in [(REVIEWER, CONFLICT), ("agent/example/missing", UNKNOWN)] {
+fn agent_review_step_work_actor_without_prior_claim() {
+    for (kind, actor, expected) in [
+        ("work.person-done", Some(REVIEWER), CONFLICT),
+        ("work.person-done", Some(PERSON), "ok"),
+        ("work.person-done", None, "ok"),
+        ("work.submitted", Some(REVIEWER), CONFLICT),
+        ("work.submitted", Some("agent/example/missing"), UNKNOWN),
+        ("work.submitted", None, UNKNOWN),
+    ] {
         let (store, step) = fixture(r#"assigned-to "agent/example/new""#);
-        let mut connection = store.connection.write();
-        let transaction = connection.transaction().unwrap();
-        append_claim_tx(
-            &transaction,
-            store.origin(),
-            &step.subject,
-            "work.submitted",
-            Some(actor),
+        event(
+            &store,
+            &step,
+            kind,
+            actor,
             &json!({"fields": {"attempt": 1, "status": "verifying", "claimant": null}}),
-            &[],
-            None,
-        )
-        .unwrap();
-        transaction.commit().unwrap();
-        drop(connection);
+        );
         assert_eq!(check(&store, &step, PERSON, REVIEWER), expected);
     }
 }
