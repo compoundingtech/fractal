@@ -290,6 +290,7 @@ pub mod document_index_tests;
 pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
+pub mod run_eta;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
