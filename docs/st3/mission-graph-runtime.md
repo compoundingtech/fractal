@@ -826,6 +826,10 @@ or an hour for `cargo-test`). They check again when not yet, break the same way,
 use (`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`); without one, the gate is broken. Each
 `st gate KIND` command also runs by hand and prints its answer; `st gate --help` lists them.
 
+`st gate cargo-test --as agent/example/caller TARGET --package PACKAGE` attributes
+the local execution in stderr before running it. The optional actor does not change
+the target, ref, worktree, or gate answer; an agent cannot name a peer or person.
+
 A mission stores each of these as the gate it expands to: an `exists` predicate or an exec gate.
 
 ### Mechanical gates
@@ -915,6 +919,11 @@ each checked command for real, so a gate with side effects has them when it is c
 Loop `until` scripts are listed as "not checked, they run after each round", with that reason
 shown. Publication and dry-run checks use the same scope. A running loop still evaluates its
 `until` scripts at every round boundary, when round outputs exist.
+
+Use `st missions check --as agent/example/caller FILE` to carry execution attribution
+on the trusted local Unix daemon request. The actor does not select a mission or
+change the workspace, inputs, or gate environment. An explicit actor must match
+an agent caller's own identity. Omitting it preserves the existing check behavior.
 
 ```sh
 st missions check release.kdl --workspace ~/src/app --input commit=4f2a9c1
