@@ -18,6 +18,8 @@ use smallclaims::fleet::{FleetView, MemberView};
 
 const REQUEST_LIMIT: usize = 1024 * 1024;
 pub(super) const RENAMED_OWNER_PREFIX: &str = concat!("fractal", "/fleet/");
+#[cfg(test)]
+const RENAMED_PTY_PREFIX: &str = concat!("fractal", "/pty/");
 const RESPONSE_LIMIT: u64 = 4 * 1024 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -80,16 +82,19 @@ pub fn control_socket() -> Result<PathBuf> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Source {
-    Runtime { owner: String },
+    Runtime {
+        owner: String,
+        expires_at: Option<u64>,
+    },
     Static { path: PathBuf },
 }
 impl Source {
     fn owned_by(&self, owner: &str) -> bool {
-        matches!(self, Self::Runtime { owner: source_owner } if source_owner == owner)
+        matches!(self, Self::Runtime { owner: source_owner, .. } if source_owner == owner)
     }
     fn describe(&self) -> String {
         match self {
-            Self::Runtime { owner } => format!("runtime owner {owner}"),
+            Self::Runtime { owner, .. } => format!("runtime owner {owner}"),
             Self::Static { path } => format!("static {}", path.display()),
         }
     }
@@ -314,7 +319,9 @@ fn desired(
 
 type DesiredPolicy = BTreeMap<String, BTreeSet<String>>;
 
-fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy) -> Vec<Value> {
+type Expiries = BTreeMap<String, u64>;
+
+fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy, expiries: &Expiries) -> Vec<Value> {
     let owned = snapshot
         .peers
         .iter()
@@ -331,21 +338,38 @@ fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy) -> Vec<Value>
         operations.push(json!({"op":"remove_peer", "node_id":node}));
     }
     for (node, grants) in desired {
-        if let Some(peer) = owned.get(node.as_str()) {
-            let actual = peer
-                .services
-                .iter()
-                .filter(|(_, sources)| sources.iter().any(|source| source.owned_by(owner)))
-                .map(|(service, _)| service.clone())
-                .collect::<BTreeSet<_>>();
-            if actual == *grants {
-                continue;
+        let peer = owned.get(node.as_str());
+        let actual_expiry = peer.and_then(|peer| peer.trust_sources.iter().find_map(|source| match source {
+            Source::Runtime { owner: source_owner, expires_at } if source_owner == owner => Some(*expires_at),
+            _ => None,
+        })).flatten();
+        let expected_expiry = expiries.get(node).copied();
+        if owner.starts_with(RENAMED_OWNER_PREFIX) {
+            // Recovery is a reader: expiry changes may revoke the old record,
+            // never promote it by removing and re-adding grants.
+            if actual_expiry != expected_expiry {
+                operations.push(json!({"op":"remove_peer", "node_id":node}));
             }
-        } else {
-            // No label: avoid conflicting with a static source's user-selected name.
+            continue;
+        }
+        // Fabric expiry is immutable. Promotion/abort replaces the record in
+        // this same atomic batch, never renews a staged record by add_peer alone.
+        let replace = actual_expiry.is_some() && actual_expiry != expected_expiry;
+        if replace {
+            operations.push(json!({"op":"remove_peer", "node_id":node}));
+        }
+        let actual = peer.map(|peer| peer.services.iter()
+            .filter(|(_, sources)| sources.iter().any(|source| source.owned_by(owner)))
+            .map(|(service, _)| service.clone()).collect::<BTreeSet<_>>());
+        if peer.is_none() || replace {
             operations.push(json!({"op":"add_peer", "node_id":node}));
         }
-        operations.push(json!({"op":"set_grants", "node_id":node, "grants":grants}));
+        if replace || actual.as_ref() != Some(grants) {
+            operations.push(json!({"op":"set_grants", "node_id":node, "grants":grants}));
+        }
+        if expected_expiry.is_some() && (replace || actual_expiry != expected_expiry) {
+            operations.push(json!({"op":"set_expiry", "node_id":node, "expires_at":expected_expiry}));
+        }
     }
     operations
 }
@@ -433,7 +457,7 @@ async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
     .await?
 }
 
-fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
+fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy, expiries: &Expiries) -> bool {
     if pending.request["owner"].as_str().is_some_and(|owner| owner.starts_with(RENAMED_OWNER_PREFIX)) {
         return pending.request["operations"].as_array().is_some_and(|operations|
             operations.iter().all(|operation| operation["op"] == "remove_peer"));
@@ -447,7 +471,9 @@ fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
                 };
                 match operation["op"].as_str() {
                     Some("add_peer") => desired.contains_key(node),
-                    Some("remove_peer") => !desired.contains_key(node),
+                    Some("remove_peer") => !desired.contains_key(node)
+                        || pending.request["operations"].as_array().is_some_and(|ops| ops.iter().any(|op| op["op"] == "add_peer" && op["node_id"] == node)),
+                    Some("set_expiry") => expiries.get(node).is_some_and(|deadline| operation["expires_at"].as_u64() == Some(*deadline)),
                     Some("set_grants") => desired.get(node).is_some_and(|grants| {
                         operation["grants"].as_array().is_some_and(|services| {
                             services.len() == grants.len()
@@ -511,11 +537,12 @@ async fn resolve_pending(
     socket: &Path,
     journal: &mut Journal,
     desired: &DesiredPolicy,
+    expiries: &Expiries,
 ) -> Result<Option<Mutation>> {
     let Some(pending) = &journal.pending else {
         return Ok(None);
     };
-    let replay_allowed = pending_matches_desired(pending, desired);
+    let replay_allowed = pending_matches_desired(pending, desired, expiries);
     match complete_pending(socket, pending, replay_allowed).await {
         Ok(mutation) => {
             journal.pending = None;
@@ -563,6 +590,7 @@ async fn apply(
     socket: &Path,
     fleet_id: &str,
     desired: DesiredPolicy,
+    expiries: Expiries,
     ended: BTreeSet<String>,
     withdrawing: bool,
 ) -> Result<ReconcileStatus> {
@@ -576,13 +604,13 @@ async fn apply(
             "pending Fabric batch belongs to another fleet"
         );
     }
-    resolve_pending(state_dir, socket, &mut journal, &desired).await?;
+    resolve_pending(state_dir, socket, &mut journal, &desired, &expiries).await?;
     let mut journal_changed = false;
     for node in ended {
         journal_changed |= journal.retired.insert(node);
     }
     let mut current = snapshot(socket).await?;
-    for owner in [owner, format!("{RENAMED_OWNER_PREFIX}{fleet_id}")] {
+    for owner in [owner.clone(), format!("{RENAMED_OWNER_PREFIX}{fleet_id}")] {
         let retained;
         let policy = if owner.starts_with("st/") {
             &desired
@@ -590,7 +618,7 @@ async fn apply(
             retained = retained_policy(&current, &owner, &desired);
             &retained
         };
-        let operations = plan(&current, &owner, policy);
+        let operations = plan(&current, &owner, policy, &expiries);
         ensure!(
             operations.len() <= 128,
             "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
@@ -622,7 +650,7 @@ async fn apply(
             // Durable before sending: restarting st must not forget an uncertain commit
             // or replace a pending/timed-out cancellation with an empty-diff success.
             save_journal(state_dir, &journal).await?;
-            let mutation = resolve_pending(state_dir, socket, &mut journal, policy)
+            let mutation = resolve_pending(state_dir, socket, &mut journal, policy, &expiries)
                 .await?
                 .expect("pending transaction");
             journal_changed = false;
@@ -633,6 +661,10 @@ async fn apply(
             );
         }
     }
+    ensure!(
+        plan(&current, &owner, &desired, &expiries).is_empty(),
+        "Fabric final snapshot does not match the desired exact grants and expiry; no rekey receipt is safe"
+    );
     let retired_count = journal.retired.len();
     journal.retired.retain(|node| {
         !desired.contains_key(node)
@@ -682,7 +714,7 @@ pub async fn reconcile(
         .members
         .iter()
         .any(|member| member.member_key == own_key && member.state == "current");
-    let desired = desired
+    let desired: DesiredPolicy = desired
         .into_iter()
         .map(|node| {
             let peer_current = view.members.iter().any(|member| {
@@ -699,6 +731,7 @@ pub async fn reconcile(
             (node, services)
         })
         .collect();
+    let expiries = Expiries::new();
     let ended = view
         .members
         .iter()
@@ -707,7 +740,7 @@ pub async fn reconcile(
         .filter(|endpoint| endpoint["transport"] == "fabric")
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
-    let mut status = apply(state_dir, socket, fleet_id, desired, ended, false).await?;
+    let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false).await?;
     if status.state == "applied"
         && view.members.iter().any(|member| {
             member.state == "ended"
@@ -729,6 +762,7 @@ pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result
         socket,
         fleet_id,
         DesiredPolicy::new(),
+        Expiries::new(),
         BTreeSet::new(),
         true,
     )
