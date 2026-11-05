@@ -120,6 +120,9 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  launch_contract?: {
+
+} | null;
   lifecycle?: AgentLifecycle;
   mail_custody?: AgentMailCustody;
   name: string;
