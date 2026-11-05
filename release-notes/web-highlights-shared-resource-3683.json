@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share the deferred highlighter snapshot across code fences and diff rows",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No upgrade coordination changes." },
+  "compatibility": { "status": "none", "detail": "Uses React's external-store boundary for one module snapshot and one load notification rather than per-row loading effects. Plain source remains visible until the module is available." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "In-memory presentation state only. Reverting the web build requires no data recovery." }
+}

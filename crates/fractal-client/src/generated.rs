@@ -1131,6 +1131,16 @@ pub struct PublicationDefinition {
     pub token: String,
 }
 
+/// Canonical redacted KDL from one immutable published mission revision.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionDeclaration {
+    pub mission: String,
+    pub revision: String,
+    pub published_at: u64,
+    pub text: String,
+    pub legacy: bool,
+}
+
 /// Applied desired state, not the original declaration file or a proposed mission revision.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SubjectDefinition {
@@ -1515,6 +1525,8 @@ pub struct MissionRunSummary {
     pub current_steps: Vec<Value>,
     pub must_act: String,
     pub state_since: String,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default)]
     pub outcome: Option<MissionRunOutcome>,
@@ -1555,6 +1567,8 @@ pub struct MissionStep {
     #[serde(default)]
     pub keep_open: bool,
     pub since: String,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     #[serde(default)]
     pub last_progress: Option<String>,
     #[serde(default)]
@@ -1691,6 +1705,8 @@ pub struct Work {
     pub nudged_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_elapsed_ms: u64,
+    #[serde(default)]
+    pub execution_waited_ms: u64,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     pub blocked_reason: Option<String>,

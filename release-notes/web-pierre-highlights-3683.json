@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Web Markdown fences and diff rows use Pierre Highlights after a plain-text first paint",
+  "replay": { "status": "none", "detail": "Presentation-only; no replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or upgrade changes." },
+  "compatibility": { "status": "none", "detail": "Preserves the existing twelve languages, unknown-language plain text, streaming source, copy and wrap state. Existing wasm-unsafe-eval CSP permission covers Highlights." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "If highlighting cannot load, source remains readable as plain text. Reverting the web build requires no data recovery." }
+}

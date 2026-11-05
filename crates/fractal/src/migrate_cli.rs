@@ -18,6 +18,8 @@ use fractal_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
 mod native;
 mod home_manager;
 mod mounts;
+#[cfg(any(target_os = "macos", test))]
+use fractal_daemon::service::launchd_domain as launchd;
 #[cfg(test)]
 mod tests;
 
@@ -68,6 +70,7 @@ struct Receipt {
     host: String,
     status: &'static str,
     manager: &'static str,
+    launchd_domain: Option<String>,
     local_api: &'static str,
     effective: Protection,
     gap_ms: u128,
@@ -251,6 +254,8 @@ fn control_directory_exists(path: &Path) -> Result<bool> {
 #[derive(Debug, Deserialize, Serialize)]
 struct Journal {
     migration: String,
+    #[serde(default)]
+    launchd_domain: Option<String>,
     services: Services,
     pairs: Vec<(PathBuf, PathBuf)>,
     moves: Vec<usize>,
@@ -269,6 +274,8 @@ struct Journal {
 
 trait Manager {
     fn kind(&self) -> &'static str;
+    fn domain(&self) -> Option<&str> { None }
+    fn bind_domain(&mut self, _recorded: Option<&str>, _recovery: bool) -> Result<()> { Ok(()) }
     fn inspect(&mut self) -> Result<Services>;
     fn stop(&mut self, unit: &Unit) -> Result<()>;
     fn start(&mut self, unit: &Unit) -> Result<()>;
@@ -278,10 +285,34 @@ trait Manager {
     async fn idle(&mut self) -> Result<()>;
     async fn probe(&mut self) -> Result<()>;
 }
+pub(super) fn print_launchd_domain() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        ensure!(fractal_daemon::instance::current().is_none(), "launchd migration domain is for the default host only");
+        let layout = Layout::discover()?;
+        let domain = queried_launchd_domain(&layout, unsafe { libc::getuid() },
+            |domain| launchd::probe(domain, std::process::Command::new("/bin/launchctl").args(["print", domain]).output()?))?;
+        fractal_daemon::cli_println!("{domain}");
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    bail!("launchd domain queries require macOS")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn queried_launchd_domain(layout: &Layout, uid: u32, inspect: impl FnMut(&str) -> Result<launchd::Probe>) -> Result<String> {
+    let journal = match fs::read(&layout.journal) {
+        Ok(bytes) => Some(serde_json::from_slice::<Journal>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    launchd::resolve(uid, journal.as_ref().and_then(|j| j.launchd_domain.as_deref()), journal.is_some(), inspect)
+}
+
 
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
-    ensure!(matches!(endpoint, Endpoint::Unix(_)), "host migration requires the local Unix API, not a remote endpoint");
+    ensure!(endpoint.unix_socket().is_some(), "host migration requires the local Unix API, not a remote endpoint");
     let mut layout = Layout::discover()?;
     let mut config = Config::load_unvalidated(args.config.as_deref())?;
     if let Some(state) = &args.state_dir { config.state_dir = state.clone(); }
@@ -299,6 +330,7 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
         fractal_daemon::cli_println!("memory.swap.max={} MemoryLow={} gap={}ms manager={}",
             receipt.effective.memory_swap_max.as_deref().unwrap_or("not-applicable (launchd)"),
             receipt.effective.memory_low.as_deref().unwrap_or("not-applicable (launchd)"), receipt.gap_ms, receipt.manager);
+        if let Some(domain) = &receipt.launchd_domain { fractal_daemon::cli_println!("launchd_domain={domain}"); }
         Ok(())
     }
 }
@@ -448,9 +480,10 @@ fn validate_journal(layout: &Layout, journal: &Journal, current: &Services) -> R
 
 async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: &HostArgs) -> Result<Receipt> {
     let _lock = if args.dry_run { None } else { Some(lock(layout)?) };
-    let services = manager.inspect()?;
     if layout.journal.exists() {
         let mut journal: Journal = serde_json::from_slice(&fs::read(&layout.journal)?)?;
+        manager.bind_domain(journal.launchd_domain.as_deref(), true)?;
+        let services = manager.inspect()?;
         validate_journal(layout, &journal, &services)?;
         if args.rollback {
             mounts::rollback_preflight(&journal.pairs)?;
@@ -470,6 +503,8 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         return Ok(receipt(manager, host, if args.dry_run { "dry-run (already committed)" } else { "completed" }, "local API listening", protection, journal.gap_ms));
     }
     ensure!(!args.rollback, "no interrupted host cutover journal exists");
+    manager.bind_domain(None, false)?;
+    let services = manager.inspect()?;
     ensure!(!services.legacy.is_empty() && !services.target.is_empty(), "legacy and pre-staged Fractal daemon definitions are required");
     ensure!(services.legacy[0].installed, "legacy daemon unit is not installed");
     ensure!(!services.legacy.iter().any(|unit| unit.running) || !services.target.iter().any(|unit| unit.running), "legacy and Fractal services both run; stop and investigate before cutover");
@@ -503,7 +538,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     if args.dry_run {
         return Ok(receipt(manager, host, "dry-run: preflight passed; no changes", "legacy API listening", before, 0));
     }
-    let mut journal = Journal { migration: MIGRATION_ID.into(), services, pairs,
+    let mut journal = Journal { migration: MIGRATION_ID.into(), launchd_domain: manager.domain().map(str::to_owned), services, pairs,
         moves: Vec::new(), emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false, committed: false, before, after: None, gap_ms: 0 };
     save(layout, &journal)?;
     let attempt = swap(layout, manager, &mut journal).await;
@@ -526,7 +561,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
 }
 
 fn receipt(manager: &impl Manager, host: &str, status: &'static str, local_api: &'static str, effective: Protection, gap_ms: u128) -> Receipt {
-    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), local_api, effective, gap_ms }
+    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), launchd_domain: manager.domain().map(str::to_owned), local_api, effective, gap_ms }
 }
 
 fn stop_legacy(manager: &mut impl Manager, journal: &Journal) -> Result<()> {

@@ -57,6 +57,112 @@ class SelectionTest(unittest.TestCase):
         self.module.recovery_select_build('b' * 40)
         return str(self.module.P / 'builds' / ('a' * 40))
 
+    def test_capacity_sandbox_cli_preserves_nix_tempfail(self):
+        sandbox = self.module.candidate_sandbox
+        for code in (75, 1):
+            with self.subTest(code=code), \
+                    patch('sys.argv', ['candidate_sandbox.py', '--worktree', str(self.root), '--', 'true']), \
+                    patch.object(sandbox, 'validate_configuration'), \
+                    patch.object(sandbox, 'run',
+                                 side_effect=subprocess.CalledProcessError(code, ['nix', 'build'])), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                sandbox.main()
+            self.assertEqual(raised.exception.code, code)
+
+    @contextlib.contextmanager
+    def capacity_tick(self, codes, preparation_error=None):
+        """Exercise real build/probe/cache handling inside the tick error boundary."""
+        self.activation_builds()
+        previous = (self.module.P / 'current').resolve()
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        build_root = self.root / 'build-root'
+        build_root.mkdir()
+        codes = iter(codes)
+        commands = []
+
+        def run(args, **kwargs):
+            if args[0] == 'gh':
+                return self.response([])
+            commands.append(args)
+            return subprocess.CompletedProcess(args, next(codes))
+
+        def candidate():
+            row = {'included': [{'pr': 10}], 'skipped': []}
+            self.candidate_row = row
+            if self.module.build_candidate(row, 'overlay',
+                    [{'sha': 'a' * 40, 'pr': None}, {'sha': 'b' * 40, 'pr': 10}]):
+                # End the tick after the real candidate path, without deployment.
+                raise RuntimeError('candidate completed')
+
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'run', side_effect=run), \
+                patch.object(self.module, 'prepare_clone', side_effect=candidate), \
+                patch.object(self.module, 'prepare_dependencies', side_effect=preparation_error), \
+                patch.object(self.module, 'stamp'), \
+                patch.object(self.module, 'text', return_value='b' * 40), \
+                patch.object(self.module, 'candidate_key', return_value='same-tree'), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            yield commands
+        self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
+
+    def capacity_row(self):
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(row['build'], 'error')
+        self.assertEqual(row['reason'], 'capacity-refused')
+        self.assertTrue(row['retryable'])
+        self.assertIn('previous build retained', row['error'])
+        self.assertFalse((self.module.L / 'live-r3-tree-cache.json').exists())
+        self.assertEqual(row['skipped'], [])
+        return row
+
+    def test_capacity_helper_exit_is_retryable_without_cache_or_attribution(self):
+        with self.capacity_tick([75, 1, 75]), patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+            self.capacity_row()
+            attribution.assert_not_called()
+            # A later refusal while rebuilding an attributed/reduced tree is also
+            # capacity, and must not persist the tentative failure or PR ejection.
+            attribution.return_value = 1
+            with patch.object(self.module, 'candidate_key', side_effect=['full', 'reduced']):
+                self.module.tick()
+            self.capacity_row()
+            self.assertEqual(self.candidate_row['included'], [{'pr': 10}])
+            self.assertEqual(self.candidate_row['skipped'], [])
+
+    def test_capacity_candidate_nix_exception_is_retryable_without_cache_or_attribution(self):
+        error = subprocess.CalledProcessError(75, ['/policy-bin/nix', 'build', 'bubblewrap'])
+        with self.capacity_tick([], preparation_error=error) as commands, \
+                patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+        self.capacity_row()
+        self.assertEqual(commands, [])
+        attribution.assert_not_called()
+
+    def test_capacity_same_tree_retries_on_later_tick(self):
+        with self.capacity_tick([75, 0]) as commands, \
+                patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+            self.capacity_row()
+            self.module.tick()
+        self.assertEqual(len(commands), 2)
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['same-tree']['outcome'], 'built')
+        attribution.assert_not_called()
+
+    def test_capacity_probe_aborts_attribution_without_caching_or_ejecting(self):
+        with self.capacity_tick([1, 75]) as commands:
+            self.module.tick()
+        self.capacity_row()
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(commands[-1][-1].startswith('live-r3-probe-'))
+
     def test_existing_main_probe_ejects_breaking_pr_and_keeps_later_pr(self):
         main, broken, later = ('a' * 40, 'b' * 40, 'c' * 40)
         build_root = self.root / 'build-root'

@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/kit.tsx",
+    "./lazy-chunk": "./src/lazy-chunk.ts",
     "./tokens.css": "./src/tokens.css",
     "./assistant-ui": "./src/assistant-ui/index.ts",
     "./assistant-ui/shell": "./src/assistant-ui/shell.ts",
@@ -41,15 +42,15 @@
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
-    "@effect/atom-react": "4.1.0",
+    "@effect/atom-react": "4.0.3",
+    "@pierre/highlights": "0.3.0",
     "@stylexjs/stylex": "0.19.0",
-    "effect": "4.1.0",
+    "effect": "4.0.3",
     "react": "19.2.3",
     "react-aria": "3.52.1",
     "react-aria-components": "1.21.1",
     "react-dom": "19.2.3",
     "react-markdown": "10.1.0",
-    "refractor": "5.0.0",
     "remark-gfm": "4.0.1"
   },
   "devDependencies": {
@@ -62,7 +63,6 @@
     "@types/hast": "3.0.5",
     "@types/node": "26.6.4",
     "@types/react": "19.2.18",
-    "jsdom": "26.1.0",
     "@types/react-dom": "19.2.7",
     "jsdom": "26.1.0",
     "storybook": "10.6.1",
@@ -71,5 +71,5 @@
     "vite": "8.0.5",
     "vitest": "4.1.9"
   },
-  "packageManager": "pnpm@12.17.0"
+  "packageManager": "pnpm@12.15.0"
 }

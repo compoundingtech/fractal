@@ -10,8 +10,12 @@ use std::{io::{self, Read}, path::Path, os::unix::fs::{OpenOptionsExt, MetadataE
 pub struct Adapter { client: reqwest::Client, bearer: String }
 impl Adapter {
     pub fn new(socket: &Path, credential_file: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if socket.file_name().and_then(|name| name.to_str()) != Some("st3-client.sock") {
-            return Err("only the paired gateway st3-client.sock is permitted".into());
+        let permitted = socket.file_name().and_then(|name| name.to_str()) == Some("fractal-client.sock");
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+        let permitted = permitted || socket.file_name().and_then(|name| name.to_str()) == Some("st3-client.sock");
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+        if !permitted {
+            return Err("only the paired gateway fractal-client.sock is permitted".into());
         }
         let bearer = read_credential(credential_file)?;
         let client = reqwest::Client::builder().unix_socket(socket).build()?;
