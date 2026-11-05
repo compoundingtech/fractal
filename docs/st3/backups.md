@@ -309,6 +309,16 @@ without them a restore would redeliver every message a mark covers. A build olde
 refuses the archive, and marks inside an archive that declares an earlier version are refused
 before restore.
 
+### The message outbox
+
+A message a graph write sends waits in `local_message_outbox` until the daemon writes it to the
+messages shard (db break-up step 4c). The archive does not carry the outbox: a live export first
+drains it, and refuses while a message remains ("backup waits for the messages in the outbox to
+drain"), so pending mail is never left out of an archive silently and no format version changes.
+The offline exporter opens its copy without the shard, so it does not drain; it refuses a copy
+whose outbox is not empty. In this build nothing queues messages, so the outbox is always empty
+and archives are unchanged.
+
 ### Permanent ledgers
 
 A trim deletes claims, records and batches, but keeps what readers still need of them in

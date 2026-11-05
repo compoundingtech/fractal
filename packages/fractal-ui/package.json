@@ -22,6 +22,7 @@
     "./human-time/clock": "./src/time/clock.tsx"
   },
   "scripts": {
+    "generate:pierre-languages": "node scripts/pierre-languages.mjs",
     "storybook": "storybook dev -p 53705 --host 127.0.0.1 --no-open --disable-telemetry",
     "build-storybook": "storybook build --disable-telemetry",
     "typecheck": "tsc --noEmit",
