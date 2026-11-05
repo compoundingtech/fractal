@@ -1062,6 +1062,14 @@ pub(super) fn question_generation_current(
     state: &AppState,
     generation: &crate::store::harness_questions::QuestionGeneration,
 ) -> anyhow::Result<bool> {
+    question_generation_current_with(state, generation, |wrapper| wrapper.validate(state))
+}
+
+fn question_generation_current_with(
+    state: &AppState,
+    generation: &crate::store::harness_questions::QuestionGeneration,
+    validate: impl FnOnce(&BootstrapWitness) -> Result<(), St3Error>,
+) -> anyhow::Result<bool> {
     let captured = &generation.witness;
     for (pid, token) in [captured.daemon, captured.terminal, captured.wrapper] {
         if !fractal_runtime::process_generation_alive(pid, token)? {
@@ -1086,7 +1094,7 @@ pub(super) fn question_generation_current(
         .join("sessions").join("omp");
     let identity = generation.agent.strip_prefix("agent/").unwrap_or(&generation.agent);
     if !fractal_drivers::omp_session::native_question_session_current(
-        &session_dir, identity, &captured.runtime_name, &generation.owner_session, &generation.session,
+        &session_dir, identity, identity, &generation.owner_session, &generation.session,
     )? {
         return Ok(false);
     }
@@ -1095,7 +1103,7 @@ pub(super) fn question_generation_current(
         daemon: captured.daemon, terminal: captured.terminal, peer: captured.wrapper,
         bound: captured.bound,
     };
-    match wrapper.validate(state) {
+    match validate(&wrapper) {
         Ok(()) => {}
         Err(error) if error.code == "stale-mailbox-session" => return Ok(false),
         Err(error) => return Err(error.into()),
@@ -1390,6 +1398,65 @@ fn with_authority_mode<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_runtime_key_keeps_question_generation_with_distinct_physical_id() {
+        use crate::{HarnessQuestionsStore, store::harness_questions::{
+            QuestionGeneration, QuestionObservation, QuestionWitness,
+        }};
+        use fractal_drivers::harness_state::{
+            Activity, BlockedOn, InputBuffer, Observation, Writer,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let agent = "agent/example/question";
+        let dir = source_agent_dir(&state, &Fence::new(agent, "runtime-one", "questions"));
+        fractal_drivers::harness_events::enable(&dir, "runtime-one").unwrap();
+        let sequence = fractal_drivers::harness_state::claim(
+            &dir, "example/question", "omp", "owner",
+        ).unwrap();
+        let mut writer = Writer::new(&dir, "example/question", "omp", Some("example.question".into()))
+            .with_ownership("owner", sequence);
+        writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)).unwrap();
+        let sessions = dir.parent().unwrap().join("sessions/omp");
+        fractal_drivers::omp_session::record_channel_binding(
+            &sessions, "example/question", "example/question", "owner", "native-session", None, None,
+        ).unwrap();
+        fractal_drivers::omp_session::confirm_channel_binding(
+            &sessions, &dir, "example/question", "example/question", "owner", sequence, "native-session", None,
+        ).unwrap();
+        let question = state.store.observe_harness_question_digest(&QuestionObservation {
+            agent: agent.into(), runtime_incarnation: "runtime-one".into(), session: "native-session".into(),
+            native_id: fractal_schema::harness_questions::native_id_digest("call"),
+            questions: vec![fractal_schema::harness_questions::Question {
+                id: "q0".into(), options: 2, multi: false, required: true,
+            }],
+        }).unwrap();
+        let pid = std::process::id();
+        let process = (pid, fractal_runtime::process_start_token(pid).unwrap());
+        let generation = QuestionGeneration {
+            question: question.id.clone(), agent: agent.into(), runtime_incarnation: "runtime-one".into(),
+            session: "native-session".into(), owner_session: "owner".into(), owner_sequence: sequence,
+            witness: QuestionWitness { runtime_name: "example.question".into(), created_at: "physical".into(),
+                daemon: process, terminal: process, wrapper: process, bound: false },
+        };
+        state.store.retain_harness_question_generation(&generation).unwrap();
+        let index = state.store.index().unwrap();
+        let changed = fractal_drivers::harness_state::with_record_lock(&dir, || {
+            super::super::question_lifecycle::reconcile_generation(&state.store, &generation, || {
+                question_generation_current_with(&state, &generation, |wrapper| {
+                    // Only PTY stats are substituted; provider and process checks are real.
+                    assert_eq!(wrapper.name, "example.question");
+                    assert_eq!(wrapper.created_at, "physical");
+                    Ok(())
+                })
+            })
+        }).unwrap();
+        assert!(!changed);
+        assert_eq!(state.store.index().unwrap(), index);
+        assert!(state.store.harness_question_held(&question.id).unwrap().unwrap().resolution.is_none());
+        assert_eq!(state.store.harness_question_generation(&question.id).unwrap(), Some(generation));
+    }
 
 pub fn fixture_stats() -> pty_core::stats::StatsResult {
         serde_json::from_value(json!({

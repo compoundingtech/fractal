@@ -551,6 +551,18 @@ pub fn shard(graph: &super::Store) -> Option<Arc<GraphStore>> {
     graph.extension::<Slot>().get().cloned()
 }
 
+/// This member's last writer sequence in the shard, for its leave's `shard_high_water`: its key
+/// counts in the shard at or below it, and above it its envelopes are fenced. Empty when the
+/// shard did not open, so the leave bounds the key at 0 there. Local batches are sealed first,
+/// so every message already written counts below it.
+pub fn leave_high_water(graph: &super::Store) -> anyhow::Result<BTreeMap<String, u64>> {
+    let Some(shard) = shard(graph) else {
+        return Ok(BTreeMap::new());
+    };
+    shard.seal_local_batches()?;
+    Ok(BTreeMap::from([(SHARD_ID.to_owned(), shard.own_writer_sequence()?)]))
+}
+
 /// Open the messages shard under `root`, the directory that holds the graph's database, and
 /// bind it to the graph's fleet. The file is created and bound the first time; a later open
 /// finds it bound. It signs with the graph's member key.
@@ -867,6 +879,145 @@ mod tests {
         // The shard holds the graph weakly: letting the graph go closes the authority.
         drop(graph);
         assert!(opened.fleet_membership().is_err());
+    }
+
+    /// A graph keyed as the daemon keys it: the member key is loaded before the shard opens.
+    fn keyed_graph(root: &Path) -> (Arc<Store>, Arc<smallclaims::fleet::MemberKey>) {
+        let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), "alder").unwrap());
+        graph.bind_fleet(FLEET).unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        graph.load_member_key(Some(key.clone())).unwrap();
+        graph.use_key_directory(&root.join("keys")).unwrap();
+        (graph, key)
+    }
+
+    /// A keyed member's shard signs an agent's message with the member key and writes no
+    /// principal claim of its own. Seen before: the shard minted the agent a key and wrote its
+    /// `principal.key-granted` into the shard, which refuses it, so the message failed.
+    #[test]
+    fn a_keyed_members_shard_signs_its_messages_and_writes_no_principal_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, key) = keyed_graph(root.path());
+        let shard = open(&graph, root.path()).unwrap();
+        shard
+            .append_claim(&input("message.sent", Some("agent/birch"), sent("agent/birch")))
+            .unwrap();
+        let kinds = shard
+            .readers
+            .get()
+            .prepare("SELECT kind FROM claims")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(kinds, ["message.sent"]);
+        let exchange = shard.export_replication_exchange(FLEET, &Default::default()).unwrap();
+        let [envelope] = exchange.envelopes.as_slice() else {
+            panic!("one envelope, not {}", exchange.envelopes.len());
+        };
+        assert!(smallclaims::fleet::verify_signature(
+            key.public(),
+            &smallclaims::fleet::envelope_signature_message_in(
+                Some(SHARD_ID), FLEET, "alder", envelope.sequence, &envelope.hash,
+            ),
+            envelope.signature.as_deref().expect("the shard signs with the member key"),
+        ));
+    }
+
+    /// After an upgrade, the shard judges its backlog at startup before the graph admits the
+    /// leaver's bounds that the older build held, so the leaver's envelopes stay held. The
+    /// graph's membership then moves, and the shard's next pass admits them with no new shard
+    /// data. Seen before: they waited for some unrelated stream item to arrive.
+    #[test]
+    fn a_leavers_held_envelopes_are_admitted_once_the_graph_admits_its_bounds() {
+        use crate::store::fleet_admission_tests_shared_seats::{admit, key, sync};
+        let on_disk = |root: &Path, name: &str, member: &Arc<smallclaims::fleet::MemberKey>, anchor: &smallclaims::fleet::MemberKey| {
+            let store = Arc::new(Store::open(&root.join("claims.sqlite3"), name).unwrap());
+            store.bind_fleet(FLEET).unwrap();
+            store.pin_fleet_anchor(anchor.public()).unwrap();
+            store.set_member_key(Some(member.clone())).unwrap();
+            store
+        };
+        let (anchor_key, laptop_key, older_key) = (key(), key(), key());
+        let anchor_root = tempfile::tempdir().unwrap();
+        let anchor = on_disk(anchor_root.path(), "anchor", &anchor_key, &anchor_key);
+        anchor.admit_fleet_anchor(FLEET, anchor_key.public(), "listening").unwrap();
+        admit(&anchor, "laptop", &laptop_key, "invite", None);
+        admit(&anchor, "older", &older_key, "invite", None);
+        let laptop_root = tempfile::tempdir().unwrap();
+        let laptop = on_disk(laptop_root.path(), "laptop", &laptop_key, &anchor_key);
+        sync(&anchor, &laptop);
+        let laptop_shard = open(&laptop, laptop_root.path()).unwrap();
+        laptop_shard
+            .append_claim(&input("message.sent", Some("agent/birch"), sent("agent/birch")))
+            .unwrap();
+        laptop.leave_fleet("person/test", &leave_high_water(&laptop).unwrap()).unwrap();
+
+        // An older build holds the bounds as an unknown kind.
+        let older_root = tempfile::tempdir().unwrap();
+        let older = on_disk(older_root.path(), "older", &older_key, &anchor_key);
+        let mut registry = fractal_schema::registry().clone();
+        registry.claims.remove("fleet.shard-bounds").unwrap();
+        older.set_claim_registry(registry);
+        sync(&anchor, &older);
+        assert_eq!(sync(&laptop, &older).unknown, 1);
+        drop(older);
+
+        // Upgraded, the shard judges the leaver's envelopes before the graph's own pass.
+        let upgraded = Arc::new(Store::open(&older_root.path().join("claims.sqlite3"), "older").unwrap());
+        upgraded.set_member_key(Some(older_key)).unwrap();
+        let shard = open(&upgraded, older_root.path()).unwrap();
+        let exchange = laptop_shard
+            .export_replication_exchange(FLEET, &shard.replication_inventory().unwrap())
+            .unwrap();
+        shard.receive_replication_exchange("laptop", FLEET, &exchange).unwrap();
+        shard.validate_replication_backlog().unwrap();
+        shard.project_replication_backlog().unwrap();
+        let subject = "message/0123456789abcdef";
+        assert!(shard.claims_for(subject, None).unwrap().is_empty(), "held: the graph has no bounds yet");
+        assert!(!shard.fleet_moved_since_admission().unwrap());
+        assert_eq!(upgraded.validate_replication_backlog().unwrap().unknown, 0);
+        upgraded.project_replication_backlog().unwrap();
+        assert!(shard.fleet_moved_since_admission().unwrap(), "the bounds moved the graph's membership");
+        shard.validate_replication_backlog().unwrap();
+        shard.apply_replication_repairs().unwrap();
+        shard.project_replication_backlog().unwrap();
+        assert_eq!(shard.claims_for(subject, None).unwrap().len(), 1);
+        assert!(!shard.fleet_moved_since_admission().unwrap());
+    }
+
+    /// A member's leave first bounds its key in the shard at its own last shard sequence, in a
+    /// `fleet.shard-bounds` of its own; the leave itself is as before. Without an open shard,
+    /// or before the shard is written, there is nothing to bound.
+    #[test]
+    fn a_leave_bounds_the_leavers_key_at_its_own_last_shard_sequence() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, key) = keyed_graph(root.path());
+        assert!(leave_high_water(&graph).unwrap().is_empty());
+        let shard = open(&graph, root.path()).unwrap();
+        assert_eq!(leave_high_water(&graph).unwrap(), BTreeMap::from([(SHARD_ID.to_owned(), 0)]));
+        shard
+            .append_claim(&input("message.sent", Some("agent/birch"), sent("agent/birch")))
+            .unwrap();
+        let (written, _) = shard.writer_head("alder").unwrap().unwrap();
+        assert!(written > 0);
+        let bounds = leave_high_water(&graph).unwrap();
+        assert_eq!(bounds, BTreeMap::from([(SHARD_ID.to_owned(), written)]));
+        let leave = graph.leave_fleet("person/ada", &bounds).unwrap();
+        assert_eq!(
+            leave.body["fields"],
+            json!({"member_key": key.public(), "high_water": leave.body["fields"]["high_water"]})
+        );
+        let bounded = graph
+            .latest_claim("host/alder", Some("fleet.shard-bounds"))
+            .unwrap()
+            .expect("the leave bounds the key");
+        assert_eq!(
+            bounded.body["fields"],
+            json!({"member_key": key.public(), "shard_high_water": {"messages": written}})
+        );
+        assert!(bounded.store_index < leave.store_index);
     }
 
     #[test]

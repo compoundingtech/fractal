@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Accept native encoded null prompt reasons at the shared view boundary",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "The existing missing-reason fallback also handles the native encoder's null reason, with no cast or additional data copy."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}
