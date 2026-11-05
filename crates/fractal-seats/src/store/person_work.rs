@@ -249,6 +249,7 @@ pub mod tests {
             let node = memory.origin.clone();
             drop(memory);
             let (store, origin, mut input) = fixture_with_store(Store::open(&path, &node).unwrap());
+            store.set_ask_deadlines(true);
             input.request = Some(gateway_decision());
             input.deadline_ms = Some(600_000);
             let ask = store.ask_person(&input).unwrap();
