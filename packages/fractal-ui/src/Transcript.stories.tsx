@@ -783,11 +783,12 @@ function RepeatedLoadEarlierStory({ scheme }: { scheme?: Scheme }) {
 /**
  * Five independent prepends per viewport/theme. Only native delivery and the following 24 paint opportunities
  * (about 400ms at 60Hz) are inside each bracket: no instrumented interactions, assertions, polling or idle timer.
- * A single shared-runner scheduling outlier is tolerated; sustained stalls fail p95 <=50ms or >50ms count <=1.
+ * At most one of the five prepends may contain a >50ms frame; every prepend must also have p95 <=50ms.
  * Raw intervals, max and React render time remain diagnostics, not an unsupported attribution of scheduler pauses.
  */
 export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarlierStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
   const canvas = within(canvasElement)
+  const maxima: number[] = []
   for (let iteration = 0; iteration < 5; iteration++) {
     if (iteration > 0) await userEvent.click(canvas.getByRole('button', { name: 'Reset transcript' }))
     await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
@@ -830,19 +831,20 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
     }
     const sorted = [...intervals].sort((a, b) => a - b)
     const max = sorted.at(-1)!, p95 = sorted[Math.ceil(sorted.length * 0.95) - 1]!
+    maxima.push(max)
     const longFrames = intervals.filter(duration => duration > 50).length
     host.dataset.prependFrameMaxMs = max.toFixed(1)
     host.dataset.prependFrameP95Ms = p95.toFixed(1)
     host.dataset.prependFrameCount = String(intervals.length)
     host.dataset.prependLongFrameCount = String(longFrames)
     host.dataset.prependFrameIntervalsMs = JSON.stringify(intervals)
-    const diagnostic = `prepend ${iteration + 1}/5: frames=${intervals.map(value => value.toFixed(1)).join(',')}; React=${host.dataset.prependReactMs === undefined ? 'not reported by this build' : `${host.dataset.prependReactMs}ms`}`
+    const diagnostic = `prepend ${iteration + 1}/5: maxima=${maxima.map(value => value.toFixed(1)).join(',')}ms; frames=${intervals.map(value => value.toFixed(1)).join(',')}; React=${host.dataset.prependReactMs === undefined ? 'not reported by this build' : `${host.dataset.prependReactMs}ms`}`
     await expect(canvas.queryByTestId('history-boundary'), diagnostic).toBeNull()
     await expect(Math.abs(laneOffset(lane, 'tail-0/prompt') - before), 'prepend moved the first visible message').toBeLessThanOrEqual(2)
     await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length, 'the older page mounted whole').toBeLessThan(60)
     await expect(p95, `p95 <=50ms; ${diagnostic}`).toBeLessThanOrEqual(50)
-    await expect(longFrames, `at most one shared-runner frame >50ms; ${diagnostic}`).toBeLessThanOrEqual(1)
   }
+  await expect(maxima.filter(max => max > 50).length, `at most one of five prepends may contain a frame >50ms; per-prepend maxima=${maxima.map(value => value.toFixed(1)).join(',')}ms`).toBeLessThanOrEqual(1)
 } }
 export const PendingSend: Story = { tags: ['critical'], args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
