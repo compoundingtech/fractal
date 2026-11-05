@@ -6,7 +6,8 @@ import {
   type EnvelopeOf,
   type Page,
 } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
+import type { TerminalScreen } from '@fractal/client/schema'
 import { Context, Data, Effect, Fiber, Option, Queue, Schedule, Schema, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -314,7 +315,7 @@ export const gatewaySubjectReads = ({
     decode,
     getter,
   }: {
-    readonly decode: (value: unknown) => T
+    readonly decode: (value: unknown) => T | Promise<T>
     readonly getter: (args: {
       readonly client: FractalClient
       readonly ref: string
@@ -336,9 +337,10 @@ export const gatewaySubjectReads = ({
               signal: signal,
             })
             signal.throwIfAborted()
+            const decoded = decode(response.value)
             return {
               _tag: 'Observed' as const,
-              value: decode(response.value),
+              value: decoded instanceof Promise ? await decoded : decoded,
               freshness: 'live' as const,
               ...(response.snapshot === undefined ? {} : { snapshotCreatedAt: Native.decodeUnknownSync(Native.Timestamp)(response.snapshot.created_at) }),
             }
@@ -462,7 +464,11 @@ export const gatewaySubjectReads = ({
       getter: ({ client, ref }) => client.sessionsGet(ref),
     }),
     terminalScreen: fromGetter({
-      decode: Native.decodeUnknownSync(Native.TerminalScreen),
+      decode: async (value): Promise<TerminalScreen> => {
+        // Static imports would construct PTY validators when ordinary reads start.
+        const { TerminalScreen } = await import('@fractal/client/schema')
+        return Native.decodeUnknownSync(TerminalScreen)(value)
+      },
       getter: ({ client, ref }) => client.terminalScreen(ref),
     }),
     document: fromGetter({
@@ -522,7 +528,7 @@ export interface SubjectReads {
   readonly operation: SubjectReader<Native.Operation>
   readonly history: SubjectReader<Native.History>
   readonly session: SubjectReader<Native.Session>
-  readonly terminalScreen: SubjectReader<Native.TerminalScreen>
+  readonly terminalScreen: SubjectReader<TerminalScreen>
   readonly document: SubjectReader<Native.DocumentContent>
   readonly glass: SubjectReader<Native.Glass>
   readonly agentDeclaration: SubjectReader<Native.AgentDeclaration>
