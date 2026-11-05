@@ -1780,7 +1780,7 @@ impl Store {
                 )?;
                 let mut queued = Vec::new();
                 for claim in &ordinary_claims {
-                    if pending.query_row([claim], |row| row.get::<_, bool>(0))? {
+                    if pending.query_row(/* sqlite-large-value: allow-for-now lv-hb07ab08c8a29 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim], |row| row.get::<_, bool>(0))? {
                         queued.push(claim.clone());
                         if queued.len() == JUDGE_CHUNK {
                             break;
