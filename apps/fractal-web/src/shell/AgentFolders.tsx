@@ -732,14 +732,15 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
       const children = node.children?.map(child => render(child, depth + 1))
       const accessibleName = props.accessibleNames?.get(node.id)
       const agentRef = node._tag === 'Agent' ? node.subject : undefined
+      const rowHeight = node._tag === 'Agent' && props.rowStatus?.get(node.id) === undefined ? props.agentRowHeight?.(node) : undefined
       const sameChildren = children === undefined ? cached?.element.children === undefined
         : cached?.element.children !== undefined && sameElements(cached.element.children, children)
       if (cached !== undefined && cached.node._tag === node._tag && cached.element.depth === depth &&
         cached.element.textValue === node.label && cached.element.accessibleName === accessibleName &&
-        cached.element.agentRef === agentRef && sameChildren &&
+        cached.element.agentRef === agentRef && cached.element.rowHeight?.compact === rowHeight?.compact && cached.element.rowHeight?.touch === rowHeight?.touch && sameChildren &&
         cached.node.collapsed === node.collapsed) return cached.element
       const element: AgentFolderTreeItem = {
-        id: node.id, depth, textValue: node.label, accessibleName, agentRef, children,
+        id: node.id, depth, textValue: node.label, accessibleName, agentRef, children, rowHeight,
         isDisabled: node._tag === 'Agent' && node.parent !== undefined,
         disclosurePlacement: node._tag === 'Agent' ? 'trailing' : 'leading',
         onAction: node._tag === 'Agent' && node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
@@ -751,7 +752,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     const next = props.tree.map(node => render(node, 0))
     for (const key of elements.keys()) if (!retained.has(key)) elements.delete(key)
     return next
-  }, [props.tree, props.onSelect, props.accessibleNames, elements])
+  }, [props.tree, props.onSelect, props.accessibleNames, props.agentRowHeight, props.rowStatus, elements])
   const expandAncestors = (selected: string) => {
     const path: SidebarNode[] = []
     const find = (nodes: readonly SidebarNode[]): boolean => {
