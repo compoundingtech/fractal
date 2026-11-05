@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit",
     "test:stories": "CI=1 vitest run --config vitest.story-check.config.ts",
     "test:palettes": "node --test src/legacy-palettes.test.mjs",
-    "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
+    "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs src/assistant-ui/EmbraceRuntime.unit.test.mjs src/transcript-frame-budget.unit.test.mjs",
     "test:controls": "node --test --test-force-exit src/assistant-ui/composition/Controls.unit.test.mjs",
     "test:sidebar-tree": "node --test --test-force-exit src/assistant-ui/sidebar/SidebarTree.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
