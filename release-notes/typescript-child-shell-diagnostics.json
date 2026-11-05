@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "When the runner requests web-shell diagnostics, the hook exports command_not_found_handle. If pnpm is missing in the child, the handler reports PATH and its export flag, shell identity, the first PATH component and expected wrapper prepend with empty flags, and sorted environment names. Only explicitly selected PATH, shell, Nix and admission values are shown; other values, including NIX_CONFIG, are redacted. Diagnostics use Bash builtins even when PATH has no diagnostic tools. Hook snapshots record shell IDs, PATH export state and whether the handler was exported; handler absence in the child remains evidence. Normal developer shells do not install this opt-in handler. The underlying incident is not claimed fixed."
+    "detail": "When the runner requests web-shell diagnostics, the hook exports command_not_found_handle. If pnpm is missing in the child, the handler reports PATH and its export flag, shell identity, the first PATH component and expected wrapper prepend with empty flags, and sorted environment names. Only explicitly selected PATH, shell, Nix and admission values are shown; other values, including NIX_CONFIG, are redacted. Diagnostics use Bash builtins even when PATH has no diagnostic tools. Hook snapshots record shell IDs, PATH export state and whether the handler was exported; handler absence in the child remains evidence. On Bash 5.2, a completely empty child PATH bypasses the handler, so a missing child diagnostic block may also indicate that empty-PATH condition. Normal developer shells do not install this opt-in handler. The underlying incident is not claimed fixed."
   },
   "downtime": {
     "status": "none",
