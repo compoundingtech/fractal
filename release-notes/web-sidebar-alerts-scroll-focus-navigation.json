@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep long Alerts lists reachable, preserve focus after resolution, and close the phone drawer on mission navigation",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes or accessibility exemptions."},
+  "compatibility": {"status": "none", "detail": "The Alerts tab owns a bounded scroll region. Removing a focused resolved alert moves focus to a reachable adjacent row or list target. Opening its mission explicitly closes the phone drawer."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

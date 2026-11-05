@@ -37,6 +37,38 @@ def source(number, text='hello', **changes):
     return {'id': str(number), 'channel_id': '303', 'author': {'id': '404'}, 'content': text, 'type': 0, **changes}
 
 
+class SocketDiscovery(unittest.TestCase):
+    def test_default_socket_prefers_fractal_in_runtime_and_state_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for environment, run in [
+                ({'XDG_RUNTIME_DIR': str(root / 'runtime')}, root / 'runtime'),
+                ({'XDG_STATE_HOME': str(root / 'state')}, root / 'state/st3/run'),
+            ]:
+                run.mkdir(parents=True)
+                endpoint = run / 'fractal.sock'
+                with patch.dict(os.environ, environment, clear=True):
+                    self.assertEqual(bridge.default_socket(), endpoint)
+                    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+                    legacy = run / 'st3.sock'
+                    legacy.touch()
+                    self.assertEqual(bridge.default_socket(), legacy)
+                    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+                    endpoint.touch()
+                    self.assertEqual(bridge.default_socket(), endpoint)
+
+    def test_state_socket_resolves_the_published_absolute_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / 'st3/run'
+            run.mkdir(parents=True)
+            target = root / 'published.sock'
+            target.touch()
+            (run / 'fractal.sock').symlink_to(target)
+            with patch.dict(os.environ, {'XDG_STATE_HOME': str(root)}, clear=True):
+                self.assertEqual(bridge.default_socket(), target)
+
+
 class FakeDiscord:
     token, bot_id = TOKEN, '707'
 
