@@ -37,6 +37,10 @@ export default defineConfig({
     fractalLazyChunks({
       conversation: new URL('./src/web/ConversationPane.tsx', import.meta.url).pathname,
       terminal: new URL('./src/terminal/TerminalDetail.tsx', import.meta.url).pathname,
+      workspaceMenus: new URL('./src/web/WorkspaceMenuBodies.tsx', import.meta.url).pathname,
+      details: new URL('./src/web/AgentDetailsPanel.tsx', import.meta.url).pathname,
+      changes: new URL('./src/web/ChangesInspector.tsx', import.meta.url).pathname,
+      declaration: new URL('./src/web/DeclarationBody.tsx', import.meta.url).pathname,
     }),
   ],
   server: { strictPort: true, host: '127.0.0.1', allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',') },

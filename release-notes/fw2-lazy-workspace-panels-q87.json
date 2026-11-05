@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load workspace menu and details bodies separately from the first roster and thread, warming them after roster paint and on hover or keyboard focus.",
+  "replay": {"status": "none", "detail": "No replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "Workspace actions, menus and details retain their existing behavior."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Panel chunk failures are contained locally with retry and reload recovery."}
+}

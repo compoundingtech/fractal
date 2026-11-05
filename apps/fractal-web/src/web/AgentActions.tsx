@@ -7,6 +7,7 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 import type { AgentControl, AgentControlResult } from '../agents/agent-control-port.ts'
 import { useDataSource } from '../data/react.tsx'
 import type { Agent } from '../data/source.ts'
+import { prefetchWorkspaceMenus, WorkspaceMenuBody } from './workspaceMenus.tsx'
 
 // An agent's actions, as the Fractal terminal UI's agent actions menu offers them (crates/fractal-tui/src/ui/screens.rs,
 // `agent_actions`): what can be done to it now, in the same order and words. What changes the
@@ -74,25 +75,11 @@ export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'n
     <div {...stylex.props(styles.actions)}>
       {status ? <span role="status" {...stylex.props(styles.status)}>{status}</span> : null}
       <Aria.MenuTrigger>
-        <ChromeControl icon="person" label={`Actions for ${agent.name}`} isDisabled={busy} />
+        <ChromeControl icon="person" label={`Actions for ${agent.name}`} isDisabled={busy} onPrefetch={prefetchWorkspaceMenus} />
         <Aria.Popover placement="bottom end" {...stylex.props(styles.popover)}>
-          <Aria.Menu
-            aria-label={`Actions for ${agent.name}`}
-            onAction={(key) => {
-              const row = rows.find((each) => each.key === key)
-              if (row === undefined) return
-              if (row.confirm) setConfirming(row)
-              else run(row)
-            }}
-            {...stylex.props(styles.menu)}
-          >
-            {rows.map((row) => (
-              <Aria.MenuItem key={row.key} id={row.key} textValue={row.label} {...stylex.props(styles.menuItem)}>
-                <span {...stylex.props(styles.label)}>{row.label}</span>
-                <span {...stylex.props(styles.what)}>{row.what}</span>
-              </Aria.MenuItem>
-            ))}
-          </Aria.Menu>
+          <WorkspaceMenuBody label={`Actions for ${agent.name}`} size={styles.pendingMenu}>
+            {({ AgentActionsMenu }) => <AgentActionsMenu name={agent.name} rows={rows} onRow={(row) => { if (row.confirm) setConfirming(row); else run(row) }} />}
+          </WorkspaceMenuBody>
         </Aria.Popover>
       </Aria.MenuTrigger>
       <Aria.ModalOverlay isDismissable isOpen={confirming !== undefined} onOpenChange={(open) => { if (!open) setConfirming(undefined) }} {...stylex.props(styles.overlay)}>
@@ -122,9 +109,7 @@ const styles = stylex.create({
   bordered: { borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, color: c.fg },
   danger: { borderWidth: 1, borderStyle: 'solid', borderColor: c.dangerFg, color: c.dangerFg },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
-  menu: { padding: s.xs, outline: 'none', maxWidth: 360 },
-  menuItem: { display: 'flex', flexDirection: 'column', gap: 2, padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 } },
-  label: { color: c.fg },
+  pendingMenu: { width: 320, height: 160 },
   what: { margin: 0, color: c.fgMuted, fontSize: t.denseSize },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 360, maxWidth: 'calc(100vw - 32px)', backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 8, fontFamily: t.fontSans, fontSize: t.metaSize },

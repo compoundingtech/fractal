@@ -103,12 +103,15 @@ describe('AgentActions', () => {
     document.body.append(container)
     const root = createRoot(container)
     await act(async () => root.render(<AgentActions agent={{ ref: 'agent/example/atlas', name: 'atlas', state, activity: 'idle' }} />))
-    const press = async (label: string) => act(async () => {
-      // Icon-only buttons are found by their accessible name; text buttons and menu items by their text.
-      const target = [...document.querySelectorAll<HTMLElement>('button, [role="menuitem"]')].find((each) => (each.getAttribute('aria-label') ?? each.textContent)?.startsWith(label))
-      if (target === undefined) throw new Error(`no ${label}`)
-      target.click()
-    })
+    const press = async (label: string) => {
+      // The trigger stays eager; wait for the real on-demand menu before selecting an action.
+      const target = await vi.waitFor(() => {
+        const item = [...document.querySelectorAll<HTMLElement>('button, [role="menuitem"]')].find((each) => (each.getAttribute('aria-label') ?? each.textContent)?.startsWith(label))
+        if (item === undefined) throw new Error(`no ${label}`)
+        return item
+      })
+      await act(async () => target.click())
+    }
     return { press, unmount: () => { act(() => root.unmount()); container.remove() } }
   }
 

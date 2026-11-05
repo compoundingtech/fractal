@@ -1,11 +1,11 @@
 import * as React from 'react'
 import { RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
-import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
+import { cancelMeasure, markStart } from './perfMarks.ts'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
 import * as Atom from 'effect/reactivity/Atom'
-import { DateTime } from 'effect'
+import { prefetchWorkspaceMenus, WorkspaceMenuBody } from './workspaceMenus.tsx'
 import { SidePanel } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SidePanel.tsx'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
@@ -13,11 +13,9 @@ import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/compos
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SyncFailureDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/SyncLine.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { HumanTime } from '@fractal/ui/human-time'
 import { useConversation, useConversationSync, useDataSource } from '../data/react.tsx'
 import { unavailable, waiting, type DataSource, type Feed } from '../data/source.ts'
-import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
-import { resourceState, resourceTitle, type ResourcePage } from '../resources/agent/model.ts'
+import type { ResourcePage } from '../resources/agent/model.ts'
 import { systemEventsPreference } from './conversationPreferences.ts'
 import type { OpenOperation, UxTelemetry } from '../telemetry/ux.ts'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
@@ -55,6 +53,7 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
   const registry = React.useContext(RegistryContext)
   const atoms = retainedResourceAtoms(source)
   const prefetch = () => {
+    prefetchWorkspaceMenus()
     registry.mount(atoms.resources(agentRef))()
     registry.mount(atoms.queue(agentRef))()
   }
@@ -97,7 +96,9 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
     : undefined
   const panel = resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} placement={resourcesDock === undefined ? 'overlay' : 'dock'} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close resources</Aria.Button>} onClose={() => changeResourcesOpen(false)}>
-    <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
+    <WorkspaceMenuBody label="Agent resources" size={styles.contents}>
+      {({ ResourceContents }) => <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />}
+    </WorkspaceMenuBody>
   </SidePanel> : null
   return <div {...stylex.props(styles.actions)}>
     <span {...stylex.props(styles.secondary, narrow && styles.secondaryHidden)}>
@@ -122,75 +123,16 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
       </Aria.Modal>
     </Aria.ModalOverlay>
     <Aria.MenuTrigger>
-      <ChromeControl icon="gear" label="Conversation menu" />
+      <ChromeControl icon="gear" label="Conversation menu" onPrefetch={prefetchWorkspaceMenus} />
       <Aria.Popover {...stylex.props(styles.popover)}>
-        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true); else if (key === 'sync-details') setSyncDetailsOpen(true) }} {...stylex.props(styles.menu)}>
-          <Aria.MenuSection selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))}>
-            <Aria.MenuItem id="system" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Show all system events</Aria.MenuItem>
-          </Aria.MenuSection>
-          <Aria.MenuSection selectionMode="none">
-            <Aria.MenuItem id="resources" isDisabled={disabledReason !== undefined} textValue="Resources" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Resources{disabledReason === undefined ? null : <span slot="description" {...stylex.props(styles.menuReason)}>{disabledReason}</span>}</Aria.MenuItem>
-            <Aria.MenuItem id="declaration" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>View KDL</Aria.MenuItem>
-            {retainedFailure ? <Aria.MenuItem id="sync-details" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Sync details</Aria.MenuItem> : null}
-          </Aria.MenuSection>
-        </Aria.Menu>
+        <WorkspaceMenuBody label="Conversation settings" size={narrow ? styles.pendingTouchMenu : styles.pendingMenu}>
+          {({ ConversationMenu }) => <ConversationMenu showSystemEvents={showSystemEvents} onShowSystemEventsChange={setShowSystemEvents} disabledReason={disabledReason} retainedFailure={retainedFailure}
+            onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true); else if (key === 'sync-details') setSyncDetailsOpen(true) }} />}
+        </WorkspaceMenuBody>
       </Aria.Popover>
     </Aria.MenuTrigger>
   </div>
 }
-
-const ResourceContents = ({ agentRef, resources, opening, cache }: {
-  readonly agentRef: string
-  readonly resources: Feed<ResourcePage>
-  readonly opening?: OpenOperation
-  readonly cache: 'retained' | 'cold'
-}) => {
-  const source = useDataSource()
-  const queue = useAtomValue(retainedResourceAtoms(source).queue(agentRef))
-  React.useLayoutEffect(() => {
-    if (resources._tag !== 'Waiting') opening?.phase('data', { 'wf.ux.cache': cache })
-    if (queue._tag !== 'Waiting') opening?.phase('queue')
-    if (resources._tag !== 'Waiting' && queue._tag !== 'Waiting') return opening?.contentCommitted()
-  }, [opening, cache, resources._tag, queue._tag])
-  const settled = queue._tag === 'Observed' && resources._tag === 'Observed' && !resources.value.loadingMore
-  React.useLayoutEffect(() => {
-    if (settled) return measureEnd('resources_panel', agentRef)
-  }, [agentRef, settled])
-  return <div {...stylex.props(styles.contents)}>
-    <section aria-label="To-dos">
-      <h2 {...stylex.props(styles.sectionTitle)}>To-dos</h2>
-      <LiveAgentTodos agentRef={agentRef} placement="resources" />
-    </section>
-    <section aria-label="Agent queue">
-      <h2 {...stylex.props(styles.sectionTitle)}>Agent queue</h2>
-      {queue._tag !== 'Observed' ? <ReadNotice feed={queue} label="Agent queue" /> : <>
-        {queue.freshness === 'stale' ? <p role="status">Showing the last verified agent queue while reconnecting.</p> : null}
-        <p>{queue.value.current_work_ids.length} current work {queue.value.current_work_ids.length === 1 ? 'item' : 'items'}</p>
-        {queue.value.current_work_ids.length === 0 ? null : <ul>{queue.value.current_work_ids.map(id => <li key={id}>{id}</li>)}</ul>}
-        {queue.value.runs.length === 0 ? <p>No queued mission runs observed.</p> : <ol>{queue.value.runs.map(run => <li key={run.mission_run_id}>{run.mission_run_id} · {run.state} · {run.ready_work_ids.length} ready, {run.waiting_work_ids.length} waiting</li>)}</ol>}
-      </>}
-    </section>
-    <section aria-label="Observed resources">
-      <h2 {...stylex.props(styles.sectionTitle)}>Observed resources</h2>
-      {resources._tag !== 'Observed' ? <ReadNotice feed={resources} label="Agent resources" /> : <>
-        {resources.freshness === 'stale' ? <p role="status">Showing the last verified resources while reconnecting.</p> : null}
-        {resources.value.items.length === 0 ? <p>No resources observed for this agent.</p> : <ul {...stylex.props(styles.list)}>{resources.value.items.map(resource => {
-          const state = resourceState(resource)
-          return <li key={resource.id} {...stylex.props(styles.resource)}>
-            <div {...stylex.props(styles.resourceHeading)}><span {...stylex.props(styles.resourceTitle)}>{resourceTitle(resource)}</span>{state === undefined ? null : <span {...stylex.props(styles.resourceState)}>{state.replaceAll('_', ' ')}</span>}</div>
-            <div {...stylex.props(styles.resourceMetadata)}><span>{resource.kind}</span><HumanTime at={DateTime.toEpochMillis(resource.observed_at)} kind="relative" aria-label="Resource observed" /></div>
-          </li>
-        })}</ul>}
-        {resources.value.pagingError === undefined ? null : <p role="status" data-wf-resource-paging="failed">More resources could not be loaded; refresh to try again.</p>}
-        {resources.value.nextCursor === null ? null : <Aria.Button isDisabled={resources.value.loadingMore === true} onPress={() => source.resources?.loadMore(agentRef)} {...stylex.props(styles.button)}>{resources.value.loadingMore ? 'Loading more resources…' : 'Load more resources'}</Aria.Button>}
-      </>}
-      {source.resources === undefined ? null : <Aria.Button onPress={() => source.resources?.refresh(agentRef)} {...stylex.props(styles.button)}>Refresh resources</Aria.Button>}
-    </section>
-  </div>
-}
-
-const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>; readonly label: string }) =>
-  <p role="status" data-wf-read-reason={feed._tag === 'Unavailable' ? feed.reason : undefined}>{feed._tag === 'Waiting' ? `Loading ${label.toLowerCase()}…` : feed.reason === 'ungranted' ? `Read access to ${label.toLowerCase()} has not been granted.` : feed.reason === 'unsupported' ? `This connection does not support ${label.toLowerCase()}.` : `${label} could not be loaded; reconnect and try again.`}</p>
 
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
@@ -199,22 +141,14 @@ const styles = stylex.create({
   declarationButton: { height: 28, minWidth: 28, justifyContent: 'center', paddingInline: { default: 8, '@container thread-header (max-width: 680px)': 0 } },
   declarationIcon: { display: { default: 'none', '@container thread-header (max-width: 680px)': 'inline-flex' } },
   declarationLabel: { display: { default: 'inline', '@container thread-header (max-width: 680px)': 'none' } },
-  menuReason: { display: 'block', maxWidth: 240, color: c.fgMuted, fontSize: t.denseSize },
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, whiteSpace: 'nowrap', flexShrink: 0, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', justifyContent: 'flex-end', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 380, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   dialog: { display: 'flex', flexDirection: 'column', height: '100%', outline: 'none' },
   heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   contents: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
-  sectionTitle: { fontSize: t.uiSize, marginBlock: s.md },
-  list: { listStyle: 'none', padding: 0 },
-  resource: { padding: s.md, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6 },
-  resourceHeading: { display: 'flex', alignItems: 'baseline', gap: s.md },
-  resourceTitle: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere' },
-  resourceState: { flexShrink: 0, fontSize: t.metaSize, color: c.fgMuted },
-  resourceMetadata: { display: 'flex', justifyContent: 'space-between', gap: s.md, fontSize: t.metaSize, color: c.fgMuted },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
-  menu: { padding: s.xs, outline: 'none' },
-  menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 }, ':is([data-selected])': { color: c.primary } },
+  pendingMenu: { width: 200, height: 120 },
+  pendingTouchMenu: { width: 200, height: 140 },
   touchItem: { minHeight: g.touchTarget, display: 'flex', flexDirection: 'column', justifyContent: 'center', boxSizing: 'border-box' },
 })

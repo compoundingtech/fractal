@@ -7,7 +7,9 @@ import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import type * as TerminalDetailModule from '../terminal/TerminalDetail.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
-import { DeclarationDialog } from './DeclarationDialog.tsx'
+import { DeclarationDialog, prefetchDeclaration } from './DeclarationDialog.tsx'
+import { prefetchWorkspaceMenus } from './workspaceMenus.tsx'
+import { lazyPanel, LazyPanelBoundary, type LazyPanelRecovery } from './LazyPanelBoundary.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import type * as AlertsTabModule from './AlertsTab.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
@@ -231,8 +233,24 @@ class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof 
 }
 
 // Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
-const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
-const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
+const detailsPanel = lazyPanel('details', () => import('./AgentDetailsPanel.tsx'))
+const changesPanel = lazyPanel('changes', () => import('./ChangesInspector.tsx'))
+/** Bodies one click away warm after the roster paints; the first roster and thread never wait on them. */
+const prefetchWorkspaceBodies = () => {
+  prefetchChangelog()
+  prefetchWorkspaceMenus()
+  detailsPanel.prefetch()
+  changesPanel.prefetch()
+  prefetchDeclaration()
+}
+/** The pending inspector is its final landmark at its final size: the body appears in place, with no interim content. */
+const InspectorPending = () => <aside aria-label="Agent inspector" aria-busy="true" {...stylex.props(styles.changesPanel, styles.sheetPanel)} />
+const InspectorFailed = ({ recovery }: { readonly recovery: LazyPanelRecovery }) => <aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}>
+  <div role="alert" {...stylex.props(styles.empty)}>
+    <p>Agent details could not load.</p>
+    <button type="button" onClick={recovery.onPress}>{recovery.label}</button>
+  </div>
+</aside>
 /** Demand and idle intent share one request; a failed preload never poisons the next open. */
 let terminalDetailModule: Promise<typeof TerminalDetailModule> | undefined
 /** Set once the module resolves, so a warm reopen renders it directly instead of suspending a fresh lazy identity. */
@@ -420,10 +438,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     let cancelIdle: (() => void) | undefined
     const cancelPaint = afterNextPaint(() => {
       if (typeof window.requestIdleCallback === 'function') {
-        const idle = window.requestIdleCallback(prefetchChangelog)
+        const idle = window.requestIdleCallback(prefetchWorkspaceBodies)
         cancelIdle = () => window.cancelIdleCallback(idle)
       } else {
-        const timer = window.setTimeout(prefetchChangelog, 0)
+        const timer = window.setTimeout(prefetchWorkspaceBodies, 0)
         cancelIdle = () => window.clearTimeout(timer)
       }
     })
@@ -455,9 +473,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     })
     return () => { cancelPaint(); cancelIdle?.() }
   }, [terminalRef])
-  const prefetchTerminalIntent = (event: React.SyntheticEvent<HTMLElement>) => {
-    if (terminalRef === undefined || !(event.target instanceof Element) ||
-      event.target.closest('[aria-label="Toggle terminal drawer"]') === null) return
+  // Hover or focus on a panel toggle is intent: warm that body before the press.
+  const prefetchPanelIntent = (event: React.SyntheticEvent<HTMLElement>) => {
+    if (!(event.target instanceof Element)) return
+    if (event.target.closest('[aria-label="Toggle right panel"], [aria-label="Agent details"]') !== null) detailsPanel.prefetch()
+    if (event.target.closest('[role="tab"][aria-label="Changes"]') !== null) changesPanel.prefetch()
+    if (terminalRef === undefined || event.target.closest('[aria-label="Toggle terminal drawer"]') === null) return
     prefetchTerminalDetail()
     terminalSource.prefetchTerminal?.(terminalRef)
   }
@@ -687,11 +708,11 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               {shortcutHelp}
               {narrow ? null : <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
               <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
-                <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
-                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
-                </React.Suspense>
+                <LazyPanelBoundary panel={detailsPanel} pending={<InspectorPending />} fallback={recovery => <InspectorFailed recovery={recovery} />}>
+                  {({ AgentDetailsPanel }) => <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />}
+                </LazyPanelBoundary>
               ) : undefined}>
-              <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
+              <section aria-label={workspaceLabel} onPointerOverCapture={prefetchPanelIntent} onFocusCapture={prefetchPanelIntent} {...stylex.props(styles.workspace)}>
                 {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
                 <GatewayConnectionStatus />
                 {!narrow && visiblePanes.length > 0 ? (
@@ -712,7 +733,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                 {/* Keep this panel and its portal container at one reconciliation position across the breakpoint. */}
                 <PhoneWorkspaceTabs enabled={narrow} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(terminalDisabledReason === undefined ? {} : { disabledReason: terminalDisabledReason })} /> : undefined} tabs={phoneTabs} selected={selectedPane === 'thread' ? current : selectedPane} onSelect={id => id === current || agents.some(row => row.ref === id) ? select(id) : navigate(current, id)}>
                   <div ref={setPaneHost} {...stylex.props(styles.body, narrow && selectedPane === 'changes' && styles.phoneHidden)} />
-                  {narrow && selectedPane === 'changes' && current !== '' ? <React.Suspense fallback={<SystemNotice kind="loading" title="Loading captured changes" />}><ChangesInspector key={current} agentRef={current} width="fill" /></React.Suspense> : null}
+                  {narrow && selectedPane === 'changes' && current !== '' ? <LazyPanelBoundary panel={changesPanel} pending={<div aria-busy="true" {...stylex.props(styles.body)} />} fallback={recovery => <div role="alert" {...stylex.props(styles.empty)}><p>Captured changes could not load.</p><button type="button" onClick={recovery.onPress}>{recovery.label}</button></div>}>
+                    {({ ChangesInspector }) => <ChangesInspector key={current} agentRef={current} width="fill" />}
+                  </LazyPanelBoundary> : null}
                 </PhoneWorkspaceTabs>
               </section>
               </DockedSplit>
@@ -726,9 +749,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
               {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
                 {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
-                  <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>
-                    <AgentDetailsPanel key={current} agentRef={current} width="fill" scheme={scheme} onClose={closeDetails} onOpen={(uri) => { closeDetails(); openDetailsUri(uri) }} />
-                  </React.Suspense>
+                  <LazyPanelBoundary panel={detailsPanel} pending={<InspectorPending />} fallback={recovery => <InspectorFailed recovery={recovery} />}>
+                    {({ AgentDetailsPanel }) => <AgentDetailsPanel key={current} agentRef={current} width="fill" scheme={scheme} onClose={closeDetails} onOpen={(uri) => { closeDetails(); openDetailsUri(uri) }} />}
+                  </LazyPanelBoundary>
                 )}
               </NarrowSheet> : null}
               <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />

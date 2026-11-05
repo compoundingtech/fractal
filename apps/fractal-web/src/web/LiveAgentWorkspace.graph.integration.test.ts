@@ -101,6 +101,18 @@ describe('conversation eager graph boundary', () => {
     expect(manifest.dependencies).not.toContain('virtual:build-identity')
   })
 
+  it('keeps workspace menu and inspector bodies outside startup while preserving their on-demand reachability', () => {
+    const eager = eagerGraph(resolve(web, 'main.tsx'))
+    const demand = eagerGraph(resolve(web, 'main.tsx'), true)
+    for (const body of ['WorkspaceMenuBodies.tsx', 'AgentDetailsPanel.tsx', 'ChangesInspector.tsx', 'DeclarationBody.tsx']) {
+      expect(eager.files).not.toContain(resolve(web, body))
+      expect(demand.files).toContain(resolve(web, body))
+    }
+    expect(eager.files).toContain(resolve(web, 'AgentActions.tsx'))
+    expect(eager.files).toContain(resolve(web, 'ConversationHeaderActions.tsx'))
+    expect(eager.files).not.toContain(resolve(web, '../conversation/todos/AgentTodos.tsx'))
+  })
+
   it('still reaches the real heavy composition through the on-demand pane', () => {
     const graph = eagerGraph(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Transcript.tsx'))
