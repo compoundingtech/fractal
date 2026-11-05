@@ -328,6 +328,9 @@ importers:
       react-markdown:
         specifier: 10.1.0
         version: 10.1.0(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1)
+      react-stately:
+        specifier: 3.50.0
+        version: 3.50.0(react@19.2.3)
       remark-gfm:
         specifier: 4.0.1
         version: 4.0.1(supports-color@8.1.1)
