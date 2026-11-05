@@ -78,6 +78,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("documents.list", "/v1/client/documents"),
     ("document-references.get", "/v1/client/document-references"),
     ("publication.definition", "/v1/client/publication-definition"),
+    ("mission-declaration.get", "/v1/client/mission-declaration"),
     ("subject.definition", "/v1/client/subject-definition"),
     ("mail-backlog.summary", "/v1/client/mail-backlog"),
     ("slo.list", "/v1/client/slo"),
@@ -148,6 +149,9 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("assistant.conversation-content", "/v1/client/assistant/conversation-content"),
     ("assistant.terminal-content", "/v1/client/assistant/terminal-content"),
 ];
+/// Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>.
+#[rustfmt::skip]
+pub const PINS_ARRANGEMENT_UUID: &str = "00000000-0000-7000-8000-000000000002";
 /// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
 #[rustfmt::skip]
 pub const SIDEBAR_ARRANGEMENT_UUID: &str = "00000000-0000-7000-8000-000000000001";

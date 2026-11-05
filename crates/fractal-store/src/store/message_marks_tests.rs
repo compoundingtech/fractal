@@ -154,7 +154,7 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
         assert_eq!(page(&claims), page(&marks), "closed {include_closed}");
     }
     for quiet in [false, true] {
-        assert_eq!(format!("{:?}", claims.mailbox_unread_summary(RECIPIENT, quiet).unwrap()), format!("{:?}", marks.mailbox_unread_summary(RECIPIENT, quiet).unwrap()));
+        assert_eq!(format!("{:?}", claims.mailbox_unread_summary(RECIPIENT, quiet, 0).unwrap()), format!("{:?}", marks.mailbox_unread_summary(RECIPIENT, quiet, 0).unwrap()));
     }
 }
 

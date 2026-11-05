@@ -213,8 +213,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(())
             };
             let mut backend_entered = false;
+            let mut contract = None;
             let result = caught(|| {
                 guard()?;
+                if prepared.subject.kind == "agent" {
+                    contract = Some(runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?);
+                }
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
@@ -247,6 +251,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "verification_error": verification_error})
                 },
             };
+            result["launch_contract"] = serde_json::json!(contract);
             result["operation_id"] = Value::from(id.clone());
             result["subject"] = Value::from(subject.clone());
             result["origin"] = Value::from(store.origin());
@@ -471,7 +476,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     Some(error) => Err(anyhow::anyhow!(error.to_owned())),
                     None => Ok(result["incarnation"].as_str().map(str::to_owned)),
                 };
-                let completed = self.finish_start(&operation.id, &prepared, outcome)?;
+                let completed = self.finish_start(
+                    &operation.id, &prepared, outcome, result.get("launch_contract").filter(|value| !value.is_null()),
+                )?;
                 if let StartCompletion::Applied(Some(error)) = &completed {
                     if let Some(request) = &prepared.request
                         && self.store.runtime_start_request_retained(request)?

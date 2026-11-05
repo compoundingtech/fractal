@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry equal sidebar tabs, collapsed shortcut help and valid changelog summaries into the Alerts tab",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Keep a single Alerts inbox while preserving the reviewed parent sidebar fixes."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

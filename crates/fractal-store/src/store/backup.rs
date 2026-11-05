@@ -29,7 +29,7 @@ impl Store {
             fleet_id: fleet_meta(&connection, "fleet_id")?,
             fleet_anchor: fleet_meta(&connection, "fleet_anchor_key")?,
             graph_digest: projection_digest::root(&digests),
-            log_digest: self.backup_log_digest()?,
+            log_digest: log_digest(self)?,
             tables: digests
                 .into_iter()
                 .map(|(name, digest)| {
@@ -38,42 +38,8 @@ impl Store {
                 })
                 .collect(),
             ledgers: super::backup_ledgers::digests(&connection)?,
+            shards: BTreeMap::new(),
         })
-    }
-
-    fn backup_log_digest(&self) -> Result<String> {
-        let connection = self.readers.get();
-        let mut hash = Sha256::new();
-        hash.update(INVENTORY_DIGEST_DOMAIN);
-        let mut after = (String::new(), 0_u64, String::new());
-        loop {
-            // Both index seeks are bounded before the UNION sorts at most two pages.
-            let identities = connection.prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h2f70c77d7c03 owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
-                   WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
-                   ORDER BY writer,sequence,envelope_hash LIMIT ?4),
-                 dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
-                   WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
-                   ORDER BY writer,sequence,envelope_hash LIMIT ?4)
-                 SELECT * FROM live UNION SELECT * FROM dropped ORDER BY writer,sequence,envelope_hash LIMIT ?4"
-            )?.query_map(params![after.0,after.1,after.2,PAGE], |r| Ok(ReplicaEnvelopeId {
-                writer:r.get(0)?,sequence:r.get(1)?,hash:r.get(2)?,
-            }))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            if identities.is_empty() {
-                break;
-            }
-            for identity in &identities {
-                update_identity_digest(
-                    &mut hash,
-                    &identity.writer,
-                    identity.sequence,
-                    &identity.hash,
-                );
-            }
-            let last = identities.last().unwrap();
-            after = (last.writer.clone(), last.sequence, last.hash.clone());
-        }
-        Ok(hex::encode(hash.finalize()))
     }
 
     /// Refuse an incomplete projection before returning an export stream. The
@@ -131,11 +97,28 @@ impl Store {
                 }
             }
         }
+        // The messages shard, when this process opened one. The archive carries it once it
+        // holds an envelope or a local row; see `super::backup_shards`.
+        let shard = super::messages_shard::shard(self);
+        // A message in the outbox is pending mail, and the archive has no place for it: the outbox
+        // is not a ledger, and a build before it refuses an archive that names one. So the export
+        // drains it first and refuses while any remains; in this build nothing enqueues, so none
+        // does. Only a store with its shard drains here: a copy opened without one would write the
+        // mail to the copy's graph instead of the member's.
+        if shard.is_some() {
+            super::message_outbox::drain(self)?;
+        }
         loop {
             self.seal_local_batches()?;
+            if let Some(shard) = &shard {
+                shard.seal_local_batches()?;
+            }
             // Capture before pinning: another sealer may advance this atomic after our reader
             // starts, but that commit would not be visible to the pinned snapshot.
             let seeded_through = self.seeded_batch_rowid.load(Ordering::Acquire);
+            let shard_seeded_through = shard
+                .as_ref()
+                .map(|shard| shard.seeded_batch_rowid.load(Ordering::Acquire));
             let result = self.read_snapshot(|_| {
                 // A write can land between sealing and pinning the reader. Retry before emitting
                 // anything if that snapshot has claims without their signed sync envelope.
@@ -145,130 +128,171 @@ impl Store {
                 // Admission and projection commit separately. Only a snapshot whose persisted
                 // projection frontier covers its log can promise the same graph on restore.
                 self.check_backup_projection()?;
-                let mut header = self.backup_header()?;
-                if super::backup_ledgers::MARK_LEDGERS.iter().any(|table| header.ledgers.contains_key(*table)) {
-                    header.version = super::backup_format::VERSION_WITH_MARKS;
-                } else if !header.ledgers.is_empty() {
-                    header.version = super::backup_format::VERSION_WITH_LEDGERS;
-                } else if !owned.is_empty() {
-                    header.version = super::backup_format::VERSION_WITH_BODIES;
+                if let Some((subject, attempts, error)) = super::message_outbox::oldest(&self.readers.get())? {
+                    anyhow::bail!(
+                        "backup waits for the messages in the outbox to drain; retry once the daemon has written them (`{subject}` waits after {attempts} attempts{})",
+                        error.map(|error| format!(", last: {error}")).unwrap_or_default()
+                    );
                 }
-                let mut hash = Sha256::new();
-                write_record(output, &mut hash, &Record::Header(header.clone()))?;
-                let mut after = (String::new(), 0_u64, String::new());
-                let mut count = 0;
-                loop {
-                    let connection = self.readers.get();
-                    let identities = connection
-                        .prepare_cached(
-                            "SELECT writer,sequence,envelope_hash FROM replica_envelopes
-                         WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
-                         ORDER BY writer,sequence,envelope_hash LIMIT ?4",
-                        )?
-                        .query_map(params![after.0, after.1, after.2, PAGE], |r| {
-                            Ok(ReplicaEnvelopeId {
-                                writer: r.get(0)?,
-                                sequence: r.get(1)?,
-                                hash: r.get(2)?,
-                            })
-                        })?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    if identities.is_empty() {
-                        break;
-                    }
-                    let last = identities.last().unwrap();
-                    after = (last.writer.clone(), last.sequence, last.hash.clone());
-                    drop(connection);
-                    let signatures = self.replication_signatures_for(&identities)?;
-                    for envelope in self.replica_envelopes(identities)? {
-                        write_record(output, &mut hash, &Record::Envelope(envelope))?;
-                        count += 1;
-                    }
-                    if !signatures.is_empty() {
-                        write_record(output, &mut hash, &Record::Signatures(signatures))?;
-                    }
-                }
-                // A trim records its complete certified tombstones before deleting any rows.
-                // A snapshot between deletion chunks must include that manifest too.
-                let checkpoint: Option<(String, u128)> = self
-                    .readers
-                    .get()
-                    .query_row(
-                        "SELECT id,cut_unix_ms FROM checkpoints
-                     WHERE state IN ('trimming','trimmed') AND drop_digest IS NOT NULL
-                     ORDER BY cut_unix_ms DESC LIMIT 1",
-                        [],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                u128::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
-                            ))
-                        },
-                    )
-                    .optional()?;
-                if let Some((checkpoint, cut_unix_ms)) = checkpoint {
-                    // The manifest is the sync representation, verified against signed certificate
-                    // claims on restore. No SQL or local checkpoint bookkeeping enters the archive.
-                    let mut after = None;
-                    loop {
-                        let page = self.manifest_page(
-                            &CheckpointManifestRequest {
-                                checkpoint: checkpoint.clone(),
-                                cut_unix_ms,
-                                after,
-                            },
-                            PAGE,
-                        )?;
-                        after = page.next.clone();
-                        write_record(output, &mut hash, &Record::Checkpoint(page))?;
-                        if after.is_none() {
-                            break;
+                match (&shard, shard_seeded_through) {
+                    // The shard is pinned after the graph and held while the whole archive is
+                    // written, and a shard write between sealing and pinning retries as one in
+                    // the graph does.
+                    (Some(shard), Some(seeded_through)) => shard.read_snapshot(|_| {
+                        if max_batch_rowid(&shard.readers.get())? > seeded_through {
+                            return Ok(None);
                         }
-                    }
+                        self.write_pinned_backup(output, bodies, &owned, Some(&**shard)).map(Some)
+                    }),
+                    _ => self.write_pinned_backup(output, bodies, &owned, None).map(Some),
                 }
-                // Every ledger row, after the manifest whose tombstones restore turns into some
-                // of the same rows again. The header already holds their digests.
-                super::backup_ledgers::write_pages(&self.readers.get(), |page| {
-                    write_record(output, &mut hash, &Record::Ledger(page))
-                })?;
-                if let Some(bodies) = bodies {
-                    use base64::Engine as _;
-                    for (subject, actor, sha256) in &owned {
-                        // A body that vanished or changed since it was checked is left out, and
-                        // the restore report counts it as not returned.
-                        let Some(bytes) = bodies.read(actor, subject)? else {
-                            continue;
-                        };
-                        if hex::encode(Sha256::digest(&bytes)) != *sha256 {
-                            continue;
-                        }
-                        write_record(
-                            output,
-                            &mut hash,
-                            &Record::MessageBody(super::backup_format::MessageBodyRecord {
-                                message: subject.clone(),
-                                actor: actor.clone(),
-                                sha256: sha256.clone(),
-                                data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                            }),
-                        )?;
-                    }
-                }
-                self.check_backup_chains()?;
-                serde_json::to_writer(
-                    &mut *output,
-                    &Record::End {
-                        envelopes: count,
-                        sha256: hex::encode(hash.finalize()),
-                    },
-                )?;
-                output.write_all(b"\n")?;
-                Ok(Some(header))
             })?;
             if let Some(header) = result {
                 return Ok(header);
             }
         }
+    }
+
+    /// Write the archive from the graph snapshot this thread has pinned and, when the shard is
+    /// given, the shard snapshot pinned after it.
+    fn write_pinned_backup(
+        &self,
+        output: &mut impl Write,
+        bodies: Option<&crate::message_body::Bodies>,
+        owned: &[(String, String, String)],
+        shard: Option<&GraphStore>,
+    ) -> Result<Header> {
+        let mut header = self.backup_header()?;
+        let shard_digest = match shard {
+            Some(shard) => super::backup_shards::digest(shard)?,
+            None => None,
+        };
+        if let Some(digest) = shard_digest {
+            header.version = super::backup_format::VERSION_WITH_SHARDS;
+            header.shards.insert(super::messages_shard::SHARD_ID.into(), digest);
+        } else if super::backup_ledgers::MARK_LEDGERS.iter().any(|table| header.ledgers.contains_key(*table)) {
+            header.version = super::backup_format::VERSION_WITH_MARKS;
+        } else if !header.ledgers.is_empty() {
+            header.version = super::backup_format::VERSION_WITH_LEDGERS;
+        } else if !owned.is_empty() {
+            header.version = super::backup_format::VERSION_WITH_BODIES;
+        }
+        let mut hash = Sha256::new();
+        write_record(output, &mut hash, &Record::Header(header.clone()))?;
+        let mut after = (String::new(), 0_u64, String::new());
+        let mut count = 0;
+        loop {
+            let connection = self.readers.get();
+            let identities = connection
+                .prepare_cached(
+                    "SELECT writer,sequence,envelope_hash FROM replica_envelopes
+                         WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
+                         ORDER BY writer,sequence,envelope_hash LIMIT ?4",
+                )?
+                .query_map(params![after.0, after.1, after.2, PAGE], |r| {
+                    Ok(ReplicaEnvelopeId {
+                        writer: r.get(0)?,
+                        sequence: r.get(1)?,
+                        hash: r.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if identities.is_empty() {
+                break;
+            }
+            let last = identities.last().unwrap();
+            after = (last.writer.clone(), last.sequence, last.hash.clone());
+            drop(connection);
+            let signatures = self.replication_signatures_for(&identities)?;
+            for envelope in self.replica_envelopes(identities)? {
+                write_record(output, &mut hash, &Record::Envelope(envelope))?;
+                count += 1;
+            }
+            if !signatures.is_empty() {
+                write_record(output, &mut hash, &Record::Signatures(signatures))?;
+            }
+        }
+        // A trim records its complete certified tombstones before deleting any rows.
+        // A snapshot between deletion chunks must include that manifest too.
+        let checkpoint: Option<(String, u128)> = self
+            .readers
+            .get()
+            .query_row(
+                "SELECT id,cut_unix_ms FROM checkpoints
+                     WHERE state IN ('trimming','trimmed') AND drop_digest IS NOT NULL
+                     ORDER BY cut_unix_ms DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        u128::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((checkpoint, cut_unix_ms)) = checkpoint {
+            // The manifest is the sync representation, verified against signed certificate
+            // claims on restore. No SQL or local checkpoint bookkeeping enters the archive.
+            let mut after = None;
+            loop {
+                let page = self.manifest_page(
+                    &CheckpointManifestRequest {
+                        checkpoint: checkpoint.clone(),
+                        cut_unix_ms,
+                        after,
+                    },
+                    PAGE,
+                )?;
+                after = page.next.clone();
+                write_record(output, &mut hash, &Record::Checkpoint(page))?;
+                if after.is_none() {
+                    break;
+                }
+            }
+        }
+        // Every ledger row, after the manifest whose tombstones restore turns into some
+        // of the same rows again. The header already holds their digests.
+        super::backup_ledgers::write_pages(&self.readers.get(), |page| {
+            write_record(output, &mut hash, &Record::Ledger(page))
+        })?;
+        // The shard's envelopes and local rows, read in the shard snapshot the header's shard
+        // digest was taken in.
+        if let Some(shard) = shard.filter(|_| !header.shards.is_empty()) {
+            super::backup_shards::write_records(shard, |record| write_record(output, &mut hash, record))?;
+        }
+        if let Some(bodies) = bodies {
+            use base64::Engine as _;
+            for (subject, actor, sha256) in owned {
+                // A body that vanished or changed since it was checked is left out, and
+                // the restore report counts it as not returned.
+                let Some(bytes) = bodies.read(actor, subject)? else {
+                    continue;
+                };
+                if hex::encode(Sha256::digest(&bytes)) != *sha256 {
+                    continue;
+                }
+                write_record(
+                    output,
+                    &mut hash,
+                    &Record::MessageBody(super::backup_format::MessageBodyRecord {
+                        message: subject.clone(),
+                        actor: actor.clone(),
+                        sha256: sha256.clone(),
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    }),
+                )?;
+            }
+        }
+        self.check_backup_chains()?;
+        serde_json::to_writer(
+            &mut *output,
+            &Record::End {
+                envelopes: count,
+                sha256: hex::encode(hash.finalize()),
+            },
+        )?;
+        output.write_all(b"\n")?;
+        Ok(header)
     }
 
     pub fn prepare_backup_restore(&self, header: &Header, writer: &str) -> Result<()> {
@@ -473,6 +497,7 @@ impl Store {
             message_bodies_restored: 0,
             message_bodies_unmatched: 0,
             message_bodies_referenced: 0,
+            shards: BTreeMap::new(),
         })
     }
 
@@ -551,6 +576,43 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// The digest of a store's complete admitted envelope log, certified tombstones included: the
+/// graph's `log_digest`, and each shard's in the same form.
+pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
+    let connection = store.readers.get();
+    let mut hash = Sha256::new();
+    hash.update(INVENTORY_DIGEST_DOMAIN);
+    let mut after = (String::new(), 0_u64, String::new());
+    loop {
+        // Both index seeks are bounded before the UNION sorts at most two pages.
+        let identities = connection.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-haea4d31a22af owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
+               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
+               ORDER BY writer,sequence,envelope_hash LIMIT ?4),
+             dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
+               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
+               ORDER BY writer,sequence,envelope_hash LIMIT ?4)
+             SELECT * FROM live UNION SELECT * FROM dropped ORDER BY writer,sequence,envelope_hash LIMIT ?4"
+        )?.query_map(params![after.0,after.1,after.2,PAGE], |r| Ok(ReplicaEnvelopeId {
+            writer:r.get(0)?,sequence:r.get(1)?,hash:r.get(2)?,
+        }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if identities.is_empty() {
+            break;
+        }
+        for identity in &identities {
+            update_identity_digest(
+                &mut hash,
+                &identity.writer,
+                identity.sequence,
+                &identity.hash,
+            );
+        }
+        let last = identities.last().unwrap();
+        after = (last.writer.clone(), last.sequence, last.hash.clone());
+    }
+    Ok(hex::encode(hash.finalize()))
 }
 
 #[cfg(test)]
@@ -1392,6 +1454,293 @@ mod tests {
         });
         let error = backup::verify_file(&path).unwrap_err().to_string();
         assert!(error.contains("message marks in an archive that does not declare them"), "{error}");
+    }
+
+    fn stream_message(subject: &str, to: &str) -> ClaimInput {
+        ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({"from": "agent/birch", "to": to, "content": subject, "status": "sent"})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }
+    }
+
+    fn lifecycle(store: &Store, subject: &str, kind: &str, status: &str) {
+        let fields = BTreeMap::from([("status".to_owned(), json!(status))]);
+        assert!(super::super::messages_shard::record_lifecycle(store, subject, kind, Some("agent/cedar"), &fields).unwrap());
+    }
+
+    /// Every stream item the store lists, oldest first, with its status.
+    fn stream_items(store: &Store) -> Vec<(String, String)> {
+        let filter = super::super::messages_shard::Filter { recipients: None, senders: None, open_only: false };
+        let (items, more) = store
+            .stream_page_after(filter, super::super::messages_shard::STREAM_INDEX_BASE, 50, None)
+            .unwrap();
+        assert!(!more);
+        items.into_iter().map(|item| (item.subject, item.status)).collect()
+    }
+
+    /// The store at `root`, with the messages shard the daemon opens beside it.
+    fn with_shard(root: &Path, writer: &str) -> Arc<Store> {
+        let store = Arc::new(Store::open(&root.join("claims.sqlite3"), writer).unwrap());
+        super::super::messages_shard::open(&store, root).unwrap();
+        store
+    }
+
+    #[test]
+    fn an_opened_but_empty_shard_leaves_the_archive_byte_for_byte_as_before() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        for subject in ["message/backup-a", "message/backup-b"] {
+            let mut sent = stream_message(subject, "agent/node.birch");
+            sent.actor = Some("agent/node.alder".into());
+            sent.fields.insert("from".into(), json!("agent/node.alder"));
+            source.append_claim(&sent).unwrap();
+        }
+        super::super::message_marks::record(&source, "message/backup-a", "message.delivered", "agent/node.birch").unwrap();
+        // The first export seals and settles what the writes left; the two compared follow it.
+        source.write_backup(&mut Vec::new()).unwrap();
+        let mut without = Vec::new();
+        let header = source.write_backup(&mut without).unwrap();
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_MARKS);
+        super::super::messages_shard::open(&source, root.path()).unwrap();
+        let mut with = Vec::new();
+        assert!(header.shards.is_empty());
+        assert_eq!(source.write_backup(&mut with).unwrap().version, header.version);
+        assert!(with == without, "an empty shard changed the archive");
+        let text = String::from_utf8(with).unwrap();
+        assert!(!text.contains("\"shards\"") && !text.contains("\"record\":\"shard-"));
+        // The version 4 archive restores as before, and nothing is placed beside the database.
+        let path = root.path().join("marks.jsonl");
+        fs::write(&path, text).unwrap();
+        let target = root.path().join("restored").join("claims.sqlite3");
+        let report = backup::restore(&path, &target, root.path()).unwrap();
+        assert!(report.projections_match);
+        assert!(report.shards.is_empty());
+        assert!(!root.path().join("restored").join("shards").exists());
+    }
+
+    #[test]
+    fn any_restore_refuses_a_destination_whose_messages_shard_holds_anything() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        let mut sent = stream_message("message/backup-a", "agent/node.birch");
+        sent.actor = Some("agent/node.alder".into());
+        sent.fields.insert("from".into(), json!("agent/node.alder"));
+        source.append_claim(&sent).unwrap();
+        super::super::message_marks::record(&source, "message/backup-a", "message.delivered", "agent/node.birch").unwrap();
+        let path = root.path().join("marks.jsonl");
+        assert_eq!(archive(&source, &path).version, super::super::backup_format::VERSION_WITH_MARKS);
+        // A shard left beside the destination by another store, holding a sealed stream item.
+        let destination = root.path().join("stale");
+        fs::create_dir_all(&destination).unwrap();
+        let other = Arc::new(Store::open(&root.path().join("other.sqlite3"), "cedar").unwrap());
+        let stale = super::super::messages_shard::open(&other, &destination).unwrap();
+        stale.append_claim(&stream_message("message/00000000000000c9", "agent/cedar")).unwrap();
+        stale.seal_local_batches().unwrap();
+        drop((stale, other));
+        let error = backup::restore(&path, &destination.join("claims.sqlite3"), root.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("whose messages shard at"), "{error:#}");
+        assert!(!destination.join("claims.sqlite3").exists());
+        let envelopes: i64 = rusqlite::Connection::open(super::super::backup_shards::database_path(&destination).unwrap())
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM replica_envelopes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(envelopes, 1, "the refused restore left the shard as it was");
+        // The same archive restores into a clean destination.
+        let clean = root.path().join("clean").join("claims.sqlite3");
+        assert!(backup::restore(&path, &clean, root.path()).unwrap().projections_match);
+    }
+
+    #[test]
+    fn a_shard_with_stream_items_is_version_five_and_restores_them_with_their_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let source_root = root.path().join("source");
+        fs::create_dir_all(&source_root).unwrap();
+        let source = with_shard(&source_root, "alder");
+        diagnostic(&source, "a graph claim beside the stream");
+        let shard = super::super::messages_shard::shard(&source).unwrap();
+        for (subject, to) in [
+            ("message/00000000000000e1", "agent/cedar"),
+            ("message/00000000000000e2", "agent/cedar"),
+            ("message/00000000000000e3", "agent/dogwood"),
+        ] {
+            shard.append_claim(&stream_message(subject, to)).unwrap();
+        }
+        lifecycle(&source, "message/00000000000000e1", "message.delivered", "delivered");
+        lifecycle(&source, "message/00000000000000e1", "message.read", "read");
+        lifecycle(&source, "message/00000000000000e2", "message.delivered", "delivered");
+        let path = root.path().join("stream.jsonl");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_SHARDS);
+        let carried = &header.shards[super::super::messages_shard::SHARD_ID];
+        assert_eq!(carried.envelope_count, 3);
+        assert_eq!(carried.local["stream_lifecycle"].count, 3);
+        assert!(!carried.local.contains_key("stream_arrivals"), "arrivals restore from the restored graph");
+        let restored_root = root.path().join("restored");
+        let target = restored_root.join("claims.sqlite3");
+        let report = backup::restore(&path, &target, root.path()).unwrap();
+        assert!(report.projections_match);
+        assert_eq!(report.graph_digest, header.graph_digest);
+        assert_eq!(report.shards, header.shards);
+        let restored = with_shard(&restored_root, &report.writer);
+        assert_eq!(restored.claims_for("daemon/alder", None).unwrap().len(), 1);
+        assert_eq!(stream_items(&restored), stream_items(&source));
+        assert_eq!(
+            stream_items(&restored),
+            [
+                ("message/00000000000000e1".to_owned(), "read".to_owned()),
+                ("message/00000000000000e2".to_owned(), "delivered".to_owned()),
+                ("message/00000000000000e3".to_owned(), "sent".to_owned()),
+            ]
+        );
+        // A read item stays read: no step behind it is offered again, and a later one still moves it.
+        let message = restored.message("message/00000000000000e1").unwrap().unwrap();
+        assert_eq!((message.status.as_str(), message.to.as_str()), ("read", "agent/cedar"));
+        assert!(super::super::messages_shard::mailbox_reads::delivery_items(&restored, "agent/cedar")
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != "message/00000000000000e1"));
+        lifecycle(&restored, "message/00000000000000e1", "message.closed", "closed");
+        // The restored shard backs up as the source's did.
+        let again = root.path().join("again.jsonl");
+        drop(restored);
+        let second = backup::create_from_database(&target, root.path(), &again).unwrap();
+        assert_eq!(second.shards[super::super::messages_shard::SHARD_ID].log_digest, carried.log_digest);
+        assert_eq!(second.shards[super::super::messages_shard::SHARD_ID].local["stream_lifecycle"].count, 4);
+    }
+
+    #[test]
+    fn restore_refuses_a_version_five_archive_whose_shard_does_not_match_its_header() {
+        let root = tempfile::tempdir().unwrap();
+        let source = with_shard(root.path(), "alder");
+        let shard = super::super::messages_shard::shard(&source).unwrap();
+        for subject in ["message/00000000000000f1", "message/00000000000000f2"] {
+            shard.append_claim(&stream_message(subject, "agent/cedar")).unwrap();
+        }
+        lifecycle(&source, "message/00000000000000f1", "message.delivered", "delivered");
+        let path = root.path().join("stream.jsonl");
+        archive(&source, &path);
+        let original = fs::read(&path).unwrap();
+        fn shard_digest(header: &mut Header) -> &mut super::super::backup_format::ShardDigest {
+            header.shards.get_mut(super::super::messages_shard::SHARD_ID).unwrap()
+        }
+        type Tamper = Box<dyn Fn(&mut Vec<Record>)>;
+        let cases: [(&str, Tamper); 6] = [
+            ("holds 2 envelopes, not the 3", Box::new(|records| {
+                if let Record::Header(header) = &mut records[0] {
+                    shard_digest(header).envelope_count += 1;
+                }
+            })),
+            ("restored messages shard differs", Box::new(|records| {
+                if let Record::Header(header) = &mut records[0] {
+                    shard_digest(header).log_digest = "ab".repeat(32);
+                }
+            })),
+            ("restored messages shard differs", Box::new(|records| {
+                records.retain(|record| !matches!(record, Record::ShardLocal(_)));
+            })),
+            ("shard digests in an archive that does not declare shards", Box::new(|records| {
+                if let Record::Header(header) = &mut records[0] {
+                    header.version = super::super::backup_format::VERSION_WITH_MARKS;
+                }
+            })),
+            ("backup carries an unknown shard \"notes\"", Box::new(|records| {
+                if let Record::Header(header) = &mut records[0] {
+                    let digest = header.shards.remove(super::super::messages_shard::SHARD_ID).unwrap();
+                    header.shards.insert("notes".into(), digest);
+                }
+            })),
+            ("unsupported claim backup format/version: \"st3.claim-backup\" version 6", Box::new(|records| {
+                if let Record::Header(header) = &mut records[0] {
+                    header.version = 6;
+                }
+            })),
+        ];
+        for (index, (expected, tamper)) in cases.iter().enumerate() {
+            fs::write(&path, &original).unwrap();
+            rewrite(&path, |records| tamper(records));
+            let directory = root.path().join(format!("restored-{index}"));
+            let error = backup::restore(&path, &directory.join("claims.sqlite3"), root.path()).unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{expected}: {error:#}");
+            assert!(!directory.join("claims.sqlite3").exists(), "{expected}");
+            assert!(!directory.join("shards").exists(), "{expected}");
+        }
+    }
+
+    #[test]
+    fn a_signed_shard_restores_its_envelopes_admitted_rather_than_held() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet("test-fleet").unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor("test-fleet", key.public(), "listening").unwrap();
+        let shard = super::super::messages_shard::open(&source, root.path()).unwrap();
+        for subject in ["message/00000000000000a7", "message/00000000000000a8"] {
+            // A signing store grants an actor's key with a claim the shard does not hold, so
+            // these are written as the daemon's, without an actor.
+            let mut sent = stream_message(subject, "agent/cedar");
+            sent.actor = None;
+            shard.append_claim(&sent).unwrap();
+        }
+        let path = root.path().join("signed.jsonl");
+        archive(&source, &path);
+        let records = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Record>(line).unwrap())
+            .collect::<Vec<_>>();
+        let signed = records
+            .iter()
+            .filter(|record| matches!(record, Record::ShardEnvelope(record) if record.envelope.signature.is_some()))
+            .count();
+        assert_eq!(signed, 2, "the shard signs for the graph's fleet");
+        let restored_root = root.path().join("restored");
+        let report = backup::restore(&path, &restored_root.join("claims.sqlite3"), root.path()).unwrap();
+        let restored = with_shard(&restored_root, &report.writer);
+        let shard = super::super::messages_shard::shard(&restored).unwrap();
+        let (held, pending): (i64, i64) = shard
+            .readers
+            .get()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM replica_envelope_holds),
+                        (SELECT COUNT(*) FROM replica_envelopes WHERE batch_id IS NULL)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((held, pending), (0, 0));
+        assert_eq!(stream_items(&restored).len(), 2);
+        // The restored shard still holds each writer's signature, in the shard's own domain.
+        let signatures: i64 = shard
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM replica_envelope_signatures", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(signatures, 2);
+        drop((shard, restored));
+        // A signature that does not verify in the shard's domain is refused.
+        rewrite(&path, |records| {
+            for record in records {
+                if let Record::ShardEnvelope(record) = record {
+                    record.envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+                        "test-fleet",
+                        &record.envelope.writer,
+                        record.envelope.sequence,
+                        &record.envelope.hash,
+                    )));
+                }
+            }
+        });
+        let directory = root.path().join("graph-signed");
+        let error = backup::restore(&path, &directory.join("claims.sqlite3"), root.path()).unwrap_err();
+        assert!(error.to_string().contains("invalid backup shard envelope signature"), "{error:#}");
+        assert!(!directory.join("claims.sqlite3").exists());
     }
 
     #[test]
