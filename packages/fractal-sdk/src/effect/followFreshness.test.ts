@@ -155,6 +155,7 @@ const watchFollow = <A>(
   fractal: Fractal['Service'],
   key: string,
   follow: Stream.Stream<FollowEvent<A>>,
+  onEvent?: (event: FollowEvent<A>) => Effect.Effect<unknown>,
 ): Effect.Effect<Mounted<A>, never, Scope.Scope> =>
   Effect.gen(function* () {
     const events: FollowEvent<A>[] = []
@@ -163,7 +164,10 @@ const watchFollow = <A>(
     let ended = false
     const fiber = yield* Effect.forkChild(
       follow.pipe(
-        Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+        Stream.runForEach((event) => Effect.gen(function* () {
+          events.push(event)
+          if (onEvent !== undefined) yield* onEvent(event)
+        })),
         Effect.ensuring(Effect.sync(() => (ended = true))),
       ),
     )
@@ -312,9 +316,9 @@ describe('follow freshness', () => {
         const fractal = yield* Fractal
         const spec = { _tag: 'Terminal', runtime: 'runtime/a' } as const
         const stream = fractal.followTerminal(spec)
-        const mounted = yield* watchFollow(fractal, followKey(spec), stream.pipe(Stream.tap((event: FollowEvent<unknown>) =>
+        const mounted = yield* watchFollow(fractal, followKey(spec), stream, (event) =>
           event._tag === 'Observed' && ++count === 2 ? Deferred.succeed(observed, undefined) : Effect.void,
-        )))
+        )
         yield* Deferred.await(subscribed)
         yield* Deferred.await(started)
         expect(mounted.lastStatus()).toMatchObject({ _tag: 'Requested' })
@@ -339,8 +343,6 @@ describe('follow freshness', () => {
         expect(mounted.events).toMatchObject([{ _tag: 'Stale' }])
         release()
         yield* Deferred.await(observed)
-        // Decoder completion is known; drain the downstream observer's event commits.
-        yield* settle
         expect(mounted.events).toMatchObject([
           { _tag: 'Stale' },
           { _tag: 'Observed', value: { rows: 24 } },
