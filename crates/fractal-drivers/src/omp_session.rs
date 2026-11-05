@@ -422,26 +422,6 @@ fn with_required_resume(mut argv: Vec<String>, native_session_id: &str) -> Resul
     Ok(argv)
 }
 
-/// Run one interactive omp provider and maintain its presence until it exits.
-pub fn run(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    omp_argv: Vec<String>,
-) -> Result<()> {
-    pi_family_session::run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        omp_argv,
-        &OMP_KIND,
-        &[],
-        &RESUME_FENCE_ENV,
-        None,
-        true,
-    )
-}
-
 /// Run one host-owned cold-residency attempt under its exact incarnation.
 pub fn run_residency_attempt(
     catalog_root: &Path,
@@ -636,31 +616,29 @@ mod tests {
 
     #[test]
     fn ordinary_launch_clears_inherited_resume_fences() {
-        const CHILD_ROOT: &str = "ST2_TEST_OMP_ORDINARY_CHILD_ROOT";
-        const CHILD_PROVIDER: &str = "ST2_TEST_OMP_ORDINARY_CHILD_PROVIDER";
+        const CHILD_ROOT: &str = "ST_TEST_OMP_ORDINARY_CHILD_ROOT";
+        const CHILD_PROVIDER: &str = "ST_TEST_OMP_ORDINARY_CHILD_PROVIDER";
 
         if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let paths = crate::driver_paths::Paths {
+                root: root.clone(),
+                agent_dir: root.join("observations"),
+                session_dir: root.join("sessions"),
+            };
             let provider = std::env::var(CHILD_PROVIDER).unwrap();
-            run(
-                &PathBuf::from(root).join("catalog"),
+            run_native(
+                &paths,
                 "worker".into(),
                 "worker".into(),
                 vec![provider, "boot".into()],
+                &[],
             )
             .unwrap();
             return;
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let catalog = temp.path().join("catalog");
-        let agent_dir = catalog.join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let host = crate::run::detect_host();
-        std::fs::write(
-            agent_dir.join("agent.kdl"),
-            format!(r#"agent "worker" {{ host "{host}"; command "true" }}"#),
-        )
-        .unwrap();
         let marker = temp.path().join("provider-env");
         let fake = crate::harness_admission::tests::fake_omp(temp.path());
         let hooks = temp.path().join("hooks");
@@ -694,16 +672,20 @@ mod tests {
         const CHILD: &str = "ST_TEST_ADMISSION_REFUSAL_ROOT";
         if let Some(root) = std::env::var_os(CHILD) {
             let root = PathBuf::from(root);
-            let agent_dir = root.join("catalog/agent");
-            let state = crate::harness_state::harness_state_path(&agent_dir);
-            claim_omp(&agent_dir, "predecessor");
+            let paths = crate::driver_paths::Paths {
+                root: root.clone(),
+                agent_dir: root.join("observations"),
+                session_dir: root.join("sessions"),
+            };
+            let state = crate::harness_state::harness_state_path(&paths.agent_dir);
+            claim_omp(&paths.agent_dir, "predecessor");
             let before = std::fs::read(&state).unwrap();
-            let error = run(&root.join("catalog"), "worker".into(), "worker".into(),
-                vec![root.join("omp").display().to_string()]).unwrap_err();
+            let error = run_native(&paths, "worker".into(), "worker".into(),
+                vec![root.join("omp").display().to_string()], &[]).unwrap_err();
             assert!(error.to_string().contains("admissionNativeConsumption"), "{error:#}");
             assert_eq!(std::fs::read(&state).unwrap(), before);
             assert!(!root.join("provider-env").exists());
-            let observed = crate::driver_diagnostic::read(&crate::driver_diagnostic::path(&agent_dir));
+            let observed = crate::driver_diagnostic::read(&crate::driver_diagnostic::path(&paths.agent_dir));
             assert!(matches!(observed, crate::driver_diagnostic::Observed::Failure(failure)
                 if failure.reason == crate::driver_diagnostic::Reason::AdmissionNativeConsumption));
             assert!(error.to_string().contains("st admission override omp"));
@@ -718,17 +700,13 @@ mod tests {
                 &cache,
                 "isolated regression operator exception",
             ).unwrap();
-            run(&root.join("catalog"), "worker".into(), "worker".into(),
-                vec![root.join("omp").display().to_string()]).unwrap();
+            run_native(&paths, "worker".into(), "worker".into(),
+                vec![root.join("omp").display().to_string()], &[]).unwrap();
             assert!(root.join("provider-env").exists(), "overridden omp seat launches");
             assert_ne!(std::fs::read(&state).unwrap(), before);
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("catalog/agent")).unwrap();
-        let host = crate::run::detect_host();
-        std::fs::write(root.path().join("catalog/agent/agent.kdl"),
-            format!(r#"agent "worker" {{ host "{host}"; command "true" }}"#)).unwrap();
         crate::harness_admission::tests::fake_omp(root.path());
         let mut fixture = crate::harness_admission::tests::measured_omp();
         crate::harness_admission::tests::fail_omp(&mut fixture, crate::harness_admission::Check::NativeConsumption);

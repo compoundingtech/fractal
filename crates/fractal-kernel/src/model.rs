@@ -18,7 +18,8 @@ pub use smallclaims::replication::{
 
 // Dormant until the complete agent-review policy is activated; never a serde gate variant.
 #[allow(dead_code)]
-mod evidence_contract;
+#[doc(hidden)]
+pub mod evidence_contract;
 
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
