@@ -4,7 +4,7 @@ use super::*;
 pub const SAMPLE_LIMIT: usize = 64;
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h4efe893e4971 owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb07a03ab6b1d owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_run_eta_samples (
  subject TEXT PRIMARY KEY, run_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
  step_path TEXT NOT NULL, ended INTEGER NOT NULL, duration INTEGER NOT NULL
@@ -34,16 +34,16 @@ CREATE TRIGGER run_eta_step_delete AFTER DELETE ON step_runs WHEN EXISTS(SELECT 
  INSERT OR IGNORE INTO local_run_eta_dirty VALUES(OLD.definition_hash,OLD.step_path);
  INSERT OR IGNORE INTO local_run_eta_pending VALUES(OLD.run_id); END;
 CREATE TRIGGER IF NOT EXISTS run_eta_claim_insert AFTER INSERT ON claims
- BEGIN
- INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND (id=NEW.subject OR 'mission-run/'||id=NEW.subject OR id IN (
- SELECT run_id FROM step_runs WHERE subject=NEW.subject OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=NEW.subject AND kind='work.person-asked'))); END;
+ WHEN NEW.kind IN ('mission-run.state','work.claimed','work.failed','step-run.state','step-run.carried','step-run.retried','work.person-asked','work.person-done','work.person-cancelled') BEGIN
+ INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND id IN (SELECT NEW.subject UNION SELECT substr(NEW.subject,13) UNION
+ SELECT run_id FROM step_runs WHERE subject=NEW.subject OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=NEW.subject AND kind='work.person-asked')); END;
 CREATE TRIGGER IF NOT EXISTS run_eta_claim_update AFTER UPDATE OF accepted_at_unix_ms,body ON claims BEGIN
- INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND (id=NEW.subject OR 'mission-run/'||id=NEW.subject OR id IN (
- SELECT run_id FROM step_runs WHERE subject=NEW.subject OR subject=json_extract(OLD.body,'$.fields.origin_step') OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=NEW.subject AND kind='work.person-asked'))); END;
+ INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND id IN (SELECT NEW.subject UNION SELECT substr(NEW.subject,13) UNION
+ SELECT run_id FROM step_runs WHERE subject=NEW.subject OR subject=json_extract(OLD.body,'$.fields.origin_step') OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=NEW.subject AND kind='work.person-asked')); END;
 CREATE TRIGGER IF NOT EXISTS run_eta_claim_delete AFTER DELETE ON claims BEGIN
- INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND (id=OLD.subject OR 'mission-run/'||id=OLD.subject OR id IN (
+ INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND id IN (SELECT OLD.subject UNION SELECT substr(OLD.subject,13) UNION
  SELECT run_id FROM step_runs WHERE subject=OLD.subject OR subject=json_extract(OLD.body,'$.fields.origin_step')
- OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=OLD.subject AND kind='work.person-asked'))); END;
+ OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=OLD.subject AND kind='work.person-asked')); END;
 INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs
  WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3');
 INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');
@@ -73,8 +73,10 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (hash, path) in keys {
+    for (hash, path) in &keys {
         tx.execute(/* sqlite-large-value: allow-for-now lv-h777dc35a3cdd owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2", params![hash,path])?;
+    }
+    for (hash, path) in keys {
         // Bound: only the newest 64 terminal runs per hash, including unusable runs.
         // Work is bounded by those runs' own claims, never by older step histories.
         let mut candidates = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc23992ea4eed owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &format!("WITH recent AS MATERIALIZED (
