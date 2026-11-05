@@ -312,7 +312,7 @@ describe('follow freshness', () => {
         const fractal = yield* Fractal
         const spec = { _tag: 'Terminal', runtime: 'runtime/a' } as const
         const stream = fractal.followTerminal(spec)
-        const mounted = yield* watchFollow(fractal, followKey(spec), stream.pipe(Stream.tap((event) =>
+        const mounted = yield* watchFollow(fractal, followKey(spec), stream.pipe(Stream.tap((event: FollowEvent<unknown>) =>
           event._tag === 'Observed' && ++count === 2 ? Deferred.succeed(observed, undefined) : Effect.void,
         )))
         yield* Deferred.await(subscribed)
