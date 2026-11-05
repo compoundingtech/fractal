@@ -65,9 +65,10 @@ class SelectionTest(unittest.TestCase):
         env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
         env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
 
-        def git(*args, capture=False, check=True):
+        def git(*args, capture=False, check=True, stable_messages=False):
+            git_env = {**env, 'LC_ALL': 'C', 'LANGUAGE': 'C'} if stable_messages else env
             return subprocess.run(['git', '-C', str(module.C), *map(str, args)],
-                                  capture_output=True, text=True, check=check, env=env)
+                                  capture_output=True, text=True, check=check, env=git_env)
 
         git('init')
         git('config', 'user.name', 'Metadata Test')
@@ -106,6 +107,47 @@ class SelectionTest(unittest.TestCase):
             generator.reset_mock()
             install.reset_mock()
             yield git, outputs, cache, generator, install
+
+    def test_stale_metadata_check_forces_c_messages_under_foreign_locale(self):
+        real_git, real_run = self.module.git, self.module.run
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            (self.module.C / outputs[1]).write_text('main changed output only\n')
+            git('add', '.')
+            git('commit', '-m', 'output change')
+            checked = []
+
+            def dispatch(*args, **kwargs):
+                if args[:3] == ('apply', '--check', '--index'):
+                    # Exercise the real git -> run -> host-git.py -> Git chain.
+                    with patch.object(self.module, 'run', side_effect=real_run):
+                        result = real_git(*args, **kwargs)
+                    checked.append(result)
+                    return result
+                return git(*args, **kwargs)
+
+            # C is always available; the inherited German locale need not be
+            # installed because this check must override it before launching Git.
+            with patch.dict(os.environ, LANG='de_DE.UTF-8', LC_ALL='de_DE.UTF-8', LANGUAGE='de'), \
+                    patch.object(self.module, 'git', side_effect=dispatch), \
+                    patch.object(subprocess, 'run', wraps=subprocess.run) as processes:
+                self.module.prepare_dependencies()
+                with patch.object(self.module, 'run', side_effect=real_run):
+                    real_git('status', '--porcelain', capture=True)
+                self.assertEqual(os.environ['LC_ALL'], 'de_DE.UTF-8')
+                self.assertEqual(os.environ['LANGUAGE'], 'de')
+            self.assertEqual(len(checked), 1)
+            self.assertIn('patch does not apply', checked[0].stderr)
+            host_calls = [call for call in processes.call_args_list
+                          if 'host-git.py' in str(call.args[0])]
+            host_check, = [call for call in host_calls if '--check' in call.args[0]]
+            self.assertEqual(host_check.kwargs['env']['LC_ALL'], 'C')
+            self.assertEqual(host_check.kwargs['env']['LANGUAGE'], 'C')
+            host_status, = [call for call in host_calls if 'status' in call.args[0]]
+            self.assertEqual(host_status.kwargs['env']['LC_ALL'], 'de_DE.UTF-8')
+            self.assertEqual(host_status.kwargs['env']['LANGUAGE'], 'de')
+            generator.assert_called_once_with()
+            install.assert_called_once_with()
+            self.assertIn('-main changed output only', cache.read_text())
 
     def test_stale_metadata_patch_regenerates_and_replaces_cache(self):
         with self.metadata_repository() as (git, outputs, cache, generator, install):
@@ -161,6 +203,69 @@ class SelectionTest(unittest.TestCase):
                 self.module.prepare_dependencies()
             self.assertEqual(cache.read_text(), old_patch)
             self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            install.assert_not_called()
+
+    def failed_metadata_tick(self):
+        """Exercise metadata errors inside the tick's persisted failure boundary."""
+        with patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'prepare_clone', side_effect=self.module.prepare_dependencies), \
+                patch.object(self.module, 'observe_served'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(row['build'], 'failed')
+        self.assertIsNone(row['sha'])
+        return row
+
+    def test_corrupt_metadata_patch_fails_tick_with_git_diagnostics(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            valid = cache.read_text()
+            for content, message in (
+                    ('not a patch\n', 'No valid patches in input'),
+                    (valid.rsplit('\n', 2)[0] + '\n', 'corrupt patch at'),
+                    ('@@ -1 +1 @@\n-base\n+generated\n', 'patch fragment without header')):
+                with self.subTest(message=message):
+                    cache.write_text(content)
+                    checked = git('apply', '--check', '--index', cache, capture=True, check=False)
+                    self.assertNotEqual(checked.returncode, 0)
+                    self.assertIn(message, checked.stderr)
+                    row = self.failed_metadata_tick()
+                    self.assertIn(checked.stderr, row['error'])
+                    self.assertIn('stdout:', row['error'])
+                    self.assertEqual(cache.read_text(), content)
+                    self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_unreadable_metadata_entry_fails_tick_without_regeneration(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            cache.unlink()
+            cache.mkdir()
+            row = self.failed_metadata_tick()
+            self.assertIn('Is a directory', row['error'])
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(list(cache.iterdir()), [])
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_mixed_metadata_check_diagnostics_are_fatal(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            original = cache.read_text()
+            for stdout, stderr in (
+                    ('', 'error: file: patch does not apply\nerror: unknown failure\n'),
+                    ('unexpected stdout\n', 'error: file: patch does not apply\n')):
+                def mixed_git(*args, **kwargs):
+                    if args[:3] == ('apply', '--check', '--index'):
+                        return subprocess.CompletedProcess(args, 1, stdout, stderr)
+                    return git(*args, **kwargs)
+
+                with self.subTest(stdout=stdout), patch.object(self.module, 'git', side_effect=mixed_git):
+                    row = self.failed_metadata_tick()
+                self.assertIn(stderr, row['error'])
+                self.assertIn(stdout, row['error'])
+                self.assertEqual(cache.read_text(), original)
+            generator.assert_not_called()
             install.assert_not_called()
 
     def test_capacity_sandbox_cli_preserves_nix_tempfail(self):
