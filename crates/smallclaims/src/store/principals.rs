@@ -1647,7 +1647,7 @@ impl Store {
     }
 
     /// Judge newly signed claims in ordinary passes, bounded to [`VERDICT_SLICE_LOANS`].
-    /// Historical requeues belong to the paced signature worker, not to exchanges.
+    /// Advance at most one requeue page; historical judgments belong to the paced worker.
     pub fn judge_claims_slice(&self, check_roots: bool) -> Result<usize> {
         if legacy::active(&self.readers.get())? {
             return legacy::judge_claims(self, check_roots);
@@ -1744,7 +1744,9 @@ impl Store {
                     start_root_requeue_tx(&transaction, &roots_digest)?;
                 }
             }
-            let requeuing = if fresh_only {
+            // Finish a small dependency cursor before judging fresh claims; otherwise their
+            // new links would still read as ahead of that cursor. Never page once per loan.
+            let requeuing = if fresh_only && loans > 1 {
                 requeue_pending(&transaction)?
             } else {
                 advance_requeue_tx(&transaction)?
@@ -2472,11 +2474,11 @@ mod paced_verdict_tests {
     }
 
     #[test]
-    fn an_ordinary_pass_leaves_historical_requeues_to_the_paced_job() {
+    fn an_ordinary_pass_queues_at_most_one_page_and_defers_historical_judgments() {
         let store = root_linked(REQUEUE_PAGE * 2);
         store.judge_claims_slice(true).unwrap();
-        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
-        assert_eq!(cursor(&store, "root").as_deref(), Some(""));
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), REQUEUE_PAGE as u64);
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
         assert!(store.verdicts_pending().unwrap());
         assert!(
             store.verdicts_due.load(Ordering::Acquire),

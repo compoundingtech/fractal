@@ -406,8 +406,22 @@ fn an_incomplete_join_replays_verdicts_only_on_the_paced_worker_after_removal() 
         store.redeem_fleet_invite(&request).unwrap(),
         FleetRedemption::Admitted { first: true, .. }
     ));
-    // The joiner never receives its answer or exchanges. Membership nevertheless changed
-    // the sponsor's roots, so a paced loan starts replaying the old root-linked verdicts.
+    // No paced loan has run since admission. A newly signed claim must not read Held
+    // behind a small root cursor after its ordinary judgment just verified it.
+    let fresh = store.append_claim(&ClaimInput {
+        subject: "agent/fresh-before-paced-job".into(),
+        kind: "harness.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("state".into(), serde_json::json!("ready"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    store.seal_local_batches().unwrap();
+    store.judge_claims_slice(true).unwrap();
+    assert_eq!(store.claim_verdict(&fresh.id).unwrap(), Verdict::Verified);
+    // The joiner never receives its answer or exchanges. Historical verdicts still
+    // remain queued, and a paced loan, not an ordinary exchange, starts judging them.
     store.advance_signature_judgment().unwrap();
     let queued = || store.readers.get().query_row(
         "SELECT COUNT(*) FROM claim_verdict_queue", [], |row| row.get::<_, usize>(0),
