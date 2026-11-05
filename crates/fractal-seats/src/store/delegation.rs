@@ -131,13 +131,7 @@ agent "alder.independent" { workspace "/tmp"; command "true"; restart always; }
                 intent: None,
             };
             let check = |step: &StepRunView, reviewer: &str| {
-                validate_step_reviewer(
-                    &scope,
-                    &store.readers.get(),
-                    step,
-                    &input.person,
-                    reviewer,
-                )
+                validate_step_reviewer(&scope, &store.readers.get(), step, &input.person, reviewer)
             };
             let expected_before = BTreeSet::from([input.actor.clone()]);
             // A is excluded through work.person-asked, not the requester argument.
