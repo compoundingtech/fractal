@@ -538,38 +538,82 @@ mod tests {
 
     #[test]
     fn shared_vectors() {
-        let vectors: Value =
-            serde_json::from_str(include_str!("../../../fixtures/clients/sidebar-v2.json"))
-                .unwrap();
-        assert_eq!(vectors["scope"], "folder-only-v1");
+        let vectors = behavior_vectors();
         for case in vectors["cases"].as_array().unwrap() {
-            let arrangement = serde_json::from_value(case["arrangement"].clone()).unwrap();
-            let inventory: Vec<String> = serde_json::from_value(case["inventory"].clone()).unwrap();
+            let arrangement = serde_json::from_value(case["initial"]["arrangement"].clone()).unwrap();
+            let inventory: Vec<String> = serde_json::from_value(case["catalog"].clone()).unwrap();
+            let event = &case["events"][0];
+            let checkpoint = &case["checkpoints"][0];
             let tree = build(&arrangement, &inventory).unwrap();
             assert_eq!(
                 serde_json::to_value(&tree).unwrap(),
-                case["expected"],
+                checkpoint["tree"],
                 "{}",
                 case["name"]
             );
-            for vector in case["moves"].as_array().unwrap() {
-                let intent: MoveIntent = serde_json::from_value(vector["intent"].clone()).unwrap();
+            assert_eq!(event["moves"].as_array().unwrap().len(), checkpoint["moves"].as_array().unwrap().len());
+            for (intent, expected) in event["moves"].as_array().unwrap().iter().zip(checkpoint["moves"].as_array().unwrap()) {
+                let intent: MoveIntent = serde_json::from_value(intent.clone()).unwrap();
                 let result = plan_move(&tree, &intent);
                 assert_eq!(can_place(&tree, &intent), result.clone().map(|_| ()));
                 let serialized = match result {
                     Ok(intent) => json!({"_tag": "Planned", "intent": intent}),
                     Err(refusal) => json!({"_tag": "Refused", "refusal": refusal}),
                 };
-                assert_eq!(serialized, vector["result"], "{}: {intent:?}", case["name"]);
+                assert_eq!(serialized, *expected, "{}: {intent:?}", case["name"]);
             }
             let needs_you: BTreeSet<String> =
-                serde_json::from_value(case["needsYou"].clone()).unwrap();
+                serde_json::from_value(event["needsYou"].clone()).unwrap();
             assert_eq!(
                 serde_json::to_value(rollup(&tree, &needs_you)).unwrap(),
-                case["rollup"],
+                checkpoint["rollup"],
                 "{}",
                 case["name"]
             );
+        }
+    }
+
+    fn behavior_vectors() -> Value {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/sidebar/behavior.schema.json"
+        )).unwrap();
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/sidebar/behavior-v1.json"
+        )).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<_> = validator.iter_errors(&vectors).map(|e| e.to_string()).collect();
+        assert!(errors.is_empty(), "{errors:#?}");
+        vectors
+    }
+
+    #[test]
+    fn behavior_schema_round_trip_and_rejects_unknown_fields() {
+        let vectors = behavior_vectors();
+        let encoded = serde_json::to_string(&vectors).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), vectors);
+        assert_eq!(vectors["cases"].as_array().unwrap().len(), 5);
+        assert_eq!(vectors["cases"].as_array().unwrap().iter()
+            .map(|case| case["events"][0]["moves"].as_array().unwrap().len()).sum::<usize>(), 10);
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/sidebar/behavior.schema.json"
+        )).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        for pointer in ["", "/cases/0", "/cases/0/initial", "/cases/0/initial/arrangement",
+            "/cases/0/initial/arrangement/body", "/cases/0/events/0",
+            "/cases/0/identities", "/cases/0/checkpoints/0",
+            "/cases/1/checkpoints/0/tree/nodes/folder:00000000-0000-7000-8000-00000000000a",
+            "/cases/1/checkpoints/0/moves/1/refusal/path/0"] {
+            let mut invalid = vectors.clone();
+            invalid.pointer_mut(pointer).unwrap()["unknown"] = json!(true);
+            assert!(!validator.is_valid(&invalid), "{pointer}");
+        }
+        for (pointer, value) in [("/schemaVersion", json!(2)),
+            ("/cases/0/initial/arrangement/body/version", json!(2)),
+            ("/cases/0/events/0/type", json!("Unknown")),
+            ("/cases/0/checkpoints/0/wireActions", json!([{}]))] {
+            let mut invalid = vectors.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(!validator.is_valid(&invalid), "{pointer}");
         }
     }
 
