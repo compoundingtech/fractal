@@ -1,6 +1,7 @@
 import { sidebarArrangement } from './arrangements.ts'
 import { drawCast, type Cast, type CastSpec } from './cast.ts'
 import { type FactoryContext } from './context.ts'
+import { noObjectives } from './factories/objectives.ts'
 import { missionDetails } from './missionDetails.ts'
 import { fork, rngFromSeed } from './rng.ts'
 import type { RecordedTransport } from './recording.ts'
@@ -8,6 +9,8 @@ import { SLICE_KINDS, type AnySlice, type Slice, type SliceKind, type TimelineEv
 import { timeContext } from './time.ts'
 
 export type Slices = { readonly [K in SliceKind]: Slice<K> }
+/** A world's own slices; a world that declares no objectives serves an empty objectives read. */
+export type AuthoredSlices = Omit<Slices, 'objectives'> & { readonly objectives?: Slice<'objectives'> }
 
 /** Builds one variant of slice `K` over the world's cast. `base` holds the world's own slices. */
 export type VariantBuilder<K extends SliceKind> = (ctx: FactoryContext, base: Slices) => Slice<K>
@@ -20,7 +23,7 @@ export interface WorldDefinition {
   readonly seed: number
   readonly cast: CastSpec
   /** The world's own slices. */
-  readonly slices: (ctx: FactoryContext) => Slices
+  readonly slices: (ctx: FactoryContext) => AuthoredSlices
   /** World-specific variants; they win over the kit's generic ones of the same name. */
   readonly variants?: Partial<{ readonly [K in SliceKind]: Readonly<Record<string, VariantBuilder<K>>> }>
   /** Namespace of generated ids; a derived world keeps its base world's ids. Defaults to `id`. */
@@ -77,7 +80,8 @@ const changesState = (event: TimelineEvent): boolean => {
 const assignStores = (slices: Slices): Slices => {
   // A recording's ordinals describe shared daemon versions, not event counts.
   // In particular published HTTP snapshots may lag newer stream fences.
-  if (SLICE_KINDS.every((kind) => slices[kind].source._tag === 'recorded')) return slices
+  // Objectives carry no timeline, so a synthetic default read does not unseat recorded ordinals.
+  if (SLICE_KINDS.every((kind) => kind === 'objectives' || slices[kind].source._tag === 'recorded')) return slices
   const events = SLICE_KINDS.flatMap((kind) => slices[kind].timeline.map((event, index) => ({ kind, index, event: event as TimelineEvent })))
   events.sort((a, b) => a.event.at_ms - b.event.at_ms || SLICE_KINDS.indexOf(a.kind) - SLICE_KINDS.indexOf(b.kind) || a.index - b.index)
   let store = 1
@@ -100,7 +104,9 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
   const rng = rngFromSeed(definition.seed)
   const cast = drawCast(fork(rng, 'cast'), definition.cast)
   const ctx: FactoryContext = { world: definition.scope ?? definition.id, rng: fork(rng, 'slices'), cast, t: timeContext(now) }
-  const authored = definition.slices(ctx)
+  const written = definition.slices(ctx)
+  const authored: Slices = { ...written, objectives: written.objectives ?? { kind: 'objectives', variant: 'default', source: { _tag: 'synthetic', seed: definition.seed },
+    decode: 'strict', loading: false, state: noObjectives(), timeline: [] } }
   // Only named default inventories get folders; explicit slice overrides retain their own data.
   const own: Slices = definition.id === 'fleet-mid-refactor' || definition.id === 'huge' ? {
     ...authored,

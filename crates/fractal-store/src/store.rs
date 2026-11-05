@@ -221,6 +221,7 @@ pub mod summary_list;
 pub mod attention_ivm;
 pub mod backup;
 pub mod backup_ledgers;
+pub mod backup_shards;
 pub mod checkpoint_rules;
 pub mod harness_questions;
 pub mod checkpoint_status;
@@ -247,6 +248,9 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod relayed_closes;
+#[cfg(test)]
+mod relayed_closes_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -740,7 +744,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h409e2e2924d3 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h41cc86459915 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1235,6 +1239,12 @@ WHERE available_to!='[]';
 -- The steps that have not finished, a few of every step a fleet has run.
 CREATE INDEX IF NOT EXISTS step_runs_open_index ON step_runs(created_at_unix_ms, step_path)
 WHERE status NOT IN ('completed','failed','cancelled');
+-- Exact local native question generations. Registered before the observation; retained
+-- until its existing resolution claim is durable. Not a replicated lease or wall-clock TTL.
+CREATE TABLE IF NOT EXISTS local_harness_question_generations (
+    question TEXT PRIMARY KEY,
+    generation TEXT NOT NULL
+) WITHOUT ROWID;
 -- This daemon's native subscription ownership is transport state, outside shared projections.
 CREATE TABLE IF NOT EXISTS local_mailbox_owners (
     subject TEXT NOT NULL,
@@ -2208,6 +2218,8 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// Daemon-local fallback for human questions, initialized before attention starts.
+    pub question_principal_default: std::sync::OnceLock<String>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2642,6 +2654,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2664,6 +2677,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2687,6 +2701,7 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -7030,6 +7045,7 @@ impl Store {
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
+                | "work.handoff-returned"
                 | "work.extended"
                 | "subagent.appeared"
                 | "subagent.renewed"
@@ -17520,7 +17536,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -17996,6 +18012,16 @@ pub fn project_mission_run_update(
             .optional()
             .map_err(internal)?;
         if current_attempt != Some(claim_attempt) {
+            return Ok(());
+        }
+        if claim.kind == "work.handoff-returned" {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE step_runs SET assignee=?2, available_to='[]', status='ready', lease_owner=NULL,
+                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, readiness_epoch=?3,
+                 updated_at_unix_ms=?4 WHERE subject=?1",
+                params![claim.subject, fields["handoff_to"].as_str(), fields["readiness_epoch"].as_u64(),
+                    claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
             return Ok(());
         }
         if claim.kind == "work.released"
@@ -20074,6 +20100,11 @@ fn enrich_step_wake_with(
             .collect(),
         delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
             harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
+        staging_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working"
+                && current_incarnation_key == wake_incarnation_key
+                && matches!(harness.driver.as_deref(), Some("pi" | "omp"))
         }),
     };
     let failure = connection

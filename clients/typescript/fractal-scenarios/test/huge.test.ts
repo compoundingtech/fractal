@@ -377,6 +377,7 @@ describe('huge variant coherence', () => {
     conversation: ['huge', 'empty', 'streaming'],
     terminal: [],
     sync: [],
+    objectives: ['none', 'unsafe-link'],
   }
 
   it('offers all generic variants and keeps huge window overrides coherent', () => {

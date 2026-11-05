@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Render canonical loop policies and mark published legacy collection loops without restoring parser support.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No checkpoint changes." },
+  "compatibility": { "status": "none", "detail": "Adds renderers only; legacy loops remain rejected by the current parser." },
+  "downtime": { "status": "none", "detail": "No startup changes." },
+  "manual": { "status": "none", "detail": "No operator actions." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

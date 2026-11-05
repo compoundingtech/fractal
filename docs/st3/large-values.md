@@ -363,11 +363,32 @@ transitional exceptions do not prove byte-size or execution-cost bounds.
   owns `bound-or-reference-values-and-reclamation`: carry those assertions to
   the bounded membership/state representation and its cleanup semantics.
 
+## Native question lifecycle inventory review (PR #4191)
+
+`fractal_store::store` owns schema site `lv-h77b21804192f`, combining lifecycle
+site `lv-h0113908d5df7` with receipt-index site `lv-h806ead738248`. It adds
+`local_harness_question_generations` and the receipt actor/key index; all other
+schema declarations are unchanged. The new primary key is the derived
+question subject; its inline JSON value holds authenticated process birth,
+provider ownership and native-session witnesses, never question or option text.
+The schema maintainer retains `chunk-or-reference-variable-columns`; the local
+classification is not a SQLite value-size proof.
+
+`fractal_seats::store::harness_questions` owns `lv-h984ca628442d` (register)
+and `lv-h2b3b6ffb021b` (exact-generation delete). The former serializes the
+admitted witness before publishing an open; the latter compares that same
+generation and deletes it only after durable resolution. Inline evidence
+preserves restart recovery and prevents a foreign generation from deleting a
+lease. The maintainer retains `bound-or-reference-values-and-reclamation`:
+establish the complete serialized witness/key bounds or a bounded reference
+representation, preserving compare-and-delete and crash-recovery semantics.
+These exceptions do not claim a storage-size bound or change admission.
+
 ## Harness receipt lookup inventory review (PR #3916)
 
-`fractal_store::store` owns schema site `lv-h806ead738248`, replacing
-`lv-h82624af80f95` solely for the additive receipt actor/key index. The index
-extracts the existing receipt digest and retains existing origin/subject TEXT
+`fractal_store::store` owns the combined schema site `lv-h77b21804192f`.
+The additive receipt actor/key index from `lv-h806ead738248` extracts the
+existing receipt digest and retains existing origin/subject TEXT
 keys; it stores no new question content. Canonical first-resolution and local
 owner checks remain authoritative after the indexed candidate lookup. Existing
 declaration metadata and the producer's `chunk-or-reference-variable-columns`

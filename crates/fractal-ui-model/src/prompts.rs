@@ -1,7 +1,7 @@
 //! A native harness prompt as web, tui and ios show it: which of the answers the daemon offers a
 //! client may show, and the form they read as, worded and numbered like the harness's own.
 //!
-//! The TypeScript twin is `clients/typescript/fractal-views/promptForm.ts` (with `offeredAnswers` in
+//! The TypeScript twin is `clients/typescript/fractal-views/promptForm.ts` (with `servedAnswers` in
 //! `homeView.ts`); both are checked against `clients/typescript/fractal-views/tests/fixtures/
 //! prompt-forms.json`, so web, tui and ios offer the same answers with the same words.
 //!
@@ -157,7 +157,7 @@ pub fn questions(call: Call<'_>) -> Option<Vec<Question>> {
         .then_some(questions)
 }
 
-/// The answers a client may offer, as `offeredAnswers` in `fractal-views/homeView.ts`: `allow` and
+/// The call-dependent answers a client may offer: `allow` and
 /// `approve` only when exactly one call is unanswered and it can be shown, since only then is it
 /// certain what they let through; `answer` only when that call's questions can be shown and
 /// chosen from; every other answer (deny, and a screen prompt's own answers) always.

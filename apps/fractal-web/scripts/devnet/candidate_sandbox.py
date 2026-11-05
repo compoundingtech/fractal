@@ -350,7 +350,9 @@ def main():
                    network=options.network, output=options.output, working_directory=options.directory,
                    readonly_dependencies=options.readonly_dependencies).returncode
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
-        parser.exit(1, f'candidate sandbox: {error}\n')
+        # Preserve agent-nix EX_TEMPFAIL through the shell helper to the integrator.
+        status = 75 if isinstance(error, subprocess.CalledProcessError) and error.returncode == 75 else 1
+        parser.exit(status, f'candidate sandbox: {error}\n')
 
 
 if __name__ == '__main__':

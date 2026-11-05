@@ -7,6 +7,8 @@
 mod attempt;
 #[cfg(test)]
 mod attempt_tests;
+#[cfg(test)]
+mod identity_tests;
 pub(crate) mod fixture;
 mod omp;
 pub use attempt::AttemptDiagnostic;
@@ -14,10 +16,11 @@ use attempt::Capture;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -669,11 +672,79 @@ pub(crate) fn resolve_executable(binary: &str) -> Result<PathBuf> {
 /// Fingerprint the executable, script runtime and installation metadata without traversing
 /// package assets. Bundled code belongs to the executable; package manifests and lockfiles
 /// identify dependency releases. This is build identity, not an integrity scan of every asset.
-fn executable_identity(path: &Path) -> Result<String> {
-    let mut hash = Sha256::new();
-    // Changing the identity policy invalidates both old measurements and old exceptions.
-    hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
-    hash_identity_file(path, &mut hash)?;
+pub fn executable_identity(path: &Path) -> Result<String> {
+    executable_identity_with(path, &resolve_executable)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentityMetadata {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl From<fs::Metadata> for IdentityMetadata {
+    fn from(metadata: fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            mode: metadata.mode(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentityDependency {
+    path: PathBuf,
+    resolved: Option<PathBuf>,
+    link: Option<IdentityMetadata>,
+    target: Option<IdentityMetadata>,
+}
+
+fn identity_dependency(path: &Path) -> Result<IdentityDependency> {
+    fn optional<T>(result: std::io::Result<T>) -> Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    Ok(IdentityDependency {
+        path: path.to_owned(),
+        resolved: optional(fs::canonicalize(path))?,
+        link: optional(fs::symlink_metadata(path))?.map(Into::into),
+        target: optional(fs::metadata(path))?.map(Into::into),
+    })
+}
+
+struct IdentityCacheEntry {
+    dependencies: Vec<IdentityDependency>,
+    identity: String,
+}
+
+// Bound retained paths and identities independently of the number of installed providers.
+static IDENTITY_CACHE: Mutex<Vec<IdentityCacheEntry>> = Mutex::new(Vec::new());
+
+/// Fingerprint with the launch environment's resolver for an `env` shebang.
+/// Unchanged dependencies reuse the admission-compatible identity without streaming bytes.
+pub fn executable_identity_with(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<String> {
+    executable_identity_recorded(path, resolve, SystemTime::now)
+}
+
+fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
+    // Racy-git rule: cache only writes whose timestamps precede measurement start by a full tick.
+    let settled_before = recorded_at().duration_since(UNIX_EPOCH)?.as_nanos().saturating_sub(1_000_000_000) as i128;
+    let mut files = vec![(path.to_owned(), false)];
+    let mut probes = vec![path.to_owned()];
     let mut prefix = [0_u8; 256];
     let n = File::open(path)?.read(&mut prefix)?;
     if let Some(shebang) = String::from_utf8_lossy(&prefix[..n])
@@ -684,20 +755,25 @@ fn executable_identity(path: &Path) -> Result<String> {
         let parts = shebang.split_whitespace().collect::<Vec<_>>();
         if let Some(interpreter) = parts.first() {
             let interpreter = if interpreter.ends_with("/env") {
-                parts.get(1).context("missing script interpreter")?
+                resolve(parts.get(1).context("missing script interpreter")?)?
             } else {
-                interpreter
+                resolve_executable(interpreter)?
             };
-            hash_identity_file(&resolve_executable(interpreter)?, &mut hash)?;
+            probes.push(interpreter.clone());
+            files.push((interpreter, false));
         }
     }
     if let Some(package) = path
         .ancestors()
         .skip(1)
         .take(3)
-        .find(|p| p.join("package.json").is_file())
+        .find(|p| {
+            let manifest = p.join("package.json");
+            probes.push(manifest.clone());
+            manifest.is_file()
+        })
     {
-        hash_identity_file(&package.join("package.json"), &mut hash)?;
+        files.push((package.join("package.json"), false));
         for name in [
             "package-lock.json",
             "npm-shrinkwrap.json",
@@ -706,17 +782,62 @@ fn executable_identity(path: &Path) -> Result<String> {
             "yarn.lock",
             "pnpm-lock.yaml",
         ] {
-            hash_optional_identity_file(&package.join(name), &mut hash)?;
+            let lock = package.join(name);
+            probes.push(lock.clone());
+            files.push((lock, true));
         }
         // npm's hidden lock lives beside the installed packages, including scoped packages.
         if let Some(modules) = package
             .ancestors()
             .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
         {
-            hash_optional_identity_file(&modules.join(".package-lock.json"), &mut hash)?;
+            let lock = modules.join(".package-lock.json");
+            probes.push(lock.clone());
+            files.push((lock, true));
         }
     }
-    Ok(format!("{hash:x}", hash = hash.finalize()))
+    let snapshot = || {
+        probes
+            .iter()
+            .map(|p| identity_dependency(p))
+            .collect::<Result<Vec<_>>>()
+    };
+    let dependencies = snapshot()?;
+    if let Some(entry) = IDENTITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|entry| entry.dependencies == dependencies)
+    {
+        return Ok(entry.identity.clone());
+    }
+    let mut hash = Sha256::new();
+    // Preserve the identity policy: existing measurements and exceptions remain valid.
+    hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
+    for (file, optional) in &files {
+        if *optional {
+            hash_optional_identity_file(file, &mut hash)?;
+        } else {
+            hash_identity_file(file, &mut hash)?;
+        }
+    }
+    let identity = format!("{hash:x}", hash = hash.finalize());
+    // Do not retain a result if any dependency changed while bytes were being read.
+    let settled = dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
+        [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before));
+    if settled && dependencies == snapshot()? {
+        let mut cache = IDENTITY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.len() == 128 {
+            cache.remove(0);
+        }
+        cache.push(IdentityCacheEntry {
+            dependencies,
+            identity: identity.clone(),
+        });
+    }
+    Ok(identity)
 }
 
 fn hash_optional_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
@@ -733,6 +854,8 @@ fn hash_optional_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
 }
 
 fn hash_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
+    #[cfg(test)]
+    identity_tests::HASHED_FILES.with(|count| count.set(count.get() + 1));
     let resolved = fs::canonicalize(path)?;
     let mut file = File::open(&resolved)?;
     let metadata = file.metadata()?;

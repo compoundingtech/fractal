@@ -4,6 +4,10 @@ use super::*;
 pub const SAMPLE_LIMIT: usize = 64;
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    let initialized = "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')";
+    if tx.query_row(initialized, [], |row| row.get(0))? {
+        return flush(tx);
+    }
     tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb07a03ab6b1d owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_run_eta_samples (
  subject TEXT PRIMARY KEY, run_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
@@ -13,9 +17,7 @@ CREATE INDEX IF NOT EXISTS local_run_eta_key ON local_run_eta_samples(definition
 CREATE INDEX IF NOT EXISTS local_run_eta_run ON local_run_eta_samples(run_id);
 CREATE TABLE IF NOT EXISTS local_run_eta_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_run_eta_dirty (definition_hash TEXT,step_path TEXT,PRIMARY KEY(definition_hash,step_path)) WITHOUT ROWID;
-DROP TRIGGER IF EXISTS run_eta_run_insert; DROP TRIGGER IF EXISTS run_eta_run_update; DROP TRIGGER IF EXISTS run_eta_run_delete;
-DROP TRIGGER IF EXISTS run_eta_step_insert; DROP TRIGGER IF EXISTS run_eta_step_update; DROP TRIGGER IF EXISTS run_eta_step_delete;
-DROP TRIGGER IF EXISTS run_eta_claim_insert; DROP TRIGGER IF EXISTS run_eta_claim_update; DROP TRIGGER IF EXISTS run_eta_claim_delete;
+DROP TRIGGER IF EXISTS run_eta_run_insert; DROP TRIGGER IF EXISTS run_eta_run_update; DROP TRIGGER IF EXISTS run_eta_run_delete; DROP TRIGGER IF EXISTS run_eta_step_insert; DROP TRIGGER IF EXISTS run_eta_step_update; DROP TRIGGER IF EXISTS run_eta_step_delete; DROP TRIGGER IF EXISTS run_eta_claim_insert; DROP TRIGGER IF EXISTS run_eta_claim_update; DROP TRIGGER IF EXISTS run_eta_claim_delete;
 CREATE TRIGGER run_eta_run_insert AFTER INSERT ON mission_runs WHEN NEW.phase='terminal' BEGIN
  INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;
 CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN

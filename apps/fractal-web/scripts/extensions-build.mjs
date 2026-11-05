@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { assertBundleBoundary } from '../src/extensions/bundle-policy.mjs'
-import { assertPublicChangelogBoundary, ensureChangelogRegistries, evaluateBuildIdentityModule, prepareChangelogBuild } from './changelog-build.mjs'
+import { assertPublicChangelogBoundary, defaultChangelogRegistries, ensureChangelogRegistries, evaluateBuildIdentityModule, prepareChangelogBuild } from './changelog-build.mjs'
 
 const changelogManifestModule = fileURLToPath(new URL('../src/changelog/build.ts', import.meta.url))
 const changelogMetadataModule = fileURLToPath(new URL('../src/changelog/metadata.ts', import.meta.url))
@@ -45,6 +45,9 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
       identityId = identity.id
     },
     resolveId(source, importer) {
+      // Development selects its prose registry independently of the eager extension composition.
+      if (source === '../../.changelog/mod.ts' && (importer === changelogManifestModule || importer === changelogMetadataModule))
+        return (changelogRegistries ?? defaultChangelogRegistries)[privateBuild ? 'private' : 'public']
       if (source.endsWith('/extensions/build.ts') ||
         (source === './build.ts' && importer?.includes('/src/extensions/')))
         return new URL(entry, import.meta.url).pathname
@@ -64,7 +67,7 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
         if (manifest === undefined && typeof info?.code === 'string') await compile(info.code)
         if (manifest === undefined) throw new Error('virtual:build-identity produced no code to compile the changelog manifest against')
       }
-      return `export const changelogManifest = ${JSON.stringify(manifest)};\nexport const changelogDeployment = ${JSON.stringify(changelog.deployment)};\n`
+      return `const manifest = ${JSON.stringify(manifest)};\nexport const getChangelogManifest = () => manifest;\nexport const changelogDeployment = ${JSON.stringify(changelog.deployment)};\n`
     },
     generateBundle(_options, bundle) {
       const modules = [...this.getModuleIds()]
