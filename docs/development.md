@@ -21,6 +21,19 @@ printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
 
+Operational reads accept optional leading `--as ACTOR` immediately after these
+leaf paths: `actor-contract`, `agents lane`,
+`agents rename-id proof verify`, `changes list`, `changes show`, `conversations export`,
+`fleet anchor show`, `gate ci-passed`, `gate merged`,
+`missions blocked`, `missions waiting-on`,
+`missions rename-id proof verify`, `recorder report`,
+`subject history`, `terminals peek`, `trace show`, and `validate`.
+The CLI emits a stderr read-attribution record with the actor and canonical command
+path; stdout, queried subjects, filters, and daemon authorization are unchanged.
+An agent caller must supply its literal environment identity; a different explicit
+actor or an empty/conflicting agent identity fails before the read, including offline
+commands. Omitting `--as` preserves the existing read behavior.
+
 Version policy:
 
 kind st3.actor-contract.v1 and version 1 stay for: new commands, new aliases, new optional fields on an entry, and new values of an existing enum (actor, and any later enum). Readers MUST ignore unknown fields and MUST treat an unknown enum value as unknown, never as one of the values they know; they must not infer --as syntax, person support or authority from an unknown value. kind and version bump together for: a removed or renamed field, a changed field type, a removed enum value, or a changed meaning of an existing field or value. contract_sha256 changes with ANY content change (a command moving class included) and identifies one binary build; it is not a version. The contract describes argv syntax and is never an authorization input.

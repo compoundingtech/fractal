@@ -394,15 +394,35 @@ def prepare_dependencies():
         inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
-        if cache.stat().st_size:
+        # Read even empty entries so cache I/O errors cannot become cache misses.
+        if not cache.read_bytes():
+            install()
+            return
+        # Outputs can change without changing generator inputs. Check without
+        # mutating the index/worktree; a stale patch is a miss, not a tick failure.
+        checked=git('apply','--check','--index',cache,capture=True,check=False,
+                    stable_messages=True)
+        if checked.returncode == 0:
             git('apply','--index',cache)
             git('commit','-m','live-r3: reuse generated dependency metadata')
-        install()
-        return
+            install()
+            return
+        # Git apply.c: apply_fragments emits "patch failed"; check_patch emits
+        # the summary and missing/existing index-path diagnostics. Everything
+        # else (including mixed corruption/I/O diagnostics) must remain fatal.
+        errors=[line for line in (checked.stderr or '').splitlines() if line]
+        applicability=re.compile(r'error: (?:patch failed: .+:[0-9]+|.+: (?:patch does not apply|does not exist in index|already exists in index))')
+        if (checked.returncode != 1 or checked.stdout or not errors or
+                not all(applicability.fullmatch(line) for line in errors)):
+            raise RuntimeError(f'metadata cache check failed ({checked.returncode}) for {cache}'
+                               f'\nstdout:\n{checked.stdout or ""}\nstderr:\n{checked.stderr or ""}')
     before=text('rev-parse','HEAD')
     regenerate()
     cache.parent.mkdir(exist_ok=True)
-    cache.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+    with tempfile.TemporaryDirectory(dir=cache.parent) as temporary:
+        replacement=pathlib.Path(temporary)/'patch'
+        replacement.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+        replacement.replace(cache)
 
 def probe_revision(revision):
     git('checkout','--detach',revision)
@@ -425,6 +445,16 @@ def probe_revision(revision):
                 (snapshot_root/name).rmdir()
 
 def build_candidate(row, private_hash, checkpoints):
+    included, skipped = list(row['included']), list(row['skipped'])
+    try:
+        return build_candidate_attempt(row, private_hash, checkpoints)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 75:
+            # Even a reduced-candidate refusal must not publish an ejection.
+            row.update(included=included, skipped=skipped)
+        raise
+
+def build_candidate_attempt(row, private_hash, checkpoints):
     cache=L/'live-r3-tree-cache.json'
     known=json.loads(cache.read_text()) if cache.exists() else {}
     key=candidate_key(private_hash)
@@ -448,17 +478,17 @@ def build_candidate(row, private_hash, checkpoints):
         known[key]={'outcome':'built','sha':row['sha']}
         atomic_json(cache,known)
         return True
-    known[key]={'outcome':'failed','sha':row['sha']}
-    atomic_json(cache,known)
     full=text('rev-parse','HEAD')
+    # A refused probe must abort without poisoning the tree cache or ejecting a PR.
     failed=first_break([c['sha'] for c in checkpoints],probe_revision)
+    known[key]={'outcome':'failed','sha':row['sha']}
     git('checkout','-B','live-r3',full)
     if failed is None:
+        atomic_json(cache,known)
         raise RuntimeError('integrated build failed; no attributable single PR; previous build retained')
     culprit=checkpoints[failed]['pr']
     row['skipped'].append({'pr':culprit,'reason':'build-break','files':[]})
     known[key]['ejected']=culprit
-    atomic_json(cache,known)
     # Reintegrate every later accepted head, rather than silently publishing a prefix.
     git('checkout','-B','live-r3',checkpoints[failed-1]['sha'])
     row['included']=[h for h in row['included'] if h['pr']!=culprit]
@@ -514,7 +544,7 @@ def regenerate():
         git('commit', '-m', 'live-r3: regenerate merged dependency metadata')
 
 def run(args, cwd=None, capture=False, check=True, timeout=None, *,
-        sandbox_shell=None, network=False, package=None):
+        sandbox_shell=None, network=False, package=None, stable_git_messages=False):
     started=time.monotonic()
     category = ('fetch' if 'fetch' in args else 'merge' if args[0]=='git' else
                 'install' if 'pnpm' in args else 'regenerate' if 'genie' in args or 'scripts/ci-fractal-web-licenses' in args else
@@ -539,11 +569,14 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
             host_git = command[0] == 'git'
             if command[0] == 'git':
                 command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
+            host_env={**os.environ, 'CI':'1'}
+            if host_git and stable_git_messages:
+                host_env.update(LC_ALL='C', LANGUAGE='C')
             result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
                                   stdout=subprocess.PIPE if capture or log_capture else None,
                                   stderr=subprocess.PIPE if capture or log_capture or host_git else None,
                                   check=check and not log_capture and not host_git, timeout=timeout,
-                                  env={**os.environ, 'CI':'1'})
+                                  env=host_env)
             if host_git:
                 if not capture and result.stderr:
                     print(result.stderr, end='', file=sys.stderr, flush=True)
@@ -566,7 +599,9 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
     finally:
         if TIMINGS is not None:
             TIMINGS[category]=TIMINGS.get(category,0)+round((time.monotonic()-started)*1000)
-def git(*args, capture=False, check=True): return run(['git','-C',C,*args], capture=capture, check=check)
+def git(*args, capture=False, check=True, stable_messages=False):
+    return run(['git','-C',C,*args], capture=capture, check=check,
+               stable_git_messages=stable_messages)
 def text(*args): return git(*args,capture=True).stdout.strip()
 def digest(root):
     h=hashlib.sha256()
@@ -587,7 +622,11 @@ def install():
             cwd=C, timeout=900, sandbox_shell='web', network=True)
         state.write_text(lockhash)
 def build(name):
-    return run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    result=run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    # EX_TEMPFAIL is host capacity, never evidence about the candidate (or probe).
+    if result.returncode == 75:
+        result.check_returncode()
+    return result
 def recovery_select_build(sha):
     if not isinstance(sha,str) or not re.fullmatch(r'[0-9a-f]{40}',sha):
         raise ValueError('cached build has no full revision')
@@ -935,6 +974,9 @@ def tick():
         print('selection deadline:', error, flush=True)
     except Exception as e:
         row['error']=str(e)
+        if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
+            row.update(build='error', reason='capacity-refused', retryable=True,
+                       error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
             # Host Git refusals must name every rejected key, without truncation.

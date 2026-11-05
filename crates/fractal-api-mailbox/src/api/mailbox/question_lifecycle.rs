@@ -8,39 +8,13 @@ const BATCH: usize = 128;
 
 /// Runs even after observation is disabled: an already-published open still needs an end.
 /// A periodic sweep is necessary when no successor ever reconnects after abrupt driver loss.
+/// A missing lease is indeterminate, not evidence of death: older observations
+/// do not carry the exact wrapper/provider generation needed for retirement.
 pub fn start(state: &AppState) -> tokio::task::JoinHandle<()> {
     let state = state.clone();
     tokio::spawn(crate::task_cpu::account("questions.lifecycle", async move {
-        let mut recovery = Some(String::new());
-        let mut recovery_failed = false;
         let mut cursor = String::new();
         loop {
-            if let Some(after) = recovery.as_ref() {
-                let store = state.store.clone();
-                let origin = state.node.clone();
-                let after = after.clone();
-                match tokio::task::spawn_blocking(move || {
-                    store.unleased_local_harness_questions(&origin, &after, BATCH)
-                }).await {
-                    Ok(Ok(batch)) => {
-                        for question in &batch {
-                            let result = retire_unleased(&state, question.clone()).await;
-                            if let Err(error) = result {
-                                recovery_failed = true;
-                                eprintln!("fractal: question generation recovery: {error:#}");
-                            }
-                        }
-                        recovery = if batch.len() == BATCH {
-                            batch.last().map(|question| question.id.clone())
-                        } else if std::mem::take(&mut recovery_failed) {
-                            // Retry a whole pass after transient errors, without starving
-                            // later keys behind an unavailable provider.
-                            Some(String::new())
-                        } else { None };
-                    }
-                    result => eprintln!("fractal: question generation recovery unavailable: {result:?}"),
-                }
-            }
             let store = state.store.clone();
             let after = cursor.clone();
             match tokio::task::spawn_blocking(move || store.harness_question_generations(&after, BATCH)).await {
@@ -110,37 +84,3 @@ pub(super) fn reconcile_generation(
     Ok(changed)
 }
 
-async fn retire_unleased(state: &AppState, question: crate::api::HarnessQuestion) -> anyhow::Result<()> {
-    let fence = Fence::new(&question.agent, &question.runtime_incarnation, "questions");
-    let dir = authority::source_agent_dir(state, &fence);
-    let admission = fractal_drivers::harness_state::record_lock_admission(&dir).await?;
-    let checked = state.clone();
-    let changed = tokio::task::spawn_blocking(move || {
-        let _admission = admission;
-        fractal_drivers::harness_state::with_record_lock(&dir, || {
-            // A replay may have registered its still-live generation since the recovery scan.
-            if checked.store.harness_question_generation(&question.id)?.is_some() {
-                return Ok(false);
-            }
-            let observed = checked.store.latest_claim(
-                &question.id, Some(fractal_schema::harness_questions::OBSERVED),
-            )?;
-            if !observed.is_some_and(|claim| claim.id == question.revision && claim.origin == checked.node) {
-                return Ok(false);
-            }
-            let selected = checked.store.desired_subjects_named(std::slice::from_ref(&question.agent))?;
-            if selected.first().and_then(|subject| subject.member.as_ref()).is_some_and(|member| {
-                member.driver.as_deref().is_some_and(|driver| driver != "omp") || member.host != checked.node
-            }) {
-                return Ok(false);
-            }
-            // Pre-lease local OMP observations have no recoverable wrapper generation. The
-            // upgrade revokes that observation authority, never inventing a native answer.
-            checked.store.resolve_harness_question(
-                &question.id, Status::Cancelled, &question.revision, &BTreeMap::new(), None,
-            ).map(|(_, changed)| changed).map_err(Into::into)
-        })
-    }).await??;
-    if changed { signal_local_change(state); }
-    Ok(())
-}

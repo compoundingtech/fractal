@@ -4,6 +4,6 @@
   "branch_days": 14,
   "grace_hours": 24,
   "soft_records": 3000,
-  "cap_records": 45000,
-  "reason": "cap_records 45000 (2026-10-29): about twice the live set of 21,518 records on 2026-10-29, which grew past the old cap of 20,000 once GC kept every live tree's per-crate rust-tests keys (#4170); over the cap, GC exits 3 and alerts every night. soft_records deletes nothing since #4186 (grace is absolute)."
+  "cap_records": 150000,
+  "reason": "cap_records 150000 (2026-11-05): about twice the live set of 73,782 records in a dry run on 2026-11-05, which grew past the previous cap of 45,000 (set 2026-10-29 for a live set of 21,518) while GC was paused; over the cap, GC still deletes every dead tree and key but exits 3 and alerts every night. soft_records deletes nothing since #4186 (grace is absolute)."
 }

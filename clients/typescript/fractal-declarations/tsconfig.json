@@ -12,5 +12,5 @@
     "lib": ["es2020"],
     "types": []
   },
-  "files": ["index.ts", "type-tests.ts"]
+  "files": ["index.ts", "type-tests.ts", "examples/daily-review.ts"]
 }

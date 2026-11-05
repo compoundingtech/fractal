@@ -248,6 +248,12 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod message_outbox;
+#[cfg(test)]
+mod message_outbox_tests;
+pub mod relayed_closes;
+#[cfg(test)]
+mod relayed_closes_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -287,6 +293,11 @@ pub mod document_index_tests;
 pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
+pub mod run_eta;
+#[cfg(test)]
+mod run_eta_tests;
+#[cfg(test)]
+mod run_eta_review_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
@@ -2212,6 +2223,8 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// Daemon-local fallback for human questions, initialized before attention starts.
+    pub question_principal_default: std::sync::OnceLock<String>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2646,6 +2659,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2668,6 +2682,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2691,6 +2706,7 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -7034,6 +7050,7 @@ impl Store {
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
+                | "work.handoff-returned"
                 | "work.extended"
                 | "subagent.appeared"
                 | "subagent.renewed"
@@ -17524,7 +17541,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -18000,6 +18017,16 @@ pub fn project_mission_run_update(
             .optional()
             .map_err(internal)?;
         if current_attempt != Some(claim_attempt) {
+            return Ok(());
+        }
+        if claim.kind == "work.handoff-returned" {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE step_runs SET assignee=?2, available_to='[]', status='ready', lease_owner=NULL,
+                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, readiness_epoch=?3,
+                 updated_at_unix_ms=?4 WHERE subject=?1",
+                params![claim.subject, fields["handoff_to"].as_str(), fields["readiness_epoch"].as_u64(),
+                    claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
             return Ok(());
         }
         if claim.kind == "work.released"
@@ -20078,6 +20105,11 @@ fn enrich_step_wake_with(
             .collect(),
         delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
             harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
+        staging_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working"
+                && current_incarnation_key == wake_incarnation_key
+                && matches!(harness.driver.as_deref(), Some("pi" | "omp"))
         }),
     };
     let failure = connection
@@ -22466,12 +22498,13 @@ pub fn append_claim_with_commit_context(
             }
             // A seat this member hosts records its own delivery, read and close of graph mail as a
             // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
-            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // recorded_as_mark), and its staging once every other member counts a host's staging
+            // too (marks_switch::staged_switched_tx, read here in this transaction), whoever acts for it:
             // the fences, replays and transition rules above have applied. A write acting for a
             // retired seat or under a delegation stays a claim, which carries its proof, and so
             // does a native read, whose proof links the native turn to its claim
             // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
-            if message_marks::recorded_as_mark(&input.kind)
+            if message_marks::recorded_as_mark(transaction, &input.kind).map_err(internal)?
                 && context.native_receipt.is_none()
                 && !input.fields.contains_key("acting_for")
                 && !input.fields.contains_key("delegation")

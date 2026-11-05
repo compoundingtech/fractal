@@ -270,6 +270,7 @@
   },
   "fractal-reconcile": {
    "extra": [
+    ".st/lane-bursts.json",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
     "scripts/ci-test-paths.rs",
     "slo"

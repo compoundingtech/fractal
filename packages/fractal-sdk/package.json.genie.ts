@@ -24,8 +24,11 @@ export default packageJson({
   license: 'MIT',
   type: 'module',
   exports: {
-    './effect': './src/effect/mod.ts',
+    './effect': './src/effect/compat.ts',
     './admission': './src/effect/admission.ts',
+    './read': './src/effect/mod.ts',
+    './pty': './src/effect/pty.ts',
+    './mutations': './src/effect/mutations.ts',
   },
   scripts: {
     test: 'vitest run --config vitest.config.ts',

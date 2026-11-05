@@ -261,36 +261,8 @@ pub(crate) fn run_for_paths(
     )
 }
 
-/// Resume supervising a pi-family provider a predecessor driver image launched and released for
-/// adoption. The channel the extension spawned keeps the live record; this image keeps presence
-/// and the terminal record, exactly as the launching image did.
-pub(crate) fn adopt_for(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    kind: &HarnessKind,
-    pid: u32,
-    session: String,
-    seq: u64,
-    legacy_presence: bool,
-) -> Result<()> {
-    let label = kind.label;
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, &identity, &crate::run::detect_host())?
-            .with_context(|| format!("{label} driver agent '{identity}' is not declared"))?;
-    adopt_paths(
-        &agent_dir,
-        identity,
-        runtime_id,
-        kind,
-        pid,
-        session,
-        seq,
-        legacy_presence,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Resume supervising a native pi-family provider released by a predecessor driver image.
+/// The channel keeps the live record; this image keeps its terminal fencing.
 pub(crate) fn adopt_paths(
     agent_dir: &Path,
     identity: String,
@@ -299,7 +271,6 @@ pub(crate) fn adopt_paths(
     pid: u32,
     session: String,
     seq: u64,
-    legacy_presence: bool,
 ) -> Result<()> {
     let label = kind.label;
     let observer = crate::provider_session::SessionObserver::terminal_only(
@@ -312,9 +283,7 @@ pub(crate) fn adopt_paths(
     );
     let outcome = crate::provider_session::adopt_provider_observed(
         label,
-        legacy_presence
-            .then(|| status::status_path(agent_dir))
-            .as_deref(),
+        None,
         pid,
         crate::provider_session::SESSION_REFRESH,
         PROVIDER_POLL,
