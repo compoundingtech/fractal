@@ -15988,7 +15988,7 @@ fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, St3Er
 
 /// Every value of the first column `sql` returns for `value`, without nulls.
 fn string_column_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     value: &str,
 ) -> Result<Vec<String>, St3Error> {
@@ -16245,8 +16245,9 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
 }
 
 /// The generations of one run: projected, created by claims, or named by its asks.
-fn run_generation_ids_tx(
-    transaction: &Transaction<'_>,
+#[doc(hidden)]
+pub fn run_generation_ids_tx(
+    transaction: &Connection,
     run: &str,
 ) -> Result<BTreeSet<String>, St3Error> {
     let subject = format!("mission-run/{run}");
