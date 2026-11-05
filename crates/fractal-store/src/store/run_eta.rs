@@ -4,11 +4,14 @@ use super::*;
 pub const SAMPLE_LIMIT: usize = 64;
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    let initialized = "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')";
-    if tx.query_row(initialized, [], |row| row.get(0))? {
+    if tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')",
+        [],
+        |row| row.get(0),
+    )? {
         return flush(tx);
     }
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb07a03ab6b1d owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd848d67f227a owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_run_eta_samples (
  subject TEXT PRIMARY KEY, run_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
  step_path TEXT NOT NULL, ended INTEGER NOT NULL, duration INTEGER NOT NULL

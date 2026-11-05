@@ -68,14 +68,11 @@ pub(super) fn fixture(history: i64) -> Connection {
     }
     c
 }
-
 pub(super) fn claim(c: &Connection, subject: &str, kind: &str, fields: Value, at: i64) {
-    let at = at.to_string();
-    let body = json!({"fields":fields}).to_string();
     c.execute(
         /* sqlite-large-value: allow-for-now lv-he744e35e69c5 owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,subject,kind,body,accepted_at_unix_ms)
         VALUES(?1||'-'||?2||'-'||?3,?1,?2,?4,?3)",
-        rusqlite::params![subject, kind, at, body],
+        rusqlite::params![subject, kind, at, json!({"fields":fields}).to_string()],
     )
     .unwrap();
 }
