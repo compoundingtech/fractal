@@ -1240,19 +1240,19 @@ fn a_dial_out_member_is_never_observed_and_endpoints_are_announced_once() {
     sync(&a, &laptop);
     assert!(
         laptop
-            .publish_fleet_endpoints("dial-out", &[], "test")
+            .publish_fleet_endpoints("dial-out", &[], "test", None)
             .unwrap()
     );
     assert!(
         !laptop
-            .publish_fleet_endpoints("dial-out", &[], "test")
+            .publish_fleet_endpoints("dial-out", &[], "test", None)
             .unwrap()
     );
     assert!(!laptop.observes_transport_to("a").unwrap());
     let endpoint = [json!({"transport": "loopback", "address": "127.0.0.1:1"})];
     assert!(
         laptop
-            .publish_fleet_endpoints("listening", &endpoint, "test")
+            .publish_fleet_endpoints("listening", &endpoint, "test", None)
             .unwrap()
     );
     assert!(laptop.observes_transport_to("a").unwrap());
@@ -1263,6 +1263,28 @@ fn a_dial_out_member_is_never_observed_and_endpoints_are_announced_once() {
     };
     assert_eq!(incarnation.mode, "listening");
     assert_eq!(incarnation.endpoints, endpoint);
+}
+
+#[test]
+fn attributed_transport_changes_are_recorded_even_with_unchanged_endpoints() {
+    let anchor = key();
+    let store = node("local", Some(&anchor), Some(&anchor));
+    admit(&store, "local", &anchor, "anchor", None);
+    let endpoints = [json!({"transport": "loopback", "address": "127.0.0.1:1"})];
+    assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap());
+    for mutation_id in ["transport-change-1", "transport-change-2"] {
+        let before = store.index().unwrap();
+        assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", Some(("agent/example", mutation_id))).unwrap());
+        let claim = store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap();
+        assert_eq!(claim.actor.as_deref(), Some("agent/example"));
+        assert!(store.index().unwrap() > before, "distinct changes record new events");
+        let after = store.index().unwrap();
+        assert!(store.publish_fleet_endpoints("listening", &endpoints, "test", Some(("agent/example", mutation_id))).unwrap());
+        assert_eq!(store.index().unwrap(), after, "replay must not append a claim");
+        assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints"))
+            .unwrap().unwrap().id, claim.id);
+    }
+    assert!(!store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap());
 }
 
 #[test]

@@ -3767,6 +3767,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("incarnation_id", string()),
             ("runtime_pid", integer()),
             ("runtime_pid_start_token", string()),
+            ("launch_contract", object()),
             ("deadline_key", string()),
             ("desired_token", string()),
             ("rollout_operation", string()),
@@ -4646,10 +4647,14 @@ mod tests {
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         fields.insert("runtime_pid".into(), Value::from(1234));
         fields.insert("runtime_pid_start_token".into(), Value::from("987654321"));
+        fields.insert("launch_contract".into(), serde_json::json!({
+            "version":1, "digest":"combined", "prompt":"prompt", "binary":"binary",
+        }));
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         for (name, invalid) in [
             ("runtime_pid", Value::from("1234")),
             ("runtime_pid_start_token", Value::from(987654321)),
+            ("launch_contract", Value::from("not an object")),
         ] {
             let mut invalid_fields = fields.clone();
             invalid_fields.insert(name.into(), invalid);

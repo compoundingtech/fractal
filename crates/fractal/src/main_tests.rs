@@ -1,3 +1,72 @@
+#[test]
+fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
+    for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
+        for actor in ["agent/example", "agent/other", "person/example"] {
+            let cli = Cli::try_parse_from(["fractal", "fleet", "transports", subcommand, "--as", actor, transport]).unwrap();
+            let restart = Cli::try_parse_from(["fractal", "agents", "restart", "--as", actor, "agent/example"]).unwrap();
+            assert_eq!(
+                guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_ok(),
+                guard_mutating_cli_actor(&restart.command, Some("agent/example"), None).is_ok(),
+            );
+        }
+        let cli = Cli::try_parse_from(["fractal", "fleet", "transports", subcommand, transport]).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_err());
+    }
+}
+#[tokio::test]
+async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
+    use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};
+    for (changed_base, actor, changed_endpoints, abandoned, count) in [(false, "agent/example", false, false, 1), (true, "agent/example", false, false, 2), (false, "agent/other", false, false, 2), (false, "agent/example", true, false, 1), (false, "agent/example", false, true, 2)] {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config { node: "local".into(), state_dir: root.path().into(), ..Config::default() };
+        let file = fractal_daemon::config::FleetFile {
+            fleet_id: FLEET.into(), port: Some(123), transports: vec!["tailscale".into(), "fabric".into(), "loopback".into()], ..Default::default()
+        };
+        file.save(root.path()).unwrap();
+        let path = fractal_daemon::config::FleetFile::path(root.path());
+        let before = fs::read(&path).unwrap();
+        let anchor = key();
+        let store = Arc::new(node("local", Some(&anchor), Some(&anchor)));
+        admit(&store, "local", &anchor, "anchor", None);
+        let published = store.clone();
+        let membership = store.clone();
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let observations = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = observations.clone();
+        let app = axum::Router::new()
+            .route("/v1/fleet/membership", axum::routing::get(move || {
+                let mut view = membership.fleet_view().unwrap();
+                view.members[0].endpoints = if observed.load(std::sync::atomic::Ordering::SeqCst) { vec![] } else { vec![json!({"transport":"tailscale", "address":"100.64.0.1:123"})] };
+                async move { axum::Json(json!({"api_version": "st3.v1", "value": view})) }
+            }))
+            .route("/v1/fleet/transports", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let store = published.clone();
+                let lost = body["dry_run"] != true && fail.swap(false, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if body["dry_run"] != true {
+                        store.publish_fleet_endpoints(body["mode"].as_str().unwrap(), body["endpoints"].as_array().unwrap(), "test",
+                            Some((body["actor"].as_str().unwrap(), body["mutation_id"].as_str().unwrap()))).unwrap();
+                    }
+                    (if lost { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK }, axum::Json(json!({"api_version": "st3.v1", "value": {}})))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let prefer = |actor: &str| FleetTransportsCommand::Prefer { actor: Some(actor.into()), transport: "fabric".into(), no_service: true };
+        assert!(fleet_cli::run_fleet_transports(&client, &config, prefer("agent/example"), true).await.is_err()); assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(path.with_extension("transport-change.json").exists());
+        if changed_base { let mut edited = file.clone(); edited.transports.swap(1, 2); fs::write(&path, toml::to_string(&edited).unwrap()).unwrap(); }
+        observations.store(changed_endpoints, std::sync::atomic::Ordering::SeqCst);
+        if abandoned { let mut other = file.clone(); other.transports.swap(0, 2); other.save(root.path()).unwrap(); file.save(root.path()).unwrap(); }
+        fleet_cli::run_fleet_transports(&client, &config, prefer(actor), true).await.unwrap(); assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), count);
+        assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap().actor.as_deref(), Some(actor));
+        assert_eq!(fractal_daemon::config::FleetFile::load(root.path()).unwrap().unwrap().transports, ["fabric", "tailscale", "loopback"]);
+        assert!(!path.with_extension("transport-change.json").exists());
+        server.abort();
+    }
+}
+
 use super::*;
 
 #[test]
@@ -1581,6 +1650,89 @@ fn a_harness_cannot_act_as_another_agent() {
     assert!(
         foreign_agent_actor("agent/run-1/wake.codex", Some("person/operator"), run).is_none()
     );
+}
+
+#[test]
+fn execution_actor_options_parse_and_fail_closed() {
+    for (path, tail) in [
+        (["changes", "sync"], vec!["--repository", "fixture/garden"]),
+        (["missions", "check"], vec!["mission.kdl"]),
+        (["gate", "cargo-test"], vec!["fixture", "--package", "fixture"]),
+    ] {
+        for actor in ["agent/example/caller", "agent/example/peer", "person/operator"] {
+            let mut argv = vec!["fractal", path[0], path[1], "--as", actor];
+            argv.extend(tail.iter().copied());
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert_eq!(
+                guard_mutating_cli_actor(&cli.command, Some("agent/example/caller"), None).is_ok(),
+                actor == "agent/example/caller",
+            );
+            match cli.command {
+                Command::Changes(change_cli::ChangesArgs {
+                    command: change_cli::ChangesCommand::Sync { actor: value, .. },
+                }) | Command::Gate {
+                    command: GateCommand::CargoTest { actor: value, .. },
+                } => assert_eq!(value.as_deref(), Some(actor)),
+                Command::Missions { command: MissionViewCommand::Check(args) } => {
+                    assert_eq!(args.actor.as_deref(), Some(actor));
+                }
+                _ => panic!("unexpected execution command"),
+            }
+        }
+        let mut argv = vec!["fractal", path[0], path[1]];
+        argv.extend(tail);
+        assert!(Cli::try_parse_from(argv).is_ok(), "the actor remains optional");
+    }
+}
+
+#[tokio::test]
+async fn execution_requests_carry_actor_without_changing_the_work() {
+    use axum::{Json, Router, http::HeaderMap};
+    for actor in ["person/operator", "agent/example/caller"] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("execution.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let app = Router::new()
+            .route("/v1/client/changes/sync", axum::routing::post(
+                move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-st3-person"], actor);
+                    assert_eq!(body, json!({"repository": "fixture/garden"}));
+                    Json(json!({"api_version": "st3.v1", "value": {}}))
+                },
+            ))
+            .route("/v1/gate-checks", axum::routing::post(
+                move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-st3-person"], actor);
+                    assert_eq!(body["intent"]["kdl"], "// fixture");
+                    assert_eq!(body["inputs"], json!({"revision": "fixture"}));
+                    Json(json!({"api_version": "st3.v1", "value": {"id": "fixture", "host": "fixture", "finished": true, "gates": []}}))
+                },
+            ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = Endpoint::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Defaults {
+            runtime: socket.clone(),
+            published: socket.clone(),
+        });
+        let client = execution_client(&endpoint, actor.into()).unwrap();
+        assert!(matches!(&client.endpoint, Endpoint::DiscoveredUnix(
+            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+        ) if runtime == &socket && published == &socket));
+        change_cli::run(&client, change_cli::ChangesArgs {
+            command: change_cli::ChangesCommand::Sync {
+                actor: Some(actor.into()), repository: "fixture/garden".into(),
+            },
+        }, true).await.unwrap();
+        let file = directory.path().join("mission.kdl");
+        std::fs::write(&file, "// fixture").unwrap();
+        run_mission_view(&cli_client(&endpoint), &endpoint, MissionViewCommand::Check(
+            MissionCheckArgs {
+                actor: Some(actor.into()), file, workspace: directory.path().into(),
+                inputs: vec![("revision".into(), "fixture".into())],
+            },
+        ), true).await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[test]

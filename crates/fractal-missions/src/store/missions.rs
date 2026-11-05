@@ -208,35 +208,7 @@ thread_local! {
     pub static MISSION_TIMING_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn step_timestamps(events: &[(String, Value, u128)], attempt: u32) -> (Option<u128>, Option<u128>) {
-    let (mut started, mut completed) = (None, None);
-    let mut current_attempt = 1;
-    for (kind, body, at) in events {
-        let fields = body.get("fields").unwrap_or(body);
-        if matches!(kind.as_str(), "step-run.state" | "step-run.carried" | "step-run.retried")
-            && let Some(value) = fields["attempt"].as_u64()
-        {
-            current_attempt = value;
-        }
-        let event_attempt = fields["attempt"].as_u64().unwrap_or(current_attempt);
-        if event_attempt != u64::from(attempt) {
-            continue;
-        }
-        let status = fields["status"].as_str().unwrap_or_default();
-        if kind == "work.claimed"
-            || (matches!(kind.as_str(), "step-run.state" | "step-run.carried")
-                && matches!(status, "claimed" | "working"))
-        {
-            started.get_or_insert(*at);
-        }
-        if matches!(kind.as_str(), "step-run.state" | "work.failed" | "work.person-done" | "work.person-cancelled")
-            && matches!(status, "completed" | "failed" | "cancelled" | "skipped")
-        {
-            completed.get_or_insert(*at);
-        }
-    }
-    (started, completed)
-}
+use fractal_delivery::store::run_eta::step_timestamps;
 
 #[test]
 fn step_timestamps_follow_execution_not_lease_intervals() {
