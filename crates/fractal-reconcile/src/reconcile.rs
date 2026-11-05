@@ -541,7 +541,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
         desired: &DesiredSubject,
         launch: &MemberSpec,
     ) -> Result<crate::launch_contract::Contract> {
-        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true)
+        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true).map(|(contract, _)| contract)
     }
     /// Proof for the operation in this prepared launch: no operation-owned runtime
     /// remains and no producer can launch later. A returned error or absence alone
@@ -1403,6 +1403,8 @@ pub struct Reconciler<R = NativeRuntime> {
     file_watchers: Arc<Mutex<HashMap<String, FileWatch>>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
+    file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
+    launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1461,6 +1463,8 @@ struct FileWatch {
     target: PathBuf,
     directory: PathBuf,
     referent: Option<PathBuf>,
+    recursive: bool,
+    dirty: Arc<AtomicBool>,
 }
 
 impl FileWatch {
@@ -1474,8 +1478,8 @@ impl FileWatch {
                     | notify::EventKind::Remove(_)
             ) && (event.paths.is_empty()
                 || event.paths.iter().any(|path| {
-                    path == target
-                        || referent == Some(path.as_path())
+                    path.starts_with(target)
+                        || referent.is_some_and(|referent| path.starts_with(referent))
                         || ((path == directory
                             || referent.and_then(Path::parent) == Some(path.as_path()))
                             && matches!(
@@ -1612,6 +1616,8 @@ impl Reconciler<NativeRuntime> {
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
+            file_watch_revision: Default::default(),
+            launch_input_wake: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1812,6 +1818,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
+            file_watch_revision: Default::default(),
+            launch_input_wake: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -4023,6 +4031,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        for subject in desired.iter().filter(|subject| subject.kind == "agent"
+            && subject.member.as_ref().is_some_and(|member| member.host == self.host)) {
+            self.isolate("stage/launch-inputs", &subject.subject, || self.watch_launch_inputs(subject));
+        }
         self.isolate("stage/missions", &daemon, || self.evaluate_mission_runs());
         self.release_unused_file_watchers();
 
@@ -18959,6 +18971,43 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
+        let item = format!("launch-inputs:{}", subject.subject);
+        if !self.incremental.needs(&item, now_ms()) {
+            for key in self.incremental.reads_of(&item).into_iter().filter(|key| key.starts_with("launch-input/")) {
+                self.file_watchers_used.lock().unwrap_or_else(PoisonError::into_inner).insert(key);
+            }
+            return Ok(());
+        }
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        });
+        let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
+        let (result, reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::note_read(|| "launch-identity".into());
+            smallclaims::touched::note_read(|| "kind:intent.desired".into());
+            crate::contract::declared_ready_inputs(&self.store, subject, &|path| {
+                let key = format!("launch-input/{}", path.display());
+                smallclaims::touched::note_read(|| key.clone());
+                self.ensure_file_watch(&key, path)
+            })
+        });
+        self.incremental.evaluated(&item, reads, None);
+        if matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
+            self.incremental.touch("launch-identity");
+        }
+        result.map(|_| ())
+    }
+
     fn ensure_file_watch(&self, subject: &str, path: &Path) -> Result<()> {
         self.file_watchers_used
             .lock()
@@ -18989,10 +19038,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A file symlink can point outside the lexical parent. Observe its referent's
         // parent too, so both writes and inode replacements preserve file-gate behavior.
         let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        let recursive = target.is_dir();
         if watchers.get(subject).is_some_and(|watch| {
             watch.target == target
                 && watch.directory == directory
                 && watch.referent == referent
+                && watch.recursive == recursive
+                && !watch.dirty.load(std::sync::atomic::Ordering::Acquire)
         }) {
             return Ok(());
         }
@@ -19001,10 +19053,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
+        let revision = self.file_watch_revision.clone();
         let watched_subject = subject.to_owned();
+        let dirty = Arc::new(AtomicBool::new(false));
+        let changed_watch = dirty.clone();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 let Ok(event) = event else { return };
+                if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
+                    changed_watch.store(true, std::sync::atomic::Ordering::Release);
+                }
                 // Reads (including this observer's own reads) must never self-wake.
                 if FileWatch::relevant(
                     &event,
@@ -19012,6 +19071,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &watched_directory,
                     watched_referent.as_deref(),
                 ) {
+                    revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     observations
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -19023,6 +19083,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             })?;
         watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        if recursive { watcher.watch(&target, notify::RecursiveMode::Recursive)?; }
         if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
             && parent != directory
         {
@@ -19033,6 +19094,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             target,
             directory,
             referent,
+            recursive,
+            dirty,
         });
         // A refreshed subscription may now refer to a different file at the same stamp.
         self.file_observations
@@ -26789,6 +26852,26 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn launch_input_watchers_follow_recursive_rules_and_missing_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        let rules = root.path().join("rules");
+        let missing = root.path().join("missing.md");
+        for path in [&rules, &missing] {
+            reconciler.ensure_file_watch(&format!("launch-input/{}", path.display()), path).unwrap();
+        }
+        std::fs::create_dir_all(rules.join("nested")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        reconciler.ensure_file_watch(&format!("launch-input/{}", rules.display()), &rules).unwrap();
+        for path in [rules.join("nested/new.md"), missing] {
+            std::fs::write(path, "new instruction").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        }
     }
 
     #[tokio::test]
