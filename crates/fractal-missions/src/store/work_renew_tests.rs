@@ -464,7 +464,7 @@ fn refresh_fixture() -> (Renewal, fractal_store::store::refresh_intake::Seal) {
     let intent = crate::graph::parse_test_intent(source, "node").unwrap();
     let plan = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
     store.apply(&intent, &plan.subject_tokens, "refresh-declaration").unwrap();
-    store.append_client_claim(&ClaimInput {
+    store.append_claim(&ClaimInput {
         subject: "agent/node.worker".into(), kind: "runtime.observed".into(), actor: None,
         fields: serde_json::from_value(json!({"status":"running","incarnation_id":"current"})).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -497,12 +497,11 @@ fn refresh_intake_claim_wins_and_held_renew_complete_remain_available() {
     store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
     store.work_action(&renewal.subject, "claim", &request("refresh-claim-wins", None)).unwrap();
+    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
     refresh_writer_barrier(store, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
     store.work_action(&renewal.subject, "renew", &request("refresh-renew", None)).unwrap();
     store.work_action(&renewal.subject, "complete", &request("refresh-complete", None)).unwrap();
-    assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
-    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
-    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
     assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
 }
 
@@ -529,11 +528,12 @@ fn refresh_intake_mutation_wins_and_stale_epoch_cannot_seal() {
     let store = &renewal.store;
     store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    let stale = seal.clone();
     assert!(store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
-    refresh_writer_barrier(store, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
-    store.complete_refresh_mutation("agent/node.worker", "current", "mutation").unwrap();
-    assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
     seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    refresh_writer_barrier(store, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    store.complete_refresh_mutation("agent/node.worker", "current", "mutation").unwrap();
+    assert!(!store.seal_refresh_intake("agent/node.worker", &stale).unwrap());
     assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
 }
