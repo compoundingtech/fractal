@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use chrono::{Datelike as _, NaiveDate, TimeZone as _, Utc};
+use notify::Watcher as _;
 use serde_json::Value;
 use sha2::Digest as _;
 use tokio::sync::{Notify, watch};
