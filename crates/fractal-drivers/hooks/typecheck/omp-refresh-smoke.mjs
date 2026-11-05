@@ -22,6 +22,13 @@ const handlers = new Map();
 let idle = true, jobs = [], delivered = 0, executed = 0;
 const ctx = { isIdle: () => idle, getAsyncJobSnapshot: () => ({ running: jobs }),
   ui: { notify() {} }, sessionManager: { getSessionId: () => "native-session" } };
+let expireRestore;
+if (process.argv[3] === "--restoring-ask") {
+  process.env.ST3_OMP_PENDING_ASK = "original-ask";
+  const timeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, ms, ...args) => ms === 120_000
+    ? (expireRestore = callback, { unref() {} }) : timeout(callback, ms, ...args);
+}
 const { default: extension } = await import(process.argv[2]);
 extension({ on: (name, handler) => handlers.set(name, handler),
   sendUserMessage: () => { delivered += 1; }, sendMessage() {} });
@@ -47,7 +54,17 @@ const dispatch = async (id, context = ctx, toolName = "bash") => {
 try {
   await handlers.get("session_start")({}, ctx);
   await until(() => frames().some(frame => frame.type === "ready"));
-  if (process.argv[3] === "--native-user") {
+  if (process.argv[3] === "--restoring-ask") {
+    let pending = await request("activity");
+    assert.deepEqual(pending.blockers, ["unsupported-native-prompt-preservation"]);
+    assert.notEqual((await request("close", pending.receipt)).result, "closed");
+    assert.equal(typeof expireRestore, "function");
+    expireRestore();
+    pending = await request("activity");
+    assert.deepEqual(pending.blockers, ["unsupported-native-prompt-preservation"]);
+    assert.notEqual((await request("close", pending.receipt)).result, "closed", "timeout cannot erase an unresolved ask");
+    console.log("OMP restored native ask: pending and timed-out continuation remain blocked");
+  } else if (process.argv[3] === "--native-user") {
     for (const name of ["user_bash", "user_python"]) {
       assert.equal(handlers.get(name)({ command: "fixture", code: "fixture" }, ctx), undefined);
       await handlers.get("agent_end")({}, ctx);
@@ -76,6 +93,25 @@ try {
   await handlers.get("tool_call")(denied, ctx); // Terminal fallback without an approval/result callback.
   await handlers.get("message_end")(terminal, ctx);
   assert.equal((await request("activity")).receipt.open_non_person_tools, 0);
+  const ask = { toolName: "ask", toolCallId: "original-ask",
+    input: { questions: [{ id: "choice", question: "Keep the original choice?", options: [{ label: "Keep" }] }] } };
+  await handlers.get("tool_call")(ask, ctx);
+  let prompt = await request("activity");
+  assert.deepEqual(prompt.blockers, ["unsupported-native-prompt-preservation"]);
+  assert.notEqual((await request("close", prompt.receipt)).result, "closed");
+  await handlers.get("tool_result")({ ...ask, isError: false }, ctx);
+  assert.deepEqual((await request("activity")).blockers, []);
+  const permission = { toolCallId: "original-permission", toolName: "bash" };
+  await handlers.get("tool_call")(permission, ctx);
+  await handlers.get("tool_approval_requested")(permission, ctx);
+  prompt = await request("activity");
+  assert.deepEqual(prompt.blockers, ["unsupported-native-prompt-preservation"]);
+  assert.notEqual((await request("close", prompt.receipt)).result, "closed");
+  // An unrelated stored answer cannot resolve the pending native call.
+  await handlers.get("tool_approval_resolved")({ ...permission, toolCallId: "different-call", approved: true }, ctx);
+  assert.deepEqual((await request("activity")).blockers, ["unsupported-native-prompt-preservation"]);
+  await handlers.get("tool_approval_resolved")({ ...permission, approved: false }, ctx);
+  assert.deepEqual((await request("activity")).blockers, []);
   for (const name of ["xd", "device", "device"]) await dispatch("nested-call", ctx, name);
   assert.equal((await request("activity")).receipt.open_non_person_tools, 3);
   await handlers.get("message_end")({ message: { role: "toolResult", toolCallId: "nested-call", toolName: "xd" } }, ctx);
