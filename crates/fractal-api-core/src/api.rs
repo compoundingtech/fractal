@@ -720,6 +720,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
         .route("/v1/fleet/admission-override", post(fleet::admission_override))
+        .route("/v1/fleet/transports", post(fleet::change_transports))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))
@@ -2959,6 +2960,7 @@ fn client_work_values(
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
+                "execution_waited_ms": work.execution_waited_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
                 "constraints": work.constraints,
@@ -4736,7 +4738,9 @@ fn client_message_resource(
 ) -> anyhow::Result<Value> {
     let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
     let updated_at = metadata["updated_at"].as_str().unwrap_or("0").parse::<u128>()?;
-    let reasons = if message.status == "closed" {
+    // A close the seat's host relayed is history too, though the message's own status is this
+    // member's records until the host answers again.
+    let reasons = if message.status == "closed" || metadata["closed"] == true {
         vec!["closed"]
     } else if !current {
         vec!["superseded"]
@@ -4921,7 +4925,9 @@ fn client_message_resources_at(
             .cloned()
             .unwrap_or(Value::Null);
         let mut reasons = Vec::new();
-        if message.status == "closed" {
+        if message.status == "closed"
+            || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
+        {
             reasons.push("closed");
         } else if !current_ids.contains(&message.subject) {
             reasons.push("superseded");
@@ -7409,6 +7415,7 @@ pub async fn guard_bound_request(
         "/v1/agents/start",
         "/v1/agents/source-offline",
         "/v1/fleet/admission-override",
+        "/v1/fleet/transports",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
@@ -7978,10 +7985,11 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
 }
 
 /// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
-/// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
-/// the host did not answer for stays, as this member cannot say it was read. A seat with more held
+/// that host answers about its held mail sent before `before`: mail its seat took any step with
+/// (staged, delivered, read or closed) goes, as any such claim or mark clears the host's own held
+/// flag, and mail the host did not answer for stays, as this member cannot say it was offered. A seat with more held
 /// mail than one read asks of a host keeps this member's own count, which can only be higher.
-fn relayed_held_mail(
+pub fn relayed_held_mail(
     state: &AppState,
     seats: Vec<(String, u64, u128)>,
     before: u128,
@@ -8033,7 +8041,7 @@ fn relayed_held_mail(
     for (subject, (seat, at)) in sent {
         if relayed
             .get(&subject)
-            .is_some_and(|answer| matches!(answer.status(), Some("read" | "closed")))
+            .is_some_and(|answer| answer.status().is_some())
         {
             continue;
         }

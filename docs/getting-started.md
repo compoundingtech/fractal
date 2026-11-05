@@ -230,12 +230,18 @@ Coordinate that restart with active work and any continuous health checks. Repla
 archive files alone does not restart running services.
 
 State lives in `~/.local/state/st3`. The local API uses a Unix socket. On Linux it
-normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/st3.sock` linking to it; on macOS
+normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/fractal.sock` linking to it; on macOS
 it lives in the state directory. An explicit `--endpoint` or `ST3_ENDPOINT` takes
 precedence. Commands wait up to 30 seconds for a restarting daemon, then exit with
 status 5; `--daemon-wait` and `ST3_DAEMON_WAIT` change that wait. Restarting the daemon
 leaves durable agents running so it can adopt them again. For foreground operation,
 use `st up`.
+
+Default discovery prefers `fractal.sock`.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction -->
+During the socket-name migration it falls back to `st3.sock` when the new socket is absent.
+The daemon also serves the legacy socket aliases so older clients can reconnect.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal -->
 
 The [daemon troubleshooting guide](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md),
 [command recorder](st3/command-recorder.md) and [compatibility policy](st3/compatibility.md)

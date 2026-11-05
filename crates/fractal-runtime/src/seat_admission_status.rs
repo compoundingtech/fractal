@@ -73,6 +73,9 @@ pub struct State {
     pub burst_touched: BTreeSet<String>,
     /// Bursts dropped because their holder stopped renewing, since this daemon started.
     pub bursts_lapsed: u64,
+    /// The room admission keeps from starts for a burst, as it last judged a seat's start: the
+    /// seat, the reserve with no burst held, and what is left of it now.
+    pub burst_reserve: Option<(String, u64, u64)>,
 }
 
 pub struct Status(Mutex<State>);
@@ -93,6 +96,7 @@ impl Default for Status {
             lane_bursts: VecDeque::new(),
             burst_touched: BTreeSet::new(),
             bursts_lapsed: 0,
+            burst_reserve: None,
         }))
     }
 }
@@ -114,6 +118,7 @@ impl Status {
             "laneWaits": state.lane_waits.iter().map(|wait| lane_wait_value(&state, wait, now)).collect::<Vec<_>>(),
             "laneBursts": state.lane_bursts.iter().map(|burst| burst_value(burst, now)).collect::<Vec<_>>(),
             "laneBurstsDroppedByLease": state.bursts_lapsed,
+            "laneBurstReserve": state.burst_reserve.as_ref().map(|(subject, full, kept)| json!({"subject": subject, "full": full, "kept": kept})),
         })
     }
 
