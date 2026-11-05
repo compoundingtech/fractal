@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Parse and validate declared admission metadata in agent and mission KDL",
+  "replay": {"status": "none", "detail": "No replay or backfill changes; this change validates new declaration authoring."},
+  "schema": {"status": "none", "detail": "Uses the existing optional declared admission model fields; no storage schema, claim kind, index or migration changes."},
+  "rules": {"status": "changed", "detail": "KDL accepts declared-priority background or normal, declared-lane check or build, and declared-budgets with positive safe-integer CPU/token limits and checked positive byte sizes with optional K/M/G/T suffixes. Invalid semantic values refuse authoring with invalid-declared-admission; strict KDL shape errors retain their syntax refusal codes."},
+  "compatibility": {"status": "changed", "detail": "Agent and mission declarations may now carry optional declared admission data. Empty budgets retain authoring presence until publication compatibility checks; absent metadata preserves previous declaration behavior."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only; no data migration or backfill."},
+  "manual": {"status": "changed", "detail": "Authors may use declared-priority, declared-lane and declared-budgets children. These declarations are data only, not enforced; ST_SEAT_PRIORITY behavior is unchanged."},
+  "recovery": {"status": "changed", "detail": "Remove newly authored metadata with upgraded readers before reverting to readers that do not retain these declaration fields."}
+}
