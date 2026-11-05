@@ -3416,6 +3416,25 @@ export const TimelineEntry = /*#__PURE__*/ (() => Schema.Union([
 export type TimelineEntry = typeof TimelineEntry.Type
 export type TimelineEntryEncoded = typeof TimelineEntry.Encoded
 
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "missions",
+  "attention",
+  "agents",
+  "work",
+  "glasses",
+  "arrangements",
+  "ordered-memberships",
+  "summary",
+  "clients",
+  "usage",
+  "machines",
+  "devices",
+  "sessions",
+  "terminals"
+]).annotate({ identifier: "CollectionName" }))()
+export type CollectionName = typeof CollectionName.Type
+export type CollectionNameEncoded = typeof CollectionName.Encoded
+
 export const ConversationChanges = /*#__PURE__*/ (() => Schema.Struct({
   /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
   "header": optionalKey(ConversationHeader),
