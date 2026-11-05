@@ -84,18 +84,9 @@ export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'n
       </Aria.MenuTrigger>
       <Aria.ModalOverlay isDismissable isOpen={confirming !== undefined} onOpenChange={(open) => { if (!open) setConfirming(undefined) }} {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
-          <Aria.Dialog role="alertdialog" aria-label={confirming === undefined ? 'Confirm' : `${confirming.label} ${agent.name}?`} {...stylex.props(styles.dialog)}>
-            {confirming === undefined ? null : (
-              <>
-                <strong>{confirming.label} {agent.name}?</strong>
-                <p {...stylex.props(styles.what)}>It will {confirming.what}.</p>
-                <div {...stylex.props(styles.choices)}>
-                  <Aria.Button autoFocus onPress={() => setConfirming(undefined)} {...stylex.props(styles.button, styles.bordered)}>Keep it</Aria.Button>
-                  <Aria.Button onPress={() => run(confirming)} {...stylex.props(styles.button, styles.danger)}>{confirming.label}</Aria.Button>
-                </div>
-              </>
-            )}
-          </Aria.Dialog>
+          {confirming === undefined ? null : <WorkspaceMenuBody label={`${confirming.label} ${agent.name}?`} size={styles.pendingDialog}>
+            {({ ConfirmAgentAction }) => <ConfirmAgentAction name={agent.name} row={confirming} onKeep={() => setConfirming(undefined)} onConfirm={() => run(confirming)} />}
+          </WorkspaceMenuBody>}
         </Aria.Modal>
       </Aria.ModalOverlay>
     </div>
@@ -105,14 +96,9 @@ export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'n
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: s.md },
   status: { fontSize: t.denseSize, color: c.fgMuted, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
-  bordered: { borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, color: c.fg },
-  danger: { borderWidth: 1, borderStyle: 'solid', borderColor: c.dangerFg, color: c.dangerFg },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   pendingMenu: { width: 320, height: 160 },
-  what: { margin: 0, color: c.fgMuted, fontSize: t.denseSize },
+  pendingDialog: { height: 132 },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 360, maxWidth: 'calc(100vw - 32px)', backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 8, fontFamily: t.fontSans, fontSize: t.metaSize },
-  dialog: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg, outline: 'none' },
-  choices: { display: 'flex', justifyContent: 'flex-end', gap: s.md },
 })

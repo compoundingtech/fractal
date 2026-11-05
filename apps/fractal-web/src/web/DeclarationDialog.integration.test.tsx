@@ -27,10 +27,10 @@ let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
 const onOpenChange = vi.fn()
-const render = (subject: string, isOpen: boolean) => act(async () => {
-  root.render(<DataSourceProvider source={source} registry={registry}><DeclarationDialog subject={subject} isOpen={isOpen} onOpenChange={onOpenChange} /></DataSourceProvider>)
-  if (isOpen) await import('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx')
-})
+const render = async (subject: string, isOpen: boolean) => {
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><DeclarationDialog subject={subject} isOpen={isOpen} onOpenChange={onOpenChange} /></DataSourceProvider>))
+  if (isOpen) await act(async () => vi.dynamicImportSettled())
+}
 const dialog = () => document.querySelector<HTMLElement>('[role="dialog"][data-testid="declaration-dialog"]')
 
 beforeEach(() => {

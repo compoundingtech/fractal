@@ -4,6 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtomValue } from '@effect/atom-react'
 import { DateTime } from 'effect'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { SyncFailureDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/SyncLine.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { HumanTime } from '@fractal/ui/human-time'
 import { useDataSource } from '../data/react.tsx'
@@ -15,7 +16,7 @@ import { measureEnd } from './perfMarks.ts'
 import type { AgentActionRow } from './AgentActions.tsx'
 import { retainedResourceAtoms } from './ConversationHeaderActions.tsx'
 
-// Opened bodies of the workspace header's menus and Resources panel; their triggers stay in the eager shell.
+// Opened bodies of the workspace header's menus, dialogs and Resources panel; their triggers stay in the eager shell.
 
 export const AgentActionsMenu = ({ name, rows, onRow }: {
   readonly name: string
@@ -56,6 +57,33 @@ export const ConversationMenu = ({ showSystemEvents, onShowSystemEventsChange, d
       {retainedFailure ? <Aria.MenuItem id="sync-details" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Sync details</Aria.MenuItem> : null}
     </Aria.MenuSection>
   </Aria.Menu>
+}
+
+/** The seat-changing confirmation; its state stays with the eager trigger so it survives the menu closing. */
+export const ConfirmAgentAction = ({ name, row, onKeep, onConfirm }: {
+  readonly name: string
+  readonly row: AgentActionRow
+  readonly onKeep: () => void
+  readonly onConfirm: () => void
+}) =>
+  <Aria.Dialog role="alertdialog" aria-label={`${row.label} ${name}?`} {...stylex.props(styles.confirmDialog)}>
+    <strong>{row.label} {name}?</strong>
+    <p {...stylex.props(styles.what)}>It will {row.what}.</p>
+    <div {...stylex.props(styles.choices)}>
+      <Aria.Button autoFocus onPress={onKeep} {...stylex.props(styles.confirmButton, styles.bordered)}>Keep it</Aria.Button>
+      <Aria.Button onPress={onConfirm} {...stylex.props(styles.confirmButton, styles.danger)}>{row.label}</Aria.Button>
+    </div>
+  </Aria.Dialog>
+
+export const SyncDetailsDialog = ({ status, onClose }: {
+  readonly status: React.ComponentProps<typeof SyncFailureDetails>['status'] | undefined
+  readonly onClose: () => void
+}) => {
+  const narrow = React.useContext(NarrowLayoutContext)
+  return <Aria.Dialog aria-label="Sync details for conversation" {...stylex.props(styles.syncDialog)}>
+    <header {...stylex.props(styles.heading)}><strong>Sync details</strong><Aria.Button aria-label="Close sync details" onPress={onClose} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close</Aria.Button></header>
+    {status !== undefined && <SyncFailureDetails status={status} />}
+  </Aria.Dialog>
 }
 
 export const ResourceContents = ({ agentRef, resources, opening, cache }: {
@@ -116,6 +144,13 @@ const styles = stylex.create({
   agentMenuItem: { display: 'flex', flexDirection: 'column', gap: 2, padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 } },
   label: { color: c.fg },
   what: { margin: 0, color: c.fgMuted, fontSize: t.denseSize },
+  confirmDialog: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg, outline: 'none' },
+  choices: { display: 'flex', justifyContent: 'flex-end', gap: s.md },
+  confirmButton: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
+  bordered: { borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, color: c.fg },
+  danger: { borderWidth: 1, borderStyle: 'solid', borderColor: c.dangerFg, color: c.dangerFg },
+  syncDialog: { display: 'flex', flexDirection: 'column', height: '100%', outline: 'none' },
+  heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   menu: { padding: s.xs, outline: 'none' },
   menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 }, ':is([data-selected])': { color: c.primary } },
   touchItem: { minHeight: g.touchTarget, display: 'flex', flexDirection: 'column', justifyContent: 'center', boxSizing: 'border-box' },

@@ -11,7 +11,6 @@ import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
-import { SyncFailureDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/SyncLine.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useConversation, useConversationSync, useDataSource } from '../data/react.tsx'
 import { unavailable, waiting, type DataSource, type Feed } from '../data/source.ts'
@@ -116,10 +115,9 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
     <DeclarationDialog subject={agentRef} isOpen={declarationOpen} onOpenChange={setDeclarationOpen} />
     <Aria.ModalOverlay isOpen={syncDetailsOpen && retainedFailure} onOpenChange={setSyncDetailsOpen} isDismissable {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
-        <Aria.Dialog aria-label="Sync details for conversation" {...stylex.props(styles.dialog)}>
-          <header {...stylex.props(styles.heading)}><strong>Sync details</strong><Aria.Button aria-label="Close sync details" onPress={() => setSyncDetailsOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close</Aria.Button></header>
-          {sync !== undefined && <SyncFailureDetails status={sync.status} />}
-        </Aria.Dialog>
+        <WorkspaceMenuBody label="Sync details for conversation" size={styles.pendingSheet}>
+          {({ SyncDetailsDialog }) => <SyncDetailsDialog status={sync?.status} onClose={() => setSyncDetailsOpen(false)} />}
+        </WorkspaceMenuBody>
       </Aria.Modal>
     </Aria.ModalOverlay>
     <Aria.MenuTrigger>
@@ -144,8 +142,7 @@ const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, whiteSpace: 'nowrap', flexShrink: 0, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', justifyContent: 'flex-end', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 380, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
-  dialog: { display: 'flex', flexDirection: 'column', height: '100%', outline: 'none' },
-  heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
+  pendingSheet: { height: '100%' },
   contents: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   pendingMenu: { width: 200, height: 120 },
