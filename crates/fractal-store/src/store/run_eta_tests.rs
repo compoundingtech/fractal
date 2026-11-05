@@ -272,6 +272,16 @@ fn history(runs: i64) -> Connection {
         }
         claim(&c, &format!("mission-run/{run}"), "mission-run.state", json!({"phase":"terminal"}), end);
     }
+    // The real store's claim indexes and batch positions. Without positions the canonical order
+    // counts the batch's earlier claims for every row it sorts.
+    c.execute_batch(
+        "CREATE INDEX claims_kind_index ON claims(kind,store_index);
+         CREATE INDEX claims_person_ask_origin_step_index ON claims(json_extract(body,'$.fields.origin_step'))
+             WHERE kind='work.person-asked';
+         CREATE UNIQUE INDEX claim_positions_claim ON claim_positions(claim_id);
+         INSERT OR IGNORE INTO claim_positions SELECT id,store_index FROM claims;",
+    )
+    .unwrap();
     c
 }
 
@@ -340,12 +350,13 @@ fn eta_backfill_seeks_each_definitions_runs_and_each_steps_asks() {
     );
 }
 
-/// Before and after for #5239: `cargo test -p fractal-store --lib eta_backfill_cost -- --ignored
-/// --nocapture`. Prints the first open, a rebuild and the flush after deleting a quarter of the runs.
+/// Before and after for #5239: `ETA_COST_RUNS=4000 cargo test -p fractal-store --lib eta_backfill_cost
+/// -- --ignored --nocapture`. Prints the first open, a rebuild and the flush after deleting a quarter
+/// of the runs.
 #[test]
 #[ignore]
 fn eta_backfill_cost_at_scale() {
-    let runs = 4000;
+    let runs = std::env::var("ETA_COST_RUNS").map_or(4000, |runs| runs.parse().unwrap());
     let mut c = history(runs);
     let timed = |what: &str, c: &mut Connection, work: &dyn Fn(&rusqlite::Transaction<'_>)| {
         let tx = c.transaction().unwrap();
