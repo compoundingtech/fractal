@@ -2472,13 +2472,15 @@ mod paced_verdict_tests {
     }
 
     #[test]
-    fn an_ordinary_pass_takes_a_slice_and_leaves_the_rest_due() {
+    fn an_ordinary_pass_leaves_historical_requeues_to_the_paced_job() {
         let store = root_linked(REQUEUE_PAGE * 2);
         store.judge_claims_slice(true).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+        assert_eq!(cursor(&store, "root").as_deref(), Some(""));
         assert!(store.verdicts_pending().unwrap());
         assert!(
             store.verdicts_due.load(Ordering::Acquire),
-            "the next pass takes the next slice"
+            "the paced job owns the historical replay"
         );
         // A full pass, as tests and rechecks use, still drains everything.
         store.judge_claims(true).unwrap();
