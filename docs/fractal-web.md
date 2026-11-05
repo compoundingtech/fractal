@@ -635,6 +635,13 @@ The source-owned Pins binding reuses the source's fetch/socket transports, inclu
 replay. Source switches, unmounts and retries abort initializing reads and close their
 collection sockets before starting another follow. Kit consumers receive plain views.
 
+The live sidebar renders returned Pins in membership order above the roster and
+hides an empty section. Pin/unpin menus appear only with a synced writable follow.
+Retired or unavailable subjects remain hidden by membership reads; these defaults
+are reversible presentation choices. The UI does not opt into Pins creation.
+Pins occupy at most 40% of the roster, with their own vertical scroll area; keyboard
+focus scrolls later rows into view while the agent tree keeps the remaining space.
+
 ## Focused local checks
 
 From the repository root, batch both web/UI typechecks and explicitly selected app

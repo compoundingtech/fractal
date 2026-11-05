@@ -83,9 +83,10 @@ async fn a_pass_selects_a_watch_born_after_an_empty_watch_stage() {
         .store
         .put_document("doc/unrelated", b"unrelated", &None, "unrelated")
         .unwrap();
-    smallclaims::sqlite::histogram::take();
+    // This thread's statements: other tests in the process run the roster reader for their own.
+    smallclaims::sqlite::histogram::take_on_this_thread();
     reconciler.reconcile_once().unwrap();
-    let queries = smallclaims::sqlite::histogram::take();
+    let queries = smallclaims::sqlite::histogram::take_on_this_thread();
     assert!(
         !queries
             .keys()

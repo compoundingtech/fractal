@@ -53,6 +53,11 @@
         "id": "push-registration",
         "version": 1,
         "state": "granted"
+      },
+      {
+        "id": "phone-commands",
+        "version": 1,
+        "state": "granted"
       }
     ],
     "limits": {

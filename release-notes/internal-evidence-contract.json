@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add an internal typed evidence contract with no user-visible change",
+  "replay": {
+    "status": "none",
+    "detail": "No claims, replay or projections change. The contract is in memory only."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or storage version changes; the internal types have no serde implementation."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Internal validation covers required text, subject and immutable document evidence and exact bounds. Agent-review remains rejected by mission parsing."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or publication changes; existing gate kinds and human review behavior are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No runtime behavior or restart-time work changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting removes the internal type and tests; no data recovery is needed."
+  }
+}
