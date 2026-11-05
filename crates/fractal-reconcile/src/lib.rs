@@ -13,6 +13,7 @@ mod ci_test_paths;
 pub use fractal_peer::*;
 
 pub mod reconcile;
+pub mod contract;
 #[path = "reconcile/schedule_standby.rs"]
 pub mod schedule_standby;
 pub mod delivery_presence;

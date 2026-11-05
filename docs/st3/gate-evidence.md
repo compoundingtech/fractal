@@ -272,7 +272,7 @@ or re-verify the records. Reusing verification across aliases is a separate opti
 Every resumed attempt runs the original hook again before any deletion, so the signed GC lines must still publish through the
 existing fast-forward guard. A resumed plan is marked in its plan file: its hook reuses existing GC lines without duplicating them
 or dropping copies of newer records. If an old target was logged again after this operation's GC line, resume refuses its
-deletion even if a later GC line followed. Pending-name expiration is a separate concern; it is unchanged here. A failed publication leaves the previous pending set and copies intact and deletes no
+deletion even if a later GC line followed. Pending-name expiration is bounded as described below. A failed publication leaves the previous pending set and copies intact and deletes no
 remote refs. Its signed local GC commit can remain and be published by an intervening pull while copies are retained; finishing
 the journal converges that state. Commands without a journal require a later successful GC run to converge after this failure.
 The wrapper uses `--no-wait` for the log lock, refusing promptly when a pull is active; a collision can defer deletion until the
@@ -340,9 +340,21 @@ evidence-gc plan and drops their copies; it runs before the plan's deletions (`e
 does not restore them. It also keeps the plan's ref names as pending deletions in the copy
 (`evidence-log.gc-pending.json`): a pull that runs between the GC lines and the deletions does not log those records
 again after the GC line, which would turn their deletion into `missing` and let `--restore` push them back. A name stops
-being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
-any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
-next pull.
+being pending once the remote no longer has it. After 24 hours (`TOMBSTONE_HOURS`), a pull rechecks at most 500 pending
+names (`TOMBSTONE_RELEASE_REFS`), oldest timestamp first, with ref name breaking ties. New records are verified and
+checkpointed before this expiry work starts. Every expired record still needs the usual signature check unless an exact
+verified copy is already active after the log path's last GC line. A copy left by GC before it dropped copies is rechecked
+and logged after that line. Selected names remain pending until the signed checkpoint and, with `--publish`, its guarded
+publication succeed. A kill before then selects the same oldest names next time; a verified copy written before pending
+cleanup completes that cleanup without another check. Rejected names remain held and their timestamps advance, making them
+eligible again after 24 hours while older names proceed. The pending file keeps its name-to-unix-time format.
+
+For 20,000 expired valid names, 500 per pull means 40 successful pulls, about 80 minutes at the two-minute cadence after
+expiry, without another GC run re-holding them. With GC paused, pending state cannot grow: absent names are pruned, accepted
+names drain, and rejected names remain bounded by that existing set and are periodically rechecked. This bounds expiry work;
+new refs retain their existing checkpointed processing. Pending state identifies names, not object IDs: a changed object under
+a held name remains hidden until its expiry attempt, as before. GC's exact-OID leases and record verification are unchanged.
+`gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the next pull.
 
 A stalled pull alerts within minutes. `scripts/evidence-log-watch` (`scripts/evidence-log-watch.timer`, every 2 minutes)
 fetches only the head of `refs/evidence-log/main` from the remote, not the log host's own copy, so a pull that commits but

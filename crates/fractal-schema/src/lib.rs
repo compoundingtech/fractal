@@ -1858,6 +1858,8 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             true,
             &[],
         ),
+        ("work.handoff-returned", &["step-run"], WritePolicy::AuthorizedParticipant,
+            Cardinality::Append, Some("work"), true, &[]),
         (
             "work.extended",
             &["step-run"],
@@ -2805,6 +2807,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "fleet.shard-bounds",
+            &["host"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("fleet"),
+            false,
+            &[],
+        ),
+        (
             "rule.set",
             &["rule"],
             WritePolicy::SystemOnly,
@@ -3316,6 +3327,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("attempt", integer()),
             ("episode", string()),
         ],
+        "work.handoff-returned" => &[
+            ("attempt", integer()), ("status", string()), ("reason", string()),
+            ("handoff_claim", string()), ("handoff_message", reference()),
+            ("handoff_to", reference()), ("readiness_epoch", integer()),
+            ("disposition", enumeration(&["withdrawn", "declined"])), ("return_request", object()),
+        ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
             ("attempt", integer()),
@@ -3662,6 +3679,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", required_string()),
             ("removed_by", reference_to(&["person"])),
         ],
+        "fleet.shard-bounds" => &[
+            ("member_key", required_string()),
+            ("shard_high_water", required_object()),
+        ],
         "rule.set" => &[
             ("mode", required_enum(&["off", "audit", "enforce"])),
             ("description", string()),
@@ -3759,6 +3780,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("incarnation_id", string()),
             ("runtime_pid", integer()),
             ("runtime_pid_start_token", string()),
+            ("launch_contract", object()),
             ("deadline_key", string()),
             ("desired_token", string()),
             ("rollout_operation", string()),
@@ -4638,10 +4660,14 @@ mod tests {
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         fields.insert("runtime_pid".into(), Value::from(1234));
         fields.insert("runtime_pid_start_token".into(), Value::from("987654321"));
+        fields.insert("launch_contract".into(), serde_json::json!({
+            "version":1, "digest":"combined", "prompt":"prompt", "binary":"binary",
+        }));
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         for (name, invalid) in [
             ("runtime_pid", Value::from("1234")),
             ("runtime_pid_start_token", Value::from(987654321)),
+            ("launch_contract", Value::from("not an object")),
         ] {
             let mut invalid_fields = fields.clone();
             invalid_fields.insert(name.into(), invalid);
@@ -4997,6 +5023,7 @@ mod tests {
                 "work.claimed",
                 "work.extended",
                 "work.failed",
+                "work.handoff-returned",
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",

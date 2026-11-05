@@ -219,13 +219,18 @@ fn latest_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<(S
 }
 
 /// How far `answer`'s marks took the message, keeping only those of seats this member places on
-/// `host`: a host speaks for its own seats.
+/// `host`: a host speaks for its own seats. A staging counts, below every mark: a host that
+/// records its seats' stagings as marks answers them here, and nowhere else.
 fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<&'static str> {
     answer
         .marks
         .iter()
         .filter(|mark| seats.contains(&mark.consumer))
-        .filter_map(|mark| message_marks::MARKS.iter().find(|kind| **kind == mark.kind))
+        .filter_map(|mark| {
+            std::iter::once(&message_marks::STAGED)
+                .chain(&message_marks::MARKS)
+                .find(|kind| **kind == mark.kind)
+        })
         .max_by_key(|kind| message_marks::rank(kind.trim_start_matches("message.")))
         .map(|kind| kind.trim_start_matches("message."))
 }
@@ -546,7 +551,8 @@ pub fn take_in(message: &mut MessageView, relayed: &Relayed) {
 /// Ask the assignees' hosts, within [`VIEW_DEADLINE`], about the wake messages of `steps` that
 /// this member has not seen consumed, and count what they say as this member counts its own
 /// records: read or closed acknowledges the wake as `consumed`, and delivered as `delivery` while
-/// the assignee works in the wake's incarnation. It only raises `acknowledged_by`: a claim still
+/// the assignee works in the wake's incarnation, as a staging does for a driver whose staging is
+/// its delivery. It only raises `acknowledged_by`: a claim still
 /// wins, and a host that does not answer leaves the wake as this member counted it. What it says
 /// is never part of a revision. Asks nobody and reads no message when no host keeps its seats'
 /// receipts, or no wake waits on a seat of one.
@@ -604,6 +610,12 @@ pub async fn read_work_wakes<'a>(
             Some("read" | "closed") => "consumed",
             Some("delivered")
                 if wake.asks.delivery_acknowledges
+                    && !matches!(wake.acknowledged_by.as_deref(), Some("delivery")) =>
+            {
+                "delivery"
+            }
+            Some("staged")
+                if wake.asks.staging_acknowledges
                     && !matches!(wake.acknowledged_by.as_deref(), Some("delivery")) =>
             {
                 "delivery"
