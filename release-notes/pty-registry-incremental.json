@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "No wire or client contract change."},
   "downtime": {"status": "none", "detail": "None."},
   "manual": {"status": "none", "detail": "No manual step."},
-  "recovery": {"status": "none", "detail": "Snapshots reuse metadata by file identity, modification time and size, detect additions and replacements each pass, and avoid sidecar reads for exited sessions. Exit observations remain available without retaining output or environment payloads."}
+  "recovery": {"status": "none", "detail": "Snapshots reuse metadata by file identity, modification time and size and avoid sidecar reads for exited sessions. Exited daemons retain freshly checked process identity until shutdown, preserving scope teardown fencing. Output and environment payloads are not retained."}
 }

@@ -152,27 +152,22 @@ impl RegistrySnapshot {
             let exited = metadata
                 .as_ref()
                 .is_some_and(|row| row.has_exited() || row.exit_code.is_some());
-            // Exited records need no sidecar reads or process probes. Their immutable
-            // observation is retained for exit-code consumers, not control authority.
-            let (identity, pid) = if exited {
-                (DaemonIdentityCheck::Gone, None)
+            // Exit publication can precede daemon shutdown: retain its live PID
+            // for teardown fencing, without reopening metadata or PID sidecars.
+            let sidecar = (!exited)
+                .then(|| registry::with_root(root, || registry::read_session_pid(&name)))
+                .flatten();
+            let named_pid = sidecar.or_else(|| metadata.as_ref().and_then(|row| row.daemon_pid));
+            let identity = if exited && named_pid.is_none() {
+                DaemonIdentityCheck::Gone
             } else {
-                let sidecar = registry::with_root(root, || registry::read_session_pid(&name));
-                let identity =
-                    registry::check_record_identity_in(root, &name, sidecar, metadata.as_ref());
-                let retained = matches!(
-                    identity,
-                    DaemonIdentityCheck::Match | DaemonIdentityCheck::Unknown
-                );
-                (
-                    identity,
-                    retained
-                        .then(|| {
-                            sidecar.or_else(|| metadata.as_ref().and_then(|row| row.daemon_pid))
-                        })
-                        .flatten(),
-                )
+                registry::check_record_identity_in(root, &name, sidecar, metadata.as_ref())
             };
+            let retained = matches!(
+                identity,
+                DaemonIdentityCheck::Match | DaemonIdentityCheck::Unknown
+            );
+            let pid = retained.then_some(named_pid).flatten();
             let status = if exited {
                 SessionStatus::Exited
             } else if matches!(
@@ -199,25 +194,23 @@ impl RegistrySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn write(root: &Path, name: &str, json: &str) {
+        std::fs::write(root.join(name), json).unwrap();
+    }
     fn exit_code(rows: &[SessionInfo], name: &str) -> Option<i32> {
-        rows.iter()
-            .find(|row| row.name == name)
-            .unwrap()
-            .metadata
-            .as_ref()
-            .unwrap()
-            .exit_code
+        let row = rows.iter().find(|row| row.name == name)?;
+        row.metadata.as_ref()?.exit_code
     }
 
     #[test]
     fn unchanged_exited_records_are_not_read_again() {
         let root = tempfile::tempdir().unwrap();
         for index in 0..885 {
-            std::fs::write(
-                root.path().join(format!("session-{index}.json")),
+            write(
+                root.path(),
+                &format!("session-{index}.json"),
                 r#"{"exitCode":0,"createdAt":"one"}"#,
-            )
-            .unwrap();
+            );
         }
         assert_eq!(
             registry::list_sessions_in(root.path(), &registry::ListOptions::default()).len(),
@@ -229,24 +222,24 @@ mod tests {
         snapshot.reads = 0;
         assert_eq!(snapshot.sessions(root.path()).unwrap().len(), 885);
         assert_eq!(snapshot.reads, 0);
-        std::fs::write(
-            root.path().join("replacement"),
+        write(
+            root.path(),
+            "replacement",
             r#"{"exitCode":2,"createdAt":"two"}"#,
-        )
-        .unwrap();
+        );
         std::fs::rename(
             root.path().join("replacement"),
             root.path().join("session-0.json"),
         )
         .unwrap();
-        std::fs::write(root.path().join("new.json"), r#"{"exitCode":3}"#).unwrap();
+        write(root.path(), "new.json", r#"{"exitCode":3}"#);
         let rows = snapshot.sessions(root.path()).unwrap();
         assert_eq!(snapshot.reads, 2);
         assert_eq!(rows.len(), 886);
         assert_eq!(exit_code(&rows, "session-0"), Some(2));
         assert!(rows.iter().any(|row| row.name == "new"));
         println!("metadata reads: baseline=885 cold=885 unchanged=0 changed-and-new=2");
-        std::fs::write(root.path().join("new.json"), r#"{"exitCode":123}"#).unwrap();
+        write(root.path(), "new.json", r#"{"exitCode":123}"#);
         assert_eq!(
             exit_code(&snapshot.sessions(root.path()).unwrap(), "new"),
             Some(123)
@@ -255,21 +248,35 @@ mod tests {
         std::fs::remove_file(root.path().join("new.json")).unwrap();
         assert_eq!(snapshot.sessions(root.path()).unwrap().len(), 885);
         assert_eq!(snapshot.metadata.len(), 885);
+    }
+
+    #[test]
+    fn an_exited_live_daemon_still_fences_scope_teardown() {
+        use sha2::Digest as _;
+        let root = tempfile::tempdir().unwrap();
         let runtime = super::super::PtyRuntime::new(root.path().to_owned());
-        runtime.snapshot().unwrap();
-        std::fs::write(
-            root.path().join("session-0.json"),
-            r#"{"createdAt":"fresh","exitCode":4}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            runtime
-                .session("session-0")
-                .unwrap()
-                .metadata
-                .unwrap()
-                .created_at,
-            "fresh"
-        );
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let record = serde_json::json!({
+            "exitCode": 0, "daemonPid": pid,
+            "daemonStartToken": registry::read_process_start_token(pid).unwrap(),
+            "daemonBootId": registry::read_boot_id().unwrap(),
+            "tags": {"st3.start-operation": "op", "st3.scope-unit": "work.scope"}
+        });
+        std::fs::write(root.path().join("live.json"), record.to_string()).unwrap();
+        let owner = runtime
+            .spawn_state_path("live", "producers")
+            .join(format!("{:x}", super::super::Sha256::digest(b"op")));
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::write(owner.join("owner.json"), b"invalid ownership").unwrap();
+        for _ in 0..2 {
+            let rows = runtime.snapshot().unwrap();
+            assert_eq!(rows[0].status, "exited");
+            assert_eq!(rows[0].pid, Some(std::process::id()));
+            assert!(
+                runtime
+                    .server_apart("live", "work.scope", Some(&rows[0]))
+                    .is_err()
+            );
+        }
     }
 }
