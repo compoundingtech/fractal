@@ -410,7 +410,8 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
   }, [])
   return <div ref={node} data-testid="history-boundary" data-state={loading ? 'loading' : failed ? 'failed' : 'idle'} aria-busy={loading} {...stylex.props(styles.historyBoundary)}>
     <span aria-live="polite" data-testid="history-boundary-note" {...stylex.props(styles.historyNote)}>{failed ? "Couldn't load earlier messages" : 'Earlier messages not loaded'}</span>
-    {history.onLoadEarlier !== undefined && <Button isPending={loading} onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad, loading && styles.historyPending)}>{loading ? 'Loading earlier messages…' : failed ? 'Retry' : 'Load earlier messages'}</Button>}
+    {/* Not RAC `isPending`: its focus announcement points a live-region `role="img"` at this button's id, which dangles once Complete removes the button. */}
+    {history.onLoadEarlier !== undefined && <Button aria-disabled={loading || undefined} onPress={loading ? undefined : history.onLoadEarlier} {...stylex.props(styles.historyLoad, loading && styles.historyPending)}>{loading ? 'Loading earlier messages…' : failed ? 'Retry' : 'Load earlier messages'}</Button>}
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */

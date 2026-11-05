@@ -112,7 +112,7 @@ const until = async (check: () => boolean) => {
 }
 const open = async () => {
   const gateway = new Gateway()
-  const live = liveSource({ options: { baseUrl: 'http://gateway.test', socket: gateway.factory, fetch: gateway.fetch } })
+  const live = liveSource({ options: { baseUrl: 'http://gateway.test', maxFollows: 12, socket: gateway.factory, fetch: gateway.fetch } })
   const release = live.registry.mount(live.source.conversationInterest!(ref))
   const read = () => {
     const feed = live.registry.get(live.source.conversation(ref))
