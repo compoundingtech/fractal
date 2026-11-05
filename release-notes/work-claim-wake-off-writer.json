@@ -3,7 +3,7 @@
   "summary": "Claiming, completing or otherwise acting on a step no longer reads the assignee's whole message history while it holds the store writer: the step's wake is read on a reader after the action commits, so a claim at the :00 and :30 starts stops queueing every other write behind it.",
   "replay": {
     "status": "none",
-    "detail": "No replay or projection change. A work action writes the same rows and claims. Its answer shows the same wake, read at the same snapshot time on a reader once the action has committed."
+    "detail": "No replay or projection change. A work action writes the same rows and claims. Its answer's wake is read on a reader once the action has committed, as of the snapshot time the rest of the view was read at. A claim that commits in between with an earlier timestamp, such as a replicated message, can show in it where the writer would not have seen it yet."
   },
   "schema": {
     "status": "none",

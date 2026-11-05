@@ -6349,7 +6349,7 @@ impl MissionsStore for Store {
                 // step's whole claim history, which would hold the writer longer the older the
                 // step grows, so a renewal's view is filled from a reader after COMMIT. Every
                 // other action's wake reads every message the assignee was ever sent (#5010), so
-                // it too is filled from a reader, at the snapshot the rest of the view was read at.
+                // it too is filled from a reader, as of the time the rest of the view was read at.
                 let snapshot = (action != "renew").then(now_ms);
                 if let Some(snapshot) = snapshot {
                     fractal_store::store::enrich_step_queue_but_wake_at(transaction, &mut view, snapshot)
