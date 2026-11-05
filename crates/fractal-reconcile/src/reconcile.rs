@@ -20772,6 +20772,7 @@ pub mod tests {
     mod final_cancel_gate_exit;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod standing_observer_stop;
     mod helper_launcher;
     mod bounded_loop_reads;
     mod incremental_deadlines;

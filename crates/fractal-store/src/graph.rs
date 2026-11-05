@@ -1927,6 +1927,15 @@ fn validate_account_binding(
     Ok(())
 }
 
+/// The observer name of `observer/github/OWNER/REPO`, the one standing observer every watch of
+/// that repository uses, in the lowercase spelling its subject has.
+fn standing_github_observer(subject: &str) -> Option<String> {
+    let repository = subject.strip_prefix("observer/github/")?;
+    let (owner, repo) = repository.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/'))
+        .then(|| format!("github/{}", repository.to_ascii_lowercase()))
+}
+
 fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
     let subject = one_string_with_children(node)?;
@@ -1941,10 +1950,30 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
         return Err(St3Error::new("empty-stop-reason", "a stop reason cannot be blank"));
     }
+    // A person stops a repository's standing GitHub observer so that a watch on another member
+    // declares it there, which then polls on from the observer's cursor (#5182). It declares
+    // what a host writes when the observer falls unused, which every build reads, so it carries
+    // no reason. Publication admits it from a person only.
+    if let Some(name) = standing_github_observer(&subject)
+        && context.owner_run.is_none()
+    {
+        if reason.is_some() {
+            return Err(St3Error::new(
+                "observer-stop-reason",
+                format!("a stop of `{subject}` takes no reason: it declares the observer stopped, as a host does when nothing uses it"),
+            ));
+        }
+        let mut observer = KdlNode::new("observer");
+        observer.entries_mut().push(kdl::KdlEntry::new(name));
+        let mut body = KdlDocument::new();
+        body.nodes_mut().push(KdlNode::new("stop"));
+        observer.set_children(body);
+        return parse_structure(&observer, "observer", context);
+    }
     if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
         return Err(St3Error::new(
             "invalid-stop-subject",
-            format!("stop requires a full agent, exec, or PTY subject; got `{subject}`"),
+            format!("stop requires a full agent, exec, or PTY subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
         ));
     }
     let kind = subject.split('/').next().unwrap_or_default();

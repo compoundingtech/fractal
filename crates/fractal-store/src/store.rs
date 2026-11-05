@@ -3209,6 +3209,7 @@ impl Store {
                 let normalized_actor = actor.map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
                 let actor = normalized_actor.as_deref();
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
+                validate_standing_observer_stop(intent, actor)?;
                 if let Some(options) = owned {
                     let digest = canonical_hash(&(intent, options, actor)).map_err(internal)?;
                     let cache_key = opaque_cache_key(&format!("owned-set-request:{idempotency_key}"));
@@ -17403,6 +17404,30 @@ fn clear_quarantined_claims_tx(
         )
         .map_err(internal)?;
     Ok(())
+}
+
+/// A top-level observer reaches an attributed publication only as a stop of a repository's
+/// standing GitHub observer, which moves its polling to the next member a watch declares it on
+/// (#5182). Only a person may: an agent moving polling waits on #4607. A host's own declarations
+/// carry no actor.
+fn validate_standing_observer_stop(
+    intent: &NormalizedIntent,
+    actor: Option<&str>,
+) -> Result<(), St3Error> {
+    let Some(actor) = actor.filter(|actor| !actor.starts_with("person/")) else {
+        return Ok(());
+    };
+    match intent
+        .subjects
+        .values()
+        .find(|desired| desired.kind == "observer" && desired.owner_run.is_none())
+    {
+        Some(observer) => Err(St3Error::new(
+            "observer-stop-person-only",
+            format!("only a person stops `{}`; `{actor}` cannot", observer.subject),
+        )),
+        None => Ok(()),
+    }
 }
 
 pub fn select_replicated_desired(
