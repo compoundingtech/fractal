@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Effect, Metric } from 'effect'
-import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from './fromTimeline.ts'
 import { inspectPreview } from './inspect.ts'
 import { degradedCounter, unsupportedCounter } from './telemetry.ts'
