@@ -113,8 +113,11 @@ impl<'a> Scope<'a> {
     }
 
     fn subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, St3Error> {
-        Ok(subject.contains(RUN_VALUE)
-            || self.run.contains(subject)
+        Ok(subject.contains(RUN_VALUE) || self.declared_subject(graph, subject)?)
+    }
+
+    fn declared_subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, St3Error> {
+        Ok(self.run.contains(subject)
             || self
                 .intent
                 .is_some_and(|intent| intent.subjects.contains_key(subject))

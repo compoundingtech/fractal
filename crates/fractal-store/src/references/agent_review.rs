@@ -21,7 +21,7 @@ pub(crate) fn resolve_reviewer(
         ));
     }
     let identity = identities::resolve_reference_conn(connection, reviewer)?;
-    if !scope.subject(&ReferenceGraph { connection }, &identity)? {
+    if !scope.declared_subject(&ReferenceGraph { connection }, &identity)? {
         return Err(St3Error::new(
             "reviewer-unknown",
             format!("agent-review reviewer `{reviewer}` is not declared"),
@@ -125,10 +125,12 @@ mod tests {
     #[test]
     fn agent_review_resolver_unknown() {
         let store = Store::open_memory("example").unwrap();
-        let error =
-            resolve_reviewer(&empty_scope(), &store.connection.write(), REVIEWER).unwrap_err();
-        assert_eq!(error.code, "reviewer-unknown");
-        assert!(error.message.contains(REVIEWER));
+        for reviewer in [REVIEWER, "agent/example/st-run-value-reviewer"] {
+            let error =
+                resolve_reviewer(&empty_scope(), &store.connection.write(), reviewer).unwrap_err();
+            assert_eq!(error.code, "reviewer-unknown");
+            assert!(error.message.contains(reviewer));
+        }
     }
 
     #[test]
