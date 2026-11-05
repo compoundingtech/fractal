@@ -144,9 +144,9 @@ fn agent_review_step_local_history_survives_new_claim() {
 #[test]
 fn agent_review_step_work_actor_without_prior_claim() {
     for (kind, actor, expected) in [
-        ("work.person-done", Some(REVIEWER), CONFLICT),
-        ("work.person-done", Some(PERSON), "ok"),
-        ("work.person-done", None, "ok"),
+        ("work.progress", Some(REVIEWER), CONFLICT),
+        ("work.progress", Some(PERSON), "ok"),
+        ("work.progress", None, "ok"),
         ("work.submitted", Some(REVIEWER), CONFLICT),
         ("work.submitted", Some("agent/example/missing"), UNKNOWN),
         ("work.submitted", None, UNKNOWN),
