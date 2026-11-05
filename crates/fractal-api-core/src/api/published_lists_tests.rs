@@ -1686,3 +1686,51 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
     assert_eq!(eta["remaining_low_ms"], 500);
     assert_eq!(eta["remaining_high_ms"], 700);
 }
+
+#[test]
+fn eta_v3_trigger_layout_preserves_samples_and_published_card_values() {
+    let _clock = Clock::at(start_time());
+    let mut results = Vec::new();
+    for rollback in [false, true] {
+        let store = Store::open_memory("node").unwrap();
+        publish(&store, "version 2\nmission \"eta\" state=\"ready\" { goal \"Finish.\"; concurrent-runs max=4; step \"work\" { agentless; } }", "eta");
+        if rollback {
+            // The parent replaces this trigger when a fresh v4 store lacks its v3 marker.
+            store.connection.write().execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h832547b61b1f owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER run_eta_run_update;
+                CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs
+                WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN
+                INSERT OR IGNORE INTO local_run_eta_dirty
+                SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
+                INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;"
+            ).unwrap();
+        }
+        let waiting = start(&store, "eta", "waiting");
+        fold(&store);
+        for (index, duration) in [100_u64, 300].into_iter().enumerate() {
+            let run = start(&store, "eta", &format!("sample-{index}"));
+            store.set_step_state(&run.steps[0].subject, "working", None).unwrap();
+            store.set_step_state(&run.steps[0].subject, "completed", None).unwrap();
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h5a9504380e4b owner=fractal_api_core::api::published_lists_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CASE json_extract(body,'$.fields.status')
+                WHEN 'working' THEN '1000' WHEN 'completed' THEN CAST(1000+?2 AS TEXT) ELSE accepted_at_unix_ms END WHERE subject=?1 AND kind='step-run.state'",
+                rusqlite::params![run.steps[0].subject,duration],
+            ).unwrap();
+            fold(&store);
+            store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+        }
+        let (publication, _) = fold(&store);
+        let eta = publication.rows.cards["mission/eta"]["run_details"][0]["eta"].clone();
+        assert_eq!(eta["basis"]["samples"], 2);
+        assert_eq!(eta["remaining_low_ms"], 100);
+        assert_eq!(eta["remaining_high_ms"], 300);
+        assert_eq!(Some(eta.clone()), store.mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into()).unwrap());
+        let samples = store.connection.write().prepare(
+            "SELECT duration FROM local_run_eta_samples ORDER BY duration"
+        ).unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(samples, vec![100, 300]);
+        results.push((samples, eta));
+    }
+    assert_eq!(results[0], results[1]);
+}
