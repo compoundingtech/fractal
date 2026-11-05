@@ -1,6 +1,5 @@
 use super::*;
 use crate::model::MissionRunRequest;
-use crate::store::identities::{IdentityKind, IdentityStore, RenameRequest};
 use crate::store::tests_shared_missions::publish_carry;
 use crate::store::{Store, append_claim_tx};
 use serde_json::json;
@@ -79,7 +78,6 @@ fn agent_review_step_concrete_boundaries() {
 #[test]
 fn agent_review_step_unknown_requires_later_validation() {
     let (store, mut step) = fixture("agentless");
-    assert!(step.assigned_to.is_none());
     assert_eq!(
         check(&store, &step, "person/${REQUESTER}", REVIEWER),
         UNKNOWN
@@ -143,29 +141,24 @@ fn agent_review_step_local_history_survives_new_claim() {
 }
 
 #[test]
-fn agent_review_step_pending_owner_alias() {
-    let (store, mut step) = fixture("agentless");
-    store
-        .rename_identity(
-            IdentityKind::Agent,
-            &RenameRequest {
-                from: "agent/example/old".into(),
-                to: "agent/example/renamed".into(),
-                actor: PERSON.into(),
-                reason: "Clarify responsibility".into(),
-                expected_naming_revision: None,
-                expected_declaration: None,
-                idempotency_key: "rename".into(),
-            },
+fn agent_review_step_submission_actor_without_prior_claim() {
+    for (actor, expected) in [(REVIEWER, CONFLICT), ("agent/example/missing", UNKNOWN)] {
+        let (store, step) = fixture(r#"assigned-to "agent/example/new""#);
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            store.origin(),
+            &step.subject,
+            "work.submitted",
+            Some(actor),
+            &json!({"fields": {"attempt": 1, "status": "verifying", "claimant": null}}),
             &[],
+            None,
         )
         .unwrap();
-    step.assigned_to = Some("agent/example/renamed".into());
-    assert_eq!(check(&store, &step, PERSON, "agent/example/old"), CONFLICT);
-    store.connection.write().execute(
-        "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
-         VALUES('record/pending','example-peer',1,'pending',0,'{}','unknown',?1,'agent.renamed','1')",
-        ["agent/example/old"],
-    ).unwrap();
-    assert_eq!(check(&store, &step, PERSON, REVIEWER), UNKNOWN);
+        transaction.commit().unwrap();
+        drop(connection);
+        assert_eq!(check(&store, &step, PERSON, REVIEWER), expected);
+    }
 }

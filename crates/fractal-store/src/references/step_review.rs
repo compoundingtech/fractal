@@ -18,6 +18,7 @@ fn unresolved(subject: &str) -> St3Error {
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
 /// LOCAL step only: not carried source steps, a run, child tree, or parent boundary.
 /// Slice 5b must add those boundaries before any production caller uses this helper.
+/// Owner naming failures surface as `lifecycle-unavailable` until slice 5b.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
     scope: &Scope<'_>,
@@ -40,13 +41,7 @@ pub fn validate_step_reviewer(
         if !actor.starts_with("agent/") {
             return Err(unresolved(actor));
         }
-        let identity = identities::resolve_reference_conn(connection, actor).map_err(|error| {
-            if error.code == "lifecycle-unavailable" {
-                unresolved(actor)
-            } else {
-                error
-            }
-        })?;
+        let identity = identities::resolve_reference_conn(connection, actor)?;
         if !scope.declared_subject(&ReferenceGraph { connection }, &identity)? {
             return Err(unresolved(actor));
         }
@@ -81,6 +76,18 @@ pub fn validate_step_reviewer(
         if let Some(actor) = fields.get("claimant").and_then(serde_json::Value::as_str) {
             include(actor)?;
         }
+    }
+    let mut submissions = connection
+        .prepare_cached("SELECT actor FROM claims WHERE subject=?1 AND kind='work.submitted'")
+        .map_err(internal)?;
+    let actors = submissions
+        .query_map([&step.subject], |row| row.get::<_, Option<String>>(0))
+        .map_err(internal)?;
+    for actor in actors {
+        let actor = actor
+            .map_err(internal)?
+            .ok_or_else(|| unresolved(&step.subject))?;
+        include(&actor)?;
     }
     let reviewer = agent_review::resolve_reviewer(scope, connection, reviewer)?;
     agent_review::independent_reviewer(&reviewer, &excluded)?;
