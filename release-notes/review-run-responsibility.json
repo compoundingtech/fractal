@@ -1,11 +1,1 @@
-{
-  "version": 1,
-  "summary": "Prepare dormant reviewer independence checks over run hierarchies",
-  "replay": {"status": "none", "detail": "Caller-owned snapshot reads only; no projection changes."},
-  "schema": {"status": "none", "detail": "No storage or schema changes."},
-  "rules": {"status": "none", "detail": "No production caller; parsers still reject agent review."},
-  "compatibility": {"status": "none", "detail": "Internal checks include generations, descendants and the starting parent step; missing projections and nested loops fail closed. Start/reassignment remains unavailable."},
-  "downtime": {"status": "none", "detail": "No runtime effect."},
-  "manual": {"status": "none", "detail": "No operator action."},
-  "recovery": {"status": "none", "detail": "Revert removes unused preparation; no data recovery."}
-}
+{"version":1,"summary":"Prepare dormant reviewer independence checks over run hierarchies","replay":{"status":"none","detail":"Snapshot reads only; no projections change."},"schema":{"status":"none","detail":"No schema changes."},"rules":{"status":"none","detail":"No production caller; parsers reject agent review."},"compatibility":{"status":"none","detail":"Includes generations, descendants, starting parent steps and after-run hooks; missing projections and nested loops fail closed. Start/reassignment remains unavailable."},"downtime":{"status":"none","detail":"No runtime effect."},"manual":{"status":"none","detail":"No operator action."},"recovery":{"status":"none","detail":"Revert unused preparation; no data recovery."}}

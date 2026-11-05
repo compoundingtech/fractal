@@ -46,6 +46,7 @@ pub fn validate_run_reviewer(
             let definition = pinned_generation_mission_tx(connection, &generation)
                 .map_err(internal)?
                 .ok_or_else(|| unresolved(&generation))?;
+            let definition = crate::mission::run_mission(definition, header.after.as_deref())?;
             let specs = flatten_mission_step_specs(&definition);
             if specs.iter().any(|step| step.loop_spec.is_some()) {
                 return Err(St3Error::new("reviewer-history-unsupported", &subject));

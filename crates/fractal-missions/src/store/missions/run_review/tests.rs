@@ -4,6 +4,7 @@ use crate::store::tests::publish_mission;
 const PERSON: &str = "person/operator";
 const FREE: &str = "agent/example/free";
 const CONFLICT: &str = "reviewer-not-independent";
+const UNKNOWN: &str = "reviewer-owner-unresolved";
 const CHILD: &str = "agent/example/child";
 const PARENT: &str = "agent/example/parent";
 
@@ -17,6 +18,10 @@ fn request(mission: &str) -> MissionRunRequest {
         inputs: BTreeMap::new(),
         idempotency_key: mission.into(),
     }
+}
+
+fn step<'a>(run: &'a MissionRunView, name: &str) -> &'a StepRunView {
+    run.steps.iter().find(|step| step.step == name).unwrap()
 }
 
 fn fixture() -> (Store, MissionRunView, MissionRunView) {
@@ -47,12 +52,7 @@ mission "nested-loop" state="ready" { goal "Reject nested loop history."
         "declare",
     );
     let parent = store.create_mission_run(&request("parent")).unwrap();
-    let step = &parent
-        .steps
-        .iter()
-        .find(|step| step.step == "start")
-        .unwrap()
-        .subject;
+    let step = &step(&parent, "start").subject;
     let child = store
         .create_child_mission_run(&request("child"), &parent, step, None)
         .unwrap();
@@ -62,17 +62,12 @@ mission "nested-loop" state="ready" { goal "Reject nested loop history."
 fn check(store: &Store, run: &str, reviewer: &str) -> String {
     let mut connection = store.connection.write();
     let snapshot = connection.transaction().unwrap();
-    validate_run_reviewer(
-        &Scope {
-            run: BTreeSet::new(),
-            intent: None,
-        },
-        &snapshot,
-        run,
-        PERSON,
-        reviewer,
-    )
-    .map_or_else(|error| error.code.to_owned(), |_| "ok".into())
+    let scope = Scope {
+        run: BTreeSet::new(),
+        intent: None,
+    };
+    validate_run_reviewer(&scope, &snapshot, run, PERSON, reviewer)
+        .map_or_else(|error| error.code.to_owned(), |_| "ok".into())
 }
 
 fn event(store: &Store, subject: &str, kind: &str, actor: &str, body: Value) {
@@ -89,11 +84,7 @@ fn agent_review_run_steps_children_and_parent_worker() {
     assert_eq!(check(&store, &parent.subject, CHILD), CONFLICT);
     assert_eq!(check(&store, &child.subject, PARENT), CONFLICT);
     assert_eq!(check(&store, &parent.subject, FREE), "ok");
-    let other = parent
-        .steps
-        .iter()
-        .find(|step| step.step == "other")
-        .unwrap();
+    let other = step(&parent, "other");
     event(&store, &other.subject, "work.progress", FREE, json!({}));
     assert_eq!(check(&store, &parent.subject, FREE), CONFLICT);
     // The child's boundary includes its starting step, not other steps of its parent.
@@ -119,10 +110,7 @@ fn agent_review_run_missing_rows_and_unknown_owner_fail_closed() {
         "agent/example/missing",
         json!({}),
     );
-    assert_eq!(
-        check(&store, &parent.subject, FREE),
-        "reviewer-owner-unresolved"
-    );
+    assert_eq!(check(&store, &parent.subject, FREE), UNKNOWN);
     let (store, parent, _) = fixture();
     event(
         &store,
@@ -158,11 +146,7 @@ fn agent_review_run_loop_definitions_fail_closed() {
 #[test]
 fn agent_review_run_missing_step_projection_fails_closed() {
     let (store, parent, _) = fixture();
-    let other = parent
-        .steps
-        .iter()
-        .find(|step| step.step == "other")
-        .unwrap();
+    let other = step(&parent, "other");
     event(&store, &other.subject, "work.progress", FREE, json!({}));
     store
         .connection
@@ -171,8 +155,31 @@ fn agent_review_run_missing_step_projection_fails_closed() {
             /* sqlite-large-value: allow-for-now lv-he933d1015ed6 owner=fractal_missions::store::missions::run_review::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE subject=?1", [&other.subject],
         )
         .unwrap();
-    assert_eq!(
-        check(&store, &parent.subject, FREE),
-        "reviewer-owner-unresolved"
+    assert_eq!(check(&store, &parent.subject, FREE), UNKNOWN);
+}
+
+#[test]
+fn agent_review_run_after_hook_includes_work() {
+    let (store, parent, child) = fixture();
+    store
+        .set_mission_run_state(&child.subject, "completed", "terminal", None)
+        .unwrap();
+    let source = format!(
+        r#"version 2
+mission "child" state="ready" {{ goal "Check child responsibility."; step "work" {{ assigned-to "agent/example/child" }} }}
+mission-run "after" {{ mission "mission/child@{}"; workspace "/tmp"; requester "person/operator"; after "{}" }}
+"#,
+        child.revision, parent.subject
     );
+    publish_mission(&store, &source, "after");
+    let run = store.mission_run("after").unwrap().unwrap();
+    assert_eq!(check(&store, &run.subject, FREE), "ok");
+    event(
+        &store,
+        &step(&run, "after-run").subject,
+        "work.progress",
+        FREE,
+        json!({}),
+    );
+    assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
 }
