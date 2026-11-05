@@ -10,6 +10,7 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 import type * as Atom from 'effect/reactivity/Atom'
+import { retryableImport } from '../data/lazySdk.ts'
 import { sidebarFolders, type FolderState, type SidebarGateway } from './client.ts'
 import { optimisticArrangement, type SidebarOperation } from './edit.ts'
 import type { SidebarSeat } from './sidebarAdapter.ts'
@@ -32,7 +33,7 @@ const refusal = (code: string) => new ActionRefused({ status: 409, message: 'Opa
   message: `Unknown ${code}: opaque server detail`, retryable: false, details: {},
 } })
 
-const mount = async ({ items: startingItems = [initial()], editable = true }: { items?: Arrangement[]; editable?: boolean } = {}) => {
+const mount = async ({ items: startingItems = [initial()], editable = true, loadMutations }: { items?: Arrangement[]; editable?: boolean; loadMutations?: () => Promise<void> } = {}) => {
   let items = startingItems
   let streamOptions: CollectionStreamOptions | undefined
   let closes = 0
@@ -41,6 +42,7 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
   let beforeSubmit: (() => void) | undefined
   let gate: Promise<void> | undefined
   const requests: ActionOf<'arrangement.edit'>[] = []
+  const mutationServices = loadMutations === undefined ? Effect.void : retryableImport(loadMutations, 'editing services')
   const envelope = <T,>(value: T): EnvelopeOf<T> => ({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot: testSnapshot, value })
   const gateway: SidebarGateway = {
     discover: async () => envelope({ ...testCapabilities, capabilities: [...testCapabilities.capabilities, { id: 'control.arrangements', state: editable ? 'granted' : 'ungranted', version: 0 }] }),
@@ -51,7 +53,7 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
       return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
     },
     actions: {
-      snapshot: Effect.sync(() => `snapshot/fresh/${++snapshots}`),
+      snapshot: Effect.flatMap(mutationServices, () => Effect.sync(() => `snapshot/fresh/${++snapshots}`)),
       submitAction: (request) => Effect.gen(function* () {
         requests.push(structuredClone(request))
         beforeSubmit?.()
@@ -128,6 +130,31 @@ it('Optimistic move rolls back with fixed refusal reasons on every seat row', as
     expect(h.container.textContent).not.toContain('arrangement-limit')
     expect(h.container.textContent).not.toContain('opaque server detail')
   } finally { gate.resolve(); h.close() }
+})
+
+it('reacquires a failed mutations chunk when Retry is clicked and submits the original edit once', async () => {
+  const loadMutations = vi.fn<() => Promise<void>>()
+    .mockRejectedValueOnce(new Error('chunk unavailable'))
+    .mockResolvedValue(undefined)
+  const h = await mount({ loadMutations })
+  try {
+    flushSync(() => h.binding().onMove({ items: ['alpha.example'], target: { _tag: 'Into', folder: b } }))
+    await vi.waitFor(() => expect(h.binding().status.get('alpha.example')).toMatchObject({ _tag: 'Refused', onRetry: expect.any(Function) }))
+    expect(loadMutations).toHaveBeenCalledTimes(1)
+    expect(h.requests).toHaveLength(0)
+    expect(h.registry.get(h.source).doc.placements['agent/example']?.folder).toBe(a)
+    const status = h.binding().status.get('alpha.example')
+    if (status?._tag !== 'Refused' || status.onRetry === undefined) throw new TypeError('Expected a chunk-load retry')
+    await React.act(async () => status.onRetry?.())
+    await vi.waitFor(() => expect(h.registry.get(h.source).phase).toBe('synced'))
+    expect(loadMutations).toHaveBeenCalledTimes(2)
+    expect(h.requests).toHaveLength(1)
+    expect(h.requests[0]!.parameters.operations).toContainEqual(expect.objectContaining({
+      op: 'subject.place', subject: 'agent/example', folder: b,
+    }))
+    expect(h.registry.get(h.source).doc.placements['agent/example']?.folder).toBe(b)
+    expect(h.binding().status.size).toBe(0)
+  } finally { h.close() }
 })
 
 it('Concurrent stale fence offers explicit Try again that restages keys and identity against fresh state', async () => {

@@ -55,7 +55,7 @@ export type ArrangementRefusal = {
 export const arrangementRefusal = (failure: ActionFailure | SdkChunkFailure, targets: readonly string[]): ArrangementRefusal => {
   if (failure._tag === 'SdkChunkFailure') return {
     reason: { _tag: 'Unknown' }, retryableLoad: true, detail: failure.message,
-    restageRefusal: failure.message, targets,
+    targets,
   }
   if (failure._tag !== 'ActionRefused') return { reason: { _tag: 'Unknown' }, detail: failure.message, targets }
   const code = decodeUnknownSync(ErrorCode)(failure.response.code)
