@@ -1629,8 +1629,8 @@ const epochRange = /*#__PURE__*/ Schema.makeIsBetween({ order: DateTime.Order })
 const NULL_NONE = { onNoneEncoding: null } as const
 "#;
 
-const SHARED_IMPORT: &str = r#"import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
-import type { Brand, Redacted } from "effect"
+const SHARED_IMPORT: &str = r#"import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+import type { Brand, Option, Redacted } from "effect"
 import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
 export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"
 export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.generated.ts"
