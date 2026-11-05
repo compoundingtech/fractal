@@ -84,18 +84,26 @@ pub fn seal_tx(tx: &Connection, seat: &str, expected: &Seal) -> Result<bool> {
 }
 
 /// Admit a mutation inside its existing writer transaction.
-pub fn admit_mutation_tx(tx: &Connection, seat: &str, incarnation: &str, grant: &str) -> Result<bool> {
+pub fn admit_mutation_tx(
+    tx: &Connection,
+    seat: &str,
+    incarnation: &str,
+    grant: &str,
+) -> Result<bool> {
     let mut state = load(tx, seat)?;
     if state.sealed || !work_incarnation_live(tx, seat, incarnation)? {
         return Ok(false);
     }
-    if latest_actual(tx, seat)?.is_none_or(|value| {
-        value["incarnation_id"] != incarnation || value["status"] != "running"
-    }) {
+    if latest_actual(tx, seat)?
+        .is_none_or(|value| value["incarnation_id"] != incarnation || value["status"] != "running")
+    {
         return Ok(false);
     }
     if state.grants.insert((incarnation.into(), grant.into())) {
-        state.epoch = state.epoch.checked_add(1).ok_or_else(|| anyhow::anyhow!("refresh epoch exhausted"))?;
+        state.epoch = state
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("refresh epoch exhausted"))?;
         save(tx, seat, &state)?;
     }
     Ok(true)

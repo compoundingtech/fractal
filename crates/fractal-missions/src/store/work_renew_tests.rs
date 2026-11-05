@@ -479,14 +479,15 @@ fn refresh_fixture() -> (Renewal, fractal_store::store::refresh_intake::Seal) {
 
 // The winner owns the single writer while the opponent is launched. No timing sleeps.
 fn refresh_writer_barrier(store: &Store, winner: impl FnOnce(&Connection) + Send, opponent: impl FnOnce() + Send) {
+    static RACES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _race = RACES.lock().unwrap();
     let (entered, wait) = std::sync::mpsc::channel();
     let (release, resume) = std::sync::mpsc::channel();
-    let (attempt, attempted) = std::sync::mpsc::sync_channel(0);
     std::thread::scope(|scope| {
         scope.spawn(move || store.connection.batched(move |tx| { winner(tx); entered.send(()).unwrap(); resume.recv().unwrap(); Ok::<_, rusqlite::Error>(()) }).unwrap().unwrap());
         wait.recv().unwrap();
-        let opponent = scope.spawn(move || { attempt.send(()).unwrap(); opponent(); });
-        attempted.recv().unwrap();
+        let opponent = scope.spawn(opponent);
+        while smallclaims::windows::holds::report()["waiting"]["writer"].as_u64().unwrap() == 0 { std::thread::yield_now(); }
         release.send(()).unwrap();
         opponent.join().unwrap();
     });
