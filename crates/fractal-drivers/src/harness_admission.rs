@@ -770,8 +770,7 @@ fn executable_identity_ready_recorded(
     recorded_at: fn() -> SystemTime,
     input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<Option<String>> {
-    let (files, probes) = identity_inputs(path, resolve)?;
-    for probe in &probes { input(probe)?; }
+    let (files, probes) = identity_inputs(path, resolve, input)?;
     let dependencies = identity_snapshot(&probes)?;
     if let Some(identity) = cached_identity(&dependencies) {
         return Ok(Some(identity));
@@ -884,7 +883,7 @@ fn settled_before(now: Duration) -> i128 {
 
 fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
     let settled_before = settled_before(recorded_at().duration_since(UNIX_EPOCH)?);
-    let (files, probes) = identity_inputs(path, resolve)?;
+    let (files, probes) = identity_inputs(path, resolve, &|_| Ok(()))?;
     let dependencies = identity_snapshot(&probes)?;
     if let Some(identity) = cached_identity(&dependencies) {
         return Ok(identity);
@@ -897,9 +896,11 @@ fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<Pa
 type IdentityInputs = (Vec<(PathBuf, bool)>, Vec<PathBuf>);
 
 /// An identity's inputs. Reads at most 256 bytes.
-fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result<IdentityInputs> {
+fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, input: &dyn Fn(&Path) -> Result<()>) -> Result<IdentityInputs> {
     let mut files = vec![(path.to_owned(), false)];
-    let mut probes = vec![path.to_owned()];
+    let mut probes = Vec::new();
+    let mut probe = |path: PathBuf| -> Result<()> { input(&path)?; probes.push(path); Ok(()) };
+    probe(path.to_owned())?;
     let mut prefix = [0_u8; 256];
     let n = File::open(path)?.read(&mut prefix)?;
     if let Some(shebang) = String::from_utf8_lossy(&prefix[..n])
@@ -909,25 +910,23 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Re
     {
         let parts = shebang.split_whitespace().collect::<Vec<_>>();
         if let Some(interpreter) = parts.first() {
+            probe(PathBuf::from(*interpreter))?;
             let interpreter = if interpreter.ends_with("/env") {
                 resolve(parts.get(1).context("missing script interpreter")?)?
             } else {
                 resolve_executable(interpreter)?
             };
-            probes.push(interpreter.clone());
+            probe(interpreter.clone())?;
             files.push((interpreter, false));
         }
     }
-    if let Some(package) = path
-        .ancestors()
-        .skip(1)
-        .take(3)
-        .find(|p| {
-            let manifest = p.join("package.json");
-            probes.push(manifest.clone());
-            manifest.is_file()
-        })
-    {
+    let mut package = None;
+    for parent in path.ancestors().skip(1).take(3) {
+        let manifest = parent.join("package.json");
+        probe(manifest.clone())?;
+        if manifest.is_file() { package = Some(parent); break; }
+    }
+    if let Some(package) = package {
         files.push((package.join("package.json"), false));
         for name in [
             "package-lock.json",
@@ -938,7 +937,7 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Re
             "pnpm-lock.yaml",
         ] {
             let lock = package.join(name);
-            probes.push(lock.clone());
+            probe(lock.clone())?;
             files.push((lock, true));
         }
         // npm's hidden lock lives beside the installed packages, including scoped packages.
@@ -947,7 +946,7 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Re
             .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
         {
             let lock = modules.join(".package-lock.json");
-            probes.push(lock.clone());
+            probe(lock.clone())?;
             files.push((lock, true));
         }
     }
