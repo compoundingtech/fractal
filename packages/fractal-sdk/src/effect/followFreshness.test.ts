@@ -94,7 +94,7 @@ class FakeGateway {
     this.socket?.onclose?.({ code: 1006, reason: 'socket dropped' })
   }
 
-  idOf(collection: CollectionName): string {
+  idOf(collection: CollectionName | 'terminal'): string {
     const command = this.commands.findLast(
       (candidate) => candidate.kind === 'subscribe' && candidate.collection === collection,
     )
