@@ -1,4 +1,5 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
+import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
@@ -175,6 +176,7 @@ export const liveSource = ({
     baseUrl,
     // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
+    ...(options.socket === undefined ? {} : { socket: options.socket }),
   })
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
@@ -1135,6 +1137,7 @@ export const liveSource = ({
     },
     source: {
       mode: 'live',
+      pins: sidebarPins(client),
       subjectReads,
       nativeDetails,
       objectives,

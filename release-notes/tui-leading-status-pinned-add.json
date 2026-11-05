@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use one leading tab status and keep the new-tab button pinned at the right edge.",
+  "replay": {"status": "none", "detail": "No graph replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No coordination changes."},
+  "compatibility": {"status": "changed", "detail": "TUI tabs show questions or person attention instead of activity, attach alert counts to that glyph, and separate padded tabs by two cells. The new-tab button remains visible and clickable while tabs scroll in the remaining width. Saved layouts and the 26-cell title budget are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}
