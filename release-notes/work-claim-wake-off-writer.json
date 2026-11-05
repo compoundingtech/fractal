@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Claiming, completing or otherwise acting on a step no longer reads the assignee's whole message history while it holds the store writer: the step's wake is read on a reader after the action commits, so a claim at the :00 and :30 starts stops queueing every other write behind it.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or projection change. A work action writes the same rows and claims. Its answer shows the same wake, read at the same snapshot time on a reader once the action has committed."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, durable claim or projection table changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention or graph digest rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version compatible with the previous release: no wire, claim or admission change. The idempotency cache is local to each member. A new build caches a work action's view without its wake and fills the wake on every answer, including an exact retry. A view the previous release cached with its wake gets a freshly read wake when it is replayed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Activating the new binary uses the ordinary managed daemon replacement path."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No state repair, queue deletion or configuration changes required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent format changes or new rollback restrictions. A rolled-back binary reads the wake under the writer again for new actions. An exact retry of an action the new build answered shows no wake, because that cached view has none, until the key's cache entry expires."
+  }
+}

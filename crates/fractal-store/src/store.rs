@@ -19583,6 +19583,23 @@ pub fn enrich_step_queue_cached(
     enrich_step_queue_with(connection, view, snapshot_unix_ms, definitions, WakeHistory::Read)
 }
 
+/// [`enrich_step_queue_at`] without the wake, which a work action fills from a reader after its
+/// batch commits with [`enrich_step_wake_at`] at the same snapshot: the wake reads every message
+/// the assignee was ever sent, and it must not hold the writer for that.
+pub fn enrich_step_queue_but_wake_at(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+) -> rusqlite::Result<()> {
+    enrich_step_queue_with(
+        connection,
+        view,
+        snapshot_unix_ms,
+        &mut PinnedDefinitions::default(),
+        WakeHistory::Deferred,
+    )
+}
+
 fn enrich_step_queue_with(
     connection: &Connection,
     view: &mut StepRunView,
@@ -19850,11 +19867,13 @@ pub fn fresh_context_ready_tx(
 
 /// Whether a step's wake view reads its wake history. A step created in the open transaction has
 /// none: its wake messages and wake-exhausted diagnostics name it, so none can predate it. Reading
-/// them means scanning every message its assignee was ever sent.
+/// them means scanning every message its assignee was ever sent. A deferred wake is left unset,
+/// for a reader to fill once the writer is given back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WakeHistory {
     Read,
     NewStep,
+    Deferred,
 }
 
 pub fn enrich_step_wake_at(
@@ -19876,6 +19895,9 @@ fn enrich_step_wake_with(
     let Some(assignee) = view.assigned_to.as_deref() else {
         return Ok(());
     };
+    if history == WakeHistory::Deferred {
+        return Ok(());
+    }
     // A new step shows a wake only once it is ready; until then its assignee's harness is unread.
     if history == WakeHistory::NewStep && view.status != "ready" {
         return Ok(());

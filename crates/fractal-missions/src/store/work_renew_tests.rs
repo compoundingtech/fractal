@@ -456,3 +456,101 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
         assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty(), "{status}");
     }
 }
+
+/// A ready step whose assignee holds one wake for it among `mail` other messages.
+fn ready_step_with_mail(mail: usize) -> Renewal {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("claim.sqlite3"), "node").unwrap();
+    let source = "version 2\nmission \"mailbox\" state=\"ready\" { goal \"Hold work.\"; step \"work\" { assigned-to \"agent/node.worker\" } }";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = store
+        .mission(&intent, IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &plan.subject_tokens, "mailbox-mission").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "mailbox".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "mailbox-run".into(),
+        })
+        .unwrap();
+    let subject = run.steps[0].subject.clone();
+    store.set_step_state(&subject, "ready", None).unwrap();
+    let step = store.step_run(&subject).unwrap().unwrap();
+    let send = |message: String, tags: Vec<String>| {
+        store
+            .append_claim(&ClaimInput {
+                subject: message.clone(),
+                kind: "message.sent".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "daemon/runtime", "to": "agent/node.worker", "content": "A note.",
+                    "status": "sent", "in_reply_to": null, "tags": tags,
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(message),
+            })
+            .unwrap();
+    };
+    for index in 0..mail {
+        send(format!("message/mailbox-{index}"), Vec::new());
+    }
+    send(
+        "message/mailbox-wake".into(),
+        vec![format!("st3-work:{}@{}@{}@worker", step.subject, step.attempt, step.readiness_epoch)],
+    );
+    Renewal { _directory: directory, store, subject }
+}
+
+#[test]
+fn a_claim_and_a_completion_hold_the_writer_for_the_same_work_whatever_the_assignees_mail() {
+    let mut costs = Vec::new();
+    for mail in [0, 400] {
+        let step = ready_step_with_mail(mail);
+        let (claim, complete) = (format!("mailbox-claim-{mail}"), format!("mailbox-complete-{mail}"));
+        step.store.work_action(&step.subject, "claim", &request(&claim, None)).unwrap();
+        step.store
+            .work_action(&step.subject, "complete", &WorkRequest {
+                evidence: vec!["doc/mailbox".into()],
+                ..request(&complete, Some("done"))
+            })
+            .unwrap();
+        let (claim, complete) = (writer_work(&claim), writer_work(&complete));
+        eprintln!(
+            "work writer mail={mail} claim: statements={} vm_steps={}; complete: statements={} vm_steps={}",
+            claim.statements, claim.vm_steps, complete.statements, complete.vm_steps,
+        );
+        costs.push((claim, complete));
+    }
+    let (short, long) = (costs[0], costs[1]);
+    for (name, short, long) in [("claim", short.0, long.0), ("completion", short.1, long.1)] {
+        assert_eq!(long.statements, short.statements, "a {name}'s writer statements grew with the assignee's mail");
+        assert!(
+            long.vm_steps <= short.vm_steps + short.vm_steps / 4,
+            "a {name}'s writer work grew with the assignee's mail: {} to {} VM steps",
+            short.vm_steps,
+            long.vm_steps,
+        );
+    }
+}
+
+#[test]
+fn a_claim_and_a_completion_answer_the_wake_the_writer_answered_when_it_read_it() {
+    let step = ready_step_with_mail(20);
+    let (store, subject) = (&step.store, step.subject.as_str());
+    for (action, key) in [("claim", "wake-claim"), ("complete", "wake-complete")] {
+        let request = WorkRequest { evidence: vec!["doc/mailbox".into()], ..request(key, Some("done")) };
+        let answered = store.work_action(subject, action, &request).unwrap();
+        assert_eq!(timeless(&answered), timeless(&view_enriched_in_writer(store, subject)), "{action}");
+        assert_eq!(answered.wake.as_ref().map(|wake| wake.attempts), Some(1), "{action}");
+        // An exact retry replays a view cached without its wake, and reads the wake again.
+        let replay = store.work_action(subject, action, &request).unwrap();
+        assert_eq!(timeless(&replay), timeless(&answered), "{action} retry");
+    }
+}

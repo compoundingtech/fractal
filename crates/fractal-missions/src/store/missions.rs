@@ -1892,6 +1892,8 @@ pub trait MissionsStore {
         ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
+    /// Fill a committed work acknowledgement's wake from a reader, as of `snapshot_unix_ms`, or now.
+    fn enrich_work_wake(&self, view: &mut StepRunView, snapshot_unix_ms: Option<u128>) -> Result<()>;
     fn set_step_state(
             &self,
             subject: &str,
@@ -5911,7 +5913,7 @@ impl MissionsStore for Store {
         // One work action in a savepoint of the writer's next batch, answered once that batch commits.
         let committed = self
             .connection
-            .batched(|transaction| -> Result<StepRunView, St3Error> {
+            .batched(|transaction| -> Result<(StepRunView, Option<u128>), St3Error> {
                 let actor = physical_actor(transaction, &actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
@@ -5920,7 +5922,7 @@ impl MissionsStore for Store {
                     if let Some(input) = handoff {
                         adhoc_work::validate_retry(transaction, &subject, input)?;
                     }
-                    return serde_json::from_str(&response).map_err(internal);
+                    return Ok((serde_json::from_str(&response).map_err(internal)?, None));
                 }
                 if action == "claim" && rollouts::intake_held(transaction, &actor, &subject)? {
                     return Err(St3Error::new("seat-rollout-draining", "the seat holds new work intake while its rollout drains; existing work may finish"));
@@ -6373,9 +6375,13 @@ impl MissionsStore for Store {
                      FROM step_runs WHERE subject=?1", [&subject], step_run_from_row).map_err(internal)?;
                 // A renewal only moves the lease. Its view's timing, summaries and wake fold the
                 // step's whole claim history, which would hold the writer longer the older the
-                // step grows, so a renewal's view is filled from a reader after COMMIT.
-                if action != "renew" {
-                    enrich_step_queue(transaction, &mut view).map_err(internal)?;
+                // step grows, so a renewal's view is filled from a reader after COMMIT. Every
+                // other action's wake reads every message the assignee was ever sent (#5010), so
+                // it too is filled from a reader, at the snapshot the rest of the view was read at.
+                let snapshot = (action != "renew").then(now_ms);
+                if let Some(snapshot) = snapshot {
+                    fractal_store::store::enrich_step_queue_but_wake_at(transaction, &mut view, snapshot)
+                        .map_err(internal)?;
                 }
                 transaction
                     .execute(
@@ -6389,20 +6395,28 @@ impl MissionsStore for Store {
                 if !publish {
                     mark_replay_safe_receipt_tx(transaction, &request.idempotency_key).map_err(internal)?;
                 }
-                Ok(view)
+                Ok((view, snapshot))
             })
             .map_err(|error| St3Error::new("internal", error))?;
-        let mut view = committed?;
-        if action == "renew" && enrich_renewal {
-            // An exact retry of a renewal also replays a view cached without these fields.
-            self.enrich_work_response(&mut view)
-                .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
-        }
+        let (mut view, snapshot) = committed?;
+        // An exact retry also replays a view cached without these fields.
+        let filled = if action == "renew" {
+            if enrich_renewal { self.enrich_work_response(&mut view) } else { Ok(()) }
+        } else {
+            self.enrich_work_wake(&mut view, snapshot)
+        };
+        filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
         Ok(view)
     }
 
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()> {
         enrich_step_queue(&self.readers.get(), view).map_err(Into::into)
+    }
+
+    fn enrich_work_wake(&self, view: &mut StepRunView, snapshot_unix_ms: Option<u128>) -> Result<()> {
+        let snapshot_unix_ms = snapshot_unix_ms.unwrap_or_else(now_ms);
+        fractal_store::store::enrich_step_wake_at(&self.readers.get(), view, snapshot_unix_ms)
+            .map_err(Into::into)
     }
 
     fn set_step_state(&self, subject: &str, status: &str, reason: Option<&str>) -> Result<bool> {
