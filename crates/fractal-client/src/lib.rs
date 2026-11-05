@@ -2399,6 +2399,20 @@ impl Client {
         ))
         .await
     }
+    pub async fn mission_declaration_get(
+        &self,
+        mission: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<MissionDeclaration>, ClientError> {
+        let mut path = format!(
+            "/v1/client/mission-declaration?mission={}",
+            percent_encode(mission)
+        );
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
+    }
     pub async fn subject_definition(
         &self,
         subject: &str,

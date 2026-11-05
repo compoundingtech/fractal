@@ -361,6 +361,50 @@ class TreeOrphansTest(unittest.TestCase):
                     st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, settle=0)
                 shutil.rmtree(entry)
 
+    def test_a_live_st_test_or_its_process_in_a_free_tree_is_never_signalled_and_the_tree_is_left(self):
+        # A live run's processes in a tree free by its lock are never signalled (2026-11-04: two seats' runs died of SIGTERM, cause unconfirmed).
+        self.process(300, cwd='/', argv=[sys.executable, '/opt/repo/scripts/st-test', '--all', '--push', 'origin'], ppid=1)
+        self.process(301, cwd=self.tree, argv=['bash', 'scripts/ci-local', 'tests'], ppid=300)  # its child, in the tree
+        self.process(302, cwd=self.tree, argv=['cargo', 'nextest', 'run'], ppid=301)  # and a grandchild
+        for live in ((300, 301, 302), (301, 302)):  # the st-test itself in the tree too, or only its descendants
+            with self.subTest(live=live):
+                if 300 in live:
+                    (self.proc / '300' / 'cwd').unlink()
+                    (self.proc / '300' / 'cwd').symlink_to(self.tree)
+                with mock.patch.object(st_test.os, 'pidfd_open') as opened, \
+                        mock.patch.object(st_test.signal, 'pidfd_send_signal') as sent, \
+                        contextlib.redirect_stderr(io.StringIO()) as said:
+                    self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc), False)
+                opened.assert_not_called()
+                sent.assert_not_called()
+                self.assertIn('a live st-test is in it (', said.getvalue())
+                self.assertIn('302 of st-test 300', said.getvalue())
+                self.assertIn('cargo nextest run; cwd ', said.getvalue())  # each process named with its command and cwd
+                (self.proc / '300' / 'cwd').unlink()
+                (self.proc / '300' / 'cwd').symlink_to('/')
+        # Logged once per waiter's set, however often it looks.
+        told = set()
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            for _ in range(3):
+                self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc, told=told), False)
+        self.assertEqual(said.getvalue().count('a live st-test is in it'), 1)
+
+    def test_an_orphan_whose_st_test_is_gone_or_this_run_s_own_child_is_still_cleared_and_named(self):
+        self.process(os.getpid(), cwd='/', argv=[sys.executable, '/srv/scripts/st-test'], ppid=0)  # this process, itself an st-test
+        self.process(310, cwd=self.tree, argv=['cargo', 'build'], ppid=1)  # reparented: its st-test was killed
+        self.process(311, cwd=self.tree, argv=['sleep', '60'], ppid=os.getpid())  # this run's own child is not another's
+        signalled = []
+        with mock.patch.object(st_test.os, 'pidfd_open', side_effect=lambda pid: 600 + pid), \
+                mock.patch.object(st_test.os, 'close'), \
+                mock.patch.object(st_test.select, 'select', side_effect=lambda *args: (list(args[0]), [], [])), \
+                mock.patch.object(st_test.signal, 'pidfd_send_signal', side_effect=lambda fd, sig: signalled.append(fd - 600)), \
+                mock.patch.object(st_test, 'tree_users', side_effect=[[310, 311], [310, 311], [310, 311], [310, 311], [], []]), \
+                contextlib.redirect_stderr(io.StringIO()) as said:
+            self.assertIs(st_test.clear_tree_orphans(self.tree, grace=0, proc=self.proc), True)
+        self.assertEqual(signalled, [310, 311])
+        self.assertIn('terminating 2 orphan process(es) in pool tree', said.getvalue())
+        self.assertIn('310 (cargo build; cwd ', said.getvalue())
+
     def test_termination_escalates_only_survivors_and_refuses_dirty_tree(self):
         for exits_on in (st_test.signal.SIGTERM, st_test.signal.SIGKILL, 'chdir', None):
             with self.subTest(exits_on=exits_on):
@@ -499,6 +543,154 @@ class PoolTreeTest(unittest.TestCase):
                 self.assertEqual((n, git(tree, 'rev-parse', 'HEAD'), (tree / 'tracked').read_text()), (0, commit, 'second'))
                 self.assertFalse(Path(lock).exists())
                 self.assertIn('removed a stale', said.getvalue())
+
+
+class PoolIdentityTest(unittest.TestCase):
+    """Pool identities from pinned alias data, with real Git clones and kept targets but no build or network."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q')
+        (self.repo / '.st').mkdir()
+        self.aliases = json.loads(checkout_config('repo-aliases.json').read_text())
+        (self.repo / '.st/repo-aliases.json').write_text(json.dumps(self.aliases))
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-q', '-m', 'pinned aliases')
+        self.base = git(self.repo, 'rev-parse', 'HEAD')
+        self.enterContext(mock.patch.dict(os.environ, GIT_ENV, clear=True))
+        self.enterContext(mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL': str(self.root / 'pool')}, clear=True))
+        self.enterContext(contextlib.chdir(self.repo))
+
+    def pool_for(self, url, base=None):
+        git(self.repo, 'config', 'remote.origin.url', url)
+        return st_test.pool_root(base or self.base)
+
+    @staticmethod
+    def spellings(identity):
+        host, path = identity.split('/', 1)
+        return [f'https://{host}/{path}', f'https://{host}/{path}.git', f'https://{host}/{path}/',
+                f'https://reader@{host}/{path}.git', f'git@{host}:{path}.git', f'ssh://git@{host}/{path}',
+                f'ssh://git@{host}:22/{path}.git', f'https://{host.upper()}/{path.upper()}.git']
+
+    def test_both_repository_names_and_every_transport_spelling_share_the_pinned_pool(self):
+        self.assertTrue(self.aliases)
+        self.assertEqual(self.pool_for('https://github.com/compoundingtech/fractal.git').name, 'o-37ba1e1ba8f39cf4')
+        for former, canonical in self.aliases.items():
+            expected = 'o-' + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+            for identity in (former, canonical):
+                for url in self.spellings(identity):
+                    with self.subTest(url=url):
+                        self.assertEqual(self.pool_for(url).name, expected)
+
+    def test_aliases_apply_only_to_the_exact_normalized_identity(self):
+        for former, canonical in self.aliases.items():
+            host, path = former.split('/', 1)
+            owner, name = path.split('/', 1)
+            shared = self.pool_for(f'https://{canonical}.git')
+            unrelated = [f'https://{host}/another-owner/{name}.git', f'https://{host}/{owner}/{name}-extra.git',
+                         f'https://{host}/{owner}/prefix-{name}.git', f'https://example.invalid/{path}.git',
+                         f'https://{host}:8443/{path}.git', f'ssh://git@{host}:2222/{path}.git']
+            pools = [self.pool_for(url) for url in unrelated]
+            self.assertEqual(len(set(pools + [shared])), len(pools) + 1)
+
+    def test_case_sensitive_paths_and_different_ports_keep_distinct_pools(self):
+        for urls in [('/srv/git/Sample.git', '/srv/git/sample.git', '/srv/git/sample'),
+                     ('file:///srv/git/Sample.git', 'file:///srv/git/sample.git'),
+                     ('file://localhost/srv/git/Sample.git', 'file://localhost/srv/git/sample.git'),
+                     ('https://example.invalid/Org/Repo.git', 'https://example.invalid/org/repo.git'),
+                     ('ssh://git@example.invalid:2222/org/repo.git', 'ssh://git@example.invalid:2223/org/repo.git',
+                      'ssh://git@example.invalid/org/repo.git')]:
+            with self.subTest(urls=urls):
+                self.assertEqual(len({self.pool_for(url) for url in urls}), len(urls))
+        # Relative local remotes in different clones cannot name the same repository merely by sharing their spelling.
+        first = self.pool_for('../origin.git')
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        with contextlib.chdir(nested):
+            self.assertNotEqual(st_test.normalise_origin('../origin.git'), st_test.normalise_origin('../../origin.git'))
+            self.assertEqual(st_test.pool_root(self.base), first)  # Git resolves the remote from the worktree, even in a subdirectory
+        clone = nested / 'clone'
+        git(self.root, 'clone', '-q', str(self.repo), str(clone))
+        git(clone, 'config', 'remote.origin.url', '../origin.git')
+        with contextlib.chdir(clone):
+            self.assertNotEqual(st_test.pool_root(self.base), first)
+
+    def test_no_origin_keeps_the_common_directory_key(self):
+        common = git(self.repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        expected = 'c-' + hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
+        self.assertEqual(st_test.pool_root(self.base).name, expected)
+
+    def test_the_retired_spelling_pool_is_left_for_ordinary_unlocked_cap_eviction(self):
+        former, canonical = next(iter(self.aliases.items()))
+        warm = self.pool_for(f'https://{canonical}.git')
+        retired = warm.parent / ('o-' + hashlib.sha256(former.encode()).hexdigest()[:16])
+        for pool in (warm, retired):
+            (pool / 'tree-0').mkdir(parents=True)
+            (pool / 'target-0').mkdir()
+            (pool / 'target-0/kept').write_text('warm output')
+            (pool / 'tree-0.lock').touch()
+        self.assertEqual(self.pool_for(f'https://{former}.git'), warm)
+        self.assertTrue((retired / 'target-0/kept').exists())  # selection does not move or remove anything
+        with open(retired / 'tree-0.lock', 'a') as held, mock.patch.object(st_test, 'du_gb', return_value=0.1), \
+                contextlib.redirect_stderr(io.StringIO()):
+            fcntl.flock(held, fcntl.LOCK_EX)
+            st_test.evict_to_cap(self.root / 'pool', 0.3, keep=(warm, 0))
+            self.assertTrue((retired / 'target-0/kept').exists())  # a running old copy is protected
+            fcntl.flock(held, fcntl.LOCK_UN)
+            st_test.evict_to_cap(self.root / 'pool', 0.3, keep=(warm, 0))
+        self.assertFalse((retired / 'tree-0').exists())
+        self.assertFalse((retired / 'target-0').exists())
+        self.assertEqual((warm / 'target-0/kept').read_text(), 'warm output')
+
+    def test_alias_data_comes_from_the_pinned_base_even_in_an_extracted_script(self):
+        former, canonical = next(iter(self.aliases.items()))
+        expected = self.pool_for(f'https://{former}.git')
+        (self.repo / '.st/repo-aliases.json').write_text(json.dumps({former: 'github.com/sample-org/other'}))
+        # A detached copy has no adjacent configuration; the current branch's edited file is not authoritative either.
+        extracted = self.root / 'extracted'
+        extracted.mkdir()
+        path = extracted / 'st-test'
+        shutil.copy(ROOT / 'scripts/st-test', path)
+        loader = importlib.machinery.SourceFileLoader('pool_identity_extracted', str(path))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        with mock.patch.dict(module.POOL_SETTINGS, st_test.POOL_SETTINGS):
+            self.assertEqual(module.pool_root(self.base), expected)
+        self.assertEqual(self.pool_for(f'https://{canonical}.git'), expected)
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-q', '-m', 'different aliases')
+        self.assertNotEqual(self.pool_for(f'https://{former}.git', 'HEAD'), expected)
+
+    def test_missing_aliases_preserve_older_bases_and_malformed_aliases_fail(self):
+        for value in ('[]', '{', '{"one": 2}', '{"one": "two", "two": "one"}'):
+            (self.repo / '.st/repo-aliases.json').write_text(value)
+            git(self.repo, 'commit', '-qam', 'invalid alias data')
+            with self.subTest(value=value), self.assertRaises(st_test.Failure):
+                self.pool_for('https://github.com/sample-org/repo.git', 'HEAD')
+        git(self.repo, 'rm', '-q', '.st/repo-aliases.json')
+        git(self.repo, 'commit', '-qm', 'base without aliases')
+        self.assertEqual(st_test.pool_origin_aliases('HEAD'), {})
+
+    def test_a_clone_using_the_alias_reuses_the_tree_path_and_kept_target(self):
+        former, canonical = next(iter(self.aliases.items()))
+        pool = self.pool_for(f'https://{canonical}.git')
+        pool.mkdir(parents=True)
+        tree = st_test.prepare_tree(pool, 0, self.base)
+        target = pool / 'target-0'
+        target.mkdir()
+        (target / 'warm').write_text('kept output')
+        clone = self.root / 'clone'
+        git(self.root, 'clone', '-q', str(self.repo), str(clone))
+        git(clone, 'config', 'remote.origin.url', f'git@{former}.git'.replace('/', ':', 1))
+        with contextlib.chdir(clone):
+            self.assertEqual(st_test.pool_root(self.base), pool)
+            self.assertEqual(st_test.prepare_tree(pool, 0, self.base), tree)
+            self.assertEqual((target / 'warm').read_text(), 'kept output')
+            self.assertEqual(git(tree, 'rev-parse', '--git-common-dir'), str(clone / '.git'))
 
 
 class GovernedTest(unittest.TestCase):
@@ -892,6 +1084,35 @@ class StTest(unittest.TestCase):
         finally:
             os.chdir(cwd)
         return code, out.getvalue(), err.getvalue()
+
+    @contextlib.contextmanager
+    def simulated_limit(self, seconds, waited=False):
+        """Each check's time limit as if `seconds` passed once its running time began (for a check that streams scripts/ci-local's output,
+        once ci-local printed that it started), all of them spent waiting for a build slot when `waited` (its queue log then holds that wait).
+        A check is then over its limit, or past it only by waiting, without a real sleep against a 1 or 2 s --time-limit: no wall clock
+        decides the outcome, where a loaded host's time to start sh and date counted against those limits (#4879)."""
+        init, hear = st_test.Limit.__init__, st_test.Limit.output
+
+        def jump(limit):
+            limit.started -= seconds
+            if waited:
+                now = int(time.time())
+                with open(limit.queue_log, 'a') as log:  # whole seconds, as scripts/ci-local writes them
+                    log.write(f'wait {now - seconds} tests\nslot {now + 1} tests\n')
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            if not limit.begins_at:
+                jump(limit)
+
+        def output(limit, chunk):
+            starts = bool(limit.begins_at) and limit.begins_at in limit.tail + chunk
+            hear(limit, chunk)
+            if starts:
+                jump(limit)
+
+        with mock.patch.object(st_test.Limit, '__init__', begin), mock.patch.object(st_test.Limit, 'output', output):
+            yield
 
     def statements(self):
         found = []
@@ -1352,6 +1573,166 @@ class StTest(unittest.TestCase):
             code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '60'})
         self.assertEqual(code, 0, out[-300:] + err[-300:])
 
+    def test_the_member_step_s_limit_counts_its_own_running_not_its_build_admission_waits(self):
+        now = [0.0]
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(True)  # 20 minutes in the gate
+        now[0] = 1200
+        limit.observe(True)
+        now[0] = 1201
+        limit.observe(False)  # admitted: the gate execs the command
+        self.assertAlmostEqual(limit.waiting(), 1201)
+        now[0] = 1231
+        self.assertAlmostEqual(limit.remaining(), 20)  # 30 s of its own running
+        now[0] = 1252
+        self.assertLess(limit.remaining(), 0)  # a slow member step is still over its 50 s
+        # The waits have a limit of their own.
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 600, clock=lambda: now[0])
+        limit.observe(True)
+        now[0] = 600
+        self.assertLessEqual(limit.remaining(), 0)
+
+    def test_a_member_step_waits_for_admission_exactly_while_its_process_is_the_gate_s_start(self):
+        proc = Path(self.tmp.name) / 'proc'
+        for pid, argv in ((1, ['python3', '/opt/admission/bin/build-admission', 'start', 'heavy', 'nix:run', '--', '/nix/bin/nix', 'run']),
+                          (2, ['/nix/bin/nix', 'run', 'github:x/y#megarepo', '--', 'apply']),             # admitted: the gate exec'd nix
+                          (3, ['python3', '/opt/admission/bin/build-admission', 'run', 'heavy', 'nix:build', '--', 'nix']),  # run: it stays the parent
+                          (4, ['sh', '-c', 'echo build-admission start'])):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in argv) + b'\0')
+        self.assertEqual([st_test.admission_waiting(pid, proc) for pid in (1, 2, 3, 4, 5)], [True, False, False, False, False])
+
+    @contextlib.contextmanager
+    def members_clock(self, seconds, waiting):
+        """The member step's clock moves `seconds` on the first time it is seen waiting for admission (`waiting` True) or running (False):
+        simulated, so no wall clock decides the outcome."""
+        init, observe = st_test.MembersLimit.__init__, st_test.MembersLimit.observe
+        offset, moved = [0.0], []
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            limit.clock = lambda: time.monotonic() + offset[0]
+
+        def seen(limit, now_waiting):
+            observe(limit, now_waiting)
+            if now_waiting == waiting and not moved:
+                moved.append(True)
+                offset[0] += seconds
+
+        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'observe', seen):
+            yield
+
+    def test_a_member_step_s_build_admission_wait_does_not_count_against_its_limit_and_a_slow_one_still_does(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        bin_dir = Path(self.tmp.name) / 'admission-bin'
+        bin_dir.mkdir()
+        gate = bin_dir / 'build-admission'  # as the host's gate does in `start`: wait, then exec the command
+        gate.write_text('#!/bin/sh\nshift 4\nsleep "${GATE_WAIT:-3}"\nexec "$@"\n')
+        gate.chmod(0o755)
+
+        def through_gate(script):
+            return lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', script]
+
+        # 80 s in the host's build admission, then a quick run: within a 50 s limit. Waits counted as running would stop it (#5068).
+        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('mkdir -p repos/x')):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'}, command=['test', '-d', 'repos/x'])
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(err, r'megarepo members materialized; waited (8\d|9\d)s for build admission \(not counted against ST_TEST_MEMBERS_LIMIT\)')
+        # 80 s of the member step's own running, once admitted, is over the same limit.
+        self.commit('b.txt', 'two')
+        with self.members_clock(80, False), mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'sleep 30']):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
+        # And a wait past --queue-limit is stopped.
+        self.commit('c.txt', 'three')
+        with self.members_clock(80, True), mock.patch.object(st_test, 'members_command', through_gate('true')):
+            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_WAIT': '30'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
+        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
+
+    def test_the_gate_s_admission_notice_ends_the_wait_and_sets_how_long_it_was(self):
+        now = [0.0]
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(False)  # admitted between two samples: none saw the gate
+        now[0] = 81
+        limit.admitted(80.0)
+        self.assertAlmostEqual(limit.waiting(), 80)
+        limit.observe(True)  # the samples change nothing once the gate has said so
+        now[0] = 100
+        self.assertAlmostEqual(limit.waiting(), 80)
+        self.assertAlmostEqual(limit.remaining(), 30)
+        # A sampled wait ends at the notice, and the gate's figure is never more than the step has taken.
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        limit.observe(True)
+        now[0] = 40
+        limit.admitted(None)
+        now[0] = 45
+        self.assertAlmostEqual(limit.waiting(), 40)
+        now[0] = 0.0
+        limit = st_test.MembersLimit(50, 14400, clock=lambda: now[0])
+        now[0] = 10
+        limit.admitted(500.0)
+        self.assertAlmostEqual(limit.waiting(), 10)
+        self.assertEqual([st_test.admitted_waited(line) for line in (b'admitted 1793800000.125 80.0\n', b'admitted 1 x\n', b'admitted\n', b'other 1 2\n')],
+                         [80.0, None, None, None])
+
+    @contextlib.contextmanager
+    def admission_before_notice(self, seconds):
+        """The member step's clock moves `seconds` just before the gate's notice is read: a wait in a gate the samples never saw. The notice
+        is read a second late, so a quick command has already exited by then."""
+        init, admitted = st_test.MembersLimit.__init__, st_test.MembersLimit.admitted
+        offset = [0.0]
+
+        def begin(limit, *args, **kwargs):
+            init(limit, *args, **kwargs)
+            limit.clock = lambda: time.monotonic() + offset[0]
+
+        def said(limit, waited=None):
+            time.sleep(1)
+            offset[0] += seconds
+            admitted(limit, waited)
+
+        with mock.patch.object(st_test.MembersLimit, '__init__', begin), mock.patch.object(st_test.MembersLimit, 'admitted', said):
+            yield
+
+    def test_a_member_step_reads_the_gate_s_admission_notice_from_the_fd_it_names(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        bin_dir = Path(self.tmp.name) / 'notify-bin'
+        bin_dir.mkdir()
+        gate = bin_dir / 'notify-gate'  # not named build-admission, so no sample sees it wait: only its notice says so
+        gate.write_text(f'#!{sys.executable}\nimport os, sys\nfd = int(os.environ["BUILD_ADMISSION_NOTIFY_FD"])\n'
+                        'os.write(fd, ("admitted 1793800000.0 %s\\n" % os.environ["GATE_SAYS"]).encode())\nos.close(fd)\n'
+                        'os.execvp(sys.argv[5], sys.argv[5:])\n')
+        gate.chmod(0o755)
+        through_gate = lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', 'mkdir -p repos/x']
+        # 80 s in the gate by its own notice: within a 50 s limit, and said.
+        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', through_gate):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '80.0'},
+                                              command=['test', '-d', 'repos/x'])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('megarepo members materialized; waited 80s for build admission (not counted against ST_TEST_MEMBERS_LIMIT)', err)
+        # The same 80 s that the gate says were not its wait are the step's own running, over the limit, even from a command that has
+        # already exited successfully: the limits are read as the notice leaves them before an exit is accepted.
+        quick = lambda directory: [str(gate), 'start', 'heavy', 'nix:run', '--', 'sh', '-c', 'mkdir -p repos/x']
+        self.commit('b.txt', 'two')
+        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', quick):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '0.0'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members timed out after 50s (ST_TEST_MEMBERS_LIMIT)', out)
+        # And 80 s of waiting by the notice is past a 60 s --queue-limit, likewise.
+        self.commit('c.txt', 'three')
+        with self.admission_before_notice(80), mock.patch.object(st_test, 'members_command', quick):
+            code, out, err = self.run_st_test('--check', 'demo', '--queue-limit', '60', extra_env={'ST_TEST_MEMBERS_LIMIT': '50', 'GATE_SAYS': '80.0'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('materializing the megarepo members waited 60s for build admission (--queue-limit)', out)
+        self.assertEqual(len(self.statements()), 1, 'only the first run signed')
+
     def test_the_members_limit_comes_from_the_environment_and_a_bad_value_is_the_default(self):
         for value, expected in (('30', 30), ('0', 1), ('x', st_test.MEMBERS_LIMIT), ('', st_test.MEMBERS_LIMIT)):
             with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MEMBERS_LIMIT': value}):
@@ -1385,7 +1766,8 @@ class StTest(unittest.TestCase):
 
     def test_a_time_limit_is_a_failure_not_a_hang(self):
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sleep', '30'])
+        with self.simulated_limit(100):  # 100 s of running against a 50 s limit
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', command=['sleep', '30'])
         self.assertEqual(code, 1)
         self.assertIn('timed out', out)
 
@@ -1398,22 +1780,26 @@ class StTest(unittest.TestCase):
 
     def test_a_check_s_waits_for_a_build_slot_do_not_count_against_its_time_limit(self):
         self.commit('b.txt', 'two')
-        # The queue log holds whole seconds (scripts/ci-local writes `date +%s`), so the wait is written rounded outward: it starts no later
-        # than the check does and ends no earlier than the sleep. Written as the sleep's own `date +%s` bounds, it could read up to a second
-        # short, and the time a loaded host takes to start sh and date counted too: against a 2 s limit that timed out (#4879). Now only the
-        # moment between the slot line and the command's exit runs; were waits counted against the limit, the 3 s would still be over it.
-        begun = int(time.time())
-        wait = f'echo "wait {begun} tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 3; echo "slot $(( $(date +%s) + 1 )) tests" >> "$CI_LOCAL_QUEUE_LOG"'
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', wait])
+        # 100 s pass while the check runs, all of them waiting for a build slot: within a 50 s limit, where counting the wait would stop it.
+        # Simulated (simulated_limit): with a real 3 s sleep against a 2 s limit, the time a loaded host took to start sh and date counted
+        # too, and the check timed out (#4879).
+        with self.simulated_limit(100, waited=True):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', command=['true'])
         self.assertEqual(code, 0, out + err)
         waited = re.search(r'waited (\d+)s for build slots', out)
         self.assertIsNotNone(waited, out)
-        self.assertGreaterEqual(int(waited.group(1)), 3)
-        # The same, streamed as scripts/ci-local's output is.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', wait, 'scripts/ci-local'])
+        self.assertGreaterEqual(int(waited.group(1)), 100)
+        # The same, streamed as scripts/ci-local's output is: the wait comes once ci-local has started, where the limit begins.
+        started = ['sh', '-c', 'echo "ci-local: stage logs in /x"', 'scripts/ci-local']
+        with self.simulated_limit(100, waited=True):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun', command=started)
         self.assertEqual(code, 0, out + err)
-        # Three seconds spent running, not waiting, are over the limit.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', 'sleep 3'])
+        waited = re.search(r'waited (\d+)s for build slots', out)
+        self.assertIsNotNone(waited, out)
+        self.assertGreaterEqual(int(waited.group(1)), 100)
+        # 100 s spent running, not waiting, are over the limit.
+        with self.simulated_limit(100):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun', command=['sleep', '30'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
 
@@ -1440,9 +1826,10 @@ class StTest(unittest.TestCase):
         self.assertGreaterEqual(int(waited.group(1)), 100)
         statement, = self.statements()
         self.assertEqual(statement['predicate']['observed']['inputs']['pre_start_s'], waited.group(1))  # the note records the same wait
-        # Once ci-local has started the limit holds as before: 3 s of running is over it.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun',
-                                          command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 3', 'scripts/ci-local'])
+        # Once ci-local has started the limit holds as before: 100 s of running is over it.
+        with self.simulated_limit(100):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun',
+                                              command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 30', 'scripts/ci-local'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
 
@@ -2118,6 +2505,30 @@ finally:
         self.assertFalse((repo / 'tree-1').exists())
         self.assertFalse(orphan.exists(), 'an orphaned compat target still belongs to its eviction unit')
 
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
+    def test_the_pool_cap_never_evicts_a_tree_a_live_st_test_is_in_though_its_lock_is_free(self):
+        base = Path(self.tmp.name) / 'pool-live'
+        repo = base / 'pools/o-example'
+        for n in (0, 1, 2):
+            self.fake_unit(base / 'pools', 'o-example', n, 100, 1000 + n)  # tree-0 the oldest
+        runner = Path(self.tmp.name) / 'bin' / 'st-test'  # another seat's live run, in tree-0 without its flock (acquire_tree left the tree)
+        runner.parent.mkdir()
+        runner.write_text('import time\ntime.sleep(60)\n')
+        live = subprocess.Popen([sys.executable, str(runner)], cwd=repo / 'tree-0', start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(lambda: os.killpg(live.pid, signal.SIGKILL) if live.poll() is None else None)
+        for _ in range(200):
+            if st_test.tree_users(repo / 'tree-0', execution_only=True):
+                break
+            time.sleep(0.05)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            st_test.evict_to_cap(base, 0.0003, keep=(repo, 2))  # room for one unit: this run holds tree-2
+        self.assertTrue((repo / 'tree-0/blob').exists(), 'the live run keeps its tree')
+        self.assertTrue((repo / 'target-0/blob').exists(), 'and its target')
+        self.assertFalse((repo / 'tree-1').exists(), 'an idle unit is still evicted')
+        self.assertIn('not evicting o-example/tree-0: free by its lock but a live st-test is in it', said.getvalue())
+        self.assertIsNone(live.poll())
+
     def test_a_tagless_target_the_caller_made_is_never_emptied(self):
         """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
         self.commit('b.txt', 'two')
@@ -2494,7 +2905,7 @@ finally:
                 'https://GitHub.com/org/repo/']
         self.assertEqual({st_test.normalise_origin(url) for url in same}, {'github.com/org/repo'})
         self.assertNotEqual(st_test.normalise_origin('https://github.com/org/other'), 'github.com/org/repo')
-        self.assertEqual(st_test.normalise_origin('/srv/git/repo.git'), '/srv/git/repo')  # a local path stays a path
+        self.assertEqual(st_test.normalise_origin('/srv/git/repo.git'), '/srv/git/repo.git')  # local repository names stay distinct
 
     def test_a_clone_of_the_same_origin_takes_the_warm_slot_at_the_same_path_with_the_kept_inputs(self):
         ignored = '/repos/\nnode_modules/\n/target/\nstray.txt\n'  # as the repository's .gitignore: the kept inputs are not untracked files
@@ -3728,7 +4139,8 @@ finally:
 
     def test_a_streamed_check_keeps_the_time_limit_and_is_not_held_by_what_it_left_behind(self):
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sh', '-c', 'echo "ci-local: stage logs in x"; sleep 30', 'scripts/ci-local'])
+        with self.simulated_limit(100):  # 100 s of running, once ci-local has started, against a 50 s limit
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', command=['sh', '-c', 'echo "ci-local: stage logs in x"; sleep 30', 'scripts/ci-local'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
         self.assertEqual(self.runs()[-1]['exit'], 1)
@@ -4169,6 +4581,42 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(n, 0)
         self.assertIsNotNone(left.poll())
         self.assertIn('terminating 1 orphan process', said.getvalue())
+
+    def test_a_live_st_test_in_a_free_locked_tree_survives_a_waiter_s_pass(self):
+        (self.root / 'tree-0').mkdir(parents=True)
+        runner = Path(self.tmp.name) / 'bin' / 'st-test'  # another seat's live run, its cwd in tree-0 though it holds no flock on it
+        runner.parent.mkdir()
+        runner.write_text('import subprocess, time\nsubprocess.Popen(["sleep", "60"])\ntime.sleep(60)\n')
+        live = subprocess.Popen([sys.executable, str(runner)], cwd=self.root / 'tree-0', start_new_session=True)
+        self.addCleanup(live.wait)
+        self.addCleanup(lambda: os.killpg(live.pid, signal.SIGKILL) if live.poll() is None else None)
+        for _ in range(200):  # until its child is up, so both are in the tree
+            if len(st_test.tree_users(self.root / 'tree-0', execution_only=True)) >= 2:
+                break
+            time.sleep(0.05)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50)
+        self.addCleanup(lock.close)
+        self.assertEqual(n, 1)  # tree-0 was left; the waiter took the other tree
+        self.assertIsNone(live.poll(), 'the live st-test was signalled')
+        self.assertIn('a live st-test is in it', said.getvalue())
+        self.assertNotIn('terminating', said.getvalue())
+
+    def test_a_waiter_that_gives_a_free_tree_back_for_a_build_slot_signals_nothing_in_it(self):
+        self.root.mkdir(parents=True)
+        looks, cleared = [], []
+
+        def slot_ready():
+            looks.append(True)
+            return len(looks) >= 3, 'test: 1 of 1 heavy slots busy'
+
+        with mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.01), \
+                mock.patch.object(st_test, 'clear_tree_orphans', side_effect=lambda directory, **kwargs: cleared.append(directory.name) or True), \
+                contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready)
+        lock.close()
+        self.assertEqual((n, len(looks)), (0, 3))
+        self.assertEqual(cleared, ['tree-0'])  # once, as it took the tree: not on the two passes that gave it back
 
     def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
         self.root.mkdir(parents=True)

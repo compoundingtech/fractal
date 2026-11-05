@@ -553,6 +553,73 @@ mission "garden/proposed" state="ready" revisions="human-only" revision-reviewer
     fold_work_checked(&store);
 }
 
+/// More missions, each with a run and its steps ready, than one snapshot refolds.
+fn burst(store: &Store, burst: usize) {
+    for number in 0..FOLD_CHUNK + 1 {
+        let name = format!("garden/burst-{burst}-{number}");
+        mission(store, &name);
+        let run = start(store, &name, &format!("burst-{burst}-{number}"));
+        for path in ["plant", "water"] {
+            store.set_step_state(&step(&run, path).0, "ready", None).unwrap();
+        }
+    }
+}
+
+/// Clears the catch-up hook however the test ends.
+struct ChangingThrough(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl ChangingThrough {
+    /// A burst before each of the next `rounds` catch-up rounds, whichever list folds, numbered
+    /// from `first`.
+    fn rounds(rounds: usize, first: usize) -> Self {
+        let left = std::rc::Rc::new(std::cell::Cell::new(rounds));
+        let (hook_left, mut bursts) = (left.clone(), first);
+        super::BEFORE_CATCH_UP.set(Some(Box::new(move |store: &Store| {
+            if hook_left.get() > 0 {
+                hook_left.set(hook_left.get() - 1);
+                burst(store, bursts);
+                bursts += 1;
+            }
+        })));
+        Self(left)
+    }
+
+    fn left(&self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Drop for ChangingThrough {
+    fn drop(&mut self) {
+        super::BEFORE_CATCH_UP.set(None);
+    }
+}
+
+/// A list that keeps changing through every catch-up round, as a burst of mission starts at the
+/// top of the hour makes it, still publishes at one cut, with every row the direct read's
+/// (#5122). Without a last round that refolds what is still changed at once, each fold gave up
+/// and kept the previous publication.
+#[test]
+fn a_list_changing_through_every_catch_up_round_still_publishes_at_one_cut() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    fold(&store);
+    fold_work_checked(&store);
+
+    burst(&store, 0);
+    let changing = ChangingThrough::rounds(FOLD_ROUNDS + 1, 1);
+    fold(&store);
+    assert_eq!(changing.left(), 0, "the list changed before every round");
+    assert_eq!(store.published_missions_list().rebuilds()["chunked: missions changed"], 1);
+    drop(changing);
+
+    burst(&store, FOLD_ROUNDS + 2);
+    let changing = ChangingThrough::rounds(FOLD_ROUNDS + 1, FOLD_ROUNDS + 3);
+    fold_work_checked(&store);
+    assert_eq!(changing.left(), 0, "the list changed before every round");
+    assert_eq!(store.published_work_list().rebuilds()["chunked: work changed"], 1);
+}
+
 #[test]
 fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     let _clock = Clock::at(start_time());

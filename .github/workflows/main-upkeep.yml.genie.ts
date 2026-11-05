@@ -185,6 +185,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           with: {
             path: pnpmStoreEnv.pnpm_config_store_dir,
             key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}',
+            'restore-keys': 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-',
           },
         },
         {
@@ -221,7 +222,7 @@ fi`,
         },
         ...[
           { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
-          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: fractalWebStoreCache },
+          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: { path: fractalWebStoreCache.path, key: fractalWebStoreCache.key } },
         ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true'" })),
         ...[
           {

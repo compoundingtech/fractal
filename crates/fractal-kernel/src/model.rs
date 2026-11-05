@@ -2983,11 +2983,13 @@ pub struct WorkWakeView {
 
 /// The wake's own messages to its incarnation that this member has not seen consumed, and
 /// whether one delivered would acknowledge the wake (its assignee is working in that
-/// incarnation), as this member's own records count them.
+/// incarnation), or one staged would (its driver's staging is its delivery), as this member's own
+/// records count them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WakeAsks {
     pub messages: Vec<String>,
     pub delivery_acknowledges: bool,
+    pub staging_acknowledges: bool,
 }
 
 /// One agent seat's current claim and its ordered queue of mission runs.

@@ -18,6 +18,8 @@ import { openAgent } from '@fractal/sdk/effect'
 import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
+const changelogPrefetch = vi.hoisted(() => vi.fn())
+vi.mock('../changelog/load.ts', () => ({ prefetchChangelog: changelogPrefetch }))
 // Header actions read resources from a data source; they are outside this import boundary.
 vi.mock('./ConversationHeaderActions.tsx', () => ({ ConversationHeaderActions: () => null }))
 // Keep the real retry/recovery helper; only observe the navigation-ending reload.
@@ -59,6 +61,7 @@ vi.mock('../data/react.tsx', () => ({
   useAgent: (ref: string) => rosterFeed._tag === 'Observed' ? { ...rosterFeed, value: rosterFeed.value.agents.find(row => row.ref === ref) } : rosterFeed,
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
+  useAttention: () => ({ _tag: 'Waiting' }),
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
@@ -66,7 +69,6 @@ vi.mock('../data/react.tsx', () => ({
   useGatewaySync: () => gatewayObservation,
   useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed }),
   useFeedInterest: () => {},
-  useAttention: () => ({ _tag: 'Waiting' }),
 }))
 
 let workspace: typeof WorkspaceModule
@@ -82,6 +84,9 @@ const terminalPrefetch = vi.fn()
 const prepareTerminal = vi.fn(async () => ({ _tag: 'Ready' as const }))
 let resolveTerminal: () => void
 let rejectTerminal: (reason: Error) => void
+const alertsRequested = vi.fn()
+let resolveAlerts: () => void
+let rejectAlerts: (reason: Error) => void
 const frames = new Map<number, FrameRequestCallback>()
 const paintTasks: (() => void)[] = []
 
@@ -89,7 +94,9 @@ beforeEach(async () => {
   vi.resetModules()
   chunkReload.mockClear()
   requested.mockClear()
+  changelogPrefetch.mockClear()
   terminalRequested.mockClear()
+  alertsRequested.mockClear()
   terminalPrefetch.mockClear()
   prepareTerminal.mockClear()
   gatewayObservation = { status: { _tag: 'Live', since: 0 }, observedAt: 0 }
@@ -103,6 +110,8 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/')
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // jsdom does not supply the CSSOM escaping used when the selected React Aria tab receives focus.
+  vi.stubGlobal('CSS', { escape: (value: string) => Array.from(value, char => /[a-zA-Z_-]/.test(char) ? char : `\\${char.codePointAt(0)?.toString(16)} `).join('') })
   vi.stubGlobal('ResizeObserver', class {
     observe() {}
     unobserve() {}
@@ -146,6 +155,12 @@ beforeEach(async () => {
     await terminalReady
     return { prepareTerminal, TerminalDetail: () => <div data-terminal-loaded="">Output</div> }
   })
+  const alertsReady = new Promise<void>((resolve, reject) => { resolveAlerts = resolve; rejectAlerts = reject })
+  vi.doMock('./AlertsTab.tsx', async () => {
+    alertsRequested()
+    await alertsReady
+    return { AlertsTab: () => <div data-alerts-loaded="">Inline answers</div> }
+  })
   workspace = await import('./LiveAgentWorkspace.tsx')
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -157,6 +172,8 @@ afterEach(async () => {
   container.remove()
   vi.doUnmock('./ConversationPane.tsx')
   vi.doUnmock('../terminal/TerminalDetail.tsx')
+  vi.doUnmock('../monitor/UsagePane.tsx')
+  vi.doUnmock('./AlertsTab.tsx')
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
 })
@@ -176,6 +193,55 @@ const renderShell = async (ux?: UxTelemetry) => {
     <workspace.LiveAgentWorkspace ux={ux} />
   </RegistryContext.Provider>))
 }
+
+describe('Alerts tab import boundary', () => {
+  it('requests answers only on tab selection and shows loading until the code arrives', async () => {
+    await renderShell()
+    expect(alertsRequested).not.toHaveBeenCalled()
+    const tab = container.querySelector<HTMLElement>('[data-sidebar-tab="alerts"]')
+    expect(tab).not.toBeNull()
+    await act(async () => tab!.click())
+    expect(alertsRequested).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('Loading alerts')
+    expect(container.querySelector('[data-alerts-loaded]')).toBeNull()
+    await act(async () => resolveAlerts())
+    expect(container.querySelector('[data-alerts-loaded]')?.textContent).toBe('Inline answers')
+    expect(container.textContent).not.toContain('Loading alerts')
+  })
+
+  it('reports failed code honestly and retries with a fresh lazy identity', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await renderShell()
+      const tab = container.querySelector<HTMLElement>('[data-sidebar-tab="alerts"]')
+      expect(tab).not.toBeNull()
+      await act(async () => tab!.click())
+      await act(async () => rejectAlerts(new Error('Chunk unavailable')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('Alerts could not load.')
+      expect(container.querySelector('[data-alerts-loaded]')).toBeNull()
+      // Keep the mounted workspace and its rejected lazy identity, replacing only the failed transport.
+      vi.resetModules()
+      const recovered = new Promise<void>(resolve => { resolveAlerts = resolve })
+      vi.doMock('./AlertsTab.tsx', async () => {
+        alertsRequested()
+        await recovered
+        return { AlertsTab: () => <div data-alerts-loaded="">Inline answers</div> }
+      })
+      const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')
+      expect(retry).toBeDefined()
+      retry!.focus()
+      expect(document.activeElement).toBe(retry)
+      await act(async () => retry!.click())
+      await act(async () => { await vi.waitFor(() => expect(alertsRequested).toHaveBeenCalledTimes(2)) })
+      expect(container.textContent).toContain('Loading alerts')
+      expect(document.activeElement).toBe(tab)
+      await act(async () => resolveAlerts())
+      expect(container.querySelector('[data-alerts-loaded]')).not.toBeNull()
+      expect(container.querySelector('[role="alert"]')).toBeNull()
+      expect(document.activeElement).toBe(tab)
+    } finally { errors.mockRestore() }
+  })
+})
 
 
 describe('gateway connection banner', () => {
@@ -220,11 +286,13 @@ describe('terminal import intent', () => {
     terminalRoster()
     await renderShell()
     expect(terminalRequested).not.toHaveBeenCalled()
+    expect(changelogPrefetch).not.toHaveBeenCalled()
     await paintShellFrame()
     await act(async () => { for (const task of paintTasks.splice(0)) task() })
     expect(terminalRequested).not.toHaveBeenCalled()
-    expect(idle).toHaveLength(1)
-    await act(async () => idle[0]?.())
+    expect(idle).toHaveLength(2)
+    await act(async () => { for (const task of idle) task() })
+    expect(changelogPrefetch).toHaveBeenCalledTimes(1)
     expect(terminalRequested).toHaveBeenCalledTimes(1)
     expect(terminalPrefetch).not.toHaveBeenCalled()
     await act(async () => resolveTerminal())
@@ -292,6 +360,44 @@ describe('terminal import intent', () => {
       await act(async () => reload.click())
       expect(chunkReload).toHaveBeenCalledTimes(1)
       expect(terminalRequested).toHaveBeenCalledTimes(2)
+    } finally { errors.mockRestore() }
+  })
+})
+
+describe('usage import boundary', () => {
+  it('keeps the workspace mounted after a rejected chunk and retries with a fresh lazy identity', async () => {
+    const usageRequested = vi.fn()
+    let rejectUsage!: (reason: Error) => void
+    const pending = new Promise<void>((_resolve, reject) => { rejectUsage = reject })
+    vi.doMock('../monitor/UsagePane.tsx', async () => {
+      usageRequested()
+      await pending
+      return { default: () => <div>Unused usage pane</div> }
+    })
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await renderShell()
+      const shell = container.querySelector('section[aria-label="Agent workspace"]')
+      expect(shell).not.toBeNull()
+      await act(async () => {
+        window.history.pushState(null, '', '/w/agent/example?open=monitor%2Fquota%3Adetail')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+      await act(async () => rejectUsage(new Error('Chunk unavailable')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This usage view could not load.')
+      expect(container.querySelector('section[aria-label="Agent workspace"]')).toBe(shell)
+      vi.resetModules()
+      vi.doMock('../monitor/UsagePane.tsx', () => {
+        usageRequested()
+        return { default: () => <div data-usage-loaded="">Recovered usage</div> }
+      })
+      const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')
+      expect(retry).toBeDefined()
+      await act(async () => retry!.click())
+      await act(async () => { await vi.waitFor(() => expect(usageRequested).toHaveBeenCalledTimes(2)) })
+      await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-usage-loaded]')?.textContent).toBe('Recovered usage')) })
+      expect(container.querySelector('section[aria-label="Agent workspace"]')).toBe(shell)
+      expect(container.querySelector('[role="alert"]')).toBeNull()
     } finally { errors.mockRestore() }
   })
 })
