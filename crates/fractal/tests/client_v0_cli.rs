@@ -4296,6 +4296,7 @@ async fn new_agent_reports_unknown_when_its_state_read_outlasts_the_grace() {
             root.path(), Some("ready"), Some(gate.clone()),
         ).await;
         let workspace = root.path().display().to_string();
+        let started = std::time::Instant::now();
         let command = tokio::spawn(async move {
             run_cli_mode(&socket, json, &[
                 "agents", "new", "demo", "--harness", "omp", "--model", "example-model",
@@ -4310,6 +4311,7 @@ async fn new_agent_reports_unknown_when_its_state_read_outlasts_the_grace() {
             .unwrap();
         gate.release.notify_one();
         server.abort();
+        assert!(started.elapsed() >= Duration::from_secs(2), "the read lost its grace early");
         assert!(!output.status.success());
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("current state is unknown"), "{error}");
