@@ -331,12 +331,18 @@ describe('follow freshness', () => {
             lines: [], next_sequence: 0, truncated: false,
           },
         } satisfies CollectionFrame
+        gateway.send({ ...frame, value: { ...frame.value, rows: 23 } })
+        gateway.send({ kind: 'resync', id: frame.id, collection: 'terminal' })
+        yield* settle
         gateway.send(frame)
         gateway.send({ ...frame, value: { ...frame.value, rows: 25, revision: '2' } })
-        expect(mounted.events).toEqual([])
+        expect(mounted.events).toMatchObject([{ _tag: 'Stale' }])
         release()
         yield* Deferred.await(observed)
+        // Decoder completion is known; drain the downstream observer's event commits.
+        yield* settle
         expect(mounted.events).toMatchObject([
+          { _tag: 'Stale' },
           { _tag: 'Observed', value: { rows: 24 } },
           { _tag: 'Observed', value: { rows: 25 } },
         ])
