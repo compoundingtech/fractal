@@ -205,7 +205,8 @@ POOL_WAIT_SECONDS = 1  # how often a waiter looks at the tree queue again
 QUEUE_RULES = 2
 QUEUE_FOLLOW_SECONDS = 600  # while a run waits for a tree, how often it fetches the base to see whether main's st-test changed (then it continues in that copy)
 HANDOVER_TICKET, HANDOVER_STARTED = 'ST_TEST_HANDOVER_TICKET', 'ST_TEST_HANDOVER_STARTED'
-HANDOVER = {}  # what a waiting run handed to main's newer copy when it executed it: its ticket and start time (read before the seat scrub drops every ST_* name)
+HANDOVER_TOP_UP = 'ST_TEST_HANDOVER_TOP_UP'
+HANDOVER = {}  # the ticket, start time and top-up round handed to main's newer copy, read before the seat scrub drops ST_* names
 RUN_STARTED = []  # the wall-clock start of this run, as the summary and runs.jsonl count it, for a handover
 TREE_FREE_FALLBACK_SECONDS = 60  # a tree this waiter has seen free this long, untaken by the ticket ahead of it, may be tried by it: the flock decides (liveness: waiters run different copies of this order, so the best ticket of one may defer to another that defers back)
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
@@ -648,9 +649,9 @@ def run_base_copy(argv):
 
 
 def hand_over(handover, argv):
-    """Continue a run that was waiting for a pool tree in the base's newer st-test (Handover), in this process: the same pid, so the copy takes
-    the ticket over and keeps the run's place, its start and its name in the host's admission order. The ST_TEST_* settings the seat scrub
-    dropped go along again; the copy this one ran from is removed first, as nothing removes it once this process is replaced."""
+    """Continue in the base's newer st-test in this process, keeping the start, admission order, top-up budget and any waiting tree ticket.
+    The ST_TEST_* settings the seat scrub dropped go along again; the copy this one ran from is removed first, as nothing removes it once
+    this process is replaced."""
     scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
     path = scratch / 'st-test'
     path.write_bytes(handover.source)
@@ -662,8 +663,15 @@ def hand_over(handover, argv):
         environment[HANDOVER_STARTED] = repr(RUN_STARTED[0])
     if handover.keeps_ticket:
         environment[HANDOVER_TICKET] = str(handover.ticket)
-    place = 'with its place in the tree queue' if handover.keeps_ticket else 'with a new ticket, as that copy cannot take one over'
-    print(f"fractal-test: the base's st-test changed while this run waited for a pool tree; continuing in {handover.commit[:12]}'s copy, {place}",
+    top_up = handover.top_up if handover.top_up is not None else HANDOVER.get('top_up')
+    if top_up is not None:
+        environment[HANDOVER_TOP_UP] = str(top_up)
+    if handover.top_up is not None:
+        when, place = 'before a top-up', "with the new base's checks"
+    else:
+        when = 'while this run waited for a pool tree'
+        place = 'with its place in the tree queue' if handover.keeps_ticket else 'with a new ticket, as that copy cannot take one over'
+    print(f"fractal-test: the base's st-test changed {when}; continuing in {handover.commit[:12]}'s copy, {place}",
           file=sys.stderr, flush=True)
     os.execve(sys.executable, [sys.executable, str(path), *argv], environment)
 
@@ -1602,13 +1610,13 @@ def write_ticket(ticket):
 
 
 class Handover(BaseException):
-    """Raised by a run waiting for a pool tree when the base's scripts/st-test changed: it unwinds the run (its scratch, its TMPDIR) and keeps its
-    ticket, and the entry point executes the new copy in the same process (hand_over), which takes the ticket over, since its name holds the pid,
-    and with it the run's place. A BaseException, so that no handler for errors takes it for one."""
+    """The base's runner changed during a tree wait or before a top-up: unwind resources, then continue in its copy in the same process.
+    A waiting ticket keeps its place; a completed round keeps its top-up budget. A BaseException, not an error handler's failure."""
 
-    def __init__(self, source, commit, ticket, keeps_ticket):
+    def __init__(self, source, commit, ticket, keeps_ticket, top_up=None):
         super().__init__(f"the base's st-test changed at {commit[:12]}")
         self.source, self.commit, self.ticket, self.keeps_ticket = source, commit, ticket, keeps_ticket
+        self.top_up = top_up
 
 
 def base_copy_follower(base, own=None):
@@ -3294,7 +3302,14 @@ def run_main(argv, cleanup):
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     HANDOVER.clear()
-    HANDOVER.update({key: os.environ.pop(name) for key, name in (('ticket', HANDOVER_TICKET), ('started', HANDOVER_STARTED)) if name in os.environ})
+    HANDOVER.update({key: os.environ.pop(name) for key, name in (('ticket', HANDOVER_TICKET), ('started', HANDOVER_STARTED),
+                                                               ('top_up', HANDOVER_TOP_UP)) if name in os.environ})
+    try:
+        top_up = int(HANDOVER.get('top_up', '0'))
+    except ValueError:
+        raise Failure('the handed-over top-up round is not an integer')
+    if not 0 <= top_up <= TOP_UP_ROUNDS:
+        raise Failure(f'the handed-over top-up round is outside 0..{TOP_UP_ROUNDS}')
     if 'started' in HANDOVER:
         main_started = time.monotonic() - max(0.0, time.time() - float(HANDOVER['started']))
     scrub_git_environment()
@@ -3349,6 +3364,8 @@ def run_main(argv, cleanup):
     default_checks = [name for name in LOCAL if name not in OPT_IN]
     checks = args.check or default_checks
     all_checks = default_checks + [name for name in checks if name not in default_checks]  # what a top-up asks about: the whole suite
+    if top_up:
+        checks, args.crate, args.rerun = all_checks, [], False  # the new base's whole suite, reusing notes that still cover it
     global CHECKS
     CHECKS = tuple(checks)
     if args.list:
@@ -3430,7 +3447,7 @@ def run_main(argv, cleanup):
                 merged = merge_base_in(args.base)
                 directory, commit = target_worktree(args.base, scratch)
             whole = set(default_checks) <= set(checks)  # the whole suite: a green run's branch is pushed (top_up)
-            round_number, round_started = 0, time.monotonic()  # 0: the run itself; then the top-up rounds after it
+            round_number, round_started = top_up, time.monotonic()  # 0: the run itself; then the top-ups, including a handed-over round
             target, target_lock = None, None
             while True:
                 tools = {}
@@ -3742,6 +3759,12 @@ def run_main(argv, cleanup):
                 # only what is missing is signed in the same pool tree. Covered: the branch is pushed at once, before main moves again.
                 CHECKS = tuple(all_checks)
                 round_base, base_commit = base_commit, fetch_base(args.base)
+                runner = git('show', f'{base_commit}:scripts/st-test', check=False)
+                if runner.returncode == 0 and runner.stdout and runner.stdout != Path(__file__).read_bytes():
+                    if round_number == TOP_UP_ROUNDS:
+                        raise Failure(f'main is moving too fast; run again: after {TOP_UP_ROUNDS} top-up rounds '
+                                      f'{args.base} ({base_commit[:12]}) changed its runner again; the branch is not pushed')
+                    raise Handover(runner.stdout, base_commit, None, False, top_up=round_number + 1)
                 again = merge_base_in(args.base, purpose='to bring the green run up to the base')
                 merged = again or merged
                 commit = gate_commit(args.base)[0]
