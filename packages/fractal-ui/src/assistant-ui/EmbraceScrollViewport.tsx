@@ -139,7 +139,7 @@ class ViewportController {
   firstRenderedId: string | undefined
   loadEarlier: (() => void) | undefined
 
-  private loadEarlierIfNeeded() {
+  loadEarlierIfNeeded() {
     const element = this.element
     if (element === null || this.loadEarlier === undefined || element.clientHeight === 0) return
     if (this.following ? element.scrollHeight >= element.clientHeight * 2 : element.scrollTop > element.clientHeight) return
@@ -558,6 +558,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   const previousItems = React.useRef(items)
   const previousKey = React.useRef(stateKey)
   const previousCommand = React.useRef(scrollToBottomKey)
+  const prepended = React.useRef(false)
   const history = React.useMemo<ViewportAnchorHistory>(() => anchorHistory ?? { _tag: 'Complete', includes: id => items.some(row => row.id === id) }, [anchorHistory, items])
   React.useLayoutEffect(() => {
     if (stateKey !== previousKey.current) {
@@ -569,7 +570,11 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
       controller.jump()
     } else if (previousItems.current !== items) {
       // Metadata-only snapshots still reach geometry; only new or changed rows count as unread.
-      if (sameRows(previousItems.current, items)) controller.schedule()
+      // Loaded older history is not news: the reader's anchor settles it without a jump control.
+      const previous = previousItems.current
+      const olderLoaded = previous.length > 0 && items.length > previous.length && sameRows(previous, items.slice(items.length - previous.length))
+      prepended.current ||= olderLoaded
+      if (olderLoaded || sameRows(previous, items)) controller.schedule()
       else controller.changed()
     }
     controller.updateHistory(history)
@@ -583,6 +588,8 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     if (window.key !== stateKey || window.firstId === undefined && firstId !== undefined) setWindow({ key: stateKey, firstId })
     controller.loadEarlier = !active || materializing || startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - historyBatchSize)]?.id })
     if (windowChanged) controller.settle()
+    // Mount into loaded older rows before paint, so a reader at the top never sees a frame without its anchor.
+    if (prepended.current) { prepended.current = false; controller.loadEarlierIfNeeded() }
     controller.schedule()
     return () => { controller.loadEarlier = undefined }
   }, [active, controller, firstId, items, materializing, stateKey, startIndex, window.key, window.firstId])

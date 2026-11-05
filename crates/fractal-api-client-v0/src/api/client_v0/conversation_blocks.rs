@@ -2549,13 +2549,21 @@ mod tests {
         assert_eq!(page["value"]["page"]["has_more"], json!(true));
         // Keyset continuations derive the same bounded newest head while the source is unchanged.
         let cursor = page["value"]["page"]["next_cursor"].as_str().unwrap();
+        let (status, mismatch) = request(
+            format!("/v1/client/sessions/{leaf}/timeline?limit=100&cursor={cursor}"),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "{mismatch}");
+        assert_eq!(mismatch["code"], "page-cursor-expired");
         let (status, older) = request(
             // The cursor is `page/native/` plus base64url, so it needs no percent-encoding.
-            format!("/v1/client/sessions/{leaf}/timeline?limit=5&cursor={cursor}"),
+            format!("/v1/client/sessions/{leaf}/timeline?cursor={cursor}"),
             true,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{older}");
+        assert_eq!(older["value"]["page"]["limit"], 5);
         assert_eq!(older["value"]["header"], header);
         assert_eq!(older["value"]["session_id"], child_id);
         assert!(older["value"]["items"].as_array().unwrap().iter().all(|item| {

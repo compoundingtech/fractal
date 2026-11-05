@@ -4,7 +4,7 @@
 // Regenerate: cargo run -p fractal-client-codegen; verify: cargo run -p fractal-client-codegen -- --check
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 import { DateTime, Duration, Schema, SchemaTransformation } from "effect"
-import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
 import type { Brand, Option, Redacted } from "effect"
 import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
 export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"
@@ -1081,7 +1081,7 @@ export const NoticeActor = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent
 export type NoticeActor = typeof NoticeActor.Type
 export type NoticeActorEncoded = typeof NoticeActor.Encoded
 
-export const NoticeClaimId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).annotate({ identifier: "NoticeClaimId" }))()
+export const NoticeClaimId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/NoticeClaimId")).annotate({ identifier: "NoticeClaimId" }))()
 export type NoticeClaimId = typeof NoticeClaimId.Type
 export type NoticeClaimIdEncoded = typeof NoticeClaimId.Encoded
 
@@ -1112,7 +1112,7 @@ export type NoticeSource = typeof NoticeSource.Type
 export type NoticeSourceEncoded = typeof NoticeSource.Encoded
 
 /** RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission. */
-export const NoticeTimestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$", "u"))).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "NoticeTimestamp", description: "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission." }))()
+export const NoticeTimestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$", "u"))).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isLosslessInstant).pipe(Schema.decodeTo(LosslessTimestamp, losslessFromIso)).annotate({ identifier: "NoticeTimestamp", description: "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission." }))()
 export type NoticeTimestamp = typeof NoticeTimestamp.Type
 export type NoticeTimestampEncoded = typeof NoticeTimestamp.Encoded
 
@@ -1146,7 +1146,7 @@ export const NoticeDelivery = /*#__PURE__*/ (() => Schema.Union([
 export type NoticeDelivery = typeof NoticeDelivery.Type
 export type NoticeDeliveryEncoded = typeof NoticeDelivery.Encoded
 
-export const NoticeId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).annotate({ identifier: "NoticeId" }))()
+export const NoticeId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).pipe(Schema.brand("st3/NoticeId")).annotate({ identifier: "NoticeId" }))()
 export type NoticeId = typeof NoticeId.Type
 export type NoticeIdEncoded = typeof NoticeId.Encoded
 
@@ -1189,7 +1189,7 @@ export const NoticeSeenParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type NoticeSeenParameters = typeof NoticeSeenParameters.Type
 export type NoticeSeenParametersEncoded = typeof NoticeSeenParameters.Encoded
 
-export const NoticeSourceId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).annotate({ identifier: "NoticeSourceId" }))()
+export const NoticeSourceId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).pipe(Schema.brand("st3/NoticeSourceId")).annotate({ identifier: "NoticeSourceId" }))()
 export type NoticeSourceId = typeof NoticeSourceId.Type
 export type NoticeSourceIdEncoded = typeof NoticeSourceId.Encoded
 
