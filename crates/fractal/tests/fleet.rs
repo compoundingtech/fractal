@@ -7878,6 +7878,123 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     }
 }
 
+/// What `node`'s messages shard file holds of `writer`: the envelopes it received, and the claims
+/// it admitted from them. Read from the file, so it answers for a release without test routes.
+fn shard_file_holds(node: &Node, writer: &str) -> (u64, u64) {
+    let connection = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("shards/messages/claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let count = |sql: &str| connection.query_row(sql, [writer], |row| row.get::<_, u64>(0)).unwrap();
+    (
+        count("SELECT COUNT(*) FROM replica_envelopes WHERE writer=?1"),
+        count(
+            "SELECT COUNT(*) FROM claims JOIN replica_envelopes AS envelopes
+             ON envelopes.batch_id=claims.batch_id WHERE envelopes.writer=?1",
+        ),
+    )
+}
+
+/// The replication records `node` holds for a newer build: claims of a kind it does not know.
+async fn held_claim_kinds(node: &Node) -> Vec<String> {
+    let records: Vec<Value> = node.client().get("/v1/replication/records?unresolved=true").await.unwrap();
+    records
+        .iter()
+        .filter(|record| record["error_code"] == "unknown-claim-kind")
+        .map(|record| record["kind"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// A member of this build writes to the messages shard, its first shard write as a keyed member,
+/// and leaves: its leave first bounds its key in the shard at its last shard sequence, in a
+/// `fleet.shard-bounds` of its own. A member of this build that joins after the leave admits the
+/// leaver's envelopes up to that bound. A member of the previous release that joins then holds
+/// the bounds as a claim kind it does not know, and receives the envelopes but fences them by its
+/// stricter rule, so it admits no more than this build. Upgraded in place, it admits the held
+/// bounds, then the envelopes, and its shard agrees with the others'.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_holds_a_leavers_shard_bounds_and_admits_them_when_it_upgrades() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "a").await;
+    let mut n = joined(root.path(), &a, "n", &[]).await;
+    n.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+    wait_for_stream_peers(&n, &["a"], 90).await;
+    // A keyed member's shard signs with its member key; its first message used to fail.
+    let items = ["message/0000000000000e01", "message/0000000000000e02"];
+    for item in items {
+        append_stream_item(&n, item).await;
+        wait_for_stream_item(&a, item, 90).await;
+    }
+    n.st_ok(&["fleet", "leave", "--no-service", "--wait", "2m", "--as", PERSON]);
+    n.stop();
+    wait_until("a admits n's leave", 60, || async {
+        a.claims().await.iter().any(|claim| claim["subject"] == "host/n" && claim["kind"] == "fleet.member-left")
+    })
+    .await;
+    let bounds = a
+        .claims()
+        .await
+        .into_iter()
+        .filter(|claim| claim["subject"] == "host/n" && claim["kind"] == "fleet.shard-bounds")
+        .collect::<Vec<_>>();
+    let [bound] = bounds.as_slice() else { panic!("one bounds claim for the leave: {bounds:?}") };
+    assert_eq!(bound.pointer("/body/fields/shard_high_water"), Some(&json!({"messages": 2})), "{bound}");
+
+    // Both join after the leave, so each first meets n's envelopes with n already gone.
+    let n2 = joined(root.path(), &a, "n2", &[]).await;
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old;
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    for item in items {
+        wait_for_stream_item(&n2, item, 90).await;
+    }
+    wait_until("o holds n's shard bounds as an unknown claim kind", 90, || async {
+        held_claim_kinds(&o).await == ["fleet.shard-bounds"]
+    })
+    .await;
+    wait_until("o receives n's shard envelopes", 90, || async {
+        o.state_dir().join("shards/messages/claims.sqlite3").exists() && shard_file_holds(&o, "n").0 == 2
+    })
+    .await;
+    // Give o's shard a few more exchanges to admit them, which it must not.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(shard_file_holds(&o, "n"), (2, 0), "the release fences a leaver's envelopes");
+    let status = o.st_json(&["replication", "status"]);
+    assert_eq!(status["invalid_records"], 0, "{status}");
+
+    // Upgraded in place, o admits the held bounds, and with them n's envelopes.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    for item in items {
+        wait_for_stream_item(&o, item, 90).await;
+    }
+    assert!(held_claim_kinds(&o).await.is_empty(), "the upgrade admits the held bounds");
+    for node in [&a, &n2, &o] {
+        for item in items {
+            assert_eq!(stream_items(node, item).await, 1, "{} holds {item}", node.name);
+        }
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
 /// A GitHub with one repository, `fixture/app`, and one open pull request, #12, whose head is
 /// the value of `head`. Every other read answers an empty list, as the watch fixture's does.
 async fn fake_github_with_pull_request(head: std::sync::Arc<std::sync::Mutex<String>>) -> String {

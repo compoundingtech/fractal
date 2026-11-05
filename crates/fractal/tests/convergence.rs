@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v14.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v15.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1778,15 +1778,15 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v14, every fixed
-/// seed converges, and all but seeds 21 and 74 trim a checkpoint: adding `work.handoff-returned`
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v15, every fixed
+/// seed converges, and all but seeds 2 and 27 trim a checkpoint: adding `fleet.shard-bounds`
 /// shifts the draws. Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[21, 74];
+const NEVER_TRIMS: &[u64] = &[2, 27];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v14 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v15 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2015,7 +2015,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v14.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v15.json"
         }))
         .unwrap(),
     )

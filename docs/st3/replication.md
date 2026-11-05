@@ -419,8 +419,27 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
 - **Authority.** The shard holds no fleet claims. It takes its fleet id and membership from
   the graph. Its envelopes sign `st3-shard-envelope-v1` over the shard ID, so a signature made
   for the graph never counts in the shard or the other way round. A keyed member's shard
-  envelope needs a signature in that domain by a key of one of its non-removed incarnations; a
+  envelope needs a signature in that domain by a key that counts at its sequence (below); a
   writer without membership is judged as the graph judges it.
+- **Shard bounds.** Graph windows count graph sequences, so a shard judges keys by its own
+  rule. An envelope is named by its writer, sequence and hash, so two keys' envelopes at one
+  sequence are distinct and both can count. The key of a writer's latest incarnation counts at
+  every shard sequence while it has not ended. Before a member's leave, it writes
+  `fleet.shard-bounds` (`member_key`, `shard_high_water: {"messages": N}`) with its own last
+  shard sequence, signed by its own key, as `fleet.member-left` is, and only when N > 0. A key
+  that left counts at or below its N, and at none without bounds. Bounds count only at a
+  writer sequence at or below the key's `fleet.member-left` (the two can share an envelope), so
+  bounds the key signs after it left, or that whoever holds it later signs, raise nothing. A
+  key superseded without a leave, or removed, never counts. An older build holds the bounds as `unknown-claim-kind`
+  (one record per leave attempt), fences that key at every shard sequence until it upgrades,
+  and then admits the bounds on retry. The graph admits membership on its own schedule (at
+  startup after the shard, and as its claims replicate), so the shard records the graph's fleet
+  generation at each admission pass and passes over its held envelopes again once it moves: at
+  startup after the graph's pass, and at the next shard exchange even when that brings nothing
+  new. The leave seals the shard's local batches before it reads its bound; a message written
+  after that read and before the leave is above the bound and fenced, so the first release that
+  writes the shard sends a leaving member's mail as graph claims. A reset that loses the old
+  key without a leave strands the old key's shard envelopes that no peer holds yet, as before.
 - **Contents.** One immutable `message.sent` per message, written by an agent or the daemon.
   A person's device-signed message and an external assistant's message stay graph claims.
 - **No checkpoint.** Nothing in the shard is superseded, so it is never sealed or trimmed and
