@@ -19028,10 +19028,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         let dirty = Arc::new(AtomicBool::new(false));
         let changed_watch = dirty.clone();
         let subscription = pool.subscribe(paths, Arc::new(move |event| {
-                if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
-                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
-                    changed_watch.store(true, std::sync::atomic::Ordering::Release);
-                }
                 // Reads (including this observer's own reads) must never self-wake.
                 if FileWatch::relevant(
                     &event,
@@ -19039,6 +19035,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &watched_directory,
                     watched_referent.as_deref(),
                 ) {
+                    if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
+                        | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
+                        changed_watch.store(true, std::sync::atomic::Ordering::Release);
+                    }
                     observations
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
