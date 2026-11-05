@@ -20,14 +20,11 @@ mission "carry" state="ready" {{
   goal "Check responsibility."
   agent "worker" {{ command "true"; workspace "/tmp" }}
   step "work" {{ {selector} }}
+  step "source" {{ agentless }}
+  step "middle" {{ agentless }}
 }}"#
     );
     publish_carry(&store, &source, "declare");
-    let step = run_step(&store, "run");
-    (store, step)
-}
-
-fn run_step(store: &Store, key: &str) -> StepRunView {
     let request = MissionRunRequest {
         mission: "carry".into(),
         revision: None,
@@ -35,12 +32,20 @@ fn run_step(store: &Store, key: &str) -> StepRunView {
         requester: Some(PERSON.into()),
         mode: None,
         inputs: Default::default(),
-        idempotency_key: key.into(),
+        idempotency_key: "run".into(),
     };
     let run = store
         .create_mission_run_inner(&request, None, None, None)
         .unwrap();
-    run.steps.into_iter().find(|s| s.step == "work").unwrap()
+    let step = run.steps.into_iter().find(|s| s.step == "work").unwrap();
+    (store, step)
+}
+
+fn sibling(store: &Store, step: &StepRunView, name: &str) -> StepRunView {
+    let subject = format!("{}/{name}", step.subject.strip_suffix("/work").unwrap());
+    step_run_row_tx(&store.connection.write(), &subject)
+        .unwrap()
+        .unwrap()
 }
 
 fn check(store: &Store, step: &StepRunView, requester: &str, reviewer: &str) -> String {
@@ -123,7 +128,7 @@ fn event(store: &Store, step: &StepRunView, kind: &str, actor: Option<&str>, bod
 fn agent_review_step_local_history_survives_new_claim() {
     for kind in ["work.claimed", "step-run.carried"] {
         let (store, step) = fixture(r#"assigned-to "agent/example/new""#);
-        let source = run_step(&store, "source");
+        let source = sibling(&store, &step, "source");
         for (kind, body) in [
             (
                 kind,
@@ -173,8 +178,8 @@ fn agent_review_step_work_actor_without_prior_claim() {
 fn agent_review_step_carried_chain_bare_and_wrapped() {
     for bare in [false, true] {
         let (store, step) = fixture(r#"assigned-to "agent/example/new""#);
-        let middle = run_step(&store, "middle");
-        let source = run_step(&store, "source");
+        let middle = sibling(&store, &step, "middle");
+        let source = sibling(&store, &step, "source");
         // Only the oldest source's work actor names this reviewer.
         event(&store, &source, "work.progress", Some(REVIEWER), &json!({}));
         for (target, source) in [(&step, &middle), (&middle, &source)] {
@@ -194,8 +199,7 @@ fn agent_review_step_carried_chain_bare_and_wrapped() {
 #[test]
 fn agent_review_step_carried_source_fails_closed() {
     for source in [
-        Value::Null,
-        json!(7),
+        json!("step-run/${SOURCE}/work"),
         json!("agent/example/new"),
         json!("step-run/missing/work"),
     ] {
@@ -210,7 +214,7 @@ fn agent_review_step_carried_source_fails_closed() {
         assert_eq!(check(&store, &step, PERSON, REVIEWER), UNKNOWN);
     }
     let (store, step) = fixture("agentless");
-    let source = run_step(&store, "source");
+    let source = sibling(&store, &step, "source");
     for (target, source) in [(&step, &source), (&source, &step)] {
         event(
             &store,
@@ -222,7 +226,7 @@ fn agent_review_step_carried_source_fails_closed() {
     }
     assert_eq!(check(&store, &step, PERSON, REVIEWER), UNKNOWN);
     let (store, step) = fixture("agentless");
-    let source = run_step(&store, "missing");
+    let source = sibling(&store, &step, "source");
     event(
         &store,
         &step,
