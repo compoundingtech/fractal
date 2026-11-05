@@ -14143,23 +14143,15 @@ fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_run
 
 #[test]
 fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
-    // The second check starts 600 ms in, well inside the total even on a loaded host, and
-    // ends past it.
-    let clock = DoctorClock::new(Duration::from_millis(1000), Duration::from_millis(100));
+    // Start with the total already spent. Spending it with sleeps made setup assume
+    // another check would start before the deadline, even if this thread was paused.
+    let clock = DoctorClock::new(Duration::ZERO, Duration::from_millis(100));
     let ran = std::cell::Cell::new(0);
-    for _ in 0..2 {
-        clock.checks("slow-check", || {
-            ran.set(ran.get() + 1);
-            std::thread::sleep(Duration::from_millis(600));
-            Ok(Vec::new())
-        });
-    }
-    assert_eq!(ran.get(), 2);
     let skipped = clock.checks("late-check", || {
         ran.set(ran.get() + 1);
         Ok(Vec::new())
     });
-    assert_eq!(ran.get(), 2, "a check after the total is spent does not run");
+    assert_eq!(ran.get(), 0, "a check after the total is spent does not run");
     assert_eq!((skipped[0].status.as_str(), skipped[0].message.as_str()), ("timeout", "not run: doctor's checks used all their time"));
 }
 
