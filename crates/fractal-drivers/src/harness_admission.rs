@@ -916,7 +916,7 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, input
             } else {
                 resolve_executable(interpreter)?
             };
-            probe(interpreter.clone())?;
+            if interpreter.as_path() != Path::new(parts[0]) { probe(interpreter.clone())?; }
             files.push((interpreter, false));
         }
     }

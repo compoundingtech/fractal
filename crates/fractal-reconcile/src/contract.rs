@@ -93,7 +93,6 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
     };
     let mut binaries = BTreeMap::new();
     for (role, path) in [("launcher", executable), ("provider", resolve(provider)?)] {
-        input(&path)?;
         // Start every pending measurement before answering, so one later read finds them all.
         binaries.insert(role.to_owned(), (measures.identity)(&path, &resolve, input)?);
     }

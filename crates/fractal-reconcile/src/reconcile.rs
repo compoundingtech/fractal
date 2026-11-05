@@ -26882,7 +26882,6 @@ agent "import/omp/fixture" {{
                     &format!("launch-input/{}", path.display()), path));
             assert_eq!(result.is_ok(), retarget);
             let key = format!("launch-input/{}", interpreter.display());
-            assert!(reconciler.file_watchers.lock().unwrap().contains_key(&key));
             if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
                 &format!("launch-input/{}", target.display()))); }
             reconciler.incremental.evaluated("probe", BTreeSet::from([key]), None);
