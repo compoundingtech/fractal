@@ -165,9 +165,8 @@ const REQUEUE: &str = "claim_candidate_requeue:";
 /// The first key after every `REQUEUE` key.
 const REQUEUE_END: &str = "claim_candidate_requeue;";
 const REQUEUE_PAGE: usize = 1024;
-/// Loans one ordinary verdict pass takes (projection tail, admission, sealed export, startup).
-/// The rest stays due for the next pass and for the paced signature job, so a large backlog
-/// never holds the projection lock or the writer for long.
+/// Loans one ordinary pass takes for freshly signed claims (projection, admission, export).
+/// Historical requeues and unfinished candidates stay due for the paced signature job.
 pub const VERDICT_SLICE_LOANS: usize = 8;
 pub(super) const OWN_NODE_KEY: &str = "principal_node_key";
 
@@ -1644,24 +1643,24 @@ impl Store {
             // alone owns the historical shadow queue until activation.
             return legacy::judge_claims(self, check_roots);
         }
-        self.record_judgment_failure(self.judge_claims_inner(check_roots, None))
+        self.record_judgment_failure(self.judge_claims_inner(check_roots, None, false))
     }
 
-    /// As [`Self::judge_claims`], bounded to [`VERDICT_SLICE_LOANS`] loans for the daemon's
-    /// ordinary passes. Work left over keeps `verdicts_due` set.
+    /// Judge newly signed claims in ordinary passes, bounded to [`VERDICT_SLICE_LOANS`].
+    /// Historical requeues belong to the paced signature worker, not to exchanges.
     pub fn judge_claims_slice(&self, check_roots: bool) -> Result<usize> {
         if legacy::active(&self.readers.get())? {
             return legacy::judge_claims(self, check_roots);
         }
         let judged = self.record_judgment_failure(
-            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS)),
+            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS), true),
         )?;
         self.hand_off_pending_verdicts()?;
         Ok(judged)
     }
 
-    /// Leave verdict work that is still pending to the next ordinary pass and to the paced
-    /// signature job, which owns it; a faulted member waits for resume. Nothing pending wakes
+    /// Leave pending verdict work to the paced signature job; a faulted member waits for
+    /// resume. Fresh work can also finish in the next ordinary pass. Nothing pending wakes
     /// nothing, so a pass that finishes its work never wakes the job again.
     pub(crate) fn hand_off_pending_verdicts(&self) -> Result<()> {
         if !self.verdicts_pending()? {
@@ -1679,7 +1678,7 @@ impl Store {
     /// One resumable judgment loan for the paced signature worker: the bootstrap's shadow
     /// judgment, and after it any backlog a resume or a trust-root change left.
     pub fn advance_signature_judgment(&self) -> Result<usize> {
-        self.record_judgment_failure(self.judge_claims_inner(true, Some(1)))
+        self.record_judgment_failure(self.judge_claims_inner(true, Some(1), false))
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
@@ -1703,7 +1702,12 @@ impl Store {
         }
         result
     }
-    fn judge_claims_inner(&self, check_roots: bool, max_loans: Option<usize>) -> Result<usize> {
+    fn judge_claims_inner(
+        &self,
+        check_roots: bool,
+        max_loans: Option<usize>,
+        fresh_only: bool,
+    ) -> Result<usize> {
         let migration = self.signature_migration()?;
         if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
             return Ok(0);
@@ -1740,7 +1744,11 @@ impl Store {
                     start_root_requeue_tx(&transaction, &roots_digest)?;
                 }
             }
-            let requeuing = advance_requeue_tx(&transaction)?;
+            let requeuing = if fresh_only {
+                requeue_pending(&transaction)?
+            } else {
+                advance_requeue_tx(&transaction)?
+            };
             let fresh = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_fresh LIMIT ?1")?
                 .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
@@ -1757,10 +1765,17 @@ impl Store {
                     )?
                     .execute(/* sqlite-large-value: allow-for-now lv-h9c7ea890a098 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
             }
-            let queued = transaction
-                .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
-                .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let fresh_empty = fresh.is_empty();
+            // A membership change can queue millions of old verdicts. Ordinary exchanges
+            // judge only their fresh work; the paced worker owns that historical backlog.
+            let queued = if fresh_only {
+                fresh
+            } else {
+                transaction
+                    .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
+                    .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
             let memo = RefCell::new(BTreeMap::new());
             let mut candidates_judged = 0;
             for claim_id in &queued {
@@ -1797,12 +1812,15 @@ impl Store {
             if track_bootstrap && candidates_judged != 0 {
                 migration::note_work(&transaction, candidates_judged)?;
             }
-            let drained = fresh.is_empty() && queued.is_empty() && !requeuing;
+            let drained = fresh_empty && queued.is_empty() && !requeuing
+                && (!fresh_only || !transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue)", [], |row| row.get::<_, bool>(0),
+                )?);
             if drained {
                 migration::finish_judging(&transaction)?;
             }
             transaction.commit()?;
-            if drained || max_loans.is_some_and(|max| loans >= max) {
+            if drained || (fresh_only && fresh_empty) || max_loans.is_some_and(|max| loans >= max) {
                 return Ok(judged);
             }
         }
@@ -1811,7 +1829,7 @@ impl Store {
     /// Exercise a real bounded loan, then allow another real writer to change inputs.
     #[cfg(feature = "test-support")]
     pub fn judge_claim_page_for_test(&self, check_roots: bool) -> Result<usize> {
-        self.judge_claims_inner(check_roots, Some(1))
+        self.judge_claims_inner(check_roots, Some(1), false)
     }
 
     pub fn signature_model(&self) -> Result<SignatureModel> {
