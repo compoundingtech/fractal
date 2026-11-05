@@ -42,7 +42,7 @@ fn writer_seek(table: &str, column: &str) -> String {
 /// Whether `member`'s newest own `daemon.started` at or after `start` advertises `feature`.
 fn advertises(connection: &Connection, member: &str, start: u64, feature: &str) -> Result<bool> {
     let advertised: Option<Option<bool>> = connection
-        .query_row(/* sqlite-large-value: allow-for-now lv-h68c3476e60b3 owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
+        .query_row(/* sqlite-large-value: allow-for-now lv-h63037ed7cc0c owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT json_extract(claims.body,?4)=1
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
@@ -143,7 +143,7 @@ fn record_switch(store: &Store, key: &str, switched: bool) -> Result<bool> {
         .connection
         .batched(|transaction| {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-he3398ba708bb owner=fractal_store::store::marks_switch TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                /* sqlite-large-value: allow-for-now lv-h5d2ae9ff9dec owner=fractal_store::store::marks_switch TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [key, value],
             )

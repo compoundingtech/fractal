@@ -223,7 +223,7 @@ fn a_hosted_seat_marks_staging_delivery_read_and_close_once_both_switches_are_on
 
     // The staging switch off with marks on, as the barrier decides beside a member that does not
     // count a host's staging (marks_switch's tests): the staging is a claim, the rest are marks.
-    store.connection.write().execute("UPDATE meta SET value='0' WHERE key='staged_switched'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hd5502dd7ccde owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='0' WHERE key='staged_switched'", []).unwrap();
     assert!(store.marks_switched().unwrap() && !store.staged_switched().unwrap());
     let [staged, delivered, read, closed] = lifecycle_of("message/held", RECIPIENT);
     assert!(!staged.starts_with("offset-receipt/"), "a staging was recorded as a mark: {staged}");
