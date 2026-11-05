@@ -128,6 +128,13 @@ replacement. This is a tool-effect boundary, not synchronous native-turn admissi
 `tool_call` veto must fail closed on handler errors/timeouts; an adapter error returns an explicit
 blocking reason and makes further refresh closure unsupported. Person asks are counted as tools
 until their native result; this gate does not claim durable ask preservation.
+Nested dispatches sharing a call ID are counted separately by tool name and admission count.
+Explicit native denials or terminal `message_end` tool results settle matching dispatches;
+live nested effects remain counted. Overlapping same-name dispatches require their own result
+or explicit denial; ambiguous completion stays busy. No root-tree or turn-end blanket clear is used.
+Closed native shell/Python hooks synchronously substitute a refusal result. Once native user
+execution is allowed, refresh is unsupported for that incarnation: no dispatch-correlated finish
+hook exists, and model idle or an empty job snapshot cannot prove that command finished.
 
 ## Seat label authority
 

@@ -160,7 +160,7 @@ type Stash = {
   /** Tool calls announced by `tool_call` and not yet answered by `tool_result`. */
   toolCallsInFlight?: Set<string>;
   /** Synchronous tool fence; never reset by turn boundaries or channel reconnects. */
-  refresh?: { epoch: number; tools: Set<string>; mailbox: number; closed: boolean; fault?: boolean };
+  refresh?: { epoch: number; tools: Map<string, { count: number; overlap: boolean }>; mailbox: number; closed: boolean; fault?: boolean; user?: boolean };
   /** Messages held during a running turn, oldest first. */
   held?: HeldMessage[];
   /** Releases held messages after HOLD_MAX_MS behind a running tool call. */
@@ -502,7 +502,7 @@ export default function (pi: ExtensionAPI) {
     } catch { return null; }
   };
   // JS run-to-completion is the gate lock: none of these operations may await.
-  const gate = state.refresh ??= { epoch: 0, tools: new Set(), mailbox: 0, closed: false };
+  const gate: NonNullable<Stash["refresh"]> = state.refresh ??= { epoch: 0, tools: new Map(), mailbox: 0, closed: false };
   const owner = Number(state.seq);
   const managed = Boolean(state.bin && state.identity && state.session &&
     state.seq && Number.isSafeInteger(owner) && owner >= 0);
@@ -513,9 +513,10 @@ export default function (pi: ExtensionAPI) {
   const refresh = (request: NonNullable<Frame["refresh"]>, ctx: ExtensionContext) => {
     let result = "refused";
     // Read jobs only AFTER checking open tools, in this same synchronous critical section.
-    const tools = gate.tools.size + gate.mailbox;
+    let tools = gate.mailbox;
+    for (const pending of gate.tools.values()) tools += pending.count;
     const jobs = tools === 0 ? backgroundJobs() : null;
-    if (!managed || gate.fault || jobs === null && tools === 0) result = "unsupported";
+    if (!managed || gate.fault || gate.user || jobs === null && tools === 0) result = "unsupported";
     else if (request.action === "activity") result = "activity";
     else if (request.incarnation === state.session && request.owner_sequence === owner &&
       request.epoch === gate.epoch) {
@@ -1410,22 +1411,41 @@ export default function (pi: ExtensionAPI) {
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => unknown,
   ) => void;
+  const refusedUser = { result: { output: "refresh admission closed", exitCode: 1, cancelled: true, truncated: false } };
+  for (const event of ["user_bash", "user_python"]) register(event, () => {
+    if (!managed) return;
+    try {
+      if (!gate.closed) { advance(); gate.user = true; return; }
+    } catch { gate.fault = true; }
+    return refusedUser;
+  });
   const onWidened = (
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
   ) => register(event, async (payload, ctx) => {
     try {
       // Includes subagent tools: their observational events are filtered below, not admission.
-      if (managed && (event === "tool_call" || event === "tool_result")) {
-        const call = record(payload);
-        if (typeof call?.toolCallId !== "string" || !call.toolCallId) throw new Error("missing tool identity");
-        const key = `${ctx.sessionManager.getSessionId()}:${call.toolCallId}`;
-        if (event === "tool_call") {
-          if (gate.closed) return { block: true, reason: "refresh admission closed" };
-          if (gate.tools.has(key)) throw new Error("duplicate tool admission");
-          advance();
-          gate.tools.add(key);
-        } else gate.tools.delete(key);
+      if (managed && (event === "tool_call" || event === "tool_result" || event === "message_end" || event === "tool_approval_resolved")) {
+        const call = record(event === "message_end" ? record(payload)?.message : payload);
+        if (event === "tool_call" && (typeof call?.toolCallId !== "string" || typeof call.toolName !== "string"))
+          throw new Error("missing tool identity");
+        if (typeof call?.toolCallId === "string") {
+          const root = `${JSON.stringify([ctx.sessionManager.getSessionId(), call.toolCallId])}:`;
+          const key = `${root}${call.toolName}`;
+          const pending = gate.tools.get(key);
+          if (event === "message_end" && call.role === "toolResult") {
+            // Terminal fallback is per dispatch, never a root-tree or turn-end blanket clear.
+            // Overlapping same-name dispatches require their own result/explicit denial.
+            if (pending && !pending.overlap) gate.tools.delete(key);
+          } else if (event === "tool_call") {
+            if (gate.closed) return { block: true, reason: "refresh admission closed" };
+            advance();
+            if (pending) { pending.count += 1; pending.overlap = true; }
+            else gate.tools.set(key, { count: 1, overlap: false });
+          } else if ((event === "tool_result" || event === "tool_approval_resolved" && call.approved === false) && pending) {
+            if (pending.count > 1) pending.count -= 1; else gate.tools.delete(key);
+          }
+        }
       }
       if (isSubagent(ctx)) {
         try {

@@ -39,27 +39,65 @@ const request = async (action, receipt = {}) => {
   await until(() => frames().some(frame => frame.request_id === request_id));
   return frames().find(frame => frame.request_id === request_id);
 };
-const dispatch = async (id, context = ctx) => {
-  const veto = await handlers.get("tool_call")({ toolName: "bash", toolCallId: id }, context);
+const dispatch = async (id, context = ctx, toolName = "bash") => {
+  const veto = await handlers.get("tool_call")({ toolName, toolCallId: id }, context);
   if (!veto?.block) executed += 1;
   return veto;
 };
 try {
   await handlers.get("session_start")({}, ctx);
   await until(() => frames().some(frame => frame.type === "ready"));
+  if (process.argv[3] === "--native-user") {
+    for (const name of ["user_bash", "user_python"]) {
+      assert.equal(handlers.get(name)({ command: "fixture", code: "fixture" }, ctx), undefined);
+      await handlers.get("agent_end")({}, ctx);
+      assert.equal((await request("activity")).result, "unsupported", "idle cannot prove native command settlement");
+    }
+    console.log("OMP native user execution: unknown completion remains unsupported");
+  } else {
   let activity = (await request("activity")).receipt;
   assert.equal(activity.owner_sequence, 7);
   assert.equal((await request("close", { ...activity, incarnation: "predecessor" })).result, "refused");
+  const capture = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+  const denied = capture.events.find(frame => frame.type === "tool_approval_resolved" && !frame.event.approved).event;
+  idle = false;
+  await handlers.get("agent_start")({}, ctx);
+  await handlers.get("tool_call")(denied, ctx);
+  await handlers.get("tool_approval_resolved")(denied, ctx);
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 0, "explicit native denial settles without execution");
+  const terminal = capture.events.find(frame => frame.type === "message_end" && frame.event.message.role === "toolResult").event;
+  await handlers.get("message_end")(terminal, ctx); // Producer-denied call has no extension tool_result.
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 0, "settled before agent_end");
+  await handlers.get("agent_end")(capture.events.findLast(frame => frame.type === "agent_end").event, ctx);
+  idle = true;
+  const deniedSeal = await request("close", (await request("activity")).receipt);
+  assert.equal(deniedSeal.result, "closed");
+  assert.equal((await request("reopen", deniedSeal.receipt)).result, "opened");
+  await handlers.get("tool_call")(denied, ctx); // Terminal fallback without an approval/result callback.
+  await handlers.get("message_end")(terminal, ctx);
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 0);
+  for (const name of ["xd", "device", "device"]) await dispatch("nested-call", ctx, name);
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 3);
+  await handlers.get("message_end")({ message: { role: "toolResult", toolCallId: "nested-call", toolName: "xd" } }, ctx);
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 2, "root completion cannot release live nested effects");
+  await handlers.get("message_end")({ message: { role: "toolResult", toolCallId: "nested-call", toolName: "device" } }, ctx);
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 2, "ambiguous same-name terminal cannot release overlapping effects");
+  for (const [toolName, remaining] of [["device", 1], ["device", 0]]) {
+    await handlers.get("tool_result")({ toolCallId: "nested-call", toolName }, ctx);
+    assert.equal((await request("activity")).receipt.open_non_person_tools, remaining);
+  }
+  await handlers.get("message_end")({ message: { role: "toolResult", toolCallId: "nested-call", toolName: "xd" } }, ctx);
+  assert.equal((await request("activity")).receipt.open_non_person_tools, 0, "terminal notification is idempotent");
   await dispatch("busy");
   activity = (await request("activity")).receipt;
   assert.equal(activity.open_non_person_tools, 1);
   assert.equal((await request("close", activity)).result, "refused");
-  await handlers.get("tool_result")({ toolCallId: "busy" }, ctx);
+  await handlers.get("tool_result")({ toolCallId: "busy", toolName: "bash" }, ctx);
   const subCtx = { ...ctx, agent: { kind: "sub", id: "child" } };
   await dispatch("child-tool", subCtx);
   activity = (await request("activity")).receipt;
   assert.equal((await request("close", activity)).result, "refused", "subagent tools are counted");
-  await handlers.get("tool_result")({ toolCallId: "child-tool" }, subCtx);
+  await handlers.get("tool_result")({ toolCallId: "child-tool", toolName: "bash" }, subCtx);
   jobs = [{ id: "background" }]; // Tool returned, but its effects have not finished.
   assert.equal((await request("close", activity)).result, "refused");
   jobs = [];
@@ -75,6 +113,8 @@ try {
   assert.match((await dispatch("late")).reason, /refresh admission closed/);
   assert.equal((await dispatch("late-child", subCtx)).block, true);
   assert.equal(executed, before, "closed tool never executes");
+  for (const name of ["user_bash", "user_python"])
+    assert.match(handlers.get(name)({}, ctx).result.output, /refresh admission closed/, "native user execution is synchronously substituted");
   send({ type: "message", content: "mailbox input", meta: { messageId: "mail" } });
   await until(() => frames().some(frame => frame.type === "failed" && frame.meta?.messageId === "mail"));
   assert.equal(delivered, 0, "closed mailbox never starts a delivered turn");
@@ -85,7 +125,7 @@ try {
   assert.equal((await request("reopen", { ...closed.receipt, owner_sequence: 8 })).result, "refused");
   assert.equal((await request("reopen", closed.receipt)).result, "opened");
   assert.equal(await dispatch("restored"), undefined);
-  await handlers.get("tool_result")({ toolCallId: "restored" }, ctx);
+  await handlers.get("tool_result")({ toolCallId: "restored", toolName: "bash" }, ctx);
   assert.equal((await request("close", activity)).result, "refused", "old epoch cannot close");
   const missingJobs = ctx.getAsyncJobSnapshot;
   ctx.getAsyncJobSnapshot = () => { throw new Error("snapshot unavailable"); };
@@ -98,6 +138,7 @@ try {
   assert.equal(executed, before + 1, "veto-handler failure never executes effects");
   assert.equal((await request("activity")).result, "unsupported", "uncertain accounting cannot close");
   console.log("OMP refresh adapter: idle, busy, jobs, stale owner/epoch, late tool, mailbox, reopen and error veto passed");
+  }
 } finally {
   await handlers.get("session_shutdown")({}, ctx);
   fs.rmSync(root, { recursive: true, force: true });
