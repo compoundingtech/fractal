@@ -975,7 +975,7 @@ mod tests {
             sponsor.publish_fleet_endpoints("listening", &[serde_json::json!({
                 "transport": "fabric", "node": "a".repeat(64),
                 "protocol": format!("st3/fleet/{}", founded.fleet_id),
-            })], "test").unwrap();
+            })], "test", None).unwrap();
             let invitation = invite(&sponsor, &founded.fleet_id, "sponsor", &InviteOptions {
                 name: Some("joining".into()), lifetime: std::time::Duration::from_secs(600),
                 via: "fabric".into(), person: "person/test".into(), migrate: false,
@@ -1088,7 +1088,7 @@ mod tests {
             "transport": "fabric", "node": gateway,
             "protocol": format!("{prefix}{}", founded.fleet_id)
         })];
-        store.publish_fleet_endpoints("listening", &endpoints, "test").unwrap();
+        store.publish_fleet_endpoints("listening", &endpoints, "test", None).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let backend = crate::sync::Local(store.clone());

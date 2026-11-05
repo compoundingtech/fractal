@@ -196,8 +196,34 @@ pub struct RuntimeAuthority {
 #[derive(Clone, Debug, Default)]
 pub struct MissionRunStateMoment {
     pub since_unix_ms: u128,
+    pub completed_at_unix_ms: Option<u128>,
     pub status: Option<String>,
     pub outcome: Option<MissionRunOutcomeView>,
+}
+
+pub type MissionStepTimestamps = BTreeMap<String, (Option<u128>, Option<u128>)>;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static MISSION_TIMING_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+use fractal_delivery::store::run_eta::step_timestamps;
+
+#[test]
+fn step_timestamps_follow_execution_not_lease_intervals() {
+    let event = |kind: &str, fields: Value, at| (kind.to_owned(), json!({"fields": fields}), at);
+    let mut events = vec![
+        event("work.claimed", json!({"attempt":1,"claim_expires_at_unix_ms":15}), 10),
+        event("work.released", json!({"attempt":1}), 12),
+        event("work.claimed", json!({"attempt":1}), 20),
+        event("work.submitted", json!({"attempt":1}), 25),
+        event("step-run.state", json!({"status":"verifying"}), 26),
+    ];
+    assert_eq!(step_timestamps(&events, 1), (Some(10), None));
+    events.push(event("work.failed", json!({"attempt":1,"status":"failed"}), 30));
+    events.push(event("step-run.state", json!({"status":"completed"}), 31));
+    assert_eq!(step_timestamps(&events, 1), (Some(10), Some(30)));
 }
 
 /// The most changed items one resource-change message lists.
@@ -1628,6 +1654,8 @@ pub trait MissionsStore {
             &self,
             subjects: Option<&[String]>,
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
+    /// First execution opening and authoritative terminal edge of the selected attempt.
+    fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -4672,7 +4700,44 @@ impl MissionsStore for Store {
             &self,
             subjects: &[String],
         ) -> Result<BTreeMap<String, MissionRunStateMoment>> {
+        if subjects.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         self.mission_run_states_among(Some(subjects))
+    }
+
+    fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps> {
+        if runs.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd9e9bd3ec3b9 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+             FROM claims JOIN batches ON batches.id=claims.batch_id
+             JOIN step_runs s ON s.subject=claims.subject
+             JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1))
+               AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
+               AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+                   'work.claimed','work.failed','work.person-done','work.person-cancelled')
+             ORDER BY claims.subject, {CANONICAL_ORDER}"
+        ))?;
+        let rows = statement.query_map(params![serde_json::to_string(&runs)?, subjects.map(serde_json::to_string).transpose()?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, String>(4)?))
+        })?;
+        let mut events = BTreeMap::<String, (u32, Vec<(String, Value, u128)>)>::new();
+        for row in rows {
+            let (subject, attempt, kind, body, at) = row?;
+            events.entry(subject).or_insert_with(|| (attempt, Vec::new())).1
+                .push((kind, serde_json::from_str(&body)?, at.parse()?));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        MISSION_TIMING_SUBJECTS_READ.with(|count| count.set(count.get() + events.len()));
+        Ok(events.into_iter().map(|(subject, (attempt, events))| {
+            (subject, step_timestamps(&events, attempt))
+        }).collect())
     }
 
     fn mission_run_states_among(
@@ -4712,6 +4777,8 @@ impl MissionsStore for Store {
             let at = at.parse().unwrap_or_default();
             // `mission-run.state` claims are durable, so the claim before is the state replaced.
             let previous_status = states.get(&subject).and_then(|state| state.status.clone());
+            let completed_at_unix_ms = states.get(&subject).and_then(|state| state.completed_at_unix_ms)
+                .or_else(|| (phase.as_deref() == Some("terminal")).then_some(at));
             let outcome = (phase.as_deref() == Some("terminal")
                 && previous_phase.as_deref() == Some("terminal"))
             .then(|| {
@@ -4728,6 +4795,7 @@ impl MissionsStore for Store {
                 subject,
                 MissionRunStateMoment {
                     since_unix_ms: at,
+                    completed_at_unix_ms,
                     status,
                     outcome,
                 },

@@ -176,6 +176,7 @@ fn completion_words() -> Vec<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalTarget {
     pub socket: PathBuf,
+    pub discovery: Option<fractal_client::UnixSocketDiscovery>,
     /// `ST_AGENT` in a seat, otherwise the configured person.
     pub caller: Option<String>,
     /// `person` in the st config.
@@ -188,10 +189,12 @@ impl LocalTarget {
     pub fn discover(words: &[String]) -> Option<Self> {
         let config = fractal_daemon::config::Config::load_client_unvalidated(None).ok()?.0;
         let endpoint = endpoint_word(words).or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"));
-        let socket = match endpoint.map(fractal_daemon::client::Endpoint::parse) {
-            Some(Ok(fractal_daemon::client::Endpoint::Unix(socket))) => socket,
-            Some(_) => return None,
-            None => config.socket,
+        let endpoint = endpoint.map(|endpoint| fractal_daemon::client::Endpoint::parse(&endpoint))
+            .transpose().ok()?.unwrap_or_else(|| fractal_daemon::client::Endpoint::DiscoveredUnix(config.client_discovery()));
+        let socket = endpoint.unix_socket()?.into_owned();
+        let discovery = match endpoint {
+            fractal_daemon::client::Endpoint::DiscoveredUnix(identity) => Some(identity),
+            _ => None,
         };
         let agent = fractal_drivers::contracts::env("ST_AGENT")
             .filter(|agent| !agent.is_empty())
@@ -207,6 +210,7 @@ impl LocalTarget {
         }
         Some(Self {
             socket,
+            discovery,
             caller: agent.or_else(|| config.person.clone()),
             person: config.person,
         })
@@ -214,7 +218,17 @@ impl LocalTarget {
 
     /// A client that fails at once while the daemon is unreachable.
     pub fn client(&self) -> Client {
-        Client::unix(&self.socket).with_outage_wait(Duration::ZERO, false)
+        let client = self.discovery.as_ref().map_or_else(
+            || Client::unix(&self.socket), |identity| Client::discovered_unix(identity.clone()),
+        );
+        client.with_outage_wait(Duration::ZERO, false)
+    }
+
+    fn client_as(&self, person: &str) -> Client {
+        self.discovery.as_ref().map_or_else(
+            || Client::unix_as(&self.socket, person),
+            |identity| Client::discovered_unix_as(identity.clone(), person),
+        ).with_outage_wait(Duration::ZERO, false)
     }
 }
 
@@ -343,8 +357,7 @@ async fn list(target: &LocalTarget, entity: Entity, enrich: bool) -> Result<List
         let Some(person) = &target.person else {
             return Ok(Vec::new());
         };
-        let client =
-            &Client::unix_as(&target.socket, person).with_outage_wait(Duration::ZERO, false);
+        let client = &target.client_as(person);
         all_items(|cursor| async move {
             client
                 .devices_list(cursor.as_deref(), Some(LIST_LIMIT), false)
@@ -401,8 +414,7 @@ async fn list(target: &LocalTarget, entity: Entity, enrich: bool) -> Result<List
         Entity::Session => {
             // Conversation views are scoped to a person, as `conversations sessions` is.
             if let Some(person) = &target.person {
-                let client = &Client::unix_as(&target.socket, person)
-                    .with_outage_wait(Duration::ZERO, false);
+                let client = &target.client_as(person);
                 listed.items = all_items(|cursor| async move {
                     client
                         .sessions_list(cursor.as_deref(), Some(LIST_LIMIT), false)
@@ -920,6 +932,7 @@ mod tests {
     fn target(caller: Option<&str>) -> LocalTarget {
         LocalTarget {
             socket: "/nonexistent".into(),
+            discovery: None,
             caller: caller.map(str::to_owned),
             person: Some("person/operator".into()),
         }

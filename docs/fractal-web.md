@@ -200,7 +200,7 @@ pnpm --dir apps/fractal-web build            # writes dist/web, including build-
 WF_PORT=7411 \
 WF_PUBLIC_ORIGIN="$TAILNET_HTTPS_ORIGIN" \
 WF_TAILNET_LOGINS=robin@example.com \
-WF_ST_GATEWAY=$XDG_RUNTIME_DIR/st3-client.sock \
+WF_ST_GATEWAY=$XDG_RUNTIME_DIR/fractal-client.sock \
 WF_ST_AUTHORIZATION_FILE=/path/to/paired-bearer \
   pnpm --dir apps/fractal-web start
 tailscale serve --bg --https=8443 http://127.0.0.1:7411
@@ -211,7 +211,7 @@ its port when non-default.
 
 The settings:
 
-- `WF_ST_GATEWAY` names st's paired client gateway socket, never the privileged `st3.sock`.
+- `WF_ST_GATEWAY` names st's paired client gateway socket, never the privileged `fractal.sock`.
 - `WF_ST_AUTHORIZATION_FILE` holds the paired device's bearer. The composer needs a full-control pairing.
   The host refuses to start unless the file belongs to its user and nobody else can read it.
 - `WF_DIST` defaults to `dist/web`.
@@ -631,6 +631,9 @@ Consumers close and reopen the follow after a socket interruption; an HTTP refre
 cannot restore synced or editable state on an interrupted follow. Failed reads
 retain the last complete members with an unavailable phase. Sidebar rendering is
 independent of this data API.
+The source-owned Pins binding reuses the source's fetch/socket transports, including
+replay. Source switches, unmounts and retries abort initializing reads and close their
+collection sockets before starting another follow. Kit consumers receive plain views.
 
 ## Focused local checks
 

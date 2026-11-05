@@ -252,6 +252,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    pub async fn mission_declaration_get(&self, mission: &str, revision: Option<&str>) -> Result<Envelope<MissionDeclaration>, ClientError> {{ let mut path = format!(\"/v1/client/mission-declaration?mission={{}}\", percent_encode(mission)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -527,6 +529,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/mission-declaration\", query: query) }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -795,6 +799,7 @@ fn validate_surfaces(
         "CanonicalNode",
         "SubjectDefinition",
         "PublicationDefinition",
+        "MissionDeclaration",
         "AgentsStatusWatermark",
         "Snapshot",
         "AgentsPublicationMetadata",
@@ -1687,6 +1692,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MissionDeclaration>> {{ return this.get('{route}' + query({{ mission, revision }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,

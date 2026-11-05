@@ -30,10 +30,12 @@ const REFRESH_PAUSE: Duration = Duration::from_secs(1);
 const FRESH_PAUSE: Duration = Duration::from_millis(100);
 
 /// The most rows one snapshot refolds. More changed rows refold in chunks, each at its own cut,
-/// and a last short snapshot completes the publication at one cut.
+/// and a last short snapshot completes the publication at one cut; a fold's last catch-up round
+/// refolds every row still changed, however many.
 const FOLD_CHUNK: usize = 100;
 
-/// How many rounds of chunks a fold tries before it keeps the previous publication.
+/// How many rounds of chunks a fold catches up in before its last round, which refolds whatever
+/// changed since in one snapshot.
 const FOLD_ROUNDS: usize = 3;
 
 /// How many folds in a row may fail before the refresher stops serving its list.
@@ -390,6 +392,27 @@ enum Advance<R, P> {
     Rebuild,
 }
 
+#[cfg(test)]
+type CatchUpHook = Box<dyn FnMut(&Store)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called before each catch-up round, so a test can change a list while its fold catches up.
+    static BEFORE_CATCH_UP: std::cell::RefCell<Option<CatchUpHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn before_catch_up(store: &Store) {
+    #[cfg(test)]
+    BEFORE_CATCH_UP.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook(store);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = store;
+}
+
 /// Where a fold reads changed claims from: the base's cut, or, when a replication pass has
 /// projected claims since the base was folded, the frontier the base saw, so claims the base
 /// folded before they were projected are read again. `None` when that is too many claims.
@@ -418,7 +441,7 @@ fn fold_missions_inner(
     base: Option<&Publication<MissionRows>>,
 ) -> anyhow::Result<Option<(Publication<MissionRows>, bool)>> {
     let advance = match base {
-        Some(base) => missions_since(store, base)?,
+        Some(base) => missions_since(store, base, FOLD_CHUNK)?,
         None => Advance::Rebuild,
     };
     let mut provisional = match advance {
@@ -433,9 +456,13 @@ fn fold_missions_inner(
             missions_from_nothing(store)?
         }
     };
-    // Every row now holds at the provisional cut or later: catch up to one cut.
-    for _ in 0..FOLD_ROUNDS {
-        match missions_since(store, &provisional)? {
+    // Every row now holds at the provisional cut or later: catch up to one cut. The last round
+    // refolds every row still changed in one snapshot, so a list that keeps changing through each
+    // round, as a burst of mission starts makes it, still publishes at one cut (#5122).
+    for round in 0..=FOLD_ROUNDS {
+        before_catch_up(store);
+        let chunk = if round < FOLD_ROUNDS { FOLD_CHUNK } else { usize::MAX };
+        match missions_since(store, &provisional, chunk)? {
             Advance::Current => {
                 provisional.valid_until_unix_ms = Some(valid_until(&provisional.rows, now_ms()));
                 return Ok(Some((provisional, true)));
@@ -641,10 +668,11 @@ fn refold(
     Ok(())
 }
 
-/// Advance `base` to the current cut in one snapshot, if few enough missions changed.
+/// Advance `base` to the current cut in one snapshot, if no more than `chunk` missions changed.
 fn missions_since(
     store: &Store,
     base: &Publication<MissionRows>,
+    chunk: usize,
 ) -> anyhow::Result<Advance<MissionRows, Plan>> {
     store.read_snapshot(|cut| {
         anyhow::ensure!(cut >= base.cut, "the store's index moved back from {} to {cut}", base.cut);
@@ -685,7 +713,7 @@ fn missions_since(
             return Ok(Advance::Current);
         }
         let attention = attention.map(|attention| (attention, now));
-        if missions.len() > FOLD_CHUNK {
+        if missions.len() > chunk {
             return Ok(Advance::TooMany(Plan {
                 cut, frontier, time_unix_ms: store.projection_time_at(cut)?,
                 at: now, leases, missions, attention, roster,
@@ -750,7 +778,7 @@ fn fold_work(
     base: Option<&Publication<WorkRows>>,
 ) -> anyhow::Result<Option<(Publication<WorkRows>, bool)>> {
     let advance = match base {
-        Some(base) => work_since(store, base)?,
+        Some(base) => work_since(store, base, FOLD_CHUNK)?,
         None => Advance::Rebuild,
     };
     let mut provisional = match advance {
@@ -765,8 +793,11 @@ fn fold_work(
             work_from_nothing(store)?
         }
     };
-    for _ in 0..FOLD_ROUNDS {
-        match work_since(store, &provisional)? {
+    // As the missions list's catch-up: the last round refolds every step still changed at once.
+    for round in 0..=FOLD_ROUNDS {
+        before_catch_up(store);
+        let chunk = if round < FOLD_ROUNDS { FOLD_CHUNK } else { usize::MAX };
+        match work_since(store, &provisional, chunk)? {
             Advance::Current => return Ok(Some((provisional, true))),
             Advance::Published(publication, _) => return Ok(Some((publication, true))),
             Advance::TooMany(plan) => provisional = plan.refold_in_chunks(store, &provisional)?,
@@ -904,9 +935,13 @@ fn retime_work(rows: &mut WorkRows, time: u128) -> bool {
     changed
 }
 
-/// Advance `base` to the current cut in one snapshot, if few enough steps changed. A quiet
-/// renewal moves a lease with no claim and no new cut, so leases are compared even then.
-fn work_since(store: &Store, base: &Publication<WorkRows>) -> anyhow::Result<Advance<WorkRows, WorkPlan>> {
+/// Advance `base` to the current cut in one snapshot, if no more than `chunk` steps changed. A
+/// quiet renewal moves a lease with no claim and no new cut, so leases are compared even then.
+fn work_since(
+    store: &Store,
+    base: &Publication<WorkRows>,
+    chunk: usize,
+) -> anyhow::Result<Advance<WorkRows, WorkPlan>> {
     store.read_snapshot(|cut| {
         anyhow::ensure!(cut >= base.cut, "the store's index moved back from {} to {cut}", base.cut);
         let rows = &base.rows;
@@ -946,7 +981,7 @@ fn work_since(store: &Store, base: &Publication<WorkRows>) -> anyhow::Result<Adv
         {
             return Ok(Advance::Current);
         }
-        if steps.len() > FOLD_CHUNK {
+        if steps.len() > chunk {
             return Ok(Advance::TooMany(WorkPlan { cut, frontier, time, steps }));
         }
         let mut rows = rows.clone();

@@ -82,11 +82,80 @@ fn home() -> Result<PathBuf> {
     ))
 }
 fn default_st_socket() -> Result<PathBuf> {
-    Ok(PathBuf::from(
+    let runtime = PathBuf::from(
         std::env::var_os("XDG_RUNTIME_DIR")
             .context("XDG_RUNTIME_DIR is unset; pass --st-socket")?,
-    )
-    .join("st3.sock"))
+    );
+    Ok(default_st_socket_in(&runtime))
+}
+
+fn default_st_socket_in(runtime: &Path) -> PathBuf {
+    let primary = runtime.join("fractal.sock");
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+    let legacy = runtime.join("st3.sock");
+    if !unix_socket_answers(&primary) && unix_socket_answers(&legacy) {
+        return legacy;
+    }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+    primary
+}
+
+fn unix_socket_answers(socket: &Path) -> bool {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if std::os::unix::net::SocketAddr::from_pathname(socket).is_err() {
+        return false;
+    }
+    // Discovery runs before async transport deadlines: a full backlog must never block it.
+    #[cfg(target_os = "linux")]
+    let flags = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::SOCK_STREAM;
+    // SAFETY: socket returns a new descriptor, owned here until every return path drops it.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, flags, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: fd is a valid, uniquely owned descriptor from socket.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: these commands set flags on our valid descriptor without pointer arguments.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        {
+            return false;
+        }
+    }
+    // SAFETY: an all-zero sockaddr_un is valid to initialize before setting its fields.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let path = socket.as_os_str().as_bytes();
+    for (destination, source) in address.sun_path.iter_mut().zip(path) {
+        *destination = *source as libc::c_char;
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = length as u8;
+    }
+    // SAFETY: address contains a validated, NUL-terminated path and length fits sockaddr_un.
+    let result = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            std::ptr::from_ref(&address).cast(),
+            length as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        return true;
+    }
+    // macOS also refuses full backlogs: both aliases serve one daemon, so refused aliases keep the primary.
+    let error = std::io::Error::last_os_error().raw_os_error();
+    error == Some(libc::EAGAIN)
+        || error == Some(libc::EWOULDBLOCK)
+        || error == Some(libc::EINPROGRESS)
 }
 
 fn default_state_dir(home: &Path) -> Result<PathBuf> {
@@ -361,6 +430,109 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_discovery_never_blocks_on_a_full_backlog_and_keeps_refused_primary() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::time::Instant;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fractal.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let legacy = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&legacy).unwrap());
+        // SAFETY: listener owns a valid listening socket; reduce its queue to the minimum.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        // SAFETY: zero initialization is valid before populating the Unix address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let path = socket.as_os_str().as_bytes();
+        assert!(std::os::unix::net::SocketAddr::from_pathname(&socket).is_ok());
+        for (destination, source) in address.sun_path.iter_mut().zip(path) {
+            *destination = *source as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as u8;
+        }
+        let mut clients = Vec::new();
+        let mut backlog_error = None;
+        for _ in 0..1024 {
+            // SAFETY: socket creates a descriptor that is immediately given a unique owner.
+            let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            assert!(fd >= 0);
+            // SAFETY: fd is valid and has no other owner.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            // SAFETY: set nonblocking mode before connecting, even when the queue is full.
+            assert_eq!(
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+                0
+            );
+            // SAFETY: address and length describe the validated socket path.
+            let result = unsafe {
+                libc::connect(
+                    fd.as_raw_fd(),
+                    std::ptr::from_ref(&address).cast(),
+                    length as libc::socklen_t,
+                )
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            clients.push(fd);
+            if result < 0 {
+                assert!(
+                    error == Some(libc::EAGAIN)
+                        || error == Some(libc::EWOULDBLOCK)
+                        || error == Some(libc::EINPROGRESS)
+                        || (cfg!(target_os = "macos") && error == Some(libc::ECONNREFUSED)),
+                    "{error:?}"
+                );
+                backlog_error = error;
+                break;
+            }
+        }
+        assert!(
+            backlog_error.is_some(),
+            "listener backlog did not fill after 1024 nonblocking connects"
+        );
+        let start = Instant::now();
+        assert_eq!(
+            unix_socket_answers(&socket),
+            backlog_error != Some(libc::ECONNREFUSED)
+        );
+        assert_eq!(default_st_socket_in(root.path()), socket);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(clients);
+        drop(listener);
+        assert!(socket.exists());
+        assert!(!unix_socket_answers(&socket));
+        assert!(!unix_socket_answers(&legacy));
+        assert_eq!(default_st_socket_in(root.path()), socket);
+    }
+
+    #[test]
+    fn socket_discovery_prefers_primary_and_falls_back_to_live_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("fractal.sock");
+        let legacy = root.path().join("st3.sock");
+        assert_eq!(default_st_socket_in(root.path()), primary);
+        let _legacy = std::os::unix::net::UnixListener::bind(&legacy).unwrap();
+        assert_eq!(default_st_socket_in(root.path()), legacy);
+        let _primary = std::os::unix::net::UnixListener::bind(&primary).unwrap();
+        assert_eq!(default_st_socket_in(root.path()), primary);
+    }
+
+    #[test]
+    fn socket_probe_rejects_unaddressable_paths_without_panicking() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let long = PathBuf::from("x".repeat(256));
+        let nul = Path::new(std::ffi::OsStr::from_bytes(b"invalid\0socket"));
+        assert!(!unix_socket_answers(&long));
+        assert!(!unix_socket_answers(nul));
+        assert_eq!(default_st_socket_in(&long), long.join("fractal.sock"));
+    }
 
     #[test]
     fn state_home_reads_both_names_and_refuses_conflicting_authority() {

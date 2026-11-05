@@ -23,9 +23,11 @@ GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it eve
 `gc` appends a GC line for every tree and input key of an evidence-gc plan (`--plan-out`) and drops their copies: run it BEFORE
 the plan's deletions (evidence-gc --before-delete), so a pull does not restore what GC removed. It also keeps the names of the
 plan's refs as PENDING DELETIONS: a pull that runs between the GC lines and the deletions does not log them again after the GC
-line, which would make their deletion "missing" and a restore push them back. A pending name is dropped once the remote no longer
-has it, or after TOMBSTONE_HOURS if GC never deleted it, and is then logged again like any record. With --publish it pushes the
-new head at once, so a verifier does not see the deletions as missing until the next pull.
+line, which would make their deletion "missing" and a restore push them back. Names absent remotely are dropped from pending at
+once. After TOMBSTONE_HOURS, at most TOMBSTONE_RELEASE_REFS names per pull are rechecked, oldest first, after fresh records have
+been checkpointed. Successful checks release their pending names only after the checkpoint; rejected names stay held and wait
+another TOMBSTONE_HOURS. Nothing uses a pending name as evidence of trust. With --publish it pushes the new head at once, so a
+verifier does not see the deletions as missing until the next pull.
 
 THE LOG is a chain of commits signed with the log key (`--signer` signs stdin to an SSH signature on stdout, for example
 ["ssh-keygen", "-Y", "sign", "-n", "git", "-f", KEY], or the same through `st sekrets`, so no seat reads the key). Its tree:
@@ -65,8 +67,9 @@ REMOTE_LOG = 'refs/evidence-log/remote'
 IDENTITY = 'evidence-log <evidence-log@invalid>'
 LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
 LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')
-PENDING = 'evidence-log.gc-pending.json'  # {ref name: unix time gc wrote its line}, in the repository directory
+PENDING = 'evidence-log.gc-pending.json'  # {ref name: unix time of GC mark or rejected expiry attempt}, in the repository directory
 TOMBSTONE_HOURS = 24
+TOMBSTONE_RELEASE_REFS = 500
 CHUNK_REFS = 500
 CHUNK_SECONDS = 120
 
@@ -428,9 +431,13 @@ def pull(args):
         git(repo, 'fetch', '--no-tags', '-q', remote, f'+{LOG}:{REMOTE_LOG}', check=False)
     seen = {original(ref, SEEN): oid for ref, oid in refs(repo, SEEN).items()}
     copied = {original(ref, COPY): oid for ref, oid in refs(repo, COPY).items()}
-    # GC's pending deletions: kept while the remote still has the ref and the deadline has not passed, and not logged meanwhile.
+    # Expiry is bounded work, after fresh records. Keep selected names held until their checkpoint completes: a kill must not
+    # leave an unverified batch outside pending and admit another batch on the next pull.
     held = pending(repo)
-    still = {name: at for name, at in held.items() if name in seen and args.now - at < TOMBSTONE_HOURS * 3600}
+    still = {name: at for name, at in held.items() if name in seen}
+    expired = sorted((name for name, at in still.items() if args.now - at >= TOMBSTONE_HOURS * 3600),
+                     key=lambda name: (still[name], name))[:TOMBSTONE_RELEASE_REFS]
+    expiring = set(expired)
     if still != held:
         write_pending(repo, still)
     summary['gc_pending'] = len(still)
@@ -440,11 +447,27 @@ def pull(args):
     local_head = refs(repo, LOG).get(LOG)
     if published_tip and local_head and published_tip != local_head:
         summary['published_head_differs'] = published_tip
-    additions, new_copies = {}, []
+    additions, new_copies, pending_changes = {}, [], {}
     processed, started = 0, time.monotonic()
+    active_records = {}
+
+    def already_logged(name, oid):
+        kind = parse(name)
+        if not kind or not local_head:
+            return False
+        path = path_of(kind)
+        if path not in active_records:
+            shown = git(repo, 'cat-file', 'blob', f'{local_head}:{path}', check=False)
+            lines = shown.stdout.decode().splitlines() if shown.returncode == 0 else []
+            active_records[path] = set()
+            for line in lines[lines_after_gc(lines):]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == 'record':
+                    active_records[path].add(parts[1])
+        return oid in active_records[path]
 
     def checkpoint():
-        nonlocal additions, new_copies, published, processed, started
+        nonlocal additions, new_copies, pending_changes, still, published, processed, started
         chunk = dict(summary, added=len(new_copies))
         extend(repo, additions, {}, args.signer_argv, args.log_keys, args.fixed_now, chunk)
         summary.update(head=chunk['head'], as_of=chunk['as_of'])
@@ -457,8 +480,18 @@ def pull(args):
                 return False
             published = summary['head']
             git(repo, 'update-ref', REMOTE_LOG, published)
+        if pending_changes:
+            updated = dict(still)
+            for name, at in pending_changes.items():
+                if at is None:
+                    updated.pop(name, None)
+                else:
+                    updated[name] = at
+            write_pending(repo, updated)
+            still = updated
+            summary['gc_pending'] = len(still)
         summary['chunks'] += 1
-        additions, new_copies = {}, []
+        additions, new_copies, pending_changes = {}, [], {}
         processed, started = 0, time.monotonic()
         return True
 
@@ -466,21 +499,41 @@ def pull(args):
     with tempfile.NamedTemporaryFile() as keys, tempfile.NamedTemporaryFile() as revocations:
         keys.write(keys_text)
         keys.flush()
-        for name, oid in sorted(seen.items()):
-            if name is None or copied.get(name) == oid or name in still:
-                continue
-            lines, why = accept(repo, module, keys.name, revocations.name, name, oid)
-            if why:
-                summary['rejected'][why] = summary['rejected'].get(why, 0) + 1
-            else:
-                additions.setdefault(path_of(parse(name)), []).extend(lines)
-                new_copies.append((name, oid))
-            processed += 1
-            if processed >= CHUNK_REFS or time.monotonic() - started >= CHUNK_SECONDS:
+        for names in (sorted(name for name in seen if name and name not in expiring), expired):
+            for name in names:
+                oid = seen[name]
+                if copied.get(name) == oid:
+                    if name not in expiring:
+                        continue
+                    if already_logged(name, oid):
+                        pending_changes[name] = None  # replay after copying but before releasing the pending name
+                        continue
+                    # GC can die after publishing its line but before dropping copies. A retired copy must be checked and
+                    # logged after that line, rather than silently dropping its pending name and hiding it indefinitely.
+                if name in still and name not in expiring:
+                    continue
+                lines, why = accept(repo, module, keys.name, revocations.name, name, oid)
+                if why:
+                    summary['rejected'][why] = summary['rejected'].get(why, 0) + 1
+                else:
+                    additions.setdefault(path_of(parse(name)), []).extend(lines)
+                    new_copies.append((name, oid))
+                if name in expiring:
+                    # Rejected names remain held and become eligible again after 24 h; advancing their time lets the rest of
+                    # the old backlog proceed, without using pending state as evidence that a record is trusted.
+                    pending_changes[name] = args.now if why else None
+                processed += 1
+                if processed >= CHUNK_REFS or time.monotonic() - started >= CHUNK_SECONDS:
+                    if not checkpoint():
+                        publish_failed = True
+                        break
+            if publish_failed:
+                break
+            if processed or pending_changes:  # finish fresh records' checkpoint before any expiry work
                 if not checkpoint():
                     publish_failed = True
                     break
-    if not publish_failed and (processed or not summary['chunks']):
+    if not publish_failed and not summary['chunks']:
         publish_failed = not checkpoint()
     git(repo, 'pack-refs', '--all')  # thousands of loose refs made one for-each-ref take 7 s
     status = 1 if publish_failed else 0

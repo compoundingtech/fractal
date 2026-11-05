@@ -2031,6 +2031,7 @@ dependencies = [
  "blake3",
  "clap",
  "hex",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
