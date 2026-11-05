@@ -7,6 +7,10 @@ use crate::model::{GateSpec, St3Error};
 
 use crate::declaration_syntax::*;
 
+// Dormant grammar only: public dispatch stays closed until the complete policy is ready.
+#[allow(dead_code)]
+mod agent_review;
+
 const BUILT_IN_EXEC_GATES: &[&str] = &["merged", "ci-passed", "cargo-test"];
 
 pub fn gate_name(gate: &GateSpec) -> &str {
