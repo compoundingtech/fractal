@@ -3,7 +3,7 @@
 //! rows a window read folds directly at the same cut.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::api::published_lists::tests_shared_client_v0_tests::{app_state, fold, mission, oracle, presented, publish, rows};
+pub use crate::api::published_lists::tests_shared_client_v0_tests::{app_state, fold, folded_at_once, mission, oracle, presented, publish, refresh_until_published, rows};
 use super::*;
 use crate::model::{MissionRunRequest, WorkRequest};
 use smallclaims::store::set_thread_clock;
@@ -227,19 +227,12 @@ fn work_oracle(store: &Store, time: u128, actor: Option<&str>, limit: usize) -> 
 fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
     let list = store.published_work_list();
     list.start();
-    let (base, generation) = list.base();
-    let changed = match fold_work(store, base.as_deref()).unwrap() {
-        Some((publication, changed)) => {
-            list.publish(publication, generation).expect("no projection replaced meanwhile");
-            changed
-        }
-        None => false,
-    };
+    let changed = refresh_until_published(store, |store| store.published_work_list(), fold_work);
     let publication = list.newest().expect("a published list");
     assert_eq!(publication.cut, store.index().unwrap(), "published at the current cut");
     let time = publication.rows.time_unix_ms;
     assert!(time >= store.projection_time_at(publication.cut).unwrap());
-    let (fresh, _) = fold_work(store, None).unwrap().unwrap();
+    let (fresh, _) = folded_at_once(fold_work(store, None, None));
     assert_eq!(publication.rows.orders_cut, publication.cut, "seat orders read at the rows' own cut");
     // Each shown seat's queue order, kept incrementally, is the order a fold from nothing reads
     // at the same cut: a stale order shows here even for a seat no fixture actor reads.
@@ -553,6 +546,267 @@ mission "garden/proposed" state="ready" revisions="human-only" revision-reviewer
     fold_work_checked(&store);
 }
 
+/// More missions, each with a run and its steps ready, than one snapshot refolds.
+fn burst(store: &Store, burst: usize) {
+    for number in 0..FOLD_CHUNK + 1 {
+        let name = format!("garden/burst-{burst}-{number}");
+        mission(store, &name);
+        let run = start(store, &name, &format!("burst-{burst}-{number}"));
+        for path in ["plant", "water"] {
+            store.set_step_state(&step(&run, path).0, "ready", None).unwrap();
+        }
+    }
+}
+
+/// Clears the catch-up hook however the test ends.
+struct ChangingThrough(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl ChangingThrough {
+    /// A burst before each of the next `rounds` catch-up rounds, whichever list folds, numbered
+    /// from `first`.
+    fn rounds(rounds: usize, first: usize) -> Self {
+        let left = std::rc::Rc::new(std::cell::Cell::new(rounds));
+        let (hook_left, mut bursts) = (left.clone(), first);
+        super::BEFORE_CATCH_UP.set(Some(Box::new(move |store: &Store| {
+            if hook_left.get() > 0 {
+                hook_left.set(hook_left.get() - 1);
+                burst(store, bursts);
+                bursts += 1;
+            }
+            Ok(())
+        })));
+        Self(left)
+    }
+
+    fn left(&self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Drop for ChangingThrough {
+    fn drop(&mut self) {
+        super::BEFORE_CATCH_UP.set(None);
+    }
+}
+
+/// What one fold did, as its refresher runs it.
+#[derive(Debug, PartialEq)]
+struct Refresh {
+    published: bool,
+    /// The catch-up rounds it ran.
+    rounds: usize,
+    /// The most rows one of its snapshots refolded.
+    most_refolded: usize,
+    failed: bool,
+}
+
+/// Fold a list once as its refresher does, publishing what it publishes, keeping the rows it
+/// leaves pending, and folding from nothing next after a fold with no base fails.
+fn refresh_once<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, fold: super::Fold<R>) -> Refresh {
+    let list = list(store);
+    super::CATCH_UP_ROUNDS.set(0);
+    super::MOST_REFOLDED.set(0);
+    let (base, pending, generation) = list.base_and_pending();
+    let from_nothing = base.is_none();
+    let (published, failed) = match fold(store, base.as_deref(), pending) {
+        Ok(Folded::Published(publication, _)) => (list.publish(publication, generation).is_some(), false),
+        Ok(Folded::Current) => (true, false),
+        Ok(Folded::Pending(rows)) => {
+            list.keep_pending(rows, generation, from_nothing);
+            (false, false)
+        }
+        Err(_) => {
+            if from_nothing {
+                list.fold_from_nothing_next();
+            }
+            (false, true)
+        }
+    };
+    Refresh { published, rounds: super::CATCH_UP_ROUNDS.get(), most_refolded: super::MOST_REFOLDED.get(), failed }
+}
+
+/// Fold a list through bursts before every catch-up round of its first two folds and the first
+/// of its third, from a burst before it starts. Each fold stays within its rounds and snapshot
+/// size, and only the first refolds from the publication: the others go on from its rows.
+fn fold_through_bursts<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, fold: super::Fold<R>, first: usize, kind: &str) {
+    let rebuilds = |why: &str| list(store).rebuilds().get(why).copied().unwrap_or(0);
+    let (chunked, pending) = (rebuilds(&format!("chunked: {kind} changed")), rebuilds(&format!("pending: {kind} kept changing")));
+    burst(store, first);
+    let changing = ChangingThrough::rounds(2 * FOLD_ROUNDS + 1, first + 1);
+    let folds = (0..3).map(|_| refresh_once(store, list, fold)).collect::<Vec<_>>();
+    assert_eq!(changing.left(), 0, "the list changed before every round");
+    drop(changing);
+    assert_eq!(
+        folds.iter().map(|fold| fold.published).collect::<Vec<_>>(),
+        [false, false, true],
+        "{kind}: two folds left their rows pending, and the third published: {folds:?}"
+    );
+    for fold in &folds {
+        assert!(fold.rounds <= FOLD_ROUNDS, "{kind}: a fold ran {} catch-up rounds", fold.rounds);
+        assert!(fold.most_refolded <= FOLD_CHUNK, "{kind}: a snapshot refolded {} rows", fold.most_refolded);
+    }
+    assert_eq!(rebuilds(&format!("chunked: {kind} changed")), chunked + 1, "{kind}: only the first fold refolded from the publication");
+    assert_eq!(rebuilds(&format!("pending: {kind} kept changing")), pending + 2, "{kind}: the next two went on from its rows");
+}
+
+/// A list that keeps changing through every catch-up round, as a burst of mission starts at the
+/// top of the hour makes it, publishes nothing and keeps its rows for the next fold to go on
+/// from, rather than give up and refold them again (#5122). No fold runs more than its rounds,
+/// no snapshot refolds more than a chunk, and once the list holds still a fold publishes at one
+/// cut, with every row the direct read's.
+#[test]
+fn a_list_changing_through_every_catch_up_round_goes_on_from_its_rows_in_bounded_snapshots() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    fold(&store);
+    fold_work_checked(&store);
+
+    fold_through_bursts(&store, |store| store.published_missions_list(), fold_missions, 0, "missions");
+    // Published at the current cut, with every row the direct read's and a fold from nothing's.
+    let (_, changed) = fold(&store);
+    assert!(!changed, "the third fold published the rows");
+
+    // The work list's base, read past the missions list's bursts.
+    fold_work_checked(&store);
+    fold_through_bursts(&store, |store| store.published_work_list(), fold_work, 2 * FOLD_ROUNDS + 2, "work");
+    fold_work_checked(&store);
+}
+
+/// A store of a few thousand missions through two top-of-the-hour bursts of run starts, as
+/// the profile of #5181's long folds shows them: the scheduled starts land through several folds,
+/// more than a chunk before every catch-up round. Every fold stays within its rounds and its
+/// snapshot size, the list publishes within a few folds of each burst ending, at one cut, with
+/// every row the direct read's. About two minutes in a debug build, so it runs on its own:
+/// `cargo test -p fractal-api-core --lib -- --ignored a_store_of_thousands`.
+#[test]
+#[ignore = "a few thousand missions: run it on its own"]
+fn a_store_of_thousands_of_missions_publishes_through_hourly_bursts_in_bounded_folds() {
+    const MISSIONS: usize = 3_000;
+    const SHOWN_RUNS: usize = 1_000;
+    /// Starts before each catch-up round, more than a chunk.
+    const STARTS: usize = FOLD_CHUNK + 50;
+    /// Catch-up rounds a burst lands through: several folds' worth.
+    const BURST_ROUNDS: usize = 4 * FOLD_ROUNDS;
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    for number in 0..MISSIONS {
+        let name = format!("garden/m-{number}");
+        mission(&store, &name);
+        if number < SHOWN_RUNS {
+            start(&store, &name, &format!("m-{number}-0"));
+        }
+    }
+    let started = Instant::now();
+    fold(&store);
+    eprintln!("from nothing: {MISSIONS} missions in {:?}", started.elapsed());
+    for hour in 1..=2 {
+        let next = std::rc::Rc::new(std::cell::Cell::new(0));
+        // One landing before the first fold begins, then one before each of its catch-up rounds.
+        let left = std::rc::Rc::new(std::cell::Cell::new(BURST_ROUNDS + 1));
+        // How long the starts took, which a fold's own time leaves out.
+        let landing = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
+        let (hook_next, hook_left, hook_landing) = (next.clone(), left.clone(), landing.clone());
+        super::BEFORE_CATCH_UP.set(Some(Box::new(move |store: &Store| {
+            if hook_left.get() == 0 {
+                return Ok(());
+            }
+            hook_left.set(hook_left.get() - 1);
+            let started = Instant::now();
+            for _ in 0..STARTS {
+                let number = hook_next.get() % MISSIONS;
+                hook_next.set(hook_next.get() + 1);
+                let run = start(store, &format!("garden/m-{number}"), &format!("m-{number}-{hour}"));
+                store.set_step_state(&step(&run, "plant").0, "ready", None).unwrap();
+            }
+            hook_landing.set(hook_landing.get() + started.elapsed());
+            Ok(())
+        })));
+        super::BEFORE_CATCH_UP.with_borrow_mut(|hook| hook.as_mut().expect("the burst")(&store)).unwrap();
+        let mut folds = Vec::new();
+        while folds.last().is_none_or(|(fold, _): &(Refresh, Duration)| !fold.published) {
+            let (started, landed) = (Instant::now(), landing.get());
+            let fold = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+            folds.push((fold, started.elapsed().saturating_sub(landing.get() - landed)));
+            assert!(folds.len() <= BURST_ROUNDS / FOLD_ROUNDS + 2, "hour {hour}: no publication after {} folds", folds.len());
+        }
+        super::BEFORE_CATCH_UP.set(None);
+        assert_eq!(left.get(), 0, "hour {hour}: the burst landed through every round");
+        for (number, (fold, took)) in folds.iter().enumerate() {
+            eprintln!("hour {hour} fold {number}: {fold:?} in {took:?}");
+            assert!(fold.rounds <= FOLD_ROUNDS, "hour {hour}: a fold ran {} catch-up rounds", fold.rounds);
+            assert!(fold.most_refolded <= FOLD_CHUNK, "hour {hour}: a snapshot refolded {} rows", fold.most_refolded);
+        }
+        // Published at the current cut, with every row the direct read's and a fold from nothing's.
+        fold(&store);
+    }
+}
+
+/// Rows a fold left pending are folded from projections a forget or a refold replaced, so the
+/// next fold folds from nothing rather than go on from them. Rows a fold from nothing left pending
+/// keep it from nothing: should the fold that goes on from them fail, the next one folds from
+/// nothing again, never on from the publication of the projections replaced.
+#[test]
+fn a_forget_or_a_refold_drops_the_rows_a_fold_left_pending() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    fold(&store);
+    let list = store.published_missions_list();
+    let starts = || list.rebuilds().get("start").copied().unwrap_or(0);
+    for (number, replace) in [
+        (0, PublishedList::forget as fn(&PublishedList<MissionRows>)),
+        (1, PublishedList::refold),
+    ] {
+        burst(&store, 100 + 10 * number);
+        let changing = ChangingThrough::rounds(FOLD_ROUNDS, 101 + 10 * number);
+        let first = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        drop(changing);
+        assert!(!first.published, "the fold left its rows pending");
+        let before = starts();
+        replace(list);
+        assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+        assert_eq!(starts(), before + 1, "the fold after it folded from nothing");
+        fold(&store);
+    }
+
+    // Rows kept by a fold that began before a forget are dropped too.
+    burst(&store, 120);
+    let changing = ChangingThrough::rounds(FOLD_ROUNDS, 121);
+    let (base, pending, generation) = list.base_and_pending();
+    let Folded::Pending(rows) = fold_missions(&store, base.as_deref(), pending).unwrap() else {
+        panic!("the fold left its rows pending");
+    };
+    drop(changing);
+    list.forget();
+    list.keep_pending(rows, generation, false);
+    let (base, pending, _) = list.base_and_pending();
+    assert!(base.is_none() && pending.is_none(), "the next fold folds from nothing");
+    assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+
+    // After a forget or a refold, a fold from nothing leaves its rows pending, and the fold that
+    // goes on from them fails: the next one folds from nothing again, never on from the
+    // publication of the projections replaced.
+    for (number, replace) in [
+        (0, PublishedList::forget as fn(&PublishedList<MissionRows>)),
+        (1, PublishedList::refold),
+    ] {
+        fold(&store);
+        let before = starts();
+        replace(list);
+        let changing = ChangingThrough::rounds(FOLD_ROUNDS, 130 + 10 * number);
+        let first = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        drop(changing);
+        assert!(!first.published && starts() == before + 1, "the fold from nothing left its rows pending: {first:?}");
+        super::BEFORE_CATCH_UP.set(Some(Box::new(|_: &Store| anyhow::bail!("a catch-up round failed"))));
+        let failed = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        super::BEFORE_CATCH_UP.set(None);
+        assert!(failed.failed, "the fold that went on from them failed: {failed:?}");
+        assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+        assert_eq!(starts(), before + 2, "the fold after the failure folded from nothing again");
+        // Every row the direct read's and a fold from nothing's.
+        fold(&store);
+    }
+}
+
 #[test]
 fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     let _clock = Clock::at(start_time());
@@ -566,9 +820,10 @@ fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     list.forget();
     assert!(list.newest().is_some(), "readers keep the rows until the refold");
     // A fold under way when the projections were replaced publishes nothing.
-    let (stale, _) = fold_missions(&store, list.newest().as_deref()).unwrap().unwrap_or_else(|| {
-        fold_missions(&store, None).unwrap().unwrap()
-    });
+    let (stale, _) = match fold_missions(&store, list.newest().as_deref(), None).unwrap() {
+        Folded::Published(publication, changed) => (publication, changed),
+        _ => folded_at_once(fold_missions(&store, None, None)),
+    };
     assert_eq!(list.publish(stale, generation), None);
     // A refresher that then keeps failing withdraws the view, served list or not.
     assert!(list.withdraw());
@@ -827,7 +1082,7 @@ fn an_actors_order_is_built_once_per_publication_by_its_first_read() {
     for path in ["plant", "water"] {
         store.set_step_state(&step(&alpha, path).0, "ready", None).unwrap();
     }
-    let (publication, _) = fold_work(&store, None).unwrap().unwrap();
+    let (publication, _) = folded_at_once(fold_work(&store, None, None));
     let rows = &publication.rows;
     let count = |counter: &std::sync::atomic::AtomicUsize| counter.load(std::sync::atomic::Ordering::Relaxed);
     std::thread::scope(|scope| {
@@ -896,7 +1151,7 @@ fn a_work_page_clones_only_its_rows_along_each_growing_inventory() {
         ash: (usize, usize, usize),
     }
     let measure = |store: &Store| {
-        let (publication, _) = fold_work(store, None).unwrap().unwrap();
+        let (publication, _) = folded_at_once(fold_work(store, None, None));
         let rows = &publication.rows;
         let (fleet, _) = rows.page_of(None, 0, 2);
         let fleet = (fleet.len(), serde_json::to_vec(&fleet).unwrap().len(), count(&rows.actors.scanned));

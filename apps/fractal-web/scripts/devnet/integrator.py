@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 13: resolve attribution probe roots against the build helper's cwd.
+Version 14: refuse host-capacity pressure before selection or candidate writes.
 """
 import contextlib, datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, tempfile, time
 import sys
@@ -50,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 13
+INTEGRATOR_VERSION = 14
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -815,7 +815,6 @@ def compatible_recorded_stack(stack, heads, row):
 
 def tick():
     global TIMINGS, REGISTRY_BASE, SELECTION_DEADLINE
-    candidate_sandbox.validate_configuration()
     start=time.monotonic(); row={'ts':datetime.datetime.now(datetime.timezone.utc).isoformat(),'sha':None,'main':None,'included':[],'skipped':[],'selection':[],'build':'failed','ms':0}
     row['integratorVersion']=INTEGRATOR_VERSION
     TIMINGS=row['timingsMs']={}
@@ -823,9 +822,13 @@ def tick():
     pin=json.loads(pin_path.read_text()) if pin_path.exists() else None
     row['pinnedBase']=None
     lock=open(L/('live-r3-dry-run.lock' if DRY_RUN else 'live-r3.lock'),'a')
+    capacity_prechecked=False
     try:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: row.update(build='skipped',reason='lock-held'); return
+        candidate_sandbox.capacity_precheck()
+        capacity_prechecked=True
+        candidate_sandbox.validate_configuration()
         SELECTION_DEADLINE = time.monotonic() + SELECTION_BUDGET_SECONDS
         # Trust metadata is fetched before any PR files or executable content.
         permission_cache={}
@@ -975,7 +978,7 @@ def tick():
     except Exception as e:
         row['error']=str(e)
         if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
-            row.update(build='error', reason='capacity-refused', retryable=True,
+            row.update(build='capacity-refused', reason='capacity-refused', retryable=True,
                        error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
@@ -985,9 +988,15 @@ def tick():
     finally:
         SELECTION_DEADLINE = None
         observe_served(row)
+        if not capacity_prechecked and row.get('reason') == 'capacity-refused':
+            # Served identity is known, but no candidate was selected to compare.
+            row['current']=None
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
-        publish_skips(row)
+        # A refused precheck has no new selection to publish. Preserve the last
+        # selection/metadata state and append only the normal tick observation.
+        if capacity_prechecked or row.get('reason') != 'capacity-refused':
+            publish_skips(row)
         TIMINGS=None
         with (L/('live-r3-dry-run.jsonl' if DRY_RUN else 'live-r3.jsonl')).open('a') as f: f.write(json.dumps(row,separators=(',',':'))+'\n')
         print(json.dumps(row),flush=True)

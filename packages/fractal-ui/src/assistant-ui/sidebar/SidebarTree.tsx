@@ -11,6 +11,8 @@ export interface SidebarTreeItem<T> {
   readonly id: Key
   readonly depth: number
   readonly children?: readonly T[]
+  /** Exact CSS border-box height; omit for content-sized rows. Touch may retain measurement. */
+  readonly rowHeight?: { readonly compact: number; readonly touch?: number }
   /** RAC typeahead text, and the row's accessible name unless `accessibleName` is given. */
   readonly textValue: string
   /**
@@ -73,8 +75,9 @@ const layoutOptions = { estimatedRowHeight: 24 } as const
 interface SidebarTreeLayoutOptions extends ListLayoutOptions {
   /** The host's `renderRow`. A new identity means row content, and so any measured height, may have changed. */
   readonly rowContent: unknown
+  readonly touch: boolean
 }
-interface MeasuredRow { readonly width: number; readonly height: number; readonly rowContent: unknown }
+interface MeasuredRow { readonly width: number; readonly height: number; readonly rowContent: unknown; readonly touch: boolean }
 
 /**
  * Keeps RAC's own virtualized insertion indicators above the visual ancestor band, and keeps
@@ -83,8 +86,9 @@ interface MeasuredRow { readonly width: number; readonly height: number; readonl
  * with a forced layout. A retained item object at the same width and `renderRow` instead reuses
  * the height last measured for it.
  */
-class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
+export class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
   private rowContent: unknown
+  private touch = false
   private readonly measured = new WeakMap<object, MeasuredRow>()
   override getLayoutInfo(key: Key) {
     const info = super.getLayoutInfo(key)
@@ -102,18 +106,29 @@ class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
     return info
   }
   override shouldInvalidateLayoutOptions(next: SidebarTreeLayoutOptions, previous: SidebarTreeLayoutOptions) {
-    return super.shouldInvalidateLayoutOptions(next, previous) || next.rowContent !== previous.rowContent
+    return super.shouldInvalidateLayoutOptions(next, previous) || next.rowContent !== previous.rowContent || next.touch !== previous.touch
   }
   override update(invalidationContext: Parameters<ListLayout<unknown, SidebarTreeLayoutOptions>['update']>[0]) {
     this.rowContent = invalidationContext.layoutOptions?.rowContent
-    super.update(invalidationContext)
+    const touch = invalidationContext.layoutOptions?.touch ?? this.touch
+    const touchChanged = touch !== this.touch
+    this.touch = touch
+    super.update(touchChanged ? { ...invalidationContext, sizeChanged: true } : invalidationContext)
   }
   protected override buildItem(...args: Parameters<ListLayout<unknown>['buildItem']>) {
     const built = super.buildItem(...args)
     const value = args[0].value
     const known = typeof value === 'object' && value !== null ? this.measured.get(value) : undefined
     const info = built.layoutInfo
-    if (info.estimatedSize && known !== undefined && known.rowContent === this.rowContent && known.width === info.rect.width) {
+    const declared = (value as SidebarTreeItem<unknown> | null)?.rowHeight
+    const exact = this.touch ? declared?.touch : declared?.compact
+    if (exact !== undefined) {
+      info.rect.height = exact
+      info.estimatedSize = false
+      built.validRect = info.rect.intersection(this.requestedRect)
+      return built
+    }
+    if (info.estimatedSize && known !== undefined && known.rowContent === this.rowContent && known.touch === this.touch && known.width === info.rect.width) {
       info.rect.height = known.height
       info.estimatedSize = false
       built.validRect = info.rect.intersection(this.requestedRect)
@@ -124,7 +139,7 @@ class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
     const changed = super.updateItemSize(key, size)
     const value = this.virtualizer?.collection.getItem(key)?.value
     const info = this.layoutNodes.get(key)?.layoutInfo
-    if (typeof value === 'object' && value !== null && info !== undefined) this.measured.set(value, { width: info.rect.width, height: size.height, rowContent: this.rowContent })
+    if (typeof value === 'object' && value !== null && info !== undefined) this.measured.set(value, { width: info.rect.width, height: size.height, rowContent: this.rowContent, touch: this.touch })
     return changed
   }
 }
@@ -197,7 +212,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const { direction } = useLocale()
   const touch = useTouchLayout()
   const layout = React.useMemo(() => new SidebarTreeLayout(layoutOptions), [])
-  const rowLayoutOptions = React.useMemo(() => ({ rowContent: props.renderRow }), [props.renderRow])
+  const rowLayoutOptions = React.useMemo(() => ({ rowContent: props.renderRow, touch }), [props.renderRow, touch])
   const tree = React.useRef<HTMLDivElement>(null)
   const navigation = React.useRef<TreeItemRenderProps['state'] | undefined>(undefined)
   const frame = React.useRef<number | undefined>(undefined)
