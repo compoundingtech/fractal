@@ -403,6 +403,30 @@ impl Store {
         self.replica_inventory_changed();
     }
 
+    /// A trim deleted the payloads of `trimmed`, envelopes its checkpoint still lists: mark them
+    /// payloadless in the cached replication snapshot, as a load from nothing would, instead of
+    /// forgetting it. Identities and digests are unchanged, so the next snapshot builds on from
+    /// this one. Under the build lock, so a build that read the store before the deletes cannot
+    /// publish its snapshot after this patch. A trim that deleted the newest envelope row has
+    /// already moved the inventory generation, and the next snapshot is built from nothing.
+    pub fn mark_payloads_trimmed(&self, trimmed: &[ReplicaEnvelopeId]) -> Result<()> {
+        {
+            let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
+            let mut cached = crate::read_budget::lock_sync(&self.replication_snapshot)?;
+            if let Some(previous) = cached.take() {
+                let mut snapshot = Arc::try_unwrap(previous).unwrap_or_else(|shared| (*shared).clone());
+                for identity in trimmed {
+                    if snapshot.inventory.mark_payloadless(identity) {
+                        snapshot.envelope_rows = snapshot.envelope_rows.saturating_sub(1);
+                    }
+                }
+                *cached = Some(Arc::new(snapshot));
+            }
+        }
+        self.replica_inventory_changed();
+        Ok(())
+    }
+
     /// Whether evidence may cite this claim: it is stored, or a checkpoint dropped it.
     pub fn evidence_exists(&self, id: &str) -> Result<bool> {
         claim_or_tombstone_exists(&self.readers.get(), id)

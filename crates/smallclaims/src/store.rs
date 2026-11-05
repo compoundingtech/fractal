@@ -1778,6 +1778,39 @@ impl CompactReplicationInventory {
         }
     }
 
+    /// Mark a listed identity as one whose payload is gone, as a full load would after a trim
+    /// deleted it. Return whether it was listed with its payload; an identity not listed, or
+    /// already payloadless, leaves the inventory as it was.
+    pub fn mark_payloadless(&mut self, identity: &ReplicaEnvelopeId) -> bool {
+        let Ok(writer) = self.writers.binary_search(&identity.writer) else {
+            return false;
+        };
+        // `compact` keeps an irregular hash's text at the end of `irregular_hashes` so that
+        // `order` can compare it; it is taken off again whatever the search finds.
+        let probe = self.compact(writer as u32, identity.clone());
+        let found = self
+            .envelopes
+            .binary_search_by(|listed| self.order(listed, &probe))
+            .ok()
+            .map(|position| self.envelopes[position]);
+        if probe.irregular != 0 {
+            self.irregular_hashes.pop();
+        }
+        let Some(envelope) = found else {
+            return false;
+        };
+        if !self.has_payload(&envelope) {
+            return false;
+        }
+        if envelope.irregular == 0 {
+            self.payloadless.insert(envelope.hash);
+        } else {
+            let identity = self.identity(&envelope);
+            self.payloadless_irregular.insert(identity);
+        }
+        true
+    }
+
     /// Append an identity that sorts after every held one. The digest is left for the caller.
     pub fn push_sorted(&mut self, identity: ReplicaEnvelopeId) {
         if self.writers.last() != Some(&identity.writer) {
@@ -4537,6 +4570,8 @@ fn load_compact_replication_inventory(
     } else {
         connection.prepare(/* sqlite-large-value: allow-for-now lv-h7d0084b5fded owner=smallclaims::store TODO=trace-statement-and-value-representation */ CHECKPOINTED)?
     };
+    #[cfg(any(test, feature = "test-support"))]
+    FULL_INVENTORY_LOADS.with(|loads| loads.set(loads.get() + 1));
     let mut rows = statement.query([])?;
     let mut inventory = CompactReplicationInventory::default();
     let mut max_rowid = 0;
@@ -10621,6 +10656,8 @@ thread_local! {
     pub static GRAPH_DIGESTS_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Projections this thread replayed from nothing.
     pub static FULL_REPLAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Replication inventories this thread loaded from nothing.
+    pub static FULL_INVENTORY_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Writer transactions this thread admitted replicated envelopes in.
     pub static ADMISSION_TRANSACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
