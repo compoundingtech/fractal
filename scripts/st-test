@@ -2012,6 +2012,7 @@ def members_limit():
 
 
 MEMBERS_POLL = 0.5  # how often the member step's limit, and whether it waits for build admission, are read while it runs
+NOTIFY_FD = 'BUILD_ADMISSION_NOTIFY_FD'  # the gate writes 'admitted <unix time> <waited seconds>' to this fd just before it execs the command
 
 
 def admission_waiting(pid, proc='/proc'):
@@ -2028,18 +2029,29 @@ def admission_waiting(pid, proc='/proc'):
 class MembersLimit:
     """ST_TEST_MEMBERS_LIMIT for the member step: `seconds` of its own running, not counting its wait in the host's build admission (the
     gate held one `nix run` for the whole 1200 s on a crowded host before it ran anything, #5068). observe() is told, each time the step is
-    read, whether it is waiting now (admission_waiting); the waits have a limit of their own, `queue_limit`."""
+    read, whether it is waiting now (admission_waiting); admitted() is the gate's own word that the wait is over (BUILD_ADMISSION_NOTIFY_FD),
+    after which the samples change nothing. The waits have a limit of their own, `queue_limit`."""
 
     def __init__(self, seconds, queue_limit, clock=time.monotonic):
         self.seconds, self.queue_limit, self.clock = seconds, queue_limit, clock
-        self.started, self.waited, self.since = clock(), 0.0, None
+        self.started, self.waited, self.since, self.done = clock(), 0.0, None, False
 
     def observe(self, waiting):
+        if self.done:
+            return
         now = self.clock()
         if waiting and self.since is None:
             self.since = now
         elif not waiting and self.since is not None:
             self.waited, self.since = self.waited + now - self.since, None
+
+    def admitted(self, waited=None):
+        """The gate admitted the step: the wait ends now, and it is at least the `waited` seconds the gate reports (it may have admitted
+        between two samples, which then saw no wait at all), never more than the step has taken."""
+        self.observe(False)
+        if waited is not None:
+            self.waited = max(self.waited, min(waited, self.clock() - self.started))
+        self.done = True
 
     def waiting(self):
         """Seconds spent waiting for admission so far."""
@@ -2051,12 +2063,22 @@ class MembersLimit:
         return min(self.seconds - (self.clock() - self.started - waited), self.queue_limit - waited)
 
 
+def admitted_waited(data):
+    """The waited seconds from the gate's notice ('admitted <unix time> <waited seconds>'), or None when it does not say."""
+    parts = data.decode(errors='replace').split()
+    try:
+        return float(parts[2]) if len(parts) >= 3 and parts[0] == 'admitted' else None
+    except ValueError:
+        return None
+
+
 def materialize_members(directory, queue_limit=None):
     """Fill repos/ from the tree's megarepo.lock, as CI does before every lane that reads it; a tree without one needs nothing.
 
     Returns None, or why the members could not be materialized (then no check runs and nothing is signed). The command's output goes to a
     file, not a pipe this process would have to read, and a run past its limit (MembersLimit: ST_TEST_MEMBERS_LIMIT of running, `queue_limit`
-    of waiting for build admission) is killed with everything it started."""
+    of waiting for build admission) is killed with everything it started. The gate's admission notice comes on a pipe (BUILD_ADMISSION_NOTIFY_FD):
+    a line ends the wait when it happens; until one comes, and on a host without the notice (EOF and no line), the step's process is sampled."""
     if not (directory / 'megarepo.lock').is_file():
         return None
     try:
@@ -2064,19 +2086,41 @@ def materialize_members(directory, queue_limit=None):
     except (OSError, ValueError, KeyError, TypeError) as error:
         return f'cannot read the effect-utils pin from flake.lock: {error}'
     limit = MembersLimit(members_limit(), QUEUE_LIMIT if queue_limit is None else queue_limit)
+    notice, write_end = os.pipe()
     with tempfile.TemporaryFile() as output:
-        process = subprocess.Popen(command, cwd=directory, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            process = subprocess.Popen(command, cwd=directory, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+                                       pass_fds=(write_end,), env=dict(os.environ, **{NOTIFY_FD: str(write_end)}))
+        except BaseException:
+            os.close(notice)
+            raise
+        finally:
+            os.close(write_end)  # only the step holds it, so a gate that dies without a line is EOF
         while True:
             limit.observe(admission_waiting(process.pid))
             left = limit.remaining()
             if left <= 0:
                 code, waited_out = None, limit.queue_limit - limit.waiting() <= 0
                 break
+            if notice is not None:
+                if select.select([notice], [], [], min(left, MEMBERS_POLL))[0]:
+                    data = os.read(notice, 256)
+                    if data:
+                        limit.admitted(admitted_waited(data))
+                    os.close(notice)
+                    notice = None
+                    continue  # the limits as the notice leaves them, before an exit is accepted
+                code = process.poll()
+                if code is not None:
+                    break
+                continue
             try:
                 code = process.wait(timeout=min(left, MEMBERS_POLL))
                 break
             except subprocess.TimeoutExpired:
                 continue
+        if notice is not None:
+            os.close(notice)
         limit.observe(False)
         waited = round(limit.waiting())
         note = f'; waited {waited}s for build admission (not counted against ST_TEST_MEMBERS_LIMIT)' if waited else ''

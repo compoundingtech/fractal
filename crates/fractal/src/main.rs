@@ -11876,13 +11876,26 @@ fn render_performance(view: &Value) -> String {
         let _ = writeln!(out);
     }
     if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
-        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start",
+        let reserve = &view["lane_bursts"]["reserve"];
+        let seat = reserve["subject"].as_str().unwrap_or("a seat");
+        let reserve = match (reserve["full"].as_u64(), reserve["kept"].as_u64()) {
+            (Some(full), Some(kept)) if full == kept => format!(" · {} kept from starts for a burst (last judged for {seat})", show_gib(full)),
+            (Some(full), Some(kept)) => format!(" · {} kept from starts for a burst ({} while one is held; last judged for {seat})",
+                show_gib(full), show_gib(kept)),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start{reserve}",
             view["lane_bursts"]["held"], view["lane_bursts"]["waiting"]);
     }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
     out
+}
+
+/// Bytes as the lane reasons show them: GiB with one decimal.
+fn show_gib(bytes: u64) -> String {
+    format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
 }
 
 async fn doctor_request<T: serde::de::DeserializeOwned>(
@@ -21078,6 +21091,21 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 0
             }
         };
+        // A seat's host's relayed closes this member's own records now cover (relayed_closes.rs).
+        let relayed_store = store.clone();
+        let relayed = match relayed_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("relayed_closes.trim", || {
+            fractal_daemon::store::relayed_closes::trim(&relayed_store, LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("relayed close trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("relayed close trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -21111,7 +21139,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows and {marks} message marks, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows, {marks} message marks and {relayed} relayed closes, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),
