@@ -40,6 +40,9 @@ mission "parent" state="ready" { goal "Check the complete run boundary."
   step "start" { assigned-to "agent/example/parent" }; step "other" { agentless } }
 mission "child" state="ready" { goal "Check child responsibility."
   step "work" { assigned-to "agent/example/child" } }
+mission "pool" state="ready" { goal "Keep raw responsibility."
+  step "work" { available-to "agent/example/requester"; available-to "agent/example/free" } }
+mission "source" state="ready" { goal "Keep carried requesters."; step "work" { agentless } }
 mission "looping" state="ready" { goal "Do not silently accept unsupported history."
   loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } } }
 mission "nested-loop" state="ready" { goal "Reject nested loop history."
@@ -179,4 +182,56 @@ mission-run "after" {{ mission "mission/child@{}"; workspace "/tmp"; requester "
     assert_eq!(check(&store, &run.subject, FREE), "ok");
     progress(&store, &step(&run, "after-run").subject, FREE);
     assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
+}
+
+#[test]
+fn agent_review_run_terminal_pool_keeps_raw_claimant() {
+    let (store, _, _) = fixture();
+    let run = store.create_mission_run(&request("pool")).unwrap();
+    let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "ready", None).unwrap();
+    store
+        .work_action(
+            subject,
+            "claim",
+            &WorkRequest {
+                actor: Some(REQUESTER.into()),
+                incarnation: Some("pool-worker".into()),
+                wait_ms: None,
+                summary: None,
+                reason: None,
+                evidence: Vec::new(),
+                idempotency_key: "pool-claim".into(),
+            },
+        )
+        .unwrap();
+    store
+        .set_mission_run_state(&run.subject, "completed", "terminal", None)
+        .unwrap();
+    assert_eq!(check(&store, &run.subject, FREE), "ok");
+    assert_eq!(check(&store, &run.subject, REQUESTER), CONFLICT);
+}
+
+#[test]
+fn agent_review_run_carried_source_requester() {
+    for enclosing in [false, true] {
+        let (store, parent, child) = fixture();
+        let mut request = request("source");
+        request.requester = Some(FREE.into());
+        let source = store.create_mission_run(&request).unwrap();
+        assert_eq!(check(&store, &child.subject, FREE), "ok");
+        let target = if enclosing {
+            step(&parent, "start")
+        } else {
+            &child.steps[0]
+        };
+        event(
+            &store,
+            &target.subject,
+            "step-run.carried",
+            PERSON,
+            json!({"fields": {"source_step_run": source.steps[0].subject, "attempt": 1, "status": "ready"}}),
+        );
+        assert_eq!(check(&store, &child.subject, FREE), CONFLICT);
+    }
 }

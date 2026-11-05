@@ -1,6 +1,8 @@
 use super::{Scope, St3Error, agent_review};
 use crate::model::StepRunView;
-use crate::store::{ReferenceGraph, identities, step_run_row_tx, step_timing_events};
+use crate::store::{
+    ReferenceGraph, identities, mission_run_header_tx, step_run_row_tx, step_timing_events,
+};
 use rusqlite::Connection;
 use smallclaims::error::internal;
 use std::collections::BTreeSet;
@@ -11,7 +13,7 @@ fn unresolved(subject: &str) -> St3Error {
 
 /// The caller supplies a raw step/assignment/pool view and requester from the same
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
-/// Includes local responsibility and every carried source step.
+/// Includes local responsibility, every carried source step and cross-run source requesters.
 /// Run hierarchy validation lives in fractal-missions' `store::missions::validate_run_reviewer`.
 /// Loops and the start/reassignment boundary still require the later run-policy slice.
 #[doc(hidden)]
@@ -127,6 +129,12 @@ fn collect_step(
         let source = step_run_row_tx(connection, source)
             .map_err(internal)?
             .ok_or_else(|| unresolved(source))?;
+        if source.run != step.run {
+            let owner =
+                mission_run_header_tx(connection, source.run.trim_start_matches("mission-run/"))
+                    .map_err(internal)?;
+            include(&owner.requester)?;
+        }
         collect_step(connection, &source, include, visiting)?;
     }
     visiting.remove(&step.subject);
