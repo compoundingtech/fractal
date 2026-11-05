@@ -905,9 +905,9 @@ def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
 
 def memory_caps(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     """The cgroups whose memory limit can OOM-kill what a check that builds starts, each with how the summary names it: every cgroup
-    above this process that holds a memory.max (its own cap: a lane, builds.slice or a gate slot), else the seat's capped lane a check
-    runs in (`seat_lane`, as `governed` chooses it), and the user manager's builds.slice, where a check outside every cap runs and the
-    host's sccache server compiles for every check. A kernel OOM kill leaves only a bare exit in the check (2026-11-05, on a build host:
+    above this process that holds a memory.max (its own cap: a lane, builds.slice or a gate slot); the seat's capped lane when `governed`
+    puts the check in it (no cap of its own, a user bus to scope with: `seat_lane`); and the user manager's builds.slice, where a check
+    outside every cap runs and the host's sccache server compiles for every check. A kernel OOM kill leaves only a bare exit in the check (2026-11-05, on a build host:
     a lane's compiles were OOM-killed at its memory limit, and the summary said only FAILED (1))."""
     try:
         parts = next((line[3:] for line in Path(cgroup_file).read_text().splitlines() if line.startswith('0::')), '').strip('/').split('/')
@@ -930,7 +930,10 @@ def memory_caps(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     caps = {Path(root, *parts[:depth]): named(parts[depth - 1]) for depth in range(1, len(parts) + 1) if parts[0] and limited(Path(root, *parts[:depth]))}
     manager = next((depth for depth, part in enumerate(parts) if re.fullmatch(r'user@\d+\.service', part)), None)
     if manager is not None:
-        if not caps:
+        runtime = os.environ.get('XDG_RUNTIME_DIR')
+        scoped = (os.environ.get('ST_EVIDENCE_GOVERN') != 'off' and not own_cap(cgroup_file, root) and shutil.which('systemd-run')
+                  and runtime and Path(runtime, 'bus').exists())
+        if scoped:
             lane, _ = seat_lane(cgroup_file, root)
             if lane:
                 caps[Path(root, *parts[:manager + 1], 'app.slice', 'app-lanes.slice', lane)] = named(lane)
@@ -954,8 +957,9 @@ def oom_kills(caps):
 
 def oom_note(caps, before):
     """What the summary row of a failed check adds when the kernel OOM-killed in one of its caps (memory_caps) while it ran, or ''. Only the
-    innermost cap that counted kills is named: the kills in a lane also count in every cgroup above it. builds.slice is shared, so a kill
-    there may be another run's compile."""
+    innermost cap that counted kills is named: the kills in a lane also count in every cgroup above it. A cap is shared with what else
+    runs in it (builds.slice with every run's compiles, a lane with the run's other checks and the seat's harness), so a kill there may
+    be theirs: the note says where and how many, not whose."""
     after = oom_kills(caps)
     grew = {cgroup: after[cgroup] - before[cgroup] for cgroup in after if cgroup in before and after[cgroup] > before[cgroup]}
     inner = [cgroup for cgroup in grew if not any(other != cgroup and cgroup in other.parents for other in grew)]

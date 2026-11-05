@@ -156,8 +156,9 @@ otherwise leaves only a bare exit: before a check that builds, it reads the `oom
 `memory.events` of each memory limit the check runs under (its own cap, else the seat's lane it runs
 in, and builds.slice, where the host's sccache server compiles), and a check that fails while one grew
 says `killed by the lane's memory limit (SLICE): N OOM kills at memory.max X while it ran`. Only the
-innermost limit that counted kills is named, since a kill counts in every cgroup above it too;
-builds.slice is shared, so a kill there may be another run's compile.
+innermost limit that counted kills is named, since a kill counts in every cgroup above it too. A
+limit is shared with what else runs under it (builds.slice with every run's compiles, a lane with the
+run's other checks and the seat's harness), so a kill it names may be theirs.
 
 A host guard that counts every `oom_kill` in the user slice would read a lane's kills as a fault, so
 it counts only the kills outside lanes:

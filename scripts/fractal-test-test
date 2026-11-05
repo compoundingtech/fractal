@@ -867,14 +867,27 @@ class GovernedTest(unittest.TestCase):
             self.tree(tmp, self.SEAT, {})
             with mock.patch.dict(os.environ, {}, clear=True):
                 self.assertEqual(st_test.memory_caps(Path(tmp, 'cgroup'), sys_root), {builds: "builds.slice's memory limit"})
-            # A seat's unit outside its lane: its check runs in the lane (governed), so the lane's limit is the one named.
-            self.tree(tmp, self.UNIT, {})
+            # A seat's unit outside its lane, under a user manager that holds a memory.max but no build cap: its check runs in the lane
+            # (governed), so the lane's limit is the one a kill there is named by. Not scoped (ST_EVIDENCE_GOVERN=off), it is not.
+            self.tree(tmp, self.UNIT, {'user@1000.service': (str(50 * 2 ** 30), None)})
+            Path(tmp, 'bus').touch()
             st = Path(tmp, 'st')
             st.write_text(f'#!/bin/sh\nprintf %s {shlex.quote(self.named()[1])}\n')
             st.chmod(0o755)
-            with mock.patch.dict(os.environ, {'ST_AGENT': 'agent/seat-1', 'ST3_BIN': str(st)}, clear=True):
-                self.assertEqual(st_test.memory_caps(Path(tmp, 'cgroup'), sys_root),
-                                 {lane: f"the lane's memory limit ({self.LANE_SLICE})", builds: "builds.slice's memory limit"})
+            seat = {'ST_AGENT': 'agent/seat-1', 'ST3_BIN': str(st), 'XDG_RUNTIME_DIR': tmp}
+            with mock.patch.dict(os.environ, seat, clear=True), mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'):
+                caps = st_test.memory_caps(Path(tmp, 'cgroup'), sys_root)
+                self.assertEqual(caps, {manager: 'the memory limit of user@1000.service', lane: f"the lane's memory limit ({self.LANE_SLICE})",
+                                        builds: "builds.slice's memory limit"})
+                lane.joinpath('memory.events').write_text('oom_kill 0\n')
+                manager.joinpath('memory.events').write_text('oom_kill 0\n')
+                before = st_test.oom_kills(caps)
+                lane.joinpath('memory.events').write_text('oom_kill 2\n')
+                manager.joinpath('memory.events').write_text('oom_kill 2\n')
+                self.assertIn(f"the lane's memory limit ({self.LANE_SLICE}): 2 OOM kills", st_test.oom_note(caps, before))
+            with mock.patch.dict(os.environ, dict(seat, ST_EVIDENCE_GOVERN='off'), clear=True), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'):
+                self.assertNotIn(lane, st_test.memory_caps(Path(tmp, 'cgroup'), sys_root))
 
     def test_an_unreadable_cgroup_is_no_cap(self):
         self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
