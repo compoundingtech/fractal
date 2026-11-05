@@ -44,6 +44,7 @@ import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider,
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { formatDuration } from '@fractal/ui/human-time/format'
+import { createLazyChunk, readLazyChunkAssets } from '@fractal/ui/lazy-chunk'
 import { useGatewaySync } from '../data/react.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
@@ -148,31 +149,28 @@ const LiveSidebarTreeView = React.memo((props: {
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
 // A static import would evaluate the kit Transcript/Markdown before the shell paints.
-// Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
-let conversationPaneModule: Promise<typeof ConversationPaneModule> | undefined
-const loadConversationPane = () => {
-  if (conversationPaneModule === undefined) {
-    conversationPaneModule = import('./ConversationPane.tsx').catch(error => {
-      conversationPaneModule = undefined
-      throw error
-    })
-  }
-  return conversationPaneModule
-}
+// Demand and speculative prefetch share one request; a rejection stays until a user retry.
+const conversationChunk = createLazyChunk({ load: () => import('./ConversationPane.tsx'), assets: () => readLazyChunkAssets('conversation') })
 const ConversationPane = React.lazy(() => {
   // An initially selected pane and later shell prefetch must retain the same lazy identity.
   // A second wrapper suspends on an already resolved module during the first seat switch.
   prefetchedConversationPane ??= ConversationPane
-  return loadConversationPane().then(module => ({ default: module.ConversationPane }))
+  return conversationChunk.load().then(module => ({ default: module.ConversationPane }))
 })
 let prefetchedConversationPane: typeof ConversationPane | undefined
 const prefetchConversationPane = () => {
-  const request = loadConversationPane()
+  const request = conversationChunk.load()
   // Preserve this attempt's failure for the requested pane's honest, local error surface.
   // A retry creates a fresh lazy wrapper, not React's permanently rejected cached wrapper.
   prefetchedConversationPane ??= React.lazy(() => request.then(module => ({ default: module.ConversationPane })))
   void request.catch(() => {})
 }
+
+/** The first recovery re-imports in this document; after a second rejected import, reload with fresh feature assets. Drafts and selection are already persisted. */
+const LazyChunkRecoveryAction = (props: { readonly chunk: { readonly recovery: 'retry' | 'reload'; readonly reload: () => Promise<void> }; readonly onRetry: () => void }) =>
+  props.chunk.recovery === 'reload'
+    ? <button type="button" onClick={() => void props.chunk.reload()}>Reload and retry</button>
+    : <button type="button" onClick={props.onRetry}>Try again</button>
 
 /** Acquire visible route demand outside Suspense so the socket read overlaps pane evaluation. */
 const ConversationPaneLoadBoundary = (props: React.ComponentProps<typeof ConversationPaneModule.ConversationPane>) => {
@@ -195,11 +193,11 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
   render() {
     if (this.state.failed) return <div role="alert" aria-hidden={!this.props.visible} {...stylex.props(styles.empty)}>
       <p>This conversation view could not load.</p>
-      <button type="button" onClick={() => {
-        const Pane = React.lazy(() => loadConversationPane().then(module => ({ default: module.ConversationPane })))
+      <LazyChunkRecoveryAction chunk={conversationChunk} onRetry={() => {
+        const Pane = React.lazy(() => conversationChunk.retry().then(module => ({ default: module.ConversationPane })))
         prefetchedConversationPane = Pane
         this.setState({ failed: false, Pane })
-      }}>Try again</button>
+      }} />
     </div>
     const Pane = this.state.Pane
     return <React.Suspense fallback={<ConversationPaneFallback agentName={this.props.agentName} visible={this.props.visible} />}>
@@ -233,38 +231,34 @@ class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof 
 // Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
 const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
-/** Demand and idle intent share one request; a failed preload never poisons the next open. */
-let terminalDetailModule: Promise<typeof TerminalDetailModule> | undefined
 /** Set once the module resolves, so a warm reopen renders it directly instead of suspending a fresh lazy identity. */
 let terminalDetailLoaded: typeof TerminalDetailModule | undefined
-const loadTerminalDetail = () => {
-  terminalDetailModule ??= import('../terminal/TerminalDetail.tsx').then(module => {
+/** Demand and idle intent share one request; a rejection stays until a user retry. */
+const terminalChunk = createLazyChunk({
+  load: () => import('../terminal/TerminalDetail.tsx').then(module => {
     terminalDetailLoaded = module
     return module
-  }).catch(error => {
-    terminalDetailModule = undefined
-    throw error
-  })
-  return terminalDetailModule
-}
-const makeTerminalDetail = () => React.lazy(() =>
-  loadTerminalDetail().then(module => {
+  }),
+  assets: () => readLazyChunkAssets('terminal'),
+})
+const terminalDetail = (load: () => Promise<typeof TerminalDetailModule>) => React.lazy(() =>
+  load().then(module => {
     void module.prepareTerminal()
     return { default: module.TerminalDetail }
   }),
 )
 const prefetchTerminalDetail = () => {
-  void loadTerminalDetail().then(module => module.prepareTerminal()).catch(() => {})
+  void terminalChunk.load().then(module => module.prepareTerminal()).catch(() => {})
 }
 
 /** The terminal grid, fonts and native key encoder stay outside the eager shell; a fresh lazy identity on retry avoids React's permanently rejected module cache. */
 class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `terminal/${string}` }> {
-  state = { failed: false, Detail: makeTerminalDetail() }
+  state = { failed: false, Detail: terminalDetail(() => terminalChunk.load()) }
   static getDerivedStateFromError() { return { failed: true } }
   render() {
     if (this.state.failed) return <div role="alert">
       <p>This terminal view could not load.</p>
-      <button type="button" onClick={() => this.setState({ failed: false, Detail: makeTerminalDetail() })}>Try again</button>
+      <LazyChunkRecoveryAction chunk={terminalChunk} onRetry={() => this.setState({ failed: false, Detail: terminalDetail(() => terminalChunk.retry()) })} />
     </div>
     const Detail = terminalDetailLoaded?.TerminalDetail ?? this.state.Detail
     return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
