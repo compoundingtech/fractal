@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fractal web, embedded workspaces and Storybook ship only English React Aria strings rather than every locale; roster, focus, collection, virtualizer and drag-and-drop code remain synchronous.",
+  "replay": { "status": "none", "detail": "No graph or storage change." },
+  "schema": { "status": "none", "detail": "No schema change." },
+  "rules": { "status": "none", "detail": "No rule change." },
+  "compatibility": { "status": "none", "detail": "Product approved en-US-only React Aria support until the app has real i18n. Explicit root I18nProviders select English strings, plurals, Aria number/date formats and left-to-right reading direction even when the browser prefers another locale. Native Intl/Date timestamp formatting outside React Aria is unchanged. No API or wire change." },
+  "downtime": { "status": "none", "detail": "Takes effect with the next web build; no daemon restart is required." },
+  "manual": { "status": "none", "detail": "No operator step." },
+  "recovery": { "status": "none", "detail": "To add real app i18n, expand the shared locale list in apps/fractal-web/scripts/aria-locales.mjs together with all root I18nProviders and their locale-selection UI; test every supported locale. Revert this change and rebuild to restore navigator-selected React Aria locale behavior and all bundled translations." }
+}
