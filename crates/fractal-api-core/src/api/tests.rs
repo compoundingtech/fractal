@@ -1945,9 +1945,10 @@ fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
     assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
 }
 
-/// While a seat's staging recorded as a mark is undelivered, doctor warns that rolling this member
-/// back below v0.3.26 would offer the mail again, and gives the steps; the warning clears once the
-/// mail is delivered, and a staging claim never raises it.
+/// While a seat's staging recorded as a mark has waited over a minute undelivered, doctor warns that
+/// rolling this member back below v0.3.26 would offer the mail again, and gives the steps. A fresh
+/// staging mark, in flight as mail ordinarily is, does not warn; the warning clears once the mail
+/// is delivered, and a staging claim never raises it.
 #[test]
 fn doctor_warns_of_undelivered_staging_marks_until_delivery() {
     let root = tempfile::tempdir().unwrap();
@@ -1976,16 +1977,19 @@ fn doctor_warns_of_undelivered_staging_marks_until_delivery() {
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
-    assert!(staging(&state).is_none(), "a staging claim reads on every release");
+    let later = || client_now_ms() + 61_000;
+    assert!(staging(&state).is_none() && message_staging_check(&state, later()).is_none(), "a staging claim reads on every release");
 
     crate::store::message_marks::record(&state.store, "message/staged-as-mark", "message.staged", seat).unwrap();
-    let warned = staging(&state).expect("an undelivered staging mark warns");
+    assert!(staging(&state).is_none(), "a fresh staging mark is in flight, not stalled");
+    let warned = message_staging_check(&state, later()).expect("a staging mark undelivered over a minute warns");
+    assert_eq!(warned.name, "message-staging-rollback");
     assert_eq!(warned.status, "warn");
-    for part in ["1 message(s)", "message/staged-as-mark", "v0.3.25 or earlier would offer them again", "v0.3.26 is the safe floor", "roll every member to v0.3.26"] {
+    for part in ["1 message(s)", "over a minute ago", "message/staged-as-mark", "v0.3.25 or earlier would offer them again", "v0.3.26 is the safe floor", "roll every member to v0.3.26"] {
         assert!(warned.message.contains(part), "{part}: {warned:?}");
     }
     crate::store::message_marks::record(&state.store, "message/staged-as-mark", "message.delivered", seat).unwrap();
-    assert!(staging(&state).is_none(), "delivery clears it");
+    assert!(message_staging_check(&state, later()).is_none(), "delivery clears it");
 }
 
 #[test]

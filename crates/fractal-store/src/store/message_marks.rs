@@ -303,19 +303,21 @@ pub fn local_consumer(connection: &Connection, origin: &str, message: &str, cons
     Ok(!probe)
 }
 
-/// The messages this member's seats staged as marks that no later step has reached yet, as their
-/// count and the first of them. A release that does not read `local_message_staged` (v0.3.25 and
-/// earlier) would read each as unoffered mail and offer it again after a rollback.
-pub fn undelivered_staged(connection: &Connection) -> Result<(u64, Option<String>)> {
+/// The messages this member's seats staged as marks at or before `staged_by` (Unix ms) that no
+/// later step has reached yet, as their count and the first of them. A release that does not read
+/// `local_message_staged` (v0.3.25 and earlier) would read each as unoffered mail and offer it again
+/// after a rollback.
+pub fn undelivered_staged(connection: &Connection, staged_by: u128) -> Result<(u64, Option<String>)> {
     Ok(connection
         .prepare_cached(
             "SELECT COUNT(DISTINCT staged.message), MIN(staged.message) FROM local_message_staged staged
-             WHERE NOT EXISTS (SELECT 1 FROM local_message_marks marks WHERE marks.message=staged.message)
+             WHERE staged.recorded_at_unix_ms<=?1
+               AND NOT EXISTS (SELECT 1 FROM local_message_marks marks WHERE marks.message=staged.message)
                AND NOT EXISTS (SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                                WHERE claims.subject=staged.message
                                  AND claims.kind IN ('message.delivered','message.read','message.closed'))",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h74e4f02ec392 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get(1)?)))?)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1a32ef3b0b5c owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [i64::try_from(staged_by).unwrap_or(i64::MAX)], |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get(1)?)))?)
 }
 
 /// The furthest-along mark of `message`, as its status ("staged", "delivered", "read" or "closed").

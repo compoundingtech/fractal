@@ -8093,18 +8093,23 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
     DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
 }
 
-/// While this member's seats have mail staged as a mark and not yet delivered, rolling this member
-/// back below v0.3.26 would offer that mail again: a warning that names the safe floor and the
-/// release note's steps. None while there is no such mail.
-fn message_staging_check(state: &AppState) -> Option<DoctorCheck> {
+/// How long a staging may wait for its delivery before doctor calls it stalled: in-flight mail is
+/// staged and delivered within seconds, and a rollback never follows a staging that closely.
+const STALLED_STAGING_MS: u128 = 60_000;
+
+/// While this member's seats have mail staged as a mark over [`STALLED_STAGING_MS`] ago and not yet
+/// delivered, rolling this member back below v0.3.26 would offer that mail again: a warning that
+/// names the safe floor and the release note's steps. None while there is no such mail, so a strict
+/// doctor does not fail on ordinary in-flight mail.
+fn message_staging_check(state: &AppState, now: u128) -> Option<DoctorCheck> {
     let name = "message-staging-rollback".to_owned();
-    match crate::store::message_marks::undelivered_staged(&state.store.readers.get()) {
+    match crate::store::message_marks::undelivered_staged(&state.store.readers.get(), now.saturating_sub(STALLED_STAGING_MS)) {
         Ok((0, _)) => None,
         Ok((count, first)) => Some(DoctorCheck {
             name,
             status: "warn".into(),
             message: format!(
-                "{count} message(s) this member's seats staged as local marks are not delivered yet ({}): rolling this member back to v0.3.25 or earlier would offer them again; v0.3.26 is the safe floor. To roll back below it, first roll every member to v0.3.26, wait a minute for stagings to turn back to claims, and let staged mail deliver (release note staging-marks-writer)",
+                "{count} message(s) this member's seats staged as local marks over a minute ago are not delivered yet ({}): rolling this member back to v0.3.25 or earlier would offer them again; v0.3.26 is the safe floor. To roll back below it, first roll every member to v0.3.26, wait a minute for stagings to turn back to claims, and let staged mail deliver (release note staging-marks-writer)",
                 first.as_deref().unwrap_or("unknown")),
         }),
         Err(error) => Some(DoctorCheck { name, status: "warn".into(), message: format!("{error:#}") }),
@@ -9473,7 +9478,9 @@ fn doctor_report_within(
     checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
     });
-    checks.check("message-marks", || Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state)).collect()));
+    checks.check("message-marks", || {
+        Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
+    });
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
