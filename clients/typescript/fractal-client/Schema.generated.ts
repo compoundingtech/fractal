@@ -1088,6 +1088,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "incarnation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "kind": Schema.Literal("agent"),
   "last_activity_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. Omitted on roster rows and non-owning hosts. */
+  "launch_contract": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE).annotate({ description: "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. Omitted on roster rows and non-owning hosts." }),
   /** The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row. */
   "lifecycle": optionalKey(AgentLifecycle),
   /** Pending mail held for the named successor; omitted without custody. */

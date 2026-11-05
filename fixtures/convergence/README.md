@@ -219,3 +219,15 @@ Characterization used
 `cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
 The first characterization run failed only the three stale v13 trim expectations;
 the per-seed equality and majority-trim assertions remain enforced.
+
+`claims-v15.json` captures the registry that adds `fleet.shard-bounds`, a leaving member's signed
+record of how far it wrote in the messages shard. Versions 1 through 14 stay frozen. Generate v15
+from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v15.json`;
+do not hand-edit the snapshot. The simulation selects v15 and records its filename in audit
+summaries.
+
+With v15 every fixed seed converges; seeds 2 and 27 are the exact never-trim set (seeds 21 and 74
+trim again). Characterization used
+`cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+The first characterization run failed only the four stale v14 trim expectations.

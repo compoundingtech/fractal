@@ -394,15 +394,23 @@ def prepare_dependencies():
         inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
-        if cache.stat().st_size:
+        if not cache.stat().st_size:
+            install()
+            return
+        # Outputs can change without changing generator inputs. Check without
+        # mutating the index/worktree; a stale patch is a miss, not a tick failure.
+        if git('apply','--check','--index',cache,capture=True,check=False).returncode == 0:
             git('apply','--index',cache)
             git('commit','-m','live-r3: reuse generated dependency metadata')
-        install()
-        return
+            install()
+            return
     before=text('rev-parse','HEAD')
     regenerate()
     cache.parent.mkdir(exist_ok=True)
-    cache.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+    with tempfile.TemporaryDirectory(dir=cache.parent) as temporary:
+        replacement=pathlib.Path(temporary)/'patch'
+        replacement.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+        replacement.replace(cache)
 
 def probe_revision(revision):
     git('checkout','--detach',revision)

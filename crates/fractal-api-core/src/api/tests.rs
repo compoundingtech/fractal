@@ -1074,6 +1074,12 @@ async fn agent_detail_does_not_materialize_unrelated_cached_cards() {
     assert_eq!(card["name"], "node.amber");
     assert!(card.get("todo").is_some());
     assert!(card.get("_status_source").is_none());
+    let contract = &card["launch_contract"];
+    assert!(contract["declared"]["digest"].is_string(), "{contract}");
+    assert!(contract["running"].is_null());
+    assert!(contract["drift"].is_null(), "missing launch evidence is not convergence");
+    let decoded: fractal_client::Agent = serde_json::from_value(card.clone()).unwrap();
+    assert_eq!(decoded.launch_contract.as_ref(), Some(contract));
 }
 
 #[tokio::test]

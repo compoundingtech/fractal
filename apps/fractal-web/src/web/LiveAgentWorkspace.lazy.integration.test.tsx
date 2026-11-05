@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as PaneModule from './ConversationPane.tsx'
 import type * as WorkspaceModule from './LiveAgentWorkspace.tsx'
 import type * as FallbackModule from './ConversationPaneFallback.tsx'
+import type * as LazyChunkModule from '@fractal/ui/lazy-chunk'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { Feed, Fleet } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
@@ -21,6 +22,21 @@ const changelogPrefetch = vi.hoisted(() => vi.fn())
 vi.mock('../changelog/load.ts', () => ({ prefetchChangelog: changelogPrefetch }))
 // Header actions read resources from a data source; they are outside this import boundary.
 vi.mock('./ConversationHeaderActions.tsx', () => ({ ConversationHeaderActions: () => null }))
+// Keep the real retry/recovery helper; only observe the navigation-ending reload.
+const chunkReload = vi.fn(async () => {})
+vi.mock('@fractal/ui/lazy-chunk', async importOriginal => {
+  const original = await importOriginal<typeof LazyChunkModule>()
+  return {
+    ...original,
+    createLazyChunk: ((options: Parameters<typeof original.createLazyChunk>[0]) => new Proxy(original.createLazyChunk(options), {
+      get: (target, key) => {
+        if (key === 'reload') return chunkReload
+        const value: unknown = Reflect.get(target, key)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })) as typeof original.createLazyChunk,
+  }
+})
 let fallbackRenders = 0
 let rosterFeed: Feed<Fleet> = { _tag: 'Waiting' }
 vi.mock('./ConversationPaneFallback.tsx', async importOriginal => {
@@ -76,6 +92,7 @@ const paintTasks: (() => void)[] = []
 
 beforeEach(async () => {
   vi.resetModules()
+  chunkReload.mockClear()
   requested.mockClear()
   changelogPrefetch.mockClear()
   terminalRequested.mockClear()
@@ -155,6 +172,7 @@ afterEach(async () => {
   container.remove()
   vi.doUnmock('./ConversationPane.tsx')
   vi.doUnmock('../terminal/TerminalDetail.tsx')
+  vi.doUnmock('../monitor/UsagePane.tsx')
   vi.doUnmock('./AlertsTab.tsx')
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
@@ -303,7 +321,7 @@ describe('terminal import intent', () => {
     })
     expect(terminalRequested).toHaveBeenCalledTimes(1)
   })
-  it('retries a rejected terminal chunk with a fresh lazy identity', async () => {
+  it('retries a rejected terminal chunk in the same document with a fresh lazy identity', async () => {
     const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
@@ -320,6 +338,66 @@ describe('terminal import intent', () => {
       await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')?.click())
       await act(async () => { await vi.waitFor(() => expect(terminalRequested).toHaveBeenCalledTimes(2)) })
       await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-terminal-loaded]')?.textContent).toBe('Recovered')) })
+    } finally { errors.mockRestore() }
+  })
+  it('offers Reload and retry only after the same-document retry also rejects', async () => {
+    const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await act(async () => root.render(show))
+      await act(async () => rejectTerminal(new Error('Chunk unavailable')))
+      vi.resetModules()
+      vi.doMock('../terminal/TerminalDetail.tsx', () => {
+        terminalRequested()
+        throw new Error('Chunk still unavailable')
+      })
+      await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')!.click())
+      await act(async () => { await vi.waitFor(() => expect(terminalRequested).toHaveBeenCalledTimes(2)) })
+      const reload = await vi.waitFor(() => [...container.querySelectorAll('button')].find(button => button.textContent === 'Reload and retry') ?? expect.fail('no reload action'))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This terminal view could not load')
+      expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Try again')).toBe(false)
+      expect(chunkReload).not.toHaveBeenCalled()
+      await act(async () => reload.click())
+      expect(chunkReload).toHaveBeenCalledTimes(1)
+      expect(terminalRequested).toHaveBeenCalledTimes(2)
+    } finally { errors.mockRestore() }
+  })
+})
+
+describe('usage import boundary', () => {
+  it('keeps the workspace mounted after a rejected chunk and retries with a fresh lazy identity', async () => {
+    const usageRequested = vi.fn()
+    let rejectUsage!: (reason: Error) => void
+    const pending = new Promise<void>((_resolve, reject) => { rejectUsage = reject })
+    vi.doMock('../monitor/UsagePane.tsx', async () => {
+      usageRequested()
+      await pending
+      return { default: () => <div>Unused usage pane</div> }
+    })
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await renderShell()
+      const shell = container.querySelector('section[aria-label="Agent workspace"]')
+      expect(shell).not.toBeNull()
+      await act(async () => {
+        window.history.pushState(null, '', '/w/agent/example?open=monitor%2Fquota%3Adetail')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+      await act(async () => rejectUsage(new Error('Chunk unavailable')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This usage view could not load.')
+      expect(container.querySelector('section[aria-label="Agent workspace"]')).toBe(shell)
+      vi.resetModules()
+      vi.doMock('../monitor/UsagePane.tsx', () => {
+        usageRequested()
+        return { default: () => <div data-usage-loaded="">Recovered usage</div> }
+      })
+      const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')
+      expect(retry).toBeDefined()
+      await act(async () => retry!.click())
+      await act(async () => { await vi.waitFor(() => expect(usageRequested).toHaveBeenCalledTimes(2)) })
+      await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-usage-loaded]')?.textContent).toBe('Recovered usage')) })
+      expect(container.querySelector('section[aria-label="Agent workspace"]')).toBe(shell)
+      expect(container.querySelector('[role="alert"]')).toBeNull()
     } finally { errors.mockRestore() }
   })
 })
@@ -499,6 +577,30 @@ describe('conversation import boundary', () => {
     await act(async () => { for (const task of paintTasks.splice(0)) task() })
     expect(capture).toHaveBeenCalledTimes(1)
     expect(requested).not.toHaveBeenCalled()
+  })
+
+  it('retries a rejected pane in the same document, then offers Reload and retry after a second rejection', async () => {
+    const show = <workspace.WorkspaceBody current="agent/a" rosterRefs={['agent/a']} view={{ _tag: 'Thread' }} agentName="agent/a" onOpenTool={() => {}} />
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await act(async () => root.render(show))
+      await act(async () => rejectImport(new Error('Synthetic chunk request failed')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This conversation view could not load.')
+      vi.resetModules()
+      vi.doMock('./ConversationPane.tsx', async () => {
+        requested()
+        throw new Error('Synthetic chunk request failed again')
+      })
+      // The first action never navigates: it re-imports through a fresh lazy wrapper in this document.
+      await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')!.click())
+      await act(async () => { await vi.waitFor(() => expect(requested).toHaveBeenCalledTimes(2)) })
+      const reload = await vi.waitFor(() => [...container.querySelectorAll('button')].find(button => button.textContent === 'Reload and retry') ?? expect.fail('no reload action'))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This conversation view could not load.')
+      expect(chunkReload).not.toHaveBeenCalled()
+      await act(async () => reload.click())
+      expect(chunkReload).toHaveBeenCalledTimes(1)
+      expect(requested).toHaveBeenCalledTimes(2)
+    } finally { errors.mockRestore() }
   })
 
   it('handles speculative import rejection without an unhandled rejection', async () => {
