@@ -107,6 +107,7 @@
     "clients/swift/FractalClient/Sources/FractalClient/Client.swift",
     "clients/swift/FractalClient/Sources/FractalClient/Contract.generated.swift",
     "clients/swift/FractalClient/Sources/FractalClient/Models.swift",
+    "clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift",
     "clients/typescript/fractal-client/Client.generated.ts",
     "clients/typescript/fractal-client/Models.generated.ts",
     "clients/typescript/fractal-client/Schema.generated.ts",
