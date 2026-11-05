@@ -1766,6 +1766,8 @@ fn emit_models(
         optional.clone_from(&entry);
         let imports = names.iter().cloned().collect::<Vec<_>>().join(", ");
         writeln!(optional, "import {{ {imports} }} from \"./ReadSchema.generated.ts\"")?;
+        let encoded = names.iter().map(|name| format!("{name}Encoded")).collect::<Vec<_>>().join(", ");
+        writeln!(optional, "import type {{ {encoded} }} from \"./ReadSchema.generated.ts\"")?;
         writeln!(optional, "export * from \"./ReadSchema.generated.ts\"\n")?;
         out = entry;
     }
