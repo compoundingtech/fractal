@@ -2959,6 +2959,7 @@ fn client_work_values(
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
+                "execution_waited_ms": work.execution_waited_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
                 "constraints": work.constraints,
@@ -4736,7 +4737,9 @@ fn client_message_resource(
 ) -> anyhow::Result<Value> {
     let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
     let updated_at = metadata["updated_at"].as_str().unwrap_or("0").parse::<u128>()?;
-    let reasons = if message.status == "closed" {
+    // A close the seat's host relayed is history too, though the message's own status is this
+    // member's records until the host answers again.
+    let reasons = if message.status == "closed" || metadata["closed"] == true {
         vec!["closed"]
     } else if !current {
         vec!["superseded"]
@@ -4921,7 +4924,9 @@ fn client_message_resources_at(
             .cloned()
             .unwrap_or(Value::Null);
         let mut reasons = Vec::new();
-        if message.status == "closed" {
+        if message.status == "closed"
+            || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
+        {
             reasons.push("closed");
         } else if !current_ids.contains(&message.subject) {
             reasons.push("superseded");

@@ -1696,6 +1696,8 @@ pub struct Work {
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]
+    pub execution_waited_ms: u64,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
     pub blocked_reason: Option<String>,
     #[serde(default)]
