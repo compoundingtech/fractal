@@ -743,7 +743,7 @@ fn within_a_trim_s_run_the_envelope_that_reuses_a_deleted_newest_rowid_is_listed
     }));
     assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
     store.trim_chunk_hook.lock().unwrap().take();
-    let seen = seen.lock().unwrap().clone();
+    let seen = *seen.lock().unwrap();
     assert!(seen.0, "the snapshot built within the run ends at the tail");
     assert_eq!(seen.1, Some((tail, true)), "admitted between chunks, reusing the rowid, and listed");
     assert!(snapshot_lists_the_store(&store));
