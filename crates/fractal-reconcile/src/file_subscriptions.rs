@@ -219,6 +219,8 @@ mod tests {
         leases.push(subscribe(paths));
         assert_eq!(lock(&pool.0).physical.len(), 1);
         assert_eq!(lock(&lock(&pool.0).users).len(), 3);
+        drop(leases.pop());
+        assert!(!lock(&pool.0).physical[&parent].0);
         let failed = tempfile::tempdir().unwrap();
         let mut state = lock(&pool.0);
         assert!(state.install(failed.path(), false, |_| Ok((0, 0))).is_err());
@@ -258,6 +260,21 @@ mod tests {
             drop(duplicate);
             assert_eq!(STATS.get(), 1);
         }
+        lock(&pool.0).generation.fetch_add(1, Ordering::AcqRel);
+        STATS.set(0);
+        let renewal = pool
+            .subscribe(vec![(root.path().join("0"), false)], Arc::new(|_| {}))
+            .unwrap();
+        assert_eq!(
+            STATS.get(),
+            2,
+            "lost coverage reinstalls only the touched root"
+        );
+        assert_eq!(
+            lock(&pool.0).physical.values().filter(|p| p.2 == 0).count(),
+            63
+        );
+        drop(renewal);
         while let Some(lease) = leases.pop() {
             STATS.set(0);
             drop(lease);
