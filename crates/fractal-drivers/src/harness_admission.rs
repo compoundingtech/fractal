@@ -872,8 +872,11 @@ fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<Pa
 }
 
 /// The files an identity hashes (and whether each is optional), and the paths whose metadata
-/// decides whether a cached identity still holds. Reads at most 256 bytes.
-fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result<(Vec<(PathBuf, bool)>, Vec<PathBuf>)> {
+/// decides whether a cached identity still holds.
+type IdentityInputs = (Vec<(PathBuf, bool)>, Vec<PathBuf>);
+
+/// An identity's inputs. Reads at most 256 bytes.
+fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result<IdentityInputs> {
     let mut files = vec![(path.to_owned(), false)];
     let mut probes = vec![path.to_owned()];
     let mut prefix = [0_u8; 256];

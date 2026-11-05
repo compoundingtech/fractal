@@ -39,9 +39,12 @@ fn prepared(store: &Store, desired: &DesiredSubject) -> Result<MemberSpec> {
 /// How a capture reads the member's environment and executable identities: waiting for them, or
 /// `None` while one is still measured off the caller.
 struct Measures<'a> {
-    environment: &'a dyn Fn(&BTreeMap<String, String>, &Path) -> Result<Option<BTreeMap<String, String>>>,
-    identity: &'a dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>) -> Result<Option<String>>,
+    environment: &'a EnvironmentMeasure,
+    identity: &'a IdentityMeasure,
 }
+
+type EnvironmentMeasure = dyn Fn(&BTreeMap<String, String>, &Path) -> Result<Option<BTreeMap<String, String>>>;
+type IdentityMeasure = dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>) -> Result<Option<String>>;
 
 pub(crate) fn capture(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool) -> Result<Contract> {
     let blocking = Measures {
