@@ -120,7 +120,7 @@ function SidebarTabsHost({ scheme, sidebar }: { readonly scheme: Scheme; readonl
   return <section aria-label={`Sidebar tabs ${scheme}`} data-scheme={scheme} {...stylex.props(styles.specimen, scheme === 'light' && lightTheme)}>
     <output data-testid="sidebar-tab-selection" {...stylex.props(styles.output)}>{selectedId}</output>
     <aside aria-label={`Agents sidebar ${scheme}`} data-sidebar-host {...stylex.props(styles.sidebar)}>
-      <SidebarTabs tabs={sidebar.tabs} selectedId={selectedId} onSelectionChange={setSelectedId}>
+      <SidebarTabs tabs={sidebar.tabs} selectedId={selectedId} onSelectionChange={setSelectedId} panelHasTabbableContent={selectedId === 'agents' && sidebar.agents.length > 0}>
         <div data-sidebar-scroller {...stylex.props(styles.scroller)}>
           {selectedId === 'agents' ? <div role="list" aria-label="Agents">{sidebar.agents.map(agent => <div role="listitem" key={agent.ref}><SidebarAgentRow item={agent} now={0} /></div>)}</div>
             : selectedId === 'alerts' ? <ItemList label="Alerts" items={sidebar.alerts} />
