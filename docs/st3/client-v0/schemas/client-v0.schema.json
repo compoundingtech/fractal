@@ -1671,6 +1671,29 @@
         "state_since": { "$ref": "#/$defs/Timestamp" },
         "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "Run creation, in Unix milliseconds." },
         "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "First terminal transition, in Unix milliseconds; unaffected by outcome edits." },
+        "eta": {
+          "description": "Remaining wall duration excluding person-held time, from completed runs under the current definition hash. Null for finished runs or a remaining step without samples; older daemons omit it.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["remaining_low_ms", "remaining_high_ms", "basis", "as_of"],
+              "properties": {
+                "remaining_low_ms": { "type": "integer", "minimum": 0, "description": "p25 remaining duration in milliseconds." },
+                "remaining_high_ms": { "type": "integer", "minimum": 0, "description": "p75 remaining duration in milliseconds." },
+                "basis": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["method", "samples"],
+                  "properties": {
+                    "method": { "enum": ["per-step", "critical-path"] },
+                    "samples": { "type": "integer", "minimum": 0, "description": "Smallest completed sample count among remaining steps; zero means no remaining steps and zero remaining duration." }
+                  }
+                },
+                "as_of": { "type": "integer", "minimum": 0, "description": "Publication cut in Unix milliseconds, not an absolute estimated finish time." }
+              }
+            }
+          ]
+        },
         "outcome": { "oneOf": [{ "$ref": "#/$defs/MissionRunOutcome" }, { "type": "null" }], "description": "The outcome a person or an authorized agent set after the run finished." },
         "last_progress": { "type": ["string", "null"] },
         "blocker": { "type": ["object", "null"] },
@@ -2142,7 +2165,7 @@
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
             "fault": { "type": ["string", "null"], "description": "Current member reconcile failure; cleared by a successful pass." },
             "incarnation_id": { "type": ["string", "null"] },
-            "launch_contract": { "type": ["object", "null"], "description": "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. Omitted on roster rows and non-owning hosts." },
+            "launch_contract": { "type": ["object", "null"], "description": "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. While an executable's identity is still measured off the request, declared and drift are null and pending is true. Omitted on roster rows and non-owning hosts." },
             "current_session_id": { "type": ["string", "null"] },
             "todo": { "oneOf": [{ "$ref": "#/$defs/AgentTodo" }, { "type": "null" }], "description": "Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible." },
             "presentation": { "$ref": "#/$defs/AgentPresentation", "description": "st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons." },
