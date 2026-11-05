@@ -235,7 +235,7 @@ pub fn refresh_work_once(store: &Store) {
                 store.publish_collection_view("work");
             }
         }
-        Folded::Pending(rows) => list.keep_pending(rows, generation),
+        Folded::Pending(rows) => list.keep_pending(rows, generation, base.is_none()),
     }
 }
 
@@ -317,8 +317,9 @@ fn spawn<R: Send + Sync + 'static>(
             let folded = tokio::task::spawn_blocking(move || {
                 crate::task_cpu::profiled_blocking(label, || {
                     let list = list(&reader);
+                    // Rows left pending by a fold from nothing come with no base either.
                     let (base, pending, generation) = list.base_and_pending();
-                    let from_nothing = base.is_none() && pending.is_none();
+                    let from_nothing = base.is_none();
                     let folded = fold(&reader, base.as_deref(), pending);
                     if from_nothing && folded.is_err() {
                         // The next fold starts from nothing again.
@@ -352,7 +353,7 @@ fn spawn<R: Send + Sync + 'static>(
                         }
                         // Not one cut yet: the next fold goes on from these rows.
                         Folded::Pending(rows) => {
-                            list.keep_pending(rows, generation);
+                            list.keep_pending(rows, generation, from_nothing);
                             return anyhow::Ok(true);
                         }
                     }
@@ -428,11 +429,12 @@ enum Advance<R, P> {
 }
 
 #[cfg(test)]
-type CatchUpHook = Box<dyn FnMut(&Store)>;
+type CatchUpHook = Box<dyn FnMut(&Store) -> anyhow::Result<()>>;
 
 #[cfg(test)]
 thread_local! {
-    /// Called before each catch-up round, so a test can change a list while its fold catches up.
+    /// Called before each catch-up round, so a test can change a list while its fold catches up,
+    /// or fail the fold there.
     static BEFORE_CATCH_UP: std::cell::RefCell<Option<CatchUpHook>> =
         const { std::cell::RefCell::new(None) };
     /// The most rows one snapshot refolded and the catch-up rounds folds ran, for tests.
@@ -440,18 +442,17 @@ thread_local! {
     static CATCH_UP_ROUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn before_catch_up(store: &Store) {
+fn before_catch_up(store: &Store) -> anyhow::Result<()> {
     #[cfg(test)]
     {
         CATCH_UP_ROUNDS.set(CATCH_UP_ROUNDS.get() + 1);
-        BEFORE_CATCH_UP.with_borrow_mut(|hook| {
-            if let Some(hook) = hook {
-                hook(store);
-            }
-        });
+        BEFORE_CATCH_UP.with_borrow_mut(|hook| hook.as_mut().map_or(Ok(()), |hook| hook(store)))
     }
     #[cfg(not(test))]
-    let _ = store;
+    {
+        let _ = store;
+        Ok(())
+    }
 }
 
 /// Count the rows one snapshot refolds, for tests.
@@ -520,7 +521,7 @@ fn fold_missions_inner(
     };
     // Every row now holds at the provisional cut or later: catch up to one cut.
     for _ in 0..FOLD_ROUNDS {
-        before_catch_up(store);
+        before_catch_up(store)?;
         match missions_since(store, &provisional)? {
             Advance::Current => {
                 provisional.valid_until_unix_ms = Some(valid_until(&provisional.rows, now_ms()));
@@ -863,7 +864,7 @@ fn fold_work(
     };
     // As the missions list's catch-up: a list still changing goes on in the next fold.
     for _ in 0..FOLD_ROUNDS {
-        before_catch_up(store);
+        before_catch_up(store)?;
         match work_since(store, &provisional)? {
             Advance::Current => return Ok(Folded::Published(provisional, true)),
             Advance::Published(publication, _) => return Ok(Folded::Published(publication, true)),

@@ -573,6 +573,7 @@ impl ChangingThrough {
                 burst(store, bursts);
                 bursts += 1;
             }
+            Ok(())
         })));
         Self(left)
     }
@@ -596,24 +597,32 @@ struct Refresh {
     rounds: usize,
     /// The most rows one of its snapshots refolded.
     most_refolded: usize,
+    failed: bool,
 }
 
-/// Fold a list once as its refresher does, publishing what it publishes and keeping the rows it
-/// leaves pending.
+/// Fold a list once as its refresher does, publishing what it publishes, keeping the rows it
+/// leaves pending, and folding from nothing next after a fold with no base fails.
 fn refresh_once<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, fold: super::Fold<R>) -> Refresh {
     let list = list(store);
     super::CATCH_UP_ROUNDS.set(0);
     super::MOST_REFOLDED.set(0);
     let (base, pending, generation) = list.base_and_pending();
-    let published = match fold(store, base.as_deref(), pending).unwrap() {
-        Folded::Published(publication, _) => list.publish(publication, generation).is_some(),
-        Folded::Current => true,
-        Folded::Pending(rows) => {
-            list.keep_pending(rows, generation);
-            false
+    let from_nothing = base.is_none();
+    let (published, failed) = match fold(store, base.as_deref(), pending) {
+        Ok(Folded::Published(publication, _)) => (list.publish(publication, generation).is_some(), false),
+        Ok(Folded::Current) => (true, false),
+        Ok(Folded::Pending(rows)) => {
+            list.keep_pending(rows, generation, from_nothing);
+            (false, false)
+        }
+        Err(_) => {
+            if from_nothing {
+                list.fold_from_nothing_next();
+            }
+            (false, true)
         }
     };
-    Refresh { published, rounds: super::CATCH_UP_ROUNDS.get(), most_refolded: super::MOST_REFOLDED.get() }
+    Refresh { published, rounds: super::CATCH_UP_ROUNDS.get(), most_refolded: super::MOST_REFOLDED.get(), failed }
 }
 
 /// Fold a list through bursts before every catch-up round of its first two folds and the first
@@ -699,7 +708,7 @@ fn a_store_of_thousands_of_missions_publishes_through_hourly_bursts_in_bounded_f
         let (hook_next, hook_left, hook_landing) = (next.clone(), left.clone(), landing.clone());
         super::BEFORE_CATCH_UP.set(Some(Box::new(move |store: &Store| {
             if hook_left.get() == 0 {
-                return;
+                return Ok(());
             }
             hook_left.set(hook_left.get() - 1);
             let started = Instant::now();
@@ -710,8 +719,9 @@ fn a_store_of_thousands_of_missions_publishes_through_hourly_bursts_in_bounded_f
                 store.set_step_state(&step(&run, "plant").0, "ready", None).unwrap();
             }
             hook_landing.set(hook_landing.get() + started.elapsed());
+            Ok(())
         })));
-        super::BEFORE_CATCH_UP.with_borrow_mut(|hook| hook.as_mut().expect("the burst")(&store));
+        super::BEFORE_CATCH_UP.with_borrow_mut(|hook| hook.as_mut().expect("the burst")(&store)).unwrap();
         let mut folds = Vec::new();
         while folds.last().is_none_or(|(fold, _): &(Refresh, Duration)| !fold.published) {
             let (started, landed) = (Instant::now(), landing.get());
@@ -732,7 +742,9 @@ fn a_store_of_thousands_of_missions_publishes_through_hourly_bursts_in_bounded_f
 }
 
 /// Rows a fold left pending are folded from projections a forget or a refold replaced, so the
-/// next fold folds from nothing rather than go on from them; so it does after a failed fold.
+/// next fold folds from nothing rather than go on from them. Rows a fold from nothing left pending
+/// keep it from nothing: should the fold that goes on from them fail, the next one folds from
+/// nothing again, never on from the publication of the projections replaced.
 #[test]
 fn a_forget_or_a_refold_drops_the_rows_a_fold_left_pending() {
     let _clock = Clock::at(start_time());
@@ -765,9 +777,34 @@ fn a_forget_or_a_refold_drops_the_rows_a_fold_left_pending() {
     };
     drop(changing);
     list.forget();
-    list.keep_pending(rows, generation);
+    list.keep_pending(rows, generation, false);
     let (base, pending, _) = list.base_and_pending();
     assert!(base.is_none() && pending.is_none(), "the next fold folds from nothing");
+    assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+
+    // After a forget or a refold, a fold from nothing leaves its rows pending, and the fold that
+    // goes on from them fails: the next one folds from nothing again, never on from the
+    // publication of the projections replaced.
+    for (number, replace) in [
+        (0, PublishedList::forget as fn(&PublishedList<MissionRows>)),
+        (1, PublishedList::refold),
+    ] {
+        fold(&store);
+        let before = starts();
+        replace(list);
+        let changing = ChangingThrough::rounds(FOLD_ROUNDS, 130 + 10 * number);
+        let first = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        drop(changing);
+        assert!(!first.published && starts() == before + 1, "the fold from nothing left its rows pending: {first:?}");
+        super::BEFORE_CATCH_UP.set(Some(Box::new(|_: &Store| anyhow::bail!("a catch-up round failed"))));
+        let failed = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        super::BEFORE_CATCH_UP.set(None);
+        assert!(failed.failed, "the fold that went on from them failed: {failed:?}");
+        assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+        assert_eq!(starts(), before + 2, "the fold after the failure folded from nothing again");
+        // Every row the direct read's and a fold from nothing's.
+        fold(&store);
+    }
 }
 
 #[test]

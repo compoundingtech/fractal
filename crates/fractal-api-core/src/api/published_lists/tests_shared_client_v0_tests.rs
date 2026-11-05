@@ -107,7 +107,7 @@ pub fn refresh_until_published<R>(store: &Store, list: fn(&Store) -> &PublishedL
                 return changed;
             }
             Folded::Current => return false,
-            Folded::Pending(rows) => list.keep_pending(rows, generation),
+            Folded::Pending(rows) => list.keep_pending(rows, generation, base.is_none()),
         }
     }
     panic!("the list never published");
