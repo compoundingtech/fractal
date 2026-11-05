@@ -96,7 +96,7 @@ async fn state<T: Send + Sync + 'static>(
 }
 
 #[tokio::test]
-async fn collection_subscribe_omits_absent_filters_and_matches_schema() {
+async fn collection_subscribe_null_filters_match_schema() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("commands.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -119,16 +119,16 @@ async fn collection_subscribe_omits_absent_filters_and_matches_schema() {
     ] {
         stream.subscribe("test", collection, 10, None, None).await.unwrap();
         let value = command(&mut socket).await;
+        assert_eq!(value["actor"], Value::Null, "{collection}");
+        assert_eq!(value["status"], Value::Null, "{collection}");
         assert!(validator.is_valid(&value), "{collection}: {value}");
-        assert!(value.get("actor").is_none());
-        assert!(value.get("status").is_none());
     }
 
     stream.subscribe("filtered", "missions", 10, Some("agent/test"), Some("active")).await.unwrap();
     let value = command(&mut socket).await;
-    assert!(validator.is_valid(&value), "{value}");
     assert_eq!(value["actor"], "agent/test");
     assert_eq!(value["status"], "active");
+    assert!(validator.is_valid(&value), "{value}");
 }
 
 #[tokio::test]

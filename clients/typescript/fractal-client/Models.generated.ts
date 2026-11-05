@@ -1289,12 +1289,14 @@ export type ClientDiagnosticsBatch = {
 };
 
 export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+  actor?: string | null;
   collection: "commands";
   id: string;
   kind: "subscribe";
   limit?: number;
+  status?: string | null;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;

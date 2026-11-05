@@ -4269,7 +4269,7 @@
     "CollectionCommand": {
       "oneOf": [
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
-        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
           "type": "object",
