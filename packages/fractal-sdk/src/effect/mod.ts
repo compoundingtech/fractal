@@ -39,8 +39,8 @@ import {
   decodeUnknownSync,
   Resource,
   Runtime,
-  TerminalScreen,
-} from '@fractal/client/schema'
+} from '@fractal/client/schema/read'
+import type { TerminalScreen } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
@@ -359,7 +359,6 @@ export interface FractalOptions {
 }
 
 
-const decodeScreen = decodeUnknownSync(TerminalScreen)
 const decodeRuntime = decodeUnknownSync(Runtime)
 const decodeCapabilities = decodeUnknownSync(CapabilitiesCodec)
 
@@ -412,7 +411,7 @@ interface FollowProtocol<A> {
     readonly id: string
   }) => Effect.Effect<void, FollowFailure>
   /** The decoded value a data frame carries, or `undefined` for a frame that changes nothing. */
-  readonly onData: (frame: CollectionFrame) => A | undefined
+  readonly onData: (frame: CollectionFrame) => A | DecodeFailure | undefined
   /** The socket dropped: forget anything the next snapshot replaces. */
   readonly reset: () => void
 }
@@ -825,7 +824,7 @@ const make = (options: FractalOptions) =>
                   options.onDiagnostics === undefined || spec._tag === 'Window'
                     ? undefined
                     : performance.now()
-                let value: A | undefined
+                let value: A | DecodeFailure | undefined
                 try {
                   value = protocol.onData(frame)
                 } finally {
@@ -834,6 +833,10 @@ const make = (options: FractalOptions) =>
                       _tag: 'Decode',
                       elapsedMs: performance.now() - started,
                     })
+                }
+                if (value instanceof DecodeFailure) {
+                  fail(value)
+                  return
                 }
                 if (value !== undefined) observe(value)
               },
@@ -987,33 +990,44 @@ const make = (options: FractalOptions) =>
     })
 
     const followTerminal = (spec: Extract<FollowSpec, { _tag: 'Terminal' }>) =>
-      follow<TerminalScreen>({
-        spec,
-        makeProtocol: () => {
-          let initialRuntime = spec.initialRuntime
-          return {
-            subscribe: ({ stream, id }) =>
-              Effect.suspend(() => {
-                const observation = initialRuntime
-                initialRuntime = undefined
-                return Effect.map(attachTerminal(spec.runtime, observation), ({ terminal, incarnation, capability }) =>
-                  stream.subscribeTerminal(id, terminal, incarnation, capability),
-                )
-              }),
-            onData: (frame) => {
-              if (frame.kind !== 'screen') return undefined
-              try {
-                return decodeScreen(frame.value)
-              } catch {
-                // The schema failure quotes the frame, which carries screen text: log fixed text only.
-                console.warn('Fractal terminal screen did not decode')
-                return undefined
+      Stream.unwrap(
+        Effect.tryPromise({
+          try: async () => {
+            // A static import would construct optional PTY and mutation validators on read startup.
+            const { TerminalScreen } = await import('@fractal/client/schema')
+            return decodeUnknownSync(TerminalScreen)
+          },
+          catch: () => new DecodeFailure({ message: 'Fractal terminal screen codec could not load' }),
+        }).pipe(
+          Effect.map((decodeScreen) => follow<TerminalScreen>({
+            spec,
+            makeProtocol: () => {
+              let initialRuntime = spec.initialRuntime
+              return {
+                subscribe: ({ stream, id }) =>
+                  Effect.suspend(() => {
+                    const observation = initialRuntime
+                    initialRuntime = undefined
+                    return Effect.map(attachTerminal(spec.runtime, observation), ({ terminal, incarnation, capability }) =>
+                      stream.subscribeTerminal(id, terminal, incarnation, capability),
+                    )
+                  }),
+                onData: (frame) => {
+                  if (frame.kind !== 'screen') return undefined
+                  try {
+                    return decodeScreen(frame.value)
+                  } catch {
+                    // Decoder errors quote screen text; expose only a fixed diagnostic.
+                    return new DecodeFailure({ message: 'Fractal terminal screen did not decode' })
+                  }
+                },
+                reset: () => {},
               }
             },
-            reset: () => {},
-          }
-        },
-      })
+          })),
+          Effect.catch((error) => Effect.succeed(Stream.succeed<FollowEvent<TerminalScreen>>({ _tag: 'Failed', error }))),
+        ),
+      )
 
     return Fractal.of({
       connection: SubscriptionRef.changes(channel.connection),
