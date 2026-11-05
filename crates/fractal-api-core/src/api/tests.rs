@@ -1062,6 +1062,8 @@ async fn agent_detail_does_not_materialize_unrelated_cached_cards() {
             ])
         })
         .unwrap();
+    // The daemon captures its environment at start; the read never waits on the login shell.
+    crate::environment::snapshot().unwrap();
     let Json(card) = client_agents_detail(
         State(state),
         Extension(snapshot),
@@ -1075,7 +1077,9 @@ async fn agent_detail_does_not_materialize_unrelated_cached_cards() {
     assert!(card.get("todo").is_some());
     assert!(card.get("_status_source").is_none());
     let contract = &card["launch_contract"];
-    assert!(contract["declared"]["digest"].is_string(), "{contract}");
+    // Nor does the read measure an executable (#5209): the contract is declared once the
+    // launcher's identity has settled off the request, and pending until then.
+    assert!(contract["declared"]["digest"].is_string() || contract["pending"] == true, "{contract}");
     assert!(contract["running"].is_null());
     assert!(contract["drift"].is_null(), "missing launch evidence is not convergence");
     let decoded: fractal_client::Agent = serde_json::from_value(card.clone()).unwrap();

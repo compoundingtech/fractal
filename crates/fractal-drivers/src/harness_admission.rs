@@ -676,6 +676,12 @@ pub fn executable_identity(path: &Path) -> Result<String> {
     executable_identity_with(path, &resolve_executable)
 }
 
+/// [`executable_identity`] if it is already measured; otherwise `None`, measuring it off the
+/// caller (see [`executable_identity_ready_with`]).
+pub fn executable_identity_ready(path: &Path) -> Result<Option<String>> {
+    executable_identity_ready_with(path, &resolve_executable)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IdentityMetadata {
     device: u64,
@@ -740,9 +746,75 @@ pub fn executable_identity_with(
     executable_identity_recorded(path, resolve, SystemTime::now)
 }
 
+/// The identity if these exact files are already measured. Otherwise `None`, after starting one
+/// background measurement of them: a request names the identity it has without ever streaming an
+/// executable's bytes, and a later call answers once the measurement settles. A changed file has
+/// new metadata, so it is measured again.
+pub fn executable_identity_ready_with(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<Option<String>> {
+    executable_identity_ready_recorded(path, resolve, SystemTime::now)
+}
+
+fn executable_identity_ready_recorded(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+    recorded_at: fn() -> SystemTime,
+) -> Result<Option<String>> {
+    let (files, probes) = identity_inputs(path, resolve)?;
+    let dependencies = identity_snapshot(&probes)?;
+    if let Some(identity) = cached_identity(&dependencies) {
+        return Ok(Some(identity));
+    }
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !measuring.contains(&dependencies) {
+        measuring.push(dependencies.clone());
+        thread::spawn(move || {
+            let measured = recorded_at().duration_since(UNIX_EPOCH).map_err(anyhow::Error::from)
+                .and_then(|now| measure_identity(&files, &probes, dependencies.clone(), settled_before(now)));
+            if let Err(error) = measured {
+                eprintln!("st3: measuring an executable's identity: {error:#}");
+            }
+            let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            measuring.retain(|pending| *pending != dependencies);
+            IDENTITY_MEASURING.1.notify_all();
+        });
+    }
+    Ok(None)
+}
+
+/// Wait until no background identity measurement is running, so a reader that saw `None` can
+/// expect an answer.
+pub fn identity_measurements_settled() {
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while !measuring.is_empty() {
+        measuring = IDENTITY_MEASURING.1.wait(measuring).unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+/// Background measurements in flight, by the dependencies they measure.
+static IDENTITY_MEASURING: (Mutex<Vec<Vec<IdentityDependency>>>, std::sync::Condvar) =
+    (Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+/// Racy-git rule: cache only writes whose timestamps precede measurement start by a full tick.
+fn settled_before(now: Duration) -> i128 {
+    now.as_nanos().saturating_sub(1_000_000_000) as i128
+}
+
 fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
-    // Racy-git rule: cache only writes whose timestamps precede measurement start by a full tick.
-    let settled_before = recorded_at().duration_since(UNIX_EPOCH)?.as_nanos().saturating_sub(1_000_000_000) as i128;
+    let settled_before = settled_before(recorded_at().duration_since(UNIX_EPOCH)?);
+    let (files, probes) = identity_inputs(path, resolve)?;
+    let dependencies = identity_snapshot(&probes)?;
+    if let Some(identity) = cached_identity(&dependencies) {
+        return Ok(identity);
+    }
+    measure_identity(&files, &probes, dependencies, settled_before)
+}
+
+/// The files an identity hashes (and whether each is optional), and the paths whose metadata
+/// decides whether a cached identity still holds. Reads at most 256 bytes.
+fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result<(Vec<(PathBuf, bool)>, Vec<PathBuf>)> {
     let mut files = vec![(path.to_owned(), false)];
     let mut probes = vec![path.to_owned()];
     let mut prefix = [0_u8; 256];
@@ -796,25 +868,33 @@ fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<Pa
             files.push((lock, true));
         }
     }
-    let snapshot = || {
-        probes
-            .iter()
-            .map(|p| identity_dependency(p))
-            .collect::<Result<Vec<_>>>()
-    };
-    let dependencies = snapshot()?;
-    if let Some(entry) = IDENTITY_CACHE
+    Ok((files, probes))
+}
+
+fn identity_snapshot(probes: &[PathBuf]) -> Result<Vec<IdentityDependency>> {
+    probes.iter().map(|p| identity_dependency(p)).collect()
+}
+
+fn cached_identity(dependencies: &[IdentityDependency]) -> Option<String> {
+    IDENTITY_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .find(|entry| entry.dependencies == dependencies)
-    {
-        return Ok(entry.identity.clone());
-    }
+        .map(|entry| entry.identity.clone())
+}
+
+/// Stream every file into the identity, and cache it if nothing changed while it was read.
+fn measure_identity(
+    files: &[(PathBuf, bool)],
+    probes: &[PathBuf],
+    dependencies: Vec<IdentityDependency>,
+    settled_before: i128,
+) -> Result<String> {
     let mut hash = Sha256::new();
     // Preserve the identity policy: existing measurements and exceptions remain valid.
     hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
-    for (file, optional) in &files {
+    for (file, optional) in files {
         if *optional {
             hash_optional_identity_file(file, &mut hash)?;
         } else {
@@ -825,7 +905,7 @@ fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<Pa
     // Do not retain a result if any dependency changed while bytes were being read.
     let settled = dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
         [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before));
-    if settled && dependencies == snapshot()? {
+    if settled && dependencies == identity_snapshot(probes)? {
         let mut cache = IDENTITY_CACHE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

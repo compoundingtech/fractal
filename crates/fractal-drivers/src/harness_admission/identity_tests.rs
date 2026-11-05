@@ -116,3 +116,26 @@ fn same_tick_same_size_writes_are_never_cached_as_settled() {
     assert!(hashed_files() > before);
     assert!(!IDENTITY_CACHE.lock().unwrap().iter().any(|e| e.dependencies.iter().any(|d| d.path == binary)));
 }
+
+#[test]
+fn a_ready_identity_is_measured_off_the_caller_and_again_when_the_binary_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("launcher");
+    fs::write(&binary, "launcher one").unwrap();
+    // A clock well past the writes, so each measurement settles into the cache.
+    let later = || SystemTime::now() + Duration::from_secs(120);
+    let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the launcher has no shebang") };
+    let before = hashed_files();
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap(), None);
+    assert_eq!(before, hashed_files(), "the caller never streams the executable");
+    identity_measurements_settled();
+    let measured = executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap();
+    assert_eq!(measured, Some(executable_identity_with(&binary, &no_runtime).unwrap()));
+    // A replaced binary has new metadata: pending again, then measured anew.
+    fs::write(&binary, "launcher two, a longer build").unwrap();
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap(), None);
+    identity_measurements_settled();
+    let changed = executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap();
+    assert_ne!(changed, measured);
+    assert_eq!(changed, Some(executable_identity_with(&binary, &no_runtime).unwrap()));
+}
