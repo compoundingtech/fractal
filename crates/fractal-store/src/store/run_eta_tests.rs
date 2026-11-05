@@ -46,7 +46,7 @@ fn eta_duration_boundaries_use_selected_attempt_for_workers_and_agentless_steps(
 pub(super) fn fixture(history: i64) -> Connection {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hfbd29c4eba3b owner=fractal_store::store::run_eta_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);
+        /* sqlite-large-value: allow-for-now lv-h12bb55457f44 owner=fractal_store::store::run_eta_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);
         CREATE TABLE mission_runs(id TEXT PRIMARY KEY,current_generation_id TEXT,
             phase TEXT,status TEXT,mission_id TEXT DEFAULT 'mission');
         CREATE TABLE step_runs(subject TEXT PRIMARY KEY,run_id TEXT,generation_id TEXT,
@@ -243,7 +243,7 @@ fn history(runs: i64) -> Connection {
         let (run, phase) = (format!("r-{n}"), if n % 7 == 3 { "working" } else { "terminal" });
         let status = if n % 5 == 4 { "failed" } else { "completed" };
         c.execute(
-            "INSERT INTO mission_runs(id,current_generation_id,phase,status) VALUES(?1,'current',?2,?3)",
+            /* sqlite-large-value: allow-for-now lv-h32544824cbd4 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id,current_generation_id,phase,status) VALUES(?1,'current',?2,?3)",
             rusqlite::params![run, phase, status],
         )
         .unwrap();
@@ -256,7 +256,7 @@ fn history(runs: i64) -> Connection {
             }
             let step = format!("s-{n}-{path}-{generation}");
             c.execute(
-                "INSERT INTO step_runs VALUES(?1,?2,?3,?4,?5,1,?6)",
+                /* sqlite-large-value: allow-for-now lv-h4e61643fbe6f owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs VALUES(?1,?2,?3,?4,?5,1,?6)",
                 rusqlite::params![step, run, generation, hash, path, if n % 11 == 6 { "failed" } else { "completed" }],
             )
             .unwrap();
@@ -275,7 +275,7 @@ fn history(runs: i64) -> Connection {
     // The real store's claim indexes and batch positions. Without positions the canonical order
     // counts the batch's earlier claims for every row it sorts.
     c.execute_batch(
-        "CREATE INDEX claims_kind_index ON claims(kind,store_index);
+        /* sqlite-large-value: allow-for-now lv-h4d94de7d92a4 owner=fractal_store::store::run_eta_tests TODO=chunk-or-reference-variable-columns */ "CREATE INDEX claims_kind_index ON claims(kind,store_index);
          CREATE INDEX claims_person_ask_origin_step_index ON claims(json_extract(body,'$.fields.origin_step'))
              WHERE kind='work.person-asked';
          CREATE UNIQUE INDEX claim_positions_claim ON claim_positions(claim_id);
@@ -287,7 +287,7 @@ fn history(runs: i64) -> Connection {
 
 fn rows(c: &Connection, sql: &str, params: impl rusqlite::Params) -> Vec<(String, String, String)> {
     let mut rows = c
-        .prepare(sql)
+        .prepare(/* sqlite-large-value: allow-for-now lv-h81ecd44328e3 owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ sql)
         .unwrap()
         .query_map(params, |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, rusqlite::types::Value>(2).map(|v| format!("{v:?}"))?)))
         .unwrap()
@@ -328,7 +328,7 @@ fn eta_backfill_seeks_each_definitions_runs_and_each_steps_asks() {
     let store = super::Store::open_memory("node").unwrap();
     let connection = store.readers.get();
     let plan = |sql: &str| {
-        let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbd7e2e22ab73 owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let unbound = std::iter::repeat_n(rusqlite::types::Null, statement.parameter_count());
         statement
             .query_map(rusqlite::params_from_iter(unbound), |row| row.get::<_, String>(3))
@@ -368,7 +368,7 @@ fn eta_backfill_cost_at_scale() {
     timed("first open", &mut c, &|tx| super::run_eta::open(tx).unwrap());
     timed("rebuild", &mut c, &|tx| super::run_eta::rebuild(tx).unwrap());
     timed("flush after deleting 1000 terminal runs", &mut c, &|tx| {
-        tx.execute("DELETE FROM mission_runs WHERE phase='terminal' AND CAST(substr(id,3) AS INTEGER)%4=1", []).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h83e8e20c3907 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE phase='terminal' AND CAST(substr(id,3) AS INTEGER)%4=1", []).unwrap();
         super::run_eta::flush(tx).unwrap();
     });
 }

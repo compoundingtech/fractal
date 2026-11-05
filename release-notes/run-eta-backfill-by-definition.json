@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The run-ETA backfill reads each step definition's own runs and each step's own person asks, so the first open after the run-ETA windows takes under a second instead of minutes",
+  "replay": {"status": "none", "detail": "The same candidates and holds are read, so the same samples result. Rebuild and large dirty flushes get faster in the same way."},
+  "schema": {"status": "changed", "detail": "Add step_runs_definition_index on step_runs(definition_hash, run_id, generation_id) with CREATE INDEX IF NOT EXISTS. It is built once on the first open (0.05 s for 24,692 step runs) and leaves the schema cookie alone on later opens."},
+  "rules": {"status": "none", "detail": "The window bounds and the sample rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire fields, claim kinds or serving schemas change. An older build ignores the extra index."},
+  "downtime": {"status": "changed", "detail": "A store that has not yet opened on a run-ETA v3 build now pays under a second on its first open instead of minutes (172 s and 190 s on two production stores). A store that already ran the v3 backfill only builds the index."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Rollback leaves an unused index; the samples are unchanged."}
+}

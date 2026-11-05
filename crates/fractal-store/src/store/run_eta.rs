@@ -84,7 +84,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     for (hash, path) in keys {
         // Bound: only the newest 64 terminal runs per hash, including unusable runs.
         // Work is bounded by those runs' own claims, never by older step histories.
-        let mut candidates = tx.prepare_cached(&candidates_sql())?;
+        let mut candidates = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h822f33d4bbe8 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &candidates_sql())?;
         let mut rows = candidates.query(params![hash, path, SAMPLE_LIMIT])?;
         while let Some(row) = rows.next()? {
             let (subject, run, attempt): (String, String, u32) =
@@ -99,7 +99,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             let (Some(start), Some(end)) = step_timestamps(&events, attempt) else {
                 continue;
             };
-            let asks = tx.prepare_cached(ASKS_SQL)?
+            let asks = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4964c05cc4f6 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ ASKS_SQL)?
                 .query_map([&subject], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut holds = Vec::new();
@@ -149,7 +149,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
 /// definition's own runs through `step_runs_definition_index`: reading every terminal run per
 /// definition made a first open on a long history take minutes (#5239).
 pub(super) fn candidates_sql() -> String {
-    /* sqlite-large-value: allow-for-now lv-hc23992ea4eed owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ format!("WITH recent AS MATERIALIZED (
+    format!("WITH recent AS MATERIALIZED (
             SELECT r.id,r.current_generation_id,r.status,
             (SELECT CAST(claims.accepted_at_unix_ms AS INTEGER) FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject='mission-run/'||r.id AND claims.kind='mission-run.state'
