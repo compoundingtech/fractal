@@ -20,20 +20,30 @@ const json = (value: unknown, status = 200) =>
 class Gateway {
   socket: CollectionSocket | undefined
   readonly commands: CollectionCommand[] = []
-  readonly requests: { url: URL; respond: (response: Response) => void }[] = []
+  readonly requests: { url: URL; limit: number; respond: (response: Response) => void }[] = []
+  readonly cursorLimits = new Map<string, number>()
 
   readonly fetch: typeof fetch = async (input) => {
     const url = new URL(String(input))
     if (url.pathname === '/v1/client/sessions/example/timeline') {
+      const cursor = url.searchParams.get('cursor') ?? ''
+      const limit = this.cursorLimits.get(cursor)
+      const requestedLimit = url.searchParams.get('limit')
+      if (limit === undefined || (requestedLimit !== null && Number(requestedLimit) !== limit)) {
+        return json({
+          api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'page-cursor-expired',
+          message: 'Cursor page size does not match', retryable: false, request_id: 'request/history', details: {},
+        }, 410)
+      }
       const { promise, resolve } = Promise.withResolvers<Response>()
-      this.requests.push({ url, respond: resolve })
+      this.requests.push({ url, limit, respond: resolve })
       return promise
     }
     if (url.pathname !== '/v1/client/capabilities') throw new Error(`Unexpected request ${url}`)
     return json({ api_version: 'st3.client.v0', snapshot, value: {
       kind: 'capabilities', capabilities: [{ id: 'work.done', state: 'granted', version: 0 }],
       event_cursor: 'cursor/current',
-      limits: { max_page_items: 100, max_event_items: 100, max_wait_ms: 1000, max_response_bytes: 65536 },
+      limits: { max_page_items: 200, max_event_items: 100, max_wait_ms: 1000, max_response_bytes: 65536 },
       schemas: ['client-v0'], session_actor: 'person/operator', transport: 'fabric-loopback',
     } })
   }
@@ -54,7 +64,8 @@ class Gateway {
     )
   }
 
-  frame(rows: TimelineEntry[], replace = false, cursor?: string) {
+  frame(rows: TimelineEntry[], replace = false, cursor?: string, limit = 200) {
+    if (cursor !== undefined) this.cursorLimits.set(cursor, limit)
     const subscription = this.subscription()
     if (subscription === undefined) throw new Error('No conversation subscription')
     const frame: CollectionFrame = {
@@ -66,9 +77,11 @@ class Gateway {
   }
 
   page(index: number, items: TimelineEntry[], nextCursor?: string) {
+    const limit = this.requests[index]!.limit
+    if (nextCursor !== undefined) this.cursorLimits.set(nextCursor, limit)
     const value: TimelinePage = {
       kind: 'timeline-page', session_id: sessionId, items,
-      page: { limit: 100, has_more: nextCursor !== undefined, ...(nextCursor === undefined ? {} : { next_cursor: nextCursor }) },
+      page: { limit, has_more: nextCursor !== undefined, ...(nextCursor === undefined ? {} : { next_cursor: nextCursor }) },
     }
     this.requests[index]!.respond(json({ api_version: 'st3.client.v0', snapshot, value }))
   }
@@ -110,7 +123,7 @@ const until = async (check: () => boolean) => {
   for (let round = 0; round < 400 && !check(); round += 1) await drain()
   if (!check()) throw new Error('condition not reached before the drain budget ran out')
 }
-const open = async () => {
+const open = async (cursorLimit = 200) => {
   const gateway = new Gateway()
   const live = liveSource({ options: { baseUrl: 'http://gateway.test', maxFollows: 12, socket: gateway.factory, fetch: gateway.fetch } })
   const release = live.registry.mount(live.source.conversationInterest!(ref))
@@ -121,7 +134,7 @@ const open = async () => {
   }
   try {
     await until(() => gateway.subscription() !== undefined)
-    gateway.frame([entry(5), entry(6)], true, 'cursor/older-1')
+    gateway.frame([entry(5), entry(6)], true, 'cursor/older-1', cursorLimit)
     await until(() => live.registry.get(live.source.conversation(ref))._tag === 'Observed')
     return {
       gateway, live, read,
@@ -137,15 +150,16 @@ const open = async () => {
 }
 
 describe('conversation history paging through the SDK and liveSource', () => {
-  it('shows loading, coalesces clicks, prepends sequential pages oldest-first, and stops at the end', async () => {
-    const ctx = await open()
+  it.each([200, 5])('inherits cursor-bound limit %i, coalesces clicks, and prepends sequential pages to completion', async (limit) => {
+    const ctx = await open(limit)
     try {
       const first = ctx.load()
       const concurrent = ctx.load()
       await until(() => ctx.gateway.requests.length === 1 && ctx.read().older?._tag === 'Loading')
       expect(ctx.ids()).toEqual(['timeline-entry/5', 'timeline-entry/6'])
       expect(ctx.gateway.requests[0]!.url.searchParams.get('cursor')).toBe('cursor/older-1')
-      expect(ctx.gateway.requests[0]!.url.searchParams.get('limit')).toBe('100')
+      expect(ctx.gateway.requests[0]!.url.searchParams.has('limit')).toBe(false)
+      expect(ctx.gateway.requests[0]!.limit).toBe(limit)
       ctx.gateway.page(0, [entry(3), entry(4)], 'cursor/older-2')
       await Promise.all([first, concurrent])
       await until(() => ctx.read().items.length === 4)

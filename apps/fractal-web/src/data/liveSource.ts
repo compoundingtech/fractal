@@ -884,7 +884,8 @@ export const liveSource = ({
       publishPending()
       olderRequest = (async () => {
         try {
-          const response = await client.timelineList(requestedSession, { cursor, limit: 100 })
+          // Opaque continuations retain the server's cursor-bound page size.
+          const response = await client.timelineList(requestedSession, { cursor })
           // Keep entries raw for the SDK's tolerant per-entry/block decoder.
           const page = decodeUnknownSync(historyPage)(response.value)
           if (generation !== requestedGeneration) return
