@@ -116,11 +116,22 @@ impl RegistrySnapshot {
                         {
                             self.reads += 1;
                         }
-                        let row = std::fs::read(&path)
-                            .ok()
-                            .and_then(|bytes| serde_json::from_slice::<Projection>(&bytes).ok())
-                            .map(Into::into);
-                        self.metadata.insert(path.clone(), (fingerprint, row));
+                        let row = std::fs::File::open(&path).ok().and_then(|mut file| {
+                            use std::io::Read as _;
+                            let opened = Fingerprint::from(&file.metadata().ok()?);
+                            let mut bytes = Vec::new();
+                            file.read_to_end(&mut bytes).ok()?;
+                            let parsed = serde_json::from_slice::<Projection>(&bytes)
+                                .ok()
+                                .map(Into::into);
+                            (opened == Fingerprint::from(&file.metadata().ok()?))
+                                .then_some((opened, parsed))
+                        });
+                        if let Some(row) = row {
+                            self.metadata.insert(path.clone(), row);
+                        } else {
+                            self.metadata.remove(&path);
+                        }
                     }
                     self.metadata.get(&path).and_then(|(_, row)| row.clone())
                 }
