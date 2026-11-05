@@ -862,6 +862,35 @@ pub async fn reconcile(
     Ok(status)
 }
 
+/// Receipts are authored under the adapter's own signed membership by the local
+/// daemon, and bind every transition selector, including the installation phase.
+pub async fn acknowledge(
+    client: &reqwest::Client,
+    socket: &Path,
+    fleet_id: &str,
+    own_key: &str,
+    view: &FleetView,
+) -> Result<()> {
+    let nodes = desired(view, own_key, fleet_id, &BTreeSet::new())?;
+    let mut policy = nodes.into_iter().map(|node| (node, grants(fleet_id))).collect();
+    let (expiries, receipts) = rotations(view, own_key, &mut policy, (now_ms() / 1000) as u64)?;
+    if receipts.is_empty() { return Ok(()); }
+    let current = snapshot(socket).await?;
+    ensure!(plan(&current, &format!("st/fleet/{fleet_id}"), &policy, &expiries).is_empty(),
+        "Fabric receipt verification failed: exact installed grants/expiry differ");
+    for (member_key, rotation) in receipts {
+        ensure!(u128::from(rotation.deadline) * 1000 > now_ms(), "Fabric rekey expired before receipt publication");
+        client.post("http://localhost/v1/internal/fleet/fabric-rekey")
+            .json(&json!({
+                "action":"receipt", "member_key":member_key,
+                "old_node":rotation.old_node, "next_node":rotation.next_node,
+                "deadline":rotation.deadline, "state":rotation.state,
+            }))
+            .send().await?.error_for_status()?;
+    }
+    Ok(())
+}
+
 /// Revoke this fleet's runtime records after it disappears from local fleet settings.
 /// Call with the same adapter state-directory lock used by reconciliation.
 pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result<ReconcileStatus> {

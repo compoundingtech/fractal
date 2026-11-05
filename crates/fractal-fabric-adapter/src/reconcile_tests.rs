@@ -1077,6 +1077,53 @@ async fn successful_mutation_without_verified_install_is_an_error() {
 }
 
 #[tokio::test]
+async fn receipts_bind_exact_phase_and_require_installed_grants_even_on_noop() {
+    for state in ["prepared", "committed"] {
+        let deadline = (now_ms() / 1000) as u64 + 300;
+        let root = tempfile::tempdir().unwrap();
+        let http_socket = root.path().join("st.sock");
+        let listener = UnixListener::bind(&http_socket).unwrap();
+        let http = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" { break; }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).await.unwrap();
+            drop(reader);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").await.unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        });
+        let client = reqwest::Client::builder().unix_socket(http_socket).build().unwrap();
+        let permanent = |node| peer(node, OWNER, &["st3-client-v0", "st3/fleet/test-fleet"]);
+        let installed = if state == "prepared" {
+            vec![permanent("peer-node"), expiring_peer("next-node", deadline)]
+        } else {
+            vec![expiring_peer("peer-node", deadline), permanent("next-node")]
+        };
+        let (socket, server) = serve(root.path(), vec![Some(list(installed, 7))]);
+        acknowledge(&client, &socket, FLEET, "own-key", &rotation_view(state, deadline)).await.unwrap();
+        assert_eq!(http.await.unwrap(), json!({
+            "action":"receipt", "member_key":"peer-key", "old_node":"peer-node",
+            "next_node":"next-node", "deadline":deadline, "state":state,
+        }));
+        assert_eq!(server.await.unwrap().len(), 1);
+
+        let failed = tempfile::tempdir().unwrap();
+        let (socket, server) = serve(failed.path(), vec![Some(list(vec![permanent("peer-node")], 7))]);
+        assert!(acknowledge(&client, &socket, FLEET, "own-key", &rotation_view(state, deadline)).await.is_err());
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn elapsed_preparation_removes_next_without_renewal_or_old_expiry() {
     let root = tempfile::tempdir().unwrap();
     let deadline = (now_ms() / 1000) as u64 - 1;
@@ -1133,6 +1180,80 @@ fn own_metadata_and_noncurrent_members_never_authorize_overlap_or_receipts() {
     assert!(receipts.is_empty());
 }
 
+#[tokio::test]
+async fn rekey_crash_recovery_replays_only_live_writer_batches() {
+    let deadline = (now_ms() / 1000) as u64 + 300;
+    for owner in [OWNER.to_owned(), format!("{RENAMED_OWNER_PREFIX}{FLEET}")] {
+        for (state, live_writer) in [("prepared", true), ("committed", false), ("aborted", false)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut policy = DesiredPolicy::from([("peer-node".into(), grants(FLEET))]);
+            if state == "committed" {
+                policy = DesiredPolicy::from([("next-node".into(), grants(FLEET))]);
+            }
+            let (expiries, _) = rotations(&rotation_view(state, deadline), "own-key",
+                &mut policy, (now_ms() / 1000) as u64).unwrap();
+            let request = json!({
+                "operation":"batch", "owner":owner, "request_id":"st-rekey-crash",
+                "expected_revision":7, "operations":[
+                    {"op":"add_peer","node_id":"next-node"},
+                    {"op":"set_grants","node_id":"next-node","grants":["st3-client-v0","st3/fleet/test-fleet"]},
+                    {"op":"set_expiry","node_id":"next-node","expires_at":deadline}
+                ]
+            });
+            save_journal(root.path(), &Journal {
+                pending: Some(Pending { request: request.clone(), created_unix_ms: now_ms() }),
+                ..Journal::default()
+            }).await.unwrap();
+            let mut journal = load_journal(root.path()).await.unwrap();
+            let (socket, server) = serve(root.path(), vec![Some(mutation(vec![], "complete"))]);
+            resolve_pending(root.path(), &socket, &mut journal, &policy, &expiries, &BTreeSet::new()).await.unwrap();
+            let requests = server.await.unwrap();
+            if owner == OWNER && live_writer {
+                assert_eq!(requests[0]["request"], request);
+            } else {
+                assert_eq!(requests[0]["request"],
+                    json!({"operation":"cancellation","request_id":"st-rekey-crash"}));
+            }
+            assert!(load_journal(root.path()).await.unwrap().pending.is_none());
+        }
+    }
+}
+
+#[test]
+fn renamed_rekey_expiry_recovery_only_retains_or_removes_existing_grants() {
+    let owner = format!("{RENAMED_OWNER_PREFIX}{FLEET}");
+    let services = [format!("{RENAMED_OWNER_PREFIX}{FLEET}"), "fractal-client-v0".into()];
+    for state in ["prepared", "committed", "aborted"] {
+        let mut policy = DesiredPolicy::from([(
+            if state == "committed" { "next-node" } else { "peer-node" }.into(),
+            grants(FLEET),
+        )]);
+        let (expiries, _) = rotations(&rotation_view(state, 1300), "own-key", &mut policy, 1000).unwrap();
+        let mut staged = peer("next-node", &owner, &[&services[0], &services[1]]);
+        staged["trust_sources"][0]["expires_at"] = json!(1300);
+        let snapshot: Snapshot = serde_json::from_value(list(vec![
+            peer("peer-node", &owner, &[&services[0], &services[1]]), staged,
+        ], 7)["reply"]["snapshot"].clone()).unwrap();
+        let retained = retained_policy(&snapshot, &owner, &policy);
+        let operations = plan(&snapshot, &owner, &retained, &expiries);
+        let expected = match state {
+            "prepared" => json!([]),
+            "committed" => json!([
+                {"op":"remove_peer","node_id":"next-node"},
+                {"op":"remove_peer","node_id":"peer-node"}
+            ]),
+            "aborted" => json!([{"op":"remove_peer","node_id":"next-node"}]),
+            _ => unreachable!(),
+        };
+        assert_eq!(json!(operations), expected);
+        assert!(operations.iter().all(|operation| operation["op"] == "remove_peer"));
+        let pending = Pending {
+            created_unix_ms: now_ms(),
+            request: json!({"owner":owner,"operations":operations}),
+        };
+        assert!(pending_matches_desired(&pending, &policy, &expiries));
+    }
+}
 
 fn serve_capability(root: &Path, capability: &'static str, replies: Vec<Value>)
     -> (PathBuf, tokio::task::JoinHandle<Vec<Value>>) {
