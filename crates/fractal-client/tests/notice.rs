@@ -3,12 +3,14 @@
 #[path = "../src/notice_models.generated.rs"]
 mod models;
 use models::*;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use serde_json::Value;
 
-fn round_trip<T: DeserializeOwned + Serialize>(value: &Value) {
-    let typed: T = serde_json::from_value(value.clone()).unwrap();
+fn round_trip<T: NoticeModel + Serialize>(value: &Value) {
+    let typed: T = decode_notice(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(), *value);
+    let direct: T = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(direct).unwrap(), *value);
 }
 
 #[test]
@@ -35,6 +37,10 @@ fn notice_fixture_models() {
         } else {
             *value.pointer_mut(pointer).unwrap() = mutation["value"].clone();
         }
+        assert!(
+            decode_notice::<NoticeSnapshot>(value.clone()).is_err(),
+            "{pointer}"
+        );
         assert!(
             serde_json::from_value::<NoticeSnapshot>(value).is_err(),
             "{pointer}"
