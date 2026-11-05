@@ -94,7 +94,7 @@ fn work_claim_writer_hold_on_production_copy() {
         }
     }
     let count = |sql: &str| -> i64 {
-        store.readers.get().query_row(sql, [], |row| row.get(0)).unwrap()
+        store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-he0a722e7c2db owner=fractal_missions::store::work_claim_production_copy_tests TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap()
     };
     println!(
         "{}",
