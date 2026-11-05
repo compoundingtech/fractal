@@ -9,6 +9,8 @@
     { "$ref": "#/$defs/ObservationResponse" },
     { "$ref": "#/$defs/PushRegistration" },
     { "$ref": "#/$defs/PushRegistrationResponse" },
+    { "$ref": "#/$defs/DeviceCommandRequest" },
+    { "$ref": "#/$defs/DeviceResult" },
     { "$ref": "#/$defs/Envelope" },
     { "$ref": "#/$defs/ErrorEnvelope" },
     { "$ref": "#/$defs/ActionRequest" },
@@ -362,6 +364,55 @@
     "PushRegistration": {"type": "object", "additionalProperties": false, "required": ["token", "environment", "bundle_id", "app_version"], "description": "A paired phone's APNs device token. The person and device come only from the paired session; any other field, including a person or device identity, is refused. The token is a secret: it is stored only on the member that issued the pairing and never appears in claims, replication, resources, logs or error messages.", "properties": {"token": {"x-st-codec": "redacted", "type": "string", "pattern": "^(?:[0-9a-fA-F]{2}){1,256}$", "minLength": 2, "maxLength": 512, "description": "Hex-encoded APNs device token, 1–256 bytes."}, "environment": {"$ref": "#/$defs/PushEnvironment"}, "bundle_id": {"type": "string", "pattern": "^[A-Za-z0-9.-]{1,255}$", "minLength": 1, "maxLength": 255}, "app_version": {"type": "string", "pattern": "^[\\x20-\\x7E]{1,64}$", "minLength": 1, "maxLength": 64, "description": "Printable ASCII."}}},
     "PushRegistrationStatus": {"description": "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["registered"], "properties": {"registered": {"const": false}}}, {"type": "object", "additionalProperties": false, "required": ["registered", "environment"], "properties": {"registered": {"const": true}, "environment": {"$ref": "#/$defs/PushEnvironment"}}}]},
     "PushRegistrationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/PushRegistrationStatus"}}},
+    "PhoneInspectArgs": {"type": "object", "additionalProperties": false, "properties": {}},
+    "PhoneMessageReadArgs": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string", "pattern": "^message/.+", "maxLength": 4096}}},
+    "PhoneRouteString": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+    "PhoneNavigateArgs": {
+      "description": "Restricted phone navigation routes; parameters are specific to the selected screen.",
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["screen"], "properties": {"screen": {"enum": ["NowRoot", "Agents", "Missions", "Usage", "History"]}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"enum": ["Mission", "Attention", "Launch"]}, "params": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"const": "Conversation"}, "params": {"type": "object", "additionalProperties": false, "required": ["target"], "properties": {"target": {"$ref": "#/$defs/PhoneRouteString"}, "sessionId": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"const": "Terminal"}, "params": {"type": "object", "additionalProperties": false, "required": ["terminalId"], "properties": {"terminalId": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen"], "properties": {"screen": {"const": "Documents"}, "params": {"type": "object", "additionalProperties": false, "properties": {"prefix": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"const": "Document"}, "params": {"type": "object", "additionalProperties": false, "required": ["reference", "trail"], "properties": {"reference": {"$ref": "#/$defs/PhoneRouteString"}, "trail": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/PhoneRouteString"}}}}}}
+      ]
+    },
+    "DeviceCommandRequest": {
+      "description": "One expiring foreground command. Default TTL is 30000 ms, maximum 60000 ms; at most eight pending commands per device.",
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.inspect"}, "args": {"$ref": "#/$defs/PhoneInspectArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.navigate"}, "args": {"$ref": "#/$defs/PhoneNavigateArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.message.read"}, "args": {"$ref": "#/$defs/PhoneMessageReadArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}}
+      ]
+    },
+    "DeviceCommandOutcome": {"enum": ["completed", "not-foreground", "expired", "refused", "failed"]},
+    "DeviceCommandState": {"enum": ["pending", "delivered", "completed", "not-foreground", "expired", "refused", "failed"]},
+    "DeviceResult": {
+      "type": "object", "additionalProperties": false, "required": ["command_id", "outcome"],
+      "properties": {"command_id": {"type": "string", "pattern": "^device-command/.+"}, "outcome": {"$ref": "#/$defs/DeviceCommandOutcome"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}},
+      "description": "Terminal phone report; authenticated pairing supplies the device identity. The daemon clock adjudicates expiry."
+    },
+    "DeviceCommand": {
+      "allOf": [{"$ref": "#/$defs/ResourceHeader"}],
+      "type": "object",
+      "required": ["id", "kind", "command_kind", "args", "device_id", "session_actor", "issued_by", "issued_at", "expires_at", "state"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^device-command/.+"},
+        "kind": {"const": "device-command"},
+        "command_kind": {"enum": ["phone.inspect", "phone.navigate", "phone.message.read"]},
+        "args": {"oneOf": [{"$ref": "#/$defs/PhoneInspectArgs"}, {"$ref": "#/$defs/PhoneNavigateArgs"}, {"$ref": "#/$defs/PhoneMessageReadArgs"}]},
+        "device_id": {"type": "string", "pattern": "^device/.+"},
+        "session_actor": {"$ref": "#/$defs/Id"}, "issued_by": {"$ref": "#/$defs/Id"},
+        "issued_at": {"$ref": "#/$defs/Timestamp"}, "expires_at": {"$ref": "#/$defs/Timestamp"},
+        "state": {"$ref": "#/$defs/DeviceCommandState"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
+      },
+      "oneOf": [
+        {"properties": {"command_kind": {"const": "phone.inspect"}, "args": {"$ref": "#/$defs/PhoneInspectArgs"}}},
+        {"properties": {"command_kind": {"const": "phone.navigate"}, "args": {"$ref": "#/$defs/PhoneNavigateArgs"}}},
+        {"properties": {"command_kind": {"const": "phone.message.read"}, "args": {"$ref": "#/$defs/PhoneMessageReadArgs"}}}
+      ]
+    },
     "PairingAdvertisement": {
       "description": "Static unauthenticated pairing preflight; no envelope, presence update or graph information.",
       "type": "object", "additionalProperties": false,
@@ -527,6 +578,7 @@
       "lane",
       "machine",
       "device",
+      "device-command",
       "operation",
       "history",
       "session",
@@ -840,6 +892,7 @@
           "lane",
           "machine",
           "device",
+          "device-command",
           "operation",
           "history",
           "session",
@@ -1671,6 +1724,29 @@
         "state_since": { "$ref": "#/$defs/Timestamp" },
         "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "Run creation, in Unix milliseconds." },
         "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "First terminal transition, in Unix milliseconds; unaffected by outcome edits." },
+        "eta": {
+          "description": "Remaining wall duration excluding person-held time, from completed runs under the current definition hash. Null for finished runs or a remaining step without samples; older daemons omit it.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["remaining_low_ms", "remaining_high_ms", "basis", "as_of"],
+              "properties": {
+                "remaining_low_ms": { "type": "integer", "minimum": 0, "description": "p25 remaining duration in milliseconds." },
+                "remaining_high_ms": { "type": "integer", "minimum": 0, "description": "p75 remaining duration in milliseconds." },
+                "basis": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["method", "samples"],
+                  "properties": {
+                    "method": { "enum": ["per-step", "critical-path"] },
+                    "samples": { "type": "integer", "minimum": 0, "description": "Smallest completed sample count among remaining steps; zero means no remaining steps and zero remaining duration." }
+                  }
+                },
+                "as_of": { "type": "integer", "minimum": 0, "description": "Publication cut in Unix milliseconds, not an absolute estimated finish time." }
+              }
+            }
+          ]
+        },
         "outcome": { "oneOf": [{ "$ref": "#/$defs/MissionRunOutcome" }, { "type": "null" }], "description": "The outcome a person or an authorized agent set after the run finished." },
         "last_progress": { "type": ["string", "null"] },
         "blocker": { "type": ["object", "null"] },
@@ -2142,7 +2218,7 @@
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
             "fault": { "type": ["string", "null"], "description": "Current member reconcile failure; cleared by a successful pass." },
             "incarnation_id": { "type": ["string", "null"] },
-            "launch_contract": { "type": ["object", "null"], "description": "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. Omitted on roster rows and non-owning hosts." },
+            "launch_contract": { "type": ["object", "null"], "description": "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. While an executable's identity is still measured off the request, declared and drift are null and pending is true. Omitted on roster rows and non-owning hosts." },
             "current_session_id": { "type": ["string", "null"] },
             "todo": { "oneOf": [{ "$ref": "#/$defs/AgentTodo" }, { "type": "null" }], "description": "Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible." },
             "presentation": { "$ref": "#/$defs/AgentPresentation", "description": "st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons." },
@@ -2841,6 +2917,9 @@
         },
         {
           "$ref": "#/$defs/Device"
+        },
+        {
+          "$ref": "#/$defs/DeviceCommand"
         },
         {
           "$ref": "#/$defs/Operation"
@@ -4299,6 +4378,7 @@
       "usage",
       "machines",
       "devices",
+      "commands",
       "sessions",
       "terminals"
     ] },
@@ -4314,6 +4394,7 @@
       "usage",
       "machines",
       "devices",
+      "commands",
       "sessions",
       "terminals"
     ] },
@@ -4369,6 +4450,7 @@
     "CollectionCommand": {
       "oneOf": [
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
           "type": "object",
