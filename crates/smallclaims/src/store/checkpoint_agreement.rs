@@ -608,6 +608,7 @@ pub(super) fn checkpoint_executable_digest() -> Result<&'static str> {
 /// order as well as the plan. A build change may fix reader/projection semantics without
 /// changing the drop rules. Rowids, live projections and later claims are not proof inputs.
 fn proof_input_digest(staged: &StagedSet, plan: &StagedPlan) -> Result<String> {
+    let _phase = super::checkpoint_accounting::Phase::start("input_digest", "checkpoint.input_digest");
     staged.proof_input_digest(plan, checkpoint_executable_digest()?, &checkpoint_build(), CHECKPOINT_PROTOCOL)
 }
 

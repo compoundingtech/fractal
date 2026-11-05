@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Checkpoint verification reports completed phase timings and process I/O in structured journal lines and the latest verification_attempt status table (see #5127).",
+  "summary": "Checkpoint verification reports completed phase timings and process I/O in structured journal lines and the latest verification_attempt status table, including input_digest scans on failed-input retries (see #5127).",
   "replay": { "status": "none", "detail": "No replay or backfill." },
   "schema": { "status": "none", "detail": "No durable schema changes." },
   "rules": { "status": "none", "detail": "Verification decisions and stopping conditions are unchanged." },
