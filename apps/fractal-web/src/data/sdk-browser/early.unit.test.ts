@@ -12,7 +12,7 @@ import * as Tracer from 'effect/Tracer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EARLY_COLLECTIONS_GLOBAL, peekEarlyBootstrap, takeEarlyCollections } from './early.ts'
-import { FIRST_FRAME_SPAN, type FollowEvent, Fractal, FractalLive, type WindowValue } from '@fractal/sdk/effect'
+import { FIRST_FRAME_SPAN, type FollowEvent, Fractal, FractalLive, type WindowValue } from '@fractal/sdk/read'
 import { Layer } from 'effect'
 import { BrowserFractalPlatform } from './platform.ts'
 
