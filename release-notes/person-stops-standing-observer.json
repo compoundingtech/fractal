@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A person can move a repository's GitHub polling to another member: a top-level stop of the standing observer observer/github/OWNER/REPO, applied on that member, declares the observer stopped, and that member's next pass for any watch it holds declares it again there and polls on from the observer's cursor (#5182)",
+  "replay": {"status": "none", "detail": "No graph replay. The stop writes the same intent.desired declaration a host writes when an observer falls unused."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "changed", "detail": "A top-level `stop \"observer/github/OWNER/REPO\"` is now accepted at parse; it takes no reason. Publication refuses it from any actor but a person with `observer-stop-person-only`; a host's own declarations carry no actor and are unchanged. A top-level observer declaration, and a stop of any other observer, stay refused as before."},
+  "compatibility": {"status": "changed", "detail": "Mixed-version fleets with the previous release interoperate: the stop's declaration, observer \"github/OWNER/REPO\" { stop }, is the one every build already writes and folds, so a previous-release member reads it as the observer stopped and drops its cursor row, and reads the re-declaration as another member's, as it does today. A previous-release member refuses the new stop syntax at parse, so a person runs it on a member of this build."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No step is required. To move polling, a person applies the stop on the member that should poll, which needs a watch of the repository there."},
+  "recovery": {"status": "none", "detail": "Rolling back leaves the stopped and re-declared observer as ordinary declarations an earlier build reads; only the new stop syntax is refused again."}
+}

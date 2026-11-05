@@ -231,3 +231,7 @@ With v15 every fixed seed converges; seeds 2 and 27 are the exact never-trim set
 trim again). Characterization used
 `cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
 The first characterization run failed only the four stale v14 trim expectations.
+
+`claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
+Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
+Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.

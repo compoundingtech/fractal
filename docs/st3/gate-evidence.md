@@ -1211,6 +1211,33 @@ key stops the skip by itself. Paths are literal and relative; an under-declared 
 keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
 the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
 
+**A merge-group failure in a signed check: file it with an owner, fix its cause, and only then lift the refusal
+with one rerun of all jobs of that run.** A merge group never reuses a pass of its own tree, so its jobs run for
+real, and the observer records a failure like any other record. Only merge-group runs are observed: the Evidence
+observe workflow and its poll take `merge_group` runs, and the observer refuses a push. For a check with inputs,
+that failure is the newest record for the group's key. It shadows every earlier pass on the same key, so every
+pull request whose signed pass of those inputs predates it is refused with `check_failed`, until a newer pass
+exists. That refusal is the rule working: a failure on the same inputs is evidence about those inputs, and a vote
+of passes would hide exactly such a race (#5235 was one, a perf-slot ticket lost in about one join in a few
+hundred under load).
+
+So the failure is a defect first. File it, name its owner, and fix its cause, or record the owner's explicit
+disposition of why it is unrelated to the inputs. A passing rerun proves nothing about the defect. Once that is
+done, the pull requests still refused on the old key can be lifted in either of two ways:
+- **Re-sign.** Each affected pull request signs the check again (`scripts/st-test --check C --push origin`).
+- **Rerun.** One rerun of the whole merge-group run (`gh run rerun RUN`, all jobs) lifts them all at once. The
+  rerun is a new attempt of the same run. The Evidence observe workflow fires on its completion with that attempt,
+  and the poll keys its state on run and attempt (`scripts/ci-evidence-observe`), so the attempt is recorded as new
+  records. It is the same commit, so it has the same key. A job takes longer than the two-minute margin, so a
+  pass is dated after the failure and decides (`test_a_newer_failure_with_the_same_key_stops_the_skip_by_itself`,
+  and, past a preferred level,
+  `test_preferred_levels_take_the_hosts_own_pass_over_a_newer_ci_pass_but_not_over_a_failure_after_it`).
+  Rerun every job, not only the failed one. The observer reads the attempt's own `ci-evidence-source-<attempt>`
+  artifact, which only that attempt's evidence-source job uploads, so a rerun of the failed job alone (`--job`,
+  `--failed`) is never observed and the failure stands. A full rerun is a whole Workspace CI run, so once the fix
+  has merged and moved the key, re-signing the few pull requests left is usually cheaper. A failing rerun stands
+  like any failure.
+
 `linux-gate` declares its inputs too (enforced for pull requests since 2026-10-23, `sample_one_in` 5). The list is the Rust test stage's
 (`doc/fleet/factory/nix-evidence/rust-test-declared-inputs`, a textual scan of what the Rust sources name) plus what the other
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
@@ -2091,6 +2118,7 @@ Web and `typescript-client` hold the same per-worktree file lock for their entir
 reader: their different HOME and store settings can otherwise replace the shared `node_modules` while tests use it. The parent
 runner holds the lock in Git's worktree metadata, and web acquires it before taking a heavy slot. Rust and the other light checks
 remain concurrent. `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+The runner's self-test fixtures select their own scheduling mode and do not inherit the enclosing run's serial setting.
 
 An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
 deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested
