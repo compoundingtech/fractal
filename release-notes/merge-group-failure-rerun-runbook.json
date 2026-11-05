@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The gate evidence guide now says what to do when a merge-group run fails a signed check. File the failure with an owner and fix its cause first. Then the pull requests still refused on those inputs can be lifted by re-signing, or by one rerun of all of that run's jobs, which the observer records as newer passes.",
+  "replay": {"status": "none", "detail": "Documentation only."},
+  "schema": {"status": "none", "detail": "Documentation only."},
+  "rules": {"status": "none", "detail": "Documentation only. The rule that a newer failure with the same input key decides is unchanged."},
+  "compatibility": {"status": "none", "detail": "Documentation only."},
+  "downtime": {"status": "none", "detail": "Documentation only."},
+  "manual": {"status": "none", "detail": "Operators treat a merge-group failure in a signed check as a defect: file it, fix its cause or record the owner's disposition, then re-sign the affected pull requests or rerun all jobs of that run once. A rerun of only the failed job has no source artifact for its attempt and is never observed, and a push to main is not observed at all."},
+  "recovery": {"status": "none", "detail": "Documentation only."}
+}

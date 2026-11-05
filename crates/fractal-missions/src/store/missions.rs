@@ -5915,6 +5915,9 @@ impl MissionsStore for Store {
                 if action == "claim" && rollouts::intake_held(transaction, &actor, &subject)? {
                     return Err(St3Error::new("seat-rollout-draining", "the seat holds new work intake while its rollout drains; existing work may finish"));
                 }
+                if action == "claim" {
+                    fractal_store::store::refresh_intake::admit_claim_tx(transaction, &actor)?;
+                }
                 let current = transaction
                     .query_row(
                         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
