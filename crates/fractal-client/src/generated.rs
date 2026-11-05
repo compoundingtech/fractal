@@ -1525,6 +1525,8 @@ pub struct MissionRunSummary {
     pub current_steps: Vec<Value>,
     pub must_act: String,
     pub state_since: String,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default)]
     pub outcome: Option<MissionRunOutcome>,
@@ -1565,6 +1567,8 @@ pub struct MissionStep {
     #[serde(default)]
     pub keep_open: bool,
     pub since: String,
+    pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     #[serde(default)]
     pub last_progress: Option<String>,
     #[serde(default)]
@@ -1702,6 +1706,8 @@ pub struct Work {
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]
+    pub execution_waited_ms: u64,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
     pub blocked_reason: Option<String>,
     #[serde(default)]
@@ -1784,6 +1790,9 @@ pub struct Agent {
     pub fault: Option<String>,
     #[serde(default)]
     pub incarnation_id: Option<String>,
+    /// Live owner-local launch identity; not part of the cached roster snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_contract: Option<Value>,
     #[serde(default)]
     pub current_session_id: Option<String>,
     #[serde(default)]

@@ -1,5 +1,5 @@
 /**
- * `@fractal/sdk/effect`: the Fractal client-v0 transport for the web app, as one Effect service.
+ * `@fractal/sdk/read`: the roster/conversation read transport, without PTY or mutation services.
  *
  * One collections socket carries every follow (`socket.ts`). Each follow is a scoped
  * `Stream<FollowEvent<A>>` decoded tolerantly at this edge with Fractal's generated codecs, so
@@ -15,13 +15,6 @@
  * until replacement or identifiable repair. Diagnostics count each tag per normalized
  * schema path, with bounded first-path trace events and no row contents or decoder errors.
  *
- * `messageSend` uses the generated HTTP action client and decodes its acknowledgement; it does
- * not retry ambiguous delivery. Daemon refusals retain the complete error envelope and HTTP
- * status, separately from transport failures. `snapshot` reads fresh capabilities over HTTP,
- * bypassing cached discovery so the composer's fence refresh is authoritative.
- * `arrangementActions` exposes the same fresh snapshot/refusal contract as an HTTP-only
- * `submitAction` port, so Sidebar edits do not open a second collections socket.
- *
  * Tracing (`trace.ts`, `firstFrame.ts`): SDK HTTP calls run under their own `st3.*` span (a child
  * of `parentSpan`) whose `traceparent` they carry; socket opens carry the caller's `traceContext`.
  * Each subscribe attempt opens a bounded `wf.ux.first_frame` root (and an `st3.follow.subscribe`
@@ -30,9 +23,7 @@
  */
 import {
   ClientError,
-  type ActionOf,
   type CollectionSocket,
-  type ErrorEnvelope,
   type CollectionFilters,
   type CollectionFrame,
   type CollectionSocketFactory,
@@ -43,14 +34,12 @@ import {
   FractalClient,
 } from '@fractal/client'
 import {
-  ActionResult,
   type Capabilities,
   Capabilities as CapabilitiesCodec,
   decodeUnknownSync,
   Resource,
   Runtime,
   TerminalScreen,
-  Snapshot,
 } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
 import * as Data from 'effect/Data'
@@ -99,30 +88,6 @@ export {
   FOLLOW_SUBSCRIBE_SPAN,
   type FirstFrameOutcome,
 } from './firstFrame.ts'
-export {
-  PTY_SUBPROTOCOL,
-  PtyFrame,
-  PtyProtocolError,
-  encodePtyFrame,
-  makePtyFrameReader,
-  type PtyTarget,
-  type PtyMode,
-  type PtySize,
-  PtyAttachFailure,
-  type PtyAttachment,
-  requestPtyAttachment,
-  ptyStreamUrl,
-  type PtyState,
-  type PtyEvent,
-  ptyBackoffMillis,
-  ptyTransition,
-  ptyFallback,
-  type PtySocket,
-  type PtySocketFactory,
-  type PtyOutput,
-  type PtySession,
-  openPtySession,
-} from './pty.ts'
 
 // Arrangement windows use the generated owner-scoped subscribeArrangements API.
 
@@ -184,29 +149,6 @@ export class AttachFailure extends Data.TaggedError('Attach')<{
   readonly message: string
 }> {}
 
-/** The daemon refused an action; retain its wire response for caller-specific handling. */
-export class ActionRefused extends Data.TaggedError('ActionRefused')<{
-  readonly response: ErrorEnvelope
-  readonly status: number
-  readonly message: string
-}> {}
-/** No usable action response arrived. Delivery may still have happened. */
-export class ActionTransportFailure extends Data.TaggedError('ActionTransportFailure')<{
-  readonly cause: unknown
-  readonly message: string
-}> {}
-/** Refusal or uncertain transport failure from an action invocation. */
-export type ActionFailure = ActionRefused | ActionTransportFailure
-
-/** Generated message.send input, allowing immutable draft tags. */
-export type MessageSendInput = Omit<
-  ActionOf<'message.send'>,
-  'api_version' | 'type' | 'parameters'
-> & {
-  readonly parameters: Omit<ActionOf<'message.send'>['parameters'], 'tags'> & {
-    readonly tags?: readonly string[]
-  }
-}
 
 /** Failures reported by a follow instead of terminating its event stream. */
 export type FollowFailure = SubscriptionLimit | DecodeFailure | Rejected | AttachFailure
@@ -315,9 +257,6 @@ export class Fractal extends Context.Service<
     readonly probeSockets: Effect.Effect<void>
     /** The gateway's capabilities (limits, actions and the scopes this credential holds). */
     readonly capabilities: Effect.Effect<Capabilities, Rejected>
-    /** A fresh HTTP snapshot, never the generated client's cached discovery snapshot. */
-    readonly snapshot: Effect.Effect<string, ActionFailure>
-    readonly messageSend: (request: MessageSendInput) => Effect.Effect<ActionResult, ActionFailure>
     /** One bounded published roster page, without the daemon's fresh-read wait. */
     readonly readAgents: Effect.Effect<{
       readonly value: readonly DecodedAgent[]
@@ -350,7 +289,7 @@ export class Fractal extends Context.Service<
     /** Socket reachability is not Live: only a successfully decoded data frame establishes it. */
     readonly gatewaySyncStatus: Stream.Stream<SyncStatus>
   }
->()('@fractal/sdk/Fractal') {}
+>()('@fractal/sdk/Read') {}
 
 /** A caller-owned socket that can answer an identical initial subscribe without another send. */
 export interface AdoptedCollections {
@@ -423,47 +362,8 @@ export interface FractalOptions {
 const decodeScreen = decodeUnknownSync(TerminalScreen)
 const decodeRuntime = decodeUnknownSync(Runtime)
 const decodeCapabilities = decodeUnknownSync(CapabilitiesCodec)
-const decodeActionResult = decodeUnknownSync(ActionResult)
-const decodeSnapshot = decodeUnknownSync(Snapshot)
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
-const actionFailure = (cause: unknown): ActionFailure =>
-  cause instanceof ClientError
-    ? new ActionRefused({
-        response: cause.response,
-        status: cause.status,
-        message: cause.response.message,
-      })
-    : new ActionTransportFailure({ cause, message: errorMessage(cause) })
-
-/** HTTP-only arrangement actions; sharing this port never opens another collections socket. */
-export interface ArrangementActionPort {
-  readonly snapshot: Effect.Effect<string, ActionFailure>
-  readonly submitAction: (request: ActionOf<'arrangement.edit'>) => Effect.Effect<typeof ActionResult.Type, ActionFailure>
-}
-
-export const arrangementActions = (client: Pick<FractalClient, 'capabilities' | 'arrangementEdit'>): ArrangementActionPort => ({
-  snapshot: Effect.tryPromise({
-    try: () => client.capabilities(),
-    catch: actionFailure,
-  }).pipe(
-    Effect.flatMap((envelope) => Effect.try({
-      try: () => decodeSnapshot(envelope.snapshot).id,
-      catch: actionFailure,
-    })),
-    Effect.withSpan('st3.snapshot'),
-  ),
-  submitAction: Effect.fn('st3.arrangement.edit')((request: ActionOf<'arrangement.edit'>) =>
-    Effect.tryPromise({
-      try: () => client.arrangementEdit(request),
-      catch: actionFailure,
-    }).pipe(
-      Effect.flatMap((envelope) => Effect.try({
-        try: () => decodeActionResult(envelope.value),
-        catch: actionFailure,
-      })),
-    )),
-})
 
 const unrecognized = (raw: unknown, issue: string): UnrecognizedEntry | undefined => {
   if (typeof raw !== 'object' || raw === null) return undefined
@@ -1200,44 +1100,6 @@ const make = (options: FractalOptions) =>
           ),
         ),
       ),
-      snapshot: sdkRequest('st3.snapshot', (traced) =>
-        Effect.tryPromise({
-          try: () => traced.capabilities(),
-          catch: actionFailure,
-        }).pipe(
-          Effect.flatMap((envelope) =>
-            Effect.try({
-              try: () => decodeSnapshot(envelope.snapshot).id,
-              catch: actionFailure,
-            }),
-          ),
-        ),
-      ),
-      messageSend: (request: MessageSendInput) =>
-        sdkRequest('st3.messageSend', (traced) =>
-          Effect.tryPromise({
-            try: () => {
-              const { tags, ...parameters } = request.parameters
-              return traced.messageSend({
-                id: request.id,
-                idempotency_key: request.idempotency_key,
-                fence: request.fence,
-                parameters: {
-                  ...parameters,
-                  ...(tags === undefined ? {} : { tags: [...tags] }),
-                },
-              })
-            },
-            catch: actionFailure,
-          }).pipe(
-            Effect.flatMap((envelope) =>
-              Effect.try({
-                try: () => decodeActionResult(envelope.value),
-                catch: actionFailure,
-              }),
-            ),
-          ),
-        ),
       followWindow,
       watch,
       followConversation,

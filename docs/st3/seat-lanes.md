@@ -249,7 +249,16 @@ limit shrinks what `nproc` reports. From that room, admission takes:
   seen running (for up to ten minutes): the lane caps it, so its size is firm;
 - what the seats outside lanes hold that the kernel cannot take back, the anonymous and kernel memory
   of each seat scope in the user manager's `app.slice`. Nothing caps such a seat, so a reservation
-  could not bound it; page cache is left out, since pressure reclaims it.
+  could not bound it; page cache is left out, since pressure reclaims it;
+- the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest live laned
+  seat by (one that runs or was admitted to start, since only such a seat's run asks for a burst),
+  the seat starting among them. A burst raises a seat to the burst lane (8 cores/24G, `build` in
+  `.st/lane-bursts.json`, which `scripts/fractal-test` asks for; a test holds the two together), so
+  on a host of 8G seats it keeps 16G. While a burst is held its raise already counts in its seat's
+  lane, so the reserve keeps only what is left of it. A host whose room for lanes could never hold
+  the burst lane keeps none, since every burst there is refused. Starts may not use it; bursts may. Without it,
+  seats that start while no run builds would take the room every later burst needs, and each run
+  would wait out its `--queue-limit`.
 
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
@@ -257,12 +266,13 @@ claim), and its reason shows where admission reasons show (`st agents show`'s `A
 list, the tree and `agents start`), naming the host's free room:
 
 ```
-lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G)
+lane 8 cores/30.0G does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G, kept for a burst 16.0G)
 ```
 
 Seats wait in order: a smaller lane that would fit does not pass the first seat in line ("waits
 behind …, first in line for room"), so a large lane is not starved. A lane larger than the host can
-ever give waits out of line and holds no one back. A seat leaves the line when it is no longer tried
+ever give, or than it gives beside the burst reserve ("does not fit beside the … this host keeps from
+starts for a burst"), waits out of line and holds no one back. A seat leaves the line when it is no longer tried
 for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
 workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
 A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
@@ -304,12 +314,14 @@ for it as it waits for room, saying so, rather than answering: the run that aske
 
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
-beside the other lanes and what seats outside lanes hold. Bursts wait in the order they asked, so a
+beside the other lanes and what seats outside lanes hold, the room admission keeps from starts for a
+burst included (`st doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
+it for a seat's start, naming that seat). Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at
 once. A seat that has waited 15 minutes or more to start, first in line for room, is served before
 more bursts: a new burst waits behind it, so a stream of bursts cannot keep it from starting. It
 does so only while that seat would fit once every step's raise and burst on the host were given
-back; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
+back, beside the burst reserve; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
 waiting burst's reason starts `burst lane`. While held, admission counts the seat at the raised
 lane. Released, its cores come back at once and its memory once the lane holds less than it
 will allow, as a step's lowering does. Bursts live in the daemon's memory: after a daemon restart
