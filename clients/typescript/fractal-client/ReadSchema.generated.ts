@@ -4,7 +4,7 @@
 // Regenerate: cargo run -p fractal-client-codegen; verify: cargo run -p fractal-client-codegen -- --check
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 import { DateTime, Duration, Schema, SchemaTransformation } from "effect"
-import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
 import type { Brand, Option, Redacted } from "effect"
 import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
 export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"

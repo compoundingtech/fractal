@@ -83,6 +83,20 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Carried-step review fixture inventory (PR #5343)
+
+The `fractal_store::references::step_review::tests` maintainer owns both
+exceptions reviewed for [PR #5343](https://github.com/compoundingtech/fractal/pull/5343).
+`lv-hf97024592eee` deletes one in-memory fixture step by its variable subject
+key to prove missing carried history fails closed. Existing step columns and
+index keys remain inline; its reclamation TODO must preserve the missing-source
+regression when the store representation changes.
+`lv-hdc4eec22f34b` inserts a pending naming record using fixture record/writer/hash,
+raw JSON, subject, kind and timestamp TEXT values and their index keys. Inline
+storage matches the existing identity fixture; its exact-wire TODO must preserve
+pending-replica semantics through any reference/chunk conversion.
+Neither exception creates a production writer or proves encoded byte/cost bounds.
+
 ### Cold runtime reduction inventory (PR #1706)
 
 The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
