@@ -167,8 +167,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             let (Some(start), Some(end)) = step_timestamps(&events, attempt) else {
                 continue;
             };
-            let asks = tx.prepare_cached("SELECT subject,body,accepted_at_unix_ms FROM claims
-                WHERE kind='work.person-asked' AND (subject=?1 OR json_extract(body,'$.fields.origin_step')=?1)")?
+            let asks = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4964c05cc4f6 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ ASKS_SQL)?
                 .query_map([&subject], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut holds = Vec::new();
@@ -217,6 +216,13 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7c290b785c03 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_terminal_pending", [])?;
     Ok(())
 }
+
+/// The person asks a step made itself or that name it as their origin, each through its own index;
+/// one `OR` read every ask in the store per sampled step.
+pub(super) const ASKS_SQL: &str = "SELECT subject,body,accepted_at_unix_ms FROM claims
+    WHERE kind='work.person-asked' AND subject=?1
+    UNION ALL SELECT subject,body,accepted_at_unix_ms FROM claims
+    WHERE kind='work.person-asked' AND json_extract(body,'$.fields.origin_step')=?1 AND subject<>?1";
 
 #[cfg(test)]
 thread_local! {
