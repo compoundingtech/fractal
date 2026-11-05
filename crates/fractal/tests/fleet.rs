@@ -6312,6 +6312,180 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
 }
 
+/// A page cursor into the messages stream names its position in `stream_after` and leaves out
+/// `after`, so the previous release, whose cursor needs `after`, refuses it and the listing starts
+/// over rather than reading a stream position as a graph index. A subject the graph holds lists
+/// once, as the graph's, and a walk by small pages lists every message once, in order, on pages
+/// that are never empty. A cursor the release gave, into the graph or into the stream, still
+/// reads on this build.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_across_upgrade_and_rollback() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    o.start().await;
+    // Pages of two, so the release's five messages and three stream items take four pages.
+    const QUERY: &str = "/v1/messages/page?to=agent/fleet-reader&limit=2";
+    let page = |node: &Node, cursor: Option<String>| {
+        let client = node.client();
+        async move {
+            let path = match cursor {
+                Some(cursor) => format!("{QUERY}&cursor={cursor}"),
+                None => QUERY.to_owned(),
+            };
+            client.get::<MessagePage>(&path).await
+        }
+    };
+    // Every page from `cursor` to the end, each with the cursor it gave.
+    let walk = |node: &Node, mut cursor: Option<String>| {
+        let client = node.client();
+        async move {
+            let mut pages = Vec::new();
+            loop {
+                let path = match &cursor {
+                    Some(cursor) => format!("{QUERY}&cursor={cursor}"),
+                    None => QUERY.to_owned(),
+                };
+                let page: MessagePage = client.get(&path).await.unwrap();
+                assert_eq!(page.has_more, page.next_cursor.is_some());
+                cursor = page.next_cursor.clone();
+                let subjects = page.items.iter().map(|item| item.subject.clone()).collect::<Vec<_>>();
+                pages.push((subjects, page.next_cursor));
+                if cursor.is_none() {
+                    return pages;
+                }
+                assert!(pages.len() < 20, "the listing never ended: {pages:?}");
+            }
+        }
+    };
+    let subjects = |pages: &[(Vec<String>, Option<String>)]| {
+        pages.iter().flat_map(|(subjects, _)| subjects.clone()).collect::<Vec<_>>()
+    };
+    // What a cursor says, as JSON.
+    let decoded = |cursor: &str| -> Value {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(cursor.strip_prefix("messages/").expect("a message cursor"))
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+    let into_stream = |cursor: &Value| {
+        cursor["stream_after"].as_u64().or(cursor["after"].as_u64()).is_some_and(|after| after >= base)
+    };
+
+    // The release's mail, more than two pages of it.
+    let mut graph = Vec::new();
+    for n in 1..=5 {
+        let receipt: Value = o
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("release-{n}"), "from": PERSON, "to": "agent/fleet-reader",
+                "content": format!("graph mail {n}"),
+            }))
+            .await
+            .unwrap();
+        graph.push(receipt["subject"].as_str().expect("a send receipt names its message").to_owned());
+    }
+    let first = page(&o, None).await.unwrap();
+    assert_eq!(first.items.iter().map(|item| item.subject.clone()).collect::<Vec<_>>(), graph[..2]);
+    let release_cursor = first.next_cursor.expect("the release's first page has more");
+    assert!(decoded(&release_cursor)["after"].as_u64().is_some_and(|after| after < base));
+
+    // Upgrade in place, then the stream: three items, and two under subjects the graph holds,
+    // one between them and one last.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    let stream = ["message/0000000000000e01", "message/0000000000000e02", "message/0000000000000e03"];
+    for subject in [stream[0], graph[2].as_str(), stream[1], stream[2], graph[3].as_str()] {
+        append_stream_item(&o, subject).await;
+    }
+    for shared in &graph[2..4] {
+        assert_eq!(stream_items(&o, shared).await, 1);
+    }
+    let mut expected = graph.clone();
+    expected.extend(stream.map(str::to_owned));
+    let upgraded = walk(&o, None).await;
+    assert_eq!(subjects(&upgraded), expected, "each subject once, the graph's first: {upgraded:?}");
+    // The last stream item is the graph's, so the stream ends a page early rather than give a
+    // cursor to an empty one.
+    assert_eq!(
+        upgraded.iter().map(|(subjects, _)| subjects.len()).collect::<Vec<_>>(),
+        [2, 2, 2, 2],
+        "{upgraded:?}"
+    );
+    // The graph's subjects read as the graph's messages.
+    for (n, shared) in [(3, &graph[2]), (4, &graph[3])] {
+        let read: MessageView = o.client().get(&format!("/v1/messages/read/{shared}")).await.unwrap();
+        assert_eq!(read.content, format!("graph mail {n}"));
+    }
+    // A cursor into the graph keeps `after`; one into the stream names `stream_after` alone.
+    let cursors = upgraded.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
+    assert_eq!(cursors.len(), 3);
+    for cursor in &cursors[..2] {
+        assert!(cursor["after"].as_u64().is_some_and(|after| after < base), "{cursor}");
+        assert!(cursor.get("stream_after").is_none(), "{cursor}");
+    }
+    assert!(cursors[2]["stream_after"].as_u64().is_some_and(|after| after >= base), "{}", cursors[2]);
+    assert!(cursors[2].get("after").is_none(), "{}", cursors[2]);
+    let stream_cursor = upgraded[2].1.clone().unwrap();
+    // The cursor the release gave before the upgrade reads on through the stream.
+    assert_eq!(subjects(&walk(&o, Some(release_cursor.clone())).await), expected[2..]);
+
+    // Roll back: the release answers the stream cursor as invalid (422), and the listing starts over.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let rolled_back = walk(&o, None).await;
+    let listed = subjects(&rolled_back);
+    // v0.3.25 then lists the stream, with the graph's subjects again among it; this build's guard
+    // is what lists each once.
+    assert_eq!(listed[..5], graph, "the release lists its mail first: {rolled_back:?}");
+    let release_cursors = rolled_back.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
+    if release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
+        // A release with stream_after cursors reads this build's.
+        assert_eq!(subjects(&walk(&o, Some(stream_cursor.clone())).await), expected[6..]);
+    } else {
+        let refused = page(&o, Some(stream_cursor.clone())).await.unwrap_err();
+        let (status, code, message, _) =
+            fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
+        assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+    }
+    // A cursor the release gives into the stream, if it lists the stream, names it in `after`.
+    let release_stream_cursor = rolled_back
+        .iter()
+        .filter_map(|(_, cursor)| cursor.clone())
+        .find(|cursor| into_stream(&decoded(cursor)));
+
+    // Upgrade again: the whole walk is as it was, and the release's stream cursor reads on.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    // A cursor's `through` is the graph's index at its first page, which each start moves on.
+    let shape = |pages: &[(Vec<String>, Option<String>)]| {
+        pages
+            .iter()
+            .map(|(subjects, cursor)| {
+                let cursor = cursor.as_deref().map(decoded);
+                let position = cursor.map(|cursor| (cursor.get("after").cloned(), cursor.get("stream_after").cloned()));
+                (subjects.clone(), position)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&walk(&o, None).await), shape(&upgraded));
+    assert_eq!(subjects(&walk(&o, Some(release_cursor)).await), expected[2..]);
+    // The release's first stream cursor follows its page that ended at the first stream item.
+    if let Some(cursor) = release_stream_cursor {
+        assert_eq!(subjects(&walk(&o, Some(cursor)).await), expected[6..]);
+    }
+}
+
 /// Delivery and read state this build records as local marks (db break-up step 4b) reads beside
 /// the lifecycle claims the previous release wrote, on one node upgraded in place, backed up and
 /// rolled back. The release's claims read the same throughout; a mark replicates nothing and
@@ -6551,6 +6725,8 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     // The release's archive: this build restores it, and reads the same mail on it.
     let release_archive = root.path().join("release.jsonl");
     let release_records = backup(&o, &release_archive, None);
+    let release_digest = release_records[0]["data"]["registry_digest"].clone();
+    assert!(release_digest.as_str().is_some_and(|digest| !digest.is_empty()));
     let release_version = release_records[0]["data"]["version"].as_u64().unwrap();
     assert!(release_version < 5, "{}", release_records[0]);
     let (mut from_release, report) = restored_node(root.path(), "from-release", &release_archive).await;
@@ -6578,9 +6754,15 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     o.binary = old.clone();
     let theirs = backup(&o, &root.path().join("release-of-upgraded.jsonl"), Some(&copy));
     o.binary = PathBuf::from(st3());
+    let current_digest = fractal_daemon::store::Store::open_memory("archive-writer").unwrap()
+        .backup_header().unwrap().registry_digest;
+    assert_eq!(ours[0]["data"]["registry_digest"], current_digest);
+    assert_eq!(theirs[0]["data"]["registry_digest"], release_digest);
     let without_build = |records: &[Value]| {
         let mut header = records[0].clone();
         header["data"].as_object_mut().unwrap().remove("source_build");
+        // Like source_build, the writer's registry digest changes when a release adds claim kinds.
+        header["data"].as_object_mut().unwrap().remove("registry_digest");
         // The end record's hash covers the header, so only its count can match.
         let end = &records[records.len() - 1];
         assert_eq!(end["record"], "end", "{end}");
@@ -7194,6 +7376,56 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     // The seat's own host reads its own marks, with no host to name.
     let own: Value = b.client().get(&format!("/v1/messages/read/{read}")).await.unwrap();
     assert_eq!((own["status"].clone(), own.get("status_from").cloned()), (json!("read"), None), "{own}");
+
+    // A reminder group to the seat, whose winner b closes as a mark. Once a read on `a` hears the
+    // close from b, a's client list makes the older reminder current and the closed winner
+    // history, and still no close replicates (#4866).
+    let mut reminders = Vec::new();
+    for version in [1, 2] {
+        let receipt: Value = b
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("b-seat-reminder-{version}"), "from": PERSON, "to": seat,
+                "content": "stand-up", "tags": ["reminder:standup", format!("version:{version}")],
+            }))
+            .await
+            .unwrap();
+        reminders.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (older, winner) = (reminders[0].clone(), reminders[1].clone());
+    for lifecycle in ["delivered", "read", "closed"] {
+        let receipt: Value = b
+            .client()
+            .post(
+                &format!("/v1/messages/{}/claims", winner.trim_start_matches("message/")),
+                &json!({"lifecycle": lifecycle, "actor": seat, "idempotency_key": format!("{winner}-{lifecycle}")}),
+            )
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
+    }
+    let layer = |page: &Value, subject: &str| {
+        page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).map(|item| item["operational"].clone())
+    };
+    wait_until("a's client list makes the older reminder current once it hears b's close", 90, || {
+        let client = a.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older).is_some_and(|layer| layer["layer"] == "current") && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
+    let history: Value = a.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    assert_eq!(
+        layer(&history, &winner),
+        Some(json!({"layer": "history", "actionable": false, "reasons": ["closed"]})),
+        "{history}"
+    );
+    assert!(
+        !a.claims().await.iter().any(|claim| claim["subject"] == winner.as_str() && claim["kind"] == "message.closed"),
+        "b's close replicated as a claim"
+    );
 }
 
 /// A fleet of the previous release upgraded to this build, then one member rolled back. Before
@@ -7287,10 +7519,45 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     .await;
     assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
 
+    // The host closes a reminder's winner as a mark; once `o` hears it, its client list makes the
+    // older reminder current (#4866), and `o` keeps the close in its member-local table.
+    let mut reminders = Vec::new();
+    for version in [1, 2] {
+        let receipt: Value = h
+            .client()
+            .post("/v1/messages", &json!({
+                "idempotency_key": format!("h-seat-reminder-{version}"), "from": PERSON, "to": seat,
+                "content": "stand-up", "tags": ["reminder:standup", format!("version:{version}")],
+            }))
+            .await
+            .unwrap();
+        reminders.push(receipt["subject"].as_str().unwrap().to_owned());
+    }
+    let (older, winner) = (reminders[0].clone(), reminders[1].clone());
+    for kind in ["delivered", "read", "closed"] {
+        assert!(lifecycle(&h, &winner, kind).await.starts_with("offset-receipt/"), "{kind}");
+    }
+    let layer = |page: &Value, subject: &str| {
+        page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).map(|item| item["operational"]["layer"].clone())
+    };
+    wait_until("o's client list makes the older reminder current once it hears the host's close", 90, || {
+        let client = o.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older) == Some(json!("current")) && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
+
     // `o` rolls back: the host stops recording marks, and its next lifecycle write is a claim.
     o.stop();
     o.binary = old.clone();
     o.start().await;
+    // The release never reads the kept close: its table and trigger are inert, and it lists the
+    // reminders from its own records.
+    let listed: Value = o.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    assert!(layer(&listed, &older).is_some() && layer(&listed, &winner).is_some(), "{listed}");
     wait_until("the host turns marks off beside a member that does not read them", 150, || {
         let off = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("off:");
         async move { off }
@@ -7317,6 +7584,20 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     // The host's own records are whole: its marks and the claim after them.
     assert_eq!(view(&h, &marked).await.unwrap()["status"], "closed");
     assert_eq!(view(&h, &before).await.unwrap()["status"], "delivered");
+
+    // Rolled forward again, `o` counts the close it kept before the rollback at its next fold.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("o counts the kept close again after rolling forward", 90, || {
+        let client = o.client();
+        let (older, winner) = (older.clone(), winner.clone());
+        async move {
+            let Ok(page) = client.get::<Value>("/v1/client/messages?limit=200").await else { return false };
+            layer(&page, &older) == Some(json!("current")) && layer(&page, &winner).is_none()
+        }
+    })
+    .await;
 }
 
 /// A seat's conversation and `conversations wait` across the previous release and this build, on
@@ -7835,6 +8116,63 @@ async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
             && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
                 || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
     })
+}
+
+/// The standing observer's declarations on `node`, oldest first, as (origin, stopped).
+async fn observer_declarations(node: &Node) -> Vec<(String, bool)> {
+    node.claims().await.iter()
+        .filter(|claim| claim["subject"] == "observer/github/fixture/app" && claim["kind"] == "intent.desired")
+        .map(|claim| (
+            claim["origin"].as_str().unwrap_or_default().to_owned(),
+            claim.pointer("/body/desired/children/0/name") == Some(&json!("stop")),
+        ))
+        .collect()
+}
+
+/// A member of the previous release watches a pull request beside a poller of this build that
+/// already observes the repository (#4831). The poller declares its observer once, in the write
+/// that declares the watch using it, so no pass stops it as unused and declares it again; the
+/// elder's watch, the released command, plans beside that one declaration and becomes a
+/// subscription on the poller's observer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_member_watches_beside_this_builds_poller() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the poller's observer declaration", 90, || async {
+        observer_declarations(&elder).await.iter().any(|(origin, _)| origin == "fixture-poller")
+    }).await;
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+    let declarations = observer_declarations(&poller).await;
+    assert_eq!(
+        declarations.iter().filter(|(origin, _)| origin == "fixture-poller").collect::<Vec<_>>(),
+        [&("fixture-poller".to_owned(), false)],
+        "the poller declared its observer once and never stopped it: {declarations:?}",
+    );
 }
 
 /// A previous release without the GitHub plugin keeps the poller writing item snapshots.
