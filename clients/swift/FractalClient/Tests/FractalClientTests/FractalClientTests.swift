@@ -892,6 +892,12 @@ private final class WebSocketCaptureSession: URLSession, @unchecked Sendable {
     let capture = TraceRequestCapture()
     private let backing = URLSession(configuration: .ephemeral)
 
+    #if canImport(FoundationNetworking)
+    init() {
+        super.init(configuration: .ephemeral)
+    }
+    #endif
+
     override func webSocketTask(with request: URLRequest) -> URLSessionWebSocketTask {
         capture.append(request)
         let task = backing.webSocketTask(with: request)
