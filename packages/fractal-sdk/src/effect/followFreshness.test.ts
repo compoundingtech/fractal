@@ -270,7 +270,10 @@ const run = (
 
 describe('follow freshness', () => {
   beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
-  afterEach(() => vi.useRealTimers())
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.doUnmock('@fractal/client/schema')
+  })
 
   it('loads terminal decoding on demand and reports malformed screens through Failed', () =>
     run({ maxFollows: 4 }, (gateway) =>
@@ -324,6 +327,72 @@ describe('follow freshness', () => {
         expect(mounted.ended()).toBe(true)
       }),
     ))
+
+  it('publishes a Failed status before emitting a rejected codec import', async () => {
+    vi.doMock('@fractal/client/schema', () => { throw new Error('private loader detail') })
+    await run({ maxFollows: 1 }, (gateway) =>
+      Effect.gen(function* () {
+        const fractal = yield* Fractal
+        const spec = { _tag: 'Terminal', runtime: 'runtime/import-failure' } as const
+        const key = followKey(spec)
+        const events: FollowEvent<unknown>[] = []
+        yield* fractal.followTerminal(spec).pipe(Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(key)).toMatchObject({
+              _tag: 'Failed', cause: { _tag: 'Unknown' },
+            })
+            events.push(event)
+          }),
+        ))
+        expect(events).toMatchObject([{
+          _tag: 'Failed', error: { _tag: 'Decode', message: 'Fractal terminal screen codec could not load' },
+        }])
+        const status = yield* fractal.followSyncStatus(key).pipe(Stream.take(1), Stream.runCollect)
+        expect(Array.from(status)).toMatchObject([{ _tag: 'Failed', cause: { _tag: 'Unknown' } }])
+        expect(gateway.commands.some(command => command.collection === 'terminal')).toBe(false)
+      }),
+    )
+  })
+
+  it('cancels pending codec preparation before admission and leaves no registration', async () => {
+    const { promise: pending, resolve: release } = Promise.withResolvers<void>()
+    const started = Effect.runSync(Deferred.make<void>())
+    vi.doMock('@fractal/client/schema', async () => {
+      Effect.runSync(Deferred.succeed(started, undefined))
+      await pending
+      return vi.importActual('@fractal/client/schema')
+    })
+    try {
+      const active: number[] = []
+      await run({
+        maxFollows: 1,
+        onDiagnostics: (event) => { if (event._tag === 'Follows') active.push(event.active) },
+      }, (gateway) =>
+        Effect.gen(function* () {
+          const fractal = yield* Fractal
+          const spec = { _tag: 'Terminal', runtime: 'runtime/pending-import' } as const
+          const key = followKey(spec)
+          const requests = vi.fn(async () => new Response())
+          gateway.probe = requests
+          const mounted = yield* watchFollow(fractal, key, fractal.followTerminal(spec))
+          yield* Deferred.await(started)
+          yield* mounted.interrupt
+          release()
+          yield* settle
+          expect(mounted.events).toEqual([])
+          expect(requests).not.toHaveBeenCalled()
+          expect(active.every(count => count === 0)).toBe(true)
+          expect((yield* SubscriptionRef.get(fractal.syncStatuses)).has(key)).toBe(false)
+          expect((yield* SubscriptionRef.get(fractal.freshness)).has(key)).toBe(false)
+          expect(gateway.commands.some(command => command.collection === 'terminal')).toBe(false)
+          yield* mountWindow('agents')
+          expect(active.at(-1)).toBe(1)
+        }),
+      )
+    } finally {
+      release()
+    }
+  })
 
   it('resubscribes a cursor-gap conversation resync without failing or reconnecting the socket', () =>
     run({ maxFollows: 4 }, (gateway) =>

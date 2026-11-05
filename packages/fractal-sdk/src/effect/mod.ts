@@ -406,6 +406,8 @@ const RETRY_DELAY = '1 second'
 
 /** How one kind of follow talks on the socket. */
 interface FollowProtocol<A> {
+  /** Interruptible setup before admission or socket registration, with shared failure reporting. */
+  readonly prepare?: Effect.Effect<void, FollowFailure>
   readonly subscribe: (args: {
     readonly stream: CollectionStream
     readonly id: string
@@ -686,6 +688,13 @@ const make = (options: FractalOptions) =>
               publishSync()
             }
           }))
+          if (protocol.prepare !== undefined) {
+            const ready = yield* protocol.prepare.pipe(Effect.match({
+              onSuccess: () => true,
+              onFailure: (error) => { fail(error); return false },
+            }))
+            if (!ready) return
+          }
           const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
           // Under `'advertised'`, no follow admits before the connect probe fixes the budget:
           // a subscribe cannot send before that probe opens the socket anyway.
@@ -990,44 +999,41 @@ const make = (options: FractalOptions) =>
     })
 
     const followTerminal = (spec: Extract<FollowSpec, { _tag: 'Terminal' }>) =>
-      Stream.unwrap(
-        Effect.tryPromise({
-          try: async () => {
-            // A static import would construct optional PTY and mutation validators on read startup.
-            const { TerminalScreen } = await import('@fractal/client/schema')
-            return decodeUnknownSync(TerminalScreen)
-          },
-          catch: () => new DecodeFailure({ message: 'Fractal terminal screen codec could not load' }),
-        }).pipe(
-          Effect.map((decodeScreen) => follow<TerminalScreen>({
-            spec,
-            makeProtocol: () => {
-              let initialRuntime = spec.initialRuntime
-              return {
-                subscribe: ({ stream, id }) =>
-                  Effect.suspend(() => {
-                    const observation = initialRuntime
-                    initialRuntime = undefined
-                    return Effect.map(attachTerminal(spec.runtime, observation), ({ terminal, incarnation, capability }) =>
-                      stream.subscribeTerminal(id, terminal, incarnation, capability),
-                    )
-                  }),
-                onData: (frame) => {
-                  if (frame.kind !== 'screen') return undefined
-                  try {
-                    return decodeScreen(frame.value)
-                  } catch {
-                    // Decoder errors quote screen text; expose only a fixed diagnostic.
-                    return new DecodeFailure({ message: 'Fractal terminal screen did not decode' })
-                  }
-                },
-                reset: () => {},
+      follow<TerminalScreen>({
+        spec,
+        makeProtocol: () => {
+          let initialRuntime = spec.initialRuntime
+          let decodeScreen: (value: unknown) => TerminalScreen
+          return {
+            prepare: Effect.tryPromise({
+              try: async () => {
+                // Optional PTY and mutation validators must not load on read startup.
+                const { TerminalScreen } = await import('@fractal/client/schema')
+                decodeScreen = decodeUnknownSync(TerminalScreen)
+              },
+              catch: () => new DecodeFailure({ message: 'Fractal terminal screen codec could not load' }),
+            }),
+            subscribe: ({ stream, id }) =>
+              Effect.suspend(() => {
+                const observation = initialRuntime
+                initialRuntime = undefined
+                return Effect.map(attachTerminal(spec.runtime, observation), ({ terminal, incarnation, capability }) =>
+                  stream.subscribeTerminal(id, terminal, incarnation, capability),
+                )
+              }),
+            onData: (frame) => {
+              if (frame.kind !== 'screen') return undefined
+              try {
+                return decodeScreen(frame.value)
+              } catch {
+                // Decoder errors quote screen text; expose only a fixed diagnostic.
+                return new DecodeFailure({ message: 'Fractal terminal screen did not decode' })
               }
             },
-          })),
-          Effect.catch((error) => Effect.succeed(Stream.succeed<FollowEvent<TerminalScreen>>({ _tag: 'Failed', error }))),
-        ),
-      )
+            reset: () => {},
+          }
+        },
+      })
 
     return Fractal.of({
       connection: SubscriptionRef.changes(channel.connection),
