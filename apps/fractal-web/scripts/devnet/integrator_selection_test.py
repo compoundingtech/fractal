@@ -57,6 +57,112 @@ class SelectionTest(unittest.TestCase):
         self.module.recovery_select_build('b' * 40)
         return str(self.module.P / 'builds' / ('a' * 40))
 
+    @contextlib.contextmanager
+    def metadata_repository(self, empty=False):
+        """Use real git patches; only external member/install/generator work is stubbed."""
+        module = self.module
+        module.C.mkdir(parents=True)
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+
+        def git(*args, capture=False, check=True):
+            return subprocess.run(['git', '-C', str(module.C), *map(str, args)],
+                                  capture_output=True, text=True, check=check, env=env)
+
+        git('init')
+        git('config', 'user.name', 'Metadata Test')
+        git('config', 'user.email', 'metadata@example.invalid')
+        outputs = ('.github/workflows/fleet.yml', '.github/workflows/main-upkeep.yml')
+        (module.C / 'megarepo.kdl').write_text('members {}\n')
+        (module.C / 'megarepo.lock').write_text('{"members": {}}\n')
+        for name in outputs:
+            target = module.C / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('base\n')
+        git('add', '.')
+        git('commit', '-m', 'base')
+        base = git('rev-parse', 'HEAD', capture=True).stdout.strip()
+
+        def regenerate():
+            # A stale cache must not change even the still-applicable first file.
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            if not empty:
+                for name in outputs:
+                    self.assertNotEqual((module.C / name).read_text(), 'generated\n')
+                    (module.C / name).write_text('generated\n')
+                git('add', '.')
+                git('commit', '-m', 'regenerated')
+            module.install()
+
+        with patch.object(module, 'git', side_effect=git), \
+                patch.object(module, 'run'), \
+                patch.object(module, 'install') as install, \
+                patch.object(module, 'regenerate', side_effect=regenerate) as generator:
+            module.prepare_dependencies()
+            cache, = (module.L / 'metadata-cache').iterdir()
+            git('restore', '--source', base, '--staged', '--worktree', '--', *outputs)
+            if not empty:
+                git('commit', '-m', 'restore generator base')
+            generator.reset_mock()
+            install.reset_mock()
+            yield git, outputs, cache, generator, install
+
+    def test_stale_metadata_patch_regenerates_and_replaces_cache(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            old_patch = cache.read_text()
+            (self.module.C / outputs[1]).write_text('main changed output only\n')
+            git('add', '.')
+            git('commit', '-m', 'output change with unchanged generator inputs')
+            row = {'included': [], 'skipped': []}
+            with patch.object(self.module, 'stamp'), \
+                    patch.object(self.module, 'build', return_value=subprocess.CompletedProcess([], 0)) as build:
+                self.assertTrue(self.module.build_candidate(row, 'overlay', []))
+            build.assert_called_once_with('live-r3')
+            self.assertEqual(row['sha'], git('rev-parse', 'HEAD', capture=True).stdout.strip())
+            generator.assert_called_once_with()
+            install.assert_called_once_with()
+            self.assertNotEqual(cache.read_text(), old_patch)
+            self.assertIn('-main changed output only', cache.read_text())
+            for name in outputs:
+                self.assertEqual((self.module.C / name).read_text(), 'generated\n')
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            self.assertEqual(list(cache.parent.iterdir()), [cache])
+
+    def test_valid_metadata_patch_reuses_cache(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            old_patch = cache.read_text()
+            self.module.prepare_dependencies()
+            generator.assert_not_called()
+            install.assert_called_once_with()
+            self.assertEqual(cache.read_text(), old_patch)
+            for name in outputs:
+                self.assertEqual((self.module.C / name).read_text(), 'generated\n')
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            self.assertIn('reuse generated dependency metadata',
+                          git('log', '-1', '--format=%s', capture=True).stdout)
+
+    def test_empty_metadata_patch_still_installs_without_regeneration(self):
+        with self.metadata_repository(empty=True) as (git, outputs, cache, generator, install):
+            before = git('rev-parse', 'HEAD', capture=True).stdout
+            self.module.prepare_dependencies()
+            generator.assert_not_called()
+            install.assert_called_once_with()
+            self.assertEqual(cache.read_text(), '')
+            self.assertEqual(git('rev-parse', 'HEAD', capture=True).stdout, before)
+
+    def test_stale_metadata_patch_does_not_hide_regeneration_failure(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            old_patch = cache.read_text()
+            (self.module.C / outputs[1]).write_text('main changed output only\n')
+            git('add', '.')
+            git('commit', '-m', 'output change')
+            generator.side_effect = subprocess.CalledProcessError(1, ['generator'])
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.module.prepare_dependencies()
+            self.assertEqual(cache.read_text(), old_patch)
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            install.assert_not_called()
+
     def test_capacity_sandbox_cli_preserves_nix_tempfail(self):
         sandbox = self.module.candidate_sandbox
         for code in (75, 1):
