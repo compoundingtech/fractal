@@ -230,11 +230,17 @@ fn eta_rebuild_candidates_search_terminal_order_index_before_loading_claims() {
         "{plan}"
     );
     assert!(!plan.contains("SCAN mission_runs"), "{plan}");
-    let query = format!("EXPLAIN QUERY PLAN {}", super::run_eta::INVALIDATE_MISSIONS_SQL);
-    let plan = tx.prepare(/* sqlite-large-value: allow-for-now lv-eta-publish-plan owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ &query).unwrap()
+    let query = format!(
+        "EXPLAIN QUERY PLAN {}",
+        super::run_eta::INVALIDATE_MISSIONS_SQL
+    );
+    let plan = tx.prepare(/* sqlite-large-value: allow-for-now lv-hbd1d816360bf owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ &query).unwrap()
         .query_map(["hash","build"], |row| row.get::<_,String>(3)).unwrap()
         .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
-    assert!(plan.contains("SEARCH s USING INDEX step_runs_eta_remaining"), "{plan}");
+    assert!(
+        plan.contains("SEARCH s USING INDEX step_runs_eta_remaining"),
+        "{plan}"
+    );
     super::run_eta::BODY_ROWS.with(|count| count.set(0));
     claim(&tx, "s-999", "work.claimed", json!({"attempt":1}), 2);
     super::run_eta::flush(&tx).unwrap();
