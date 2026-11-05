@@ -10,7 +10,7 @@ import { assertStrictEvidence } from './kit-play-gate-runner.mjs'
 
 // A fixture build with the strict policy's aliases and kept bases. Like Storybook's addon-a11y,
 // it reports an a11y result unless the a11y.manual global is set; `report` overrides that report.
-const iframe = (report, probes = [], navigation) => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
+const iframe = (report, probes = [], navigation, prependProbes = []) => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
 <script>
   ${navigation?.startsWith('reload-') ? `
   if (!sessionStorage.getItem('reloaded')) {
@@ -40,6 +40,7 @@ const iframe = (report, probes = [], navigation) => `<!doctype html><meta charse
           window.dispatchEvent(new CustomEvent('kit-a11y-timing', { detail: { storyId: id, phase: 'end', at: performance.now() } }))
         }
         for (const probe of ${JSON.stringify(probes)}) window.dispatchEvent(new CustomEvent('kit-filter-benchmark', { detail: probe }))
+        for (const probe of ${JSON.stringify(prependProbes)}) window.dispatchEvent(new CustomEvent('kit-prepend-benchmark', { detail: probe }))
         ${navigation === 'storage' ? "localStorage.setItem('fixture-private-key', 'private-storage-value')" : ''}
         emit('storyFinished', {
           storyId: id, status: ${JSON.stringify(report?.some(({ status }) => status === 'failed') ? 'error' : 'success')},
@@ -65,7 +66,7 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
 
-const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false } = {}) => {
+const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -77,7 +78,7 @@ const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides 
         type: 'story', id, importPath: './Kit.stories.tsx', tags: ['dev'],
       }])),
     } }))
-    await writeFile(join(build, 'iframe.html'), iframe(report, probes, navigation))
+    await writeFile(join(build, 'iframe.html'), iframe(report, probes, navigation, prependProbes))
     await writeFile(join(build, 'away.html'), '<!doctype html><title>Not Storybook</title>')
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
@@ -319,13 +320,19 @@ test('structured benchmark events survive successful and failed case receipts', 
     width, theme, filterP90Milliseconds: 30, referenceP90Milliseconds: 20,
     pooledRatio: 1.5, busyControlRatio: 4.1, threshold: 3,
   })))
+  const prependProbes = [{ iteration: 1, control: { max: 16.7, longFrames: 0, longAnimationFrames: [] }, prepend: { max: 66.7, longFrames: 1, longAnimationFrames: [{ duration: 66.7, blockingDuration: 16.7, renderStart: 10, styleAndLayoutStart: 20, scripts: [{ sourceURL: 'transcript.js', sourceFunctionName: 'commit', invoker: 'requestAnimationFrame', duration: 60 }] }] } }]
   for (const status of ['passed', 'failed']) {
-    const { code, receipt } = await runGate({
+    const { code, stdout, receipt } = await runGate({
       env: { KIT_PLAY_SET: 'critical' },
       report: [{ type: 'a11y', status, result: { violations: [] } }],
       probes,
+      prependProbes,
     })
     assert.equal(code, status === 'passed' ? 0 : 1)
     assert.ok(receipt.rows.every(row => JSON.stringify(row.filterBenchmark) === JSON.stringify(probes)))
+    assert.ok(receipt.rows.every(row => JSON.stringify(row.prependBenchmark) === JSON.stringify(prependProbes)))
+    const diagnostics = stdout.split('\n').filter(line => line.startsWith('HISTORY_PREPEND_DIAGNOSTIC ')).map(line => JSON.parse(line.slice('HISTORY_PREPEND_DIAGNOSTIC '.length)))
+    assert.equal(diagnostics.length, receipt.rows.length * prependProbes.length)
+    assert.ok(diagnostics.every(({ id, ...probe }) => typeof id === 'string' && JSON.stringify(probe) === JSON.stringify(prependProbes[0])))
   }
 })
