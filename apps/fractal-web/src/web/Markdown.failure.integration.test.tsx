@@ -3,10 +3,22 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import type * as LazyChunkModule from '../../../../packages/fractal-ui/src/lazy-chunk.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { ConversationPane } from './ConversationPane.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
+const recovery = vi.hoisted(() => ({ load: vi.fn(), retry: vi.fn(), reload: vi.fn() }))
+vi.mock('../../../../packages/fractal-ui/src/lazy-chunk.ts', async importOriginal => {
+  const original = await importOriginal<typeof LazyChunkModule>()
+  return {
+    ...original,
+    createLazyChunk: ((options: Parameters<typeof original.createLazyChunk>[0]) => {
+      const chunk = original.createLazyChunk({ ...options, load: () => { recovery.load(); return options.load() } })
+      return { ...chunk, retry: recovery.retry, reload: recovery.reload }
+    }) as typeof original.createLazyChunk,
+  }
+})
 const source = vi.hoisted(() => ({ feed: { _tag: 'Waiting' } as Feed<ConversationPage> }))
 const failedImport = vi.hoisted(() => {
   let release!: () => void
@@ -34,7 +46,7 @@ vi.mock('../data/react.tsx', async () => {
   }
 })
 
-it('contains a rejected highlighter import to plain code and retries on transcript reopen', async () => {
+it('contains a rejected highlighter import to sticky plain code across transcript reopen without reload', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0))
@@ -91,8 +103,13 @@ it('contains a rejected highlighter import to plain code and retries on transcri
     expect(code.querySelector('[data-syntax-token]')).toBeNull()
     await act(async () => root.render(null))
     await show('const answer = 43')
-    await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')) })
-    expect(failedImport.attempts).toBe(2)
+    await act(async () => { await vi.dynamicImportSettled() })
+    expect(failedImport.attempts).toBe(1)
+    expect(recovery.load).toHaveBeenCalledTimes(1)
+    expect(recovery.retry).not.toHaveBeenCalled()
+    expect(recovery.reload).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-syntax-token]')).toBeNull()
+    expect(container.textContent).not.toMatch(/Reload and retry|Try again/)
     expect(container.querySelector('code')?.textContent).toBe('const answer = 43\n')
   } finally {
     failedImport.release()
