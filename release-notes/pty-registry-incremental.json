@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "No wire or client contract change."},
   "downtime": {"status": "none", "detail": "None."},
   "manual": {"status": "none", "detail": "No manual step."},
-  "recovery": {"status": "none", "detail": "Snapshots reuse unchanged metadata and preserve fresh exited-daemon identity for scope teardown fencing. Exited records read a listed PID sidecar only when metadata lacks daemonPid, retaining legacy ownership conservatively. Output and environment payloads are not retained."}
+  "recovery": {"status": "none", "detail": "Snapshots reuse unchanged metadata while freshly reading PID companions and checking daemon identity, including exited and legacy records. Late or conflicting companions retain upstream ownership semantics and scope teardown fencing. Output and environment payloads are not retained."}
 }
