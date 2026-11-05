@@ -233,6 +233,8 @@ export interface ConversationChunk {
   readonly id?: string
   readonly replace: boolean
   readonly hasMore: boolean
+  readonly olderCursor?: string
+  readonly sessionId?: string
   readonly entries: readonly (ConversationEntry | UnrecognizedEntry)[]
   /** Raw page evidence before decoding/filtering; only explicit has_more=false proves emptiness. */
   readonly observation?: { readonly empty: boolean }
@@ -388,6 +390,8 @@ export const decodeConversationChunk = (
   id: frame.id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
+  ...(frame.older_cursor === undefined ? {} : { olderCursor: frame.older_cursor }),
+  sessionId: frame.session_id,
   ...(frame.header !== null && typeof frame.header === 'object' && !Array.isArray(frame.header)
     ? { header: Object.fromEntries(Object.entries(frame.header)) } : {}),
   ...(frame.replace || frame.items.length > 0
