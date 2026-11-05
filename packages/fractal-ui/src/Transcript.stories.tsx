@@ -802,28 +802,30 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
     const host = canvas.getByTestId('paging-host')
     const intervals: number[] = []
     let frame = 0
-    const { promise, resolve, reject } = Promise.withResolvers<void>()
-    const onAbort = () => reject(new Error('Prepend measurement aborted'))
+    let onAbort: (() => void) | undefined
     delete host.dataset.prependReactMs
     host.dataset.prependMeasuring = 'true'
     try {
-      if (abortSignal.aborted) throw new Error('Prepend measurement aborted')
-      abortSignal.addEventListener('abort', onAbort, { once: true })
-      frame = requestAnimationFrame(start => {
-        let last = start
-        const record = (time: number) => {
-          intervals.push(time - last)
-          last = time
-          if (intervals.length === 24) resolve()
-          else frame = requestAnimationFrame(record)
-        }
-        deliver.click()
-        frame = requestAnimationFrame(record)
+      // The UI kit's TS library predates Promise.withResolvers.
+      await new Promise<void>((resolve, reject) => {
+        onAbort = () => reject(new Error('Prepend measurement aborted'))
+        if (abortSignal.aborted) { onAbort(); return }
+        abortSignal.addEventListener('abort', onAbort, { once: true })
+        frame = requestAnimationFrame(start => {
+          let last = start
+          const record = (time: number) => {
+            intervals.push(time - last)
+            last = time
+            if (intervals.length === 24) resolve()
+            else frame = requestAnimationFrame(record)
+          }
+          deliver.click()
+          frame = requestAnimationFrame(record)
+        })
       })
-      await promise
     } finally {
       cancelAnimationFrame(frame)
-      abortSignal.removeEventListener('abort', onAbort)
+      if (onAbort !== undefined) abortSignal.removeEventListener('abort', onAbort)
       host.dataset.prependMeasuring = 'false'
     }
     const sorted = [...intervals].sort((a, b) => a - b)
