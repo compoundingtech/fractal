@@ -312,6 +312,7 @@ order from the same admitted claims.
 | `local_git_change_records` | Local | Local Git change observation records and cursors. |
 | `local_glass_head_dirty` | Local | Glass heads whose published read needs refresh. |
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
+| `local_harness_question_generations` | Local | Exact admitted native question process/provider/session generations, persisted before observation and retired only after durable resolution. Survives restart; not replicated or included in shared projection digests. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
 | `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |

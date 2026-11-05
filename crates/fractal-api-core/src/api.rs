@@ -113,6 +113,7 @@ mod harness_health_controls;
 mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
+mod exec_only;
 mod github_plugin;
 mod github_watch;
 pub mod harness_events;
@@ -719,6 +720,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/start", post(agents::start_mission_seat))
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
         .route("/v1/fleet/admission-override", post(fleet::admission_override))
+        .route("/v1/fleet/transports", post(fleet::change_transports))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))
@@ -2958,6 +2960,7 @@ fn client_work_values(
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
+                "execution_waited_ms": work.execution_waited_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
                 "constraints": work.constraints,
@@ -3697,8 +3700,9 @@ fn client_agent_cards_presented(
         .map(|subject| subject.subject.clone())
         .collect::<Vec<_>>();
     // Declarations, usage and faults of the listed agents only, not of every subject.
-    let desired_agents = store
-        .desired_subjects_named(&agent_subjects)?
+    let desired = store.desired_subjects_named(&agent_subjects)?;
+    let exec_cards = exec_only::cards(store, &desired, snapshot_index)?;
+    let desired_agents = desired
         .into_iter()
         .filter_map(|desired| {
             let member = desired.member?;
@@ -3775,9 +3779,11 @@ fn client_agent_cards_presented(
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
+            let exec_card = exec_cards.get(&subject.subject);
             let fields = subject
                 .actual
                 .as_ref()
+                .filter(|_| exec_card.is_none())
                 .map(|actual| actual.get("fields").unwrap_or(actual));
             let observed = fields
                 .and_then(|fields| fields.get("status"))
@@ -3869,6 +3875,7 @@ fn client_agent_cards_presented(
                 _ if subject.desired.is_some() => "desired",
                 _ => "stopped",
             };
+            let state = exec_card.map_or(state, |card| card.state);
             // When a seat that has no running session began waiting for one.
             let launch_since_ms = (matches!(state, "desired" | "starting")
                 && !matches!(observed, Some("running" | "ready" | "working" | "idle")))
@@ -3935,9 +3942,9 @@ fn client_agent_cards_presented(
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
-            let runtime_ids = runtime_id
-                .map(|runtime| vec![format!("runtime/{runtime}")])
-                .unwrap_or_default();
+            let primary_runtime_ids = runtime_id.filter(|_| exec_card.is_none())
+                .map(|runtime| vec![format!("runtime/{runtime}")]).unwrap_or_default();
+            let runtime_ids = exec_card.map_or(primary_runtime_ids.as_slice(), |card| card.runtime_ids.as_slice());
             let incarnation_id = fields
                 .filter(|_| !moving)
                 .and_then(|fields| fields.get("incarnation_id"))
@@ -3978,7 +3985,9 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = if exec_card.is_some() { None } else {
+                end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at)
+            };
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -4023,8 +4032,10 @@ fn client_agent_cards_presented(
                     .as_ref()
                     .filter(|harness| harness.reason.as_deref() == Some("compaction"))
                     .map(|_| "compacting"),
-                "host_id": desired_agents.get(&subject.subject).map(|(host, _, _)| host),
-                "workspace": desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace),
+                "host_id": exec_card.map(|card| card.host.as_ref())
+                    .unwrap_or_else(|| desired_agents.get(&subject.subject).map(|(host, _, _)| host)),
+                "workspace": exec_card.map(|card| &card.workspace)
+                    .or_else(|| desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace)),
                 "checkout": desired_agents.get(&subject.subject).and_then(|(_, _, checkout)| checkout.as_ref()),
                 "last_activity_at": last_activity_at.map(client_timestamp),
                 "silent_since": silent_since.map(client_timestamp),
@@ -4727,7 +4738,9 @@ fn client_message_resource(
 ) -> anyhow::Result<Value> {
     let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
     let updated_at = metadata["updated_at"].as_str().unwrap_or("0").parse::<u128>()?;
-    let reasons = if message.status == "closed" {
+    // A close the seat's host relayed is history too, though the message's own status is this
+    // member's records until the host answers again.
+    let reasons = if message.status == "closed" || metadata["closed"] == true {
         vec!["closed"]
     } else if !current {
         vec!["superseded"]
@@ -4912,7 +4925,9 @@ fn client_message_resources_at(
             .cloned()
             .unwrap_or(Value::Null);
         let mut reasons = Vec::new();
-        if message.status == "closed" {
+        if message.status == "closed"
+            || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
+        {
             reasons.push("closed");
         } else if !current_ids.contains(&message.subject) {
             reasons.push("superseded");
@@ -6616,6 +6631,8 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        #[cfg(feature = "test-support")]
+        hold_first_agent_roster().await;
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
@@ -6646,6 +6663,27 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// An isolated startup test reads a serving daemon whose refresher runs but has published no
+/// roster yet, as every daemon is for a moment after it starts serving.
+#[cfg(feature = "test-support")]
+async fn hold_first_agent_roster() {
+    let Some(directory) = std::env::var_os("ST3_TEST_AGENT_ROSTER_BARRIER") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(directory.join("entered"), b"first roster held")
+            .expect("publish agents roster barrier");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !directory.join("release").exists() {
+            assert!(Instant::now() < deadline, "startup test did not release the agents roster");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+    .await
+    .expect("agents roster barrier");
 }
 
 /// One owner iteration, including both queues that can outlive its readers.
@@ -7377,6 +7415,7 @@ pub async fn guard_bound_request(
         "/v1/agents/start",
         "/v1/agents/source-offline",
         "/v1/fleet/admission-override",
+        "/v1/fleet/transports",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
@@ -7946,10 +7985,11 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
 }
 
 /// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
-/// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
-/// the host did not answer for stays, as this member cannot say it was read. A seat with more held
+/// that host answers about its held mail sent before `before`: mail its seat took any step with
+/// (staged, delivered, read or closed) goes, as any such claim or mark clears the host's own held
+/// flag, and mail the host did not answer for stays, as this member cannot say it was offered. A seat with more held
 /// mail than one read asks of a host keeps this member's own count, which can only be higher.
-fn relayed_held_mail(
+pub fn relayed_held_mail(
     state: &AppState,
     seats: Vec<(String, u64, u128)>,
     before: u128,
@@ -8001,7 +8041,7 @@ fn relayed_held_mail(
     for (subject, (seat, at)) in sent {
         if relayed
             .get(&subject)
-            .is_some_and(|answer| matches!(answer.status(), Some("read" | "closed")))
+            .is_some_and(|answer| answer.status().is_some())
         {
             continue;
         }

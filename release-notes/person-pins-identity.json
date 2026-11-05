@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reserve the person Pins arrangement identity for ordered version-2 memberships",
+  "replay": {"status": "none", "detail": "Existing arrangement and membership claims are unchanged."},
+  "schema": {"status": "none", "detail": "A generated identity constant is added; no wire shape changes."},
+  "rules": {"status": "none", "detail": "Existing membership and lifecycle rules apply."},
+  "compatibility": {"status": "none", "detail": "Upgrade all owner arrangement readers to version-2-aware decoders before creating Pins, as required by the existing arrangement-v2 rollout contract. This constant creates no arrangements."},
+  "downtime": {"status": "none", "detail": "No daemon rollout is required for the constant."},
+  "manual": {"status": "none", "detail": "No Pins arrangement is created automatically."},
+  "recovery": {"status": "none", "detail": "Reverting the constant does not remove retained memberships."}
+}

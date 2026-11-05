@@ -22,6 +22,10 @@ pub const VERSION_WITH_LEDGERS: u32 = 3;
 /// a mark covers, so a build that predates marks refuses it. An archive with no marks keeps an
 /// earlier version.
 pub const VERSION_WITH_MARKS: u32 = 4;
+/// The version of an archive that also carries shards (`super::backup_shards`): each shard's
+/// admitted envelopes and the member-local rows it keeps, such as a stream item's delivery and
+/// read. An archive whose shards hold none of either keeps an earlier version, byte for byte.
+pub const VERSION_WITH_SHARDS: u32 = 5;
 pub const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 pub const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
@@ -48,6 +52,21 @@ pub struct Header {
     /// below [`VERSION_WITH_LEDGERS`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ledgers: BTreeMap<String, TableDigest>,
+    /// Each carried shard's envelope log and local tables, by shard ID. Empty, and absent from
+    /// the JSON, below [`VERSION_WITH_SHARDS`] and whenever no shard holds anything.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shards: BTreeMap<String, ShardDigest>,
+}
+
+/// What an archive holds of one shard: the digest of its admitted envelope log, as the graph's
+/// `log_digest` is taken, how many envelopes that is, and each nonempty local table's row
+/// count and digest.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ShardDigest {
+    pub log_digest: String,
+    pub envelope_count: u64,
+    #[serde(default)]
+    pub local: BTreeMap<String, TableDigest>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -65,6 +84,12 @@ pub enum Record {
     MessageBody(MessageBodyRecord),
     /// One page of one permanent ledger, restored by union. See [`super::backup_ledgers`].
     Ledger(super::backup_ledgers::LedgerPage),
+    /// One admitted envelope of a shard, in the shard's own sync wire form.
+    ShardEnvelope(ShardEnvelopeRecord),
+    /// The signatures a shard holds for the shard envelopes just before it.
+    ShardSignatures(ShardSignaturesRecord),
+    /// One page of one of a shard's local tables, restored by union.
+    ShardLocal(ShardLocalPage),
     End { envelopes: u64, sha256: String },
 }
 
@@ -76,6 +101,26 @@ pub struct MessageBodyRecord {
     pub sha256: String,
     /// The text's bytes, base64.
     pub data: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ShardEnvelopeRecord {
+    pub shard: String,
+    pub envelope: ReplicaEnvelope,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ShardSignaturesRecord {
+    pub shard: String,
+    pub signatures: Vec<ReplicaEnvelopeSignature>,
+}
+
+/// A page of a shard's local table, in the ledger page's shape with the shard it belongs to.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ShardLocalPage {
+    pub shard: String,
+    #[serde(flatten)]
+    pub page: super::backup_ledgers::LedgerPage,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -96,6 +141,9 @@ pub struct RestoreReport {
     /// Long messages the restored claims name, including those whose text another member owns.
     #[serde(default)]
     pub message_bodies_referenced: u64,
+    /// Each restored shard as it now stands, which restore checked against the header.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shards: BTreeMap<String, ShardDigest>,
 }
 
 pub fn write_record(

@@ -37,7 +37,7 @@ export interface EmbraceComposerProps {
   /** Structured drafts parallel to `history`; recall restores chips instead of re-parsing text. */
   readonly tokenHistory?: readonly Draft[]
   readonly targetLabel?: string
-  /** Distinguishes composer landmarks when a host renders multiple conversations. */
+  /** Distinguishes composer groups when a host renders multiple conversations. */
   readonly conversationLabel?: string
   readonly disabledReason?: string
   /** Shown on the C3 cancel control when the runtime cannot cancel the active run. */
@@ -477,10 +477,11 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
   const stop = () => { if (stopPending.current) return; stopPending.current = true; setStopping(true); aui.composer.cancel() }
   const sendLabel = onRequestSubmit === undefined ? 'Send' : submitLabel ?? 'Send'
   return (
+    // Conversation-local controls are a group, not a page landmark; embeds may repeat the same conversation.
+    <div role="group" aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`} style={{ display: 'contents' }}>
     <ComposerPrimitive.Root
       ref={formRef}
       tabIndex={-1}
-      aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`}
       {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={event => {
         if (readOnly || blocked || sendBlocked || onRequestSubmit !== undefined) event.preventDefault()
@@ -560,6 +561,7 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
           : <Button isDisabled={readOnly || blocked || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
       </div>
     </ComposerPrimitive.Root>
+    </div>
   )
 }
 

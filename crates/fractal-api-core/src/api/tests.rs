@@ -1,5 +1,6 @@
 #[path = "agents_publication_tests.rs"]
 mod agents_publication_tests;
+mod exec_only;
 mod roster_fresh;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -11,6 +12,37 @@ use crate::model::SESSION_CLAIMS;
 use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
+
+#[tokio::test]
+async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("bound.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    let client = crate::client::Client::unix(&socket);
+    let before = store.index().unwrap();
+    for (path, actor, allowed) in [
+        ("/v1/fleet/transports", "agent/example", true),
+        ("/v1/fleet/transports", "agent/other", false),
+        ("/v1/fleet/transports", "person/operator", false),
+        ("/v1/internal/fleet/endpoints", "agent/example", false),
+    ] {
+        let result: anyhow::Result<Value> = client.post(path, &json!({
+            "actor": actor, "mutation_id": "transport-test", "dry_run": true,
+            "mode": "dial-out", "endpoints": [],
+        })).await;
+        assert_eq!(result.is_ok(), allowed, "{path}: {actor}: {result:?}");
+        assert_eq!(store.index().unwrap(), before);
+    }
+    server.abort();
+}
 
 #[tokio::test]
 async fn fleet_leave_state_local_only_is_read_only_and_worker_absence_fails_closed() {
@@ -1042,6 +1074,12 @@ async fn agent_detail_does_not_materialize_unrelated_cached_cards() {
     assert_eq!(card["name"], "node.amber");
     assert!(card.get("todo").is_some());
     assert!(card.get("_status_source").is_none());
+    let contract = &card["launch_contract"];
+    assert!(contract["declared"]["digest"].is_string(), "{contract}");
+    assert!(contract["running"].is_null());
+    assert!(contract["drift"].is_null(), "missing launch evidence is not convergence");
+    let decoded: fractal_client::Agent = serde_json::from_value(card.clone()).unwrap();
+    assert_eq!(decoded.launch_contract.as_ref(), Some(contract));
 }
 
 #[tokio::test]

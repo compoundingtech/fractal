@@ -1,19 +1,20 @@
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
+import { Option } from 'effect'
 
 import {
   alertConversations,
   alertsIn,
   answerLabel,
-  offeredAnswers,
-  pendingCalls,
+  servedAnswers,
+  servedPrompt,
   pendingQuestions,
   promptAnswers,
   promptAlertKey,
   promptCalls,
   questionAnswer,
-  type PendingCall,
+
 } from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAttention, useDataSource } from '../../data/react.tsx'
@@ -22,15 +23,6 @@ import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import { AlertButton } from './AlertButton.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { AnswerAlert } from './AnswerAlert.tsx'
-
-/** What the strip reads of a conversation's items: its tool calls, joined with their results. */
-export type ConversationCall = { readonly _tag: string; readonly id: string } & Partial<{
-  readonly callId: string
-  readonly name: string
-  readonly input: unknown
-  readonly result: unknown
-  readonly callSeen: boolean
-}>
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
 
 const styles = stylex.create({
@@ -84,16 +76,6 @@ export const promptAlerts = (items: readonly Native.Attention[], agentRef: strin
 export const conversationAlerts = (items: readonly Native.Attention[], agentRef: string): readonly Native.Attention[] =>
   alertsIn(items, agentRef, undefined)
 
-/** The tool calls a conversation shows with no result yet, in full, as st3-views reads them. */
-export const waitingCalls = (items: readonly ConversationCall[]): PendingCall[] =>
-  pendingCalls(
-    items.flatMap((item) =>
-      item._tag === 'ToolCall' && item.callSeen === true && item.result === undefined && item.callId !== undefined
-        ? [{ id: item.id, type: 'tool_call' as const, body: { call_id: item.callId, name: item.name ?? 'tool', arguments: item.input } }]
-        : [],
-    ),
-  )
-
 type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 
@@ -106,12 +88,10 @@ type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertAction
  */
 export const AgentAlerts = ({
   alerts,
-  calls,
   onAnswer,
   onAct,
 }: {
   readonly alerts: readonly Native.Attention[]
-  readonly calls: readonly PendingCall[]
   readonly onAnswer?: Answer
   readonly onAct?: Act
 }): React.ReactNode => {
@@ -119,7 +99,7 @@ export const AgentAlerts = ({
   const one = (alert: Native.Attention) =>
     alert.attention_kind === 'harness-prompt'
       // A new prompt or revision behind the same alert starts with nothing chosen.
-      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} calls={calls} onAnswer={onAnswer} />
+      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} onAnswer={onAnswer} />
       : <AnswerAlert key={alert.id} alert={alert} onAct={onAct} />
   const [first, ...rest] = alerts
   return (
@@ -141,21 +121,20 @@ export const AgentAlerts = ({
 
 const PromptAlert = ({
   alert,
-  calls,
   onAnswer,
 }: {
   readonly alert: Native.Attention
-  readonly calls: readonly PendingCall[]
   readonly onAnswer?: Answer
 }): React.ReactNode => {
   const prompt = promptAnswers(alert)
-  // Only the exact call the prompt asks about, when the daemon names it.
-  const shown = prompt === null ? calls : promptCalls(prompt, calls)
+  const card = alert.presentation?.prompt
+  const served = servedPrompt({ presentation: card === undefined ? undefined : { prompt: { ...card, calls: Option.getOrNull(card.calls) } } })
+  const shown = prompt === null || served.calls === null ? [] : promptCalls(prompt, served.calls)
   const [chosen, setChosen] = React.useState<number[][]>([])
   const [status, setStatus] = React.useState<string>()
   const [sending, setSending] = React.useState(false)
-  const offered = prompt === null || onAnswer === undefined ? [] : offeredAnswers(prompt, calls)
-  const questions = pendingQuestions(shown)
+  const offered = prompt === null || onAnswer === undefined ? [] : servedAnswers(prompt, served)
+  const questions = pendingQuestions(shown.filter(call => call.complete === true))
   const gated = prompt?.answers.find((answer) => answer === 'allow' || answer === 'approve' || answer === 'answer')
   const sendable = questions === null ? null : questionAnswer(questions, chosen)
   const choose = (question: number, option: number, multi: boolean) =>
@@ -181,8 +160,8 @@ const PromptAlert = ({
     <section {...stylex.props(styles.alert)} aria-label={alert.title}>
       <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
       {alert.detail ? <div {...stylex.props(styles.detail)}>{alert.detail}</div> : null}
-      {prompt === null ? (
-        <div {...stylex.props(styles.note)}>Answer it in the seat's terminal.</div>
+      {prompt === null || served.calls === null ? (
+        <div {...stylex.props(styles.note)}>{served.calls === null ? `${served.why} ` : ''}Answer it in the agent's terminal.</div>
       ) : questions !== null && gated === 'answer' ? (
         questions.map((question, index) => (
           <div key={index} {...stylex.props(styles.alert)}>
@@ -213,7 +192,7 @@ const PromptAlert = ({
         <div {...stylex.props(styles.note)}>
           {prompt.call_id == null
             ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.'
-            : 'What it would let through is not in the conversation yet: answer it in the seat\'s terminal.'}
+            : 'The prompt details are incomplete or unsupported: answer it in the agent\'s terminal.'}
         </div>
       ) : null}
       {offered.length > 0 ? (
@@ -234,16 +213,13 @@ const PromptAlert = ({
 /** The agent's prompt alerts from the active data source, answered through its prompt port. */
 export const LiveAgentAlerts = ({
   agentRef,
-  items,
   ux,
 }: {
   readonly agentRef: string
-  readonly items: readonly ConversationCall[]
   readonly ux?: UxTelemetry
 }): React.ReactNode => {
   const source = useDataSource()
   const attention = useAttention()
-  const calls = React.useMemo(() => waitingCalls(items), [items])
   const alerts = React.useMemo(
     () => (attention._tag === 'Observed' ? conversationAlerts(attention.value, agentRef) : []),
     [attention, agentRef],
@@ -289,5 +265,5 @@ export const LiveAgentAlerts = ({
                 answer: sent,
               })
         }
-  return <AgentAlerts alerts={alerts} calls={calls} onAnswer={onAnswer} onAct={onAct} />
+  return <AgentAlerts alerts={alerts} onAnswer={onAnswer} onAct={onAct} />
 }
