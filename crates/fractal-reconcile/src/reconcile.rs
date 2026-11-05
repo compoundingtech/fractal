@@ -19012,14 +19012,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let watched_subject = subject.to_owned();
-        let pool = match self.file_subscriptions.get() {
-            Some(pool) => pool.clone(),
-            None => {
-                let pool = file_subscriptions::Pool::new()?;
-                let _ = self.file_subscriptions.set(pool.clone());
-                pool
-            }
-        };
+        if self.file_subscriptions.get().is_none() {
+            let _ = self.file_subscriptions.set(file_subscriptions::Pool::new()?);
+        }
+        let pool = self.file_subscriptions.get().expect("initialized subscriptions");
         let mut paths = vec![(directory.clone(), false)];
         if recursive { paths.push((target.clone(), true)); }
         if let Some(parent) = referent.as_ref().and_then(|path| path.parent()) {
@@ -19050,12 +19046,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             }))?;
         watchers.insert(subject.into(), FileWatch {
-            _subscription: subscription,
-            target,
-            directory,
-            referent,
-            recursive,
-            dirty,
+            _subscription: subscription, target, directory, referent, recursive, dirty,
         });
         // A refreshed subscription may now refer to a different file at the same stamp.
         self.file_observations
