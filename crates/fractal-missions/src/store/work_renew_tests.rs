@@ -478,13 +478,15 @@ fn refresh_fixture() -> (Renewal, fractal_store::store::refresh_intake::Seal) {
 }
 
 // The winner owns the single writer while the opponent is launched. No timing sleeps.
-fn refresh_writer_barrier(store: &Store, opponent: impl FnOnce() + Send) {
+fn refresh_writer_barrier(store: &Store, winner: impl FnOnce(&Connection) + Send, opponent: impl FnOnce() + Send) {
     let (entered, wait) = std::sync::mpsc::channel();
     let (release, resume) = std::sync::mpsc::channel();
+    let (attempt, attempted) = std::sync::mpsc::sync_channel(0);
     std::thread::scope(|scope| {
-        scope.spawn(move || store.connection.batched(move |_| { entered.send(()).unwrap(); resume.recv().unwrap(); Ok::<_, rusqlite::Error>(()) }).unwrap().unwrap());
+        scope.spawn(move || store.connection.batched(move |tx| { winner(tx); entered.send(()).unwrap(); resume.recv().unwrap(); Ok::<_, rusqlite::Error>(()) }).unwrap().unwrap());
         wait.recv().unwrap();
-        let opponent = scope.spawn(opponent);
+        let opponent = scope.spawn(move || { attempt.send(()).unwrap(); opponent(); });
+        attempted.recv().unwrap();
         release.send(()).unwrap();
         opponent.join().unwrap();
     });
@@ -499,7 +501,7 @@ fn refresh_intake_claim_wins_and_held_renew_complete_remain_available() {
     store.work_action(&renewal.subject, "claim", &request("refresh-claim-wins", None)).unwrap();
     seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
-    refresh_writer_barrier(store, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    refresh_writer_barrier(store, |_| {}, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
     store.work_action(&renewal.subject, "renew", &request("refresh-renew", None)).unwrap();
     store.work_action(&renewal.subject, "complete", &request("refresh-complete", None)).unwrap();
     assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
@@ -511,8 +513,7 @@ fn refresh_intake_seal_wins_and_owner_unseal_restores_admission() {
     let store = &renewal.store;
     store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
-    assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
-    refresh_writer_barrier(store, || {
+    refresh_writer_barrier(store, |tx| assert!(fractal_store::store::refresh_intake::seal_tx(tx, "agent/node.worker", &seal).unwrap()), || {
         assert_eq!(store.work_action(&renewal.subject, "claim", &request("refresh-refused", None)).unwrap_err().code, "refresh-intake-sealed");
         assert!(!store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
     });
@@ -529,11 +530,10 @@ fn refresh_intake_mutation_wins_and_stale_epoch_cannot_seal() {
     store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
     assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
     let stale = seal.clone();
-    assert!(store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
-    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
-    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
-    refresh_writer_barrier(store, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    refresh_writer_barrier(store, |tx| assert!(fractal_store::store::refresh_intake::admit_mutation_tx(tx, "agent/node.worker", "current", "mutation").unwrap()), || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
     store.complete_refresh_mutation("agent/node.worker", "current", "mutation").unwrap();
     assert!(!store.seal_refresh_intake("agent/node.worker", &stale).unwrap());
+    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
     assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
 }

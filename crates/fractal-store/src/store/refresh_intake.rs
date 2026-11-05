@@ -33,7 +33,7 @@ fn load(tx: &Connection, seat: &str) -> Result<Intake> {
 }
 
 fn save(tx: &Connection, seat: &str, state: &Intake) -> Result<()> {
-    tx.execute("INSERT INTO meta(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hf3700210f0d7 owner=fractal_store::store::refresh_intake TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![format!("refresh-intake/{seat}"), serde_json::to_string(state)?])?;
     Ok(())
 }
@@ -62,7 +62,8 @@ pub fn admit_claim_tx(tx: &Connection, seat: &str) -> Result<(), St3Error> {
     save(tx, seat, &state).map_err(internal)
 }
 
-fn seal_tx(tx: &Connection, seat: &str, expected: &Seal) -> Result<bool> {
+/// Acquire the seal inside an existing writer transaction.
+pub fn seal_tx(tx: &Connection, seat: &str, expected: &Seal) -> Result<bool> {
     let mut state = load(tx, seat)?;
     let held: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner=?1)",
@@ -79,6 +80,24 @@ fn seal_tx(tx: &Connection, seat: &str, expected: &Seal) -> Result<bool> {
     }
     state.sealed = true;
     save(tx, seat, &state)?;
+    Ok(true)
+}
+
+/// Admit a mutation inside its existing writer transaction.
+pub fn admit_mutation_tx(tx: &Connection, seat: &str, incarnation: &str, grant: &str) -> Result<bool> {
+    let mut state = load(tx, seat)?;
+    if state.sealed || !work_incarnation_live(tx, seat, incarnation)? {
+        return Ok(false);
+    }
+    if latest_actual(tx, seat)?.is_none_or(|value| {
+        value["incarnation_id"] != incarnation || value["status"] != "running"
+    }) {
+        return Ok(false);
+    }
+    if state.grants.insert((incarnation.into(), grant.into())) {
+        state.epoch = state.epoch.checked_add(1).ok_or_else(|| anyhow::anyhow!("refresh epoch exhausted"))?;
+        save(tx, seat, &state)?;
+    }
     Ok(true)
 }
 
@@ -139,25 +158,7 @@ impl Store {
         grant: &str,
     ) -> Result<bool> {
         self.connection
-            .batched(|tx| -> Result<bool> {
-                let mut state = load(tx, seat)?;
-                if state.sealed || !work_incarnation_live(tx, seat, incarnation)? {
-                    return Ok(false);
-                }
-                if latest_actual(tx, seat)?.is_none_or(|value| {
-                    value["incarnation_id"] != incarnation || value["status"] != "running"
-                }) {
-                    return Ok(false);
-                }
-                if state.grants.insert((incarnation.into(), grant.into())) {
-                    state.epoch = state
-                        .epoch
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("refresh epoch exhausted"))?;
-                    save(tx, seat, &state)?;
-                }
-                Ok(true)
-            })
+            .batched(|tx| admit_mutation_tx(tx, seat, incarnation, grant))
             .map_err(anyhow::Error::msg)?
     }
 
