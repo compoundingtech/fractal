@@ -1945,6 +1945,49 @@ fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
     assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
 }
 
+/// While a seat's staging recorded as a mark is undelivered, doctor warns that rolling this member
+/// back below v0.3.26 would offer the mail again, and gives the steps; the warning clears once the
+/// mail is delivered, and a staging claim never raises it.
+#[test]
+fn doctor_warns_of_undelivered_staging_marks_until_delivery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let staging = |state: &AppState| {
+        doctor_report(state).unwrap().0.checks.into_iter().find(|check| check.name == "message-staging-rollback")
+    };
+    let seat = "agent/test/staging-seat";
+    for subject in ["message/staged-as-mark", "message/staged-as-claim"] {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some("person/sender".into()),
+            fields: serde_json::from_value(json!({"from": "person/sender", "to": seat, "content": "hello", "status": "sent"})).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state.store.append_claim(&ClaimInput {
+        subject: "message/staged-as-claim".into(),
+        kind: "message.staged".into(),
+        actor: Some(seat.into()),
+        fields: serde_json::from_value(json!({"status": "staged"})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(staging(&state).is_none(), "a staging claim reads on every release");
+
+    crate::store::message_marks::record(&state.store, "message/staged-as-mark", "message.staged", seat).unwrap();
+    let warned = staging(&state).expect("an undelivered staging mark warns");
+    assert_eq!(warned.status, "warn");
+    for part in ["1 message(s)", "message/staged-as-mark", "v0.3.25 or earlier would offer them again", "v0.3.26 is the safe floor", "roll every member to v0.3.26"] {
+        assert!(warned.message.contains(part), "{part}: {warned:?}");
+    }
+    crate::store::message_marks::record(&state.store, "message/staged-as-mark", "message.delivered", seat).unwrap();
+    assert!(staging(&state).is_none(), "delivery clears it");
+}
+
 #[test]
 fn doctor_names_failed_admission_even_if_opencode_reports_ready() {
     let root = tempfile::tempdir().unwrap();
