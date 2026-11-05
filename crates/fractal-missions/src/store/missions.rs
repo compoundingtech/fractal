@@ -210,6 +210,28 @@ thread_local! {
 
 use fractal_delivery::store::run_eta::step_timestamps;
 
+/// The timing history of the runs in `?1` (and only the step subjects in `?2`, when given): each
+/// current-generation step's lifecycle claims, in canonical order. It starts from the runs' own steps
+/// (`step_runs_run_index`) and seeks each step's claims by subject and kind, so its work follows the
+/// runs read, never the store's whole history of those kinds (#5108).
+pub(crate) fn mission_step_timestamps_sql() -> String {
+    format!(
+        "WITH steps AS MATERIALIZED (
+             SELECT s.subject, s.attempt
+             FROM mission_runs r JOIN step_runs s INDEXED BY step_runs_run_index
+               ON s.run_id=r.id AND s.generation_id=r.current_generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1))
+               AND (?2 IS NULL OR s.subject IN (SELECT value FROM json_each(?2))))
+         SELECT claims.subject, steps.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM steps CROSS JOIN claims INDEXED BY claims_subject_kind_index
+           ON claims.subject=steps.subject
+          AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+              'work.claimed','work.failed','work.person-done','work.person-cancelled')
+         JOIN batches ON batches.id=claims.batch_id
+         ORDER BY claims.subject, {CANONICAL_ORDER}"
+    )
+}
+
 #[test]
 fn step_timestamps_follow_execution_not_lease_intervals() {
     let event = |kind: &str, fields: Value, at| (kind.to_owned(), json!({"fields": fields}), at);
@@ -1866,6 +1888,8 @@ pub trait MissionsStore {
         ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
+    /// Fill a committed work acknowledgement's wake from a reader, as of `snapshot_unix_ms`, or now.
+    fn enrich_work_wake(&self, view: &mut StepRunView, snapshot_unix_ms: Option<u128>) -> Result<()>;
     fn set_step_state(
             &self,
             subject: &str,
@@ -4718,17 +4742,7 @@ impl MissionsStore for Store {
         }
         let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd9e9bd3ec3b9 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
-             FROM claims JOIN batches ON batches.id=claims.batch_id
-             JOIN step_runs s ON s.subject=claims.subject
-             JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
-             WHERE r.id IN (SELECT value FROM json_each(?1))
-               AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
-               AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
-                   'work.claimed','work.failed','work.person-done','work.person-cancelled')
-             ORDER BY claims.subject, {CANONICAL_ORDER}"
-        ))?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0793121bcb1a owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &mission_step_timestamps_sql())?;
         let rows = statement.query_map(params![serde_json::to_string(&runs)?, subjects.map(serde_json::to_string).transpose()?], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?, row.get::<_, String>(4)?))
@@ -5889,7 +5903,7 @@ impl MissionsStore for Store {
         // One work action in a savepoint of the writer's next batch, answered once that batch commits.
         let committed = self
             .connection
-            .batched(|transaction| -> Result<StepRunView, St3Error> {
+            .batched(|transaction| -> Result<(StepRunView, Option<u128>), St3Error> {
                 let actor = physical_actor(transaction, &actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
@@ -5898,10 +5912,13 @@ impl MissionsStore for Store {
                     if let Some(input) = handoff {
                         adhoc_work::validate_retry(transaction, &subject, input)?;
                     }
-                    return serde_json::from_str(&response).map_err(internal);
+                    return Ok((serde_json::from_str(&response).map_err(internal)?, None));
                 }
                 if action == "claim" && rollouts::intake_held(transaction, &actor, &subject)? {
                     return Err(St3Error::new("seat-rollout-draining", "the seat holds new work intake while its rollout drains; existing work may finish"));
+                }
+                if action == "claim" {
+                    fractal_store::store::refresh_intake::admit_claim_tx(transaction, &actor)?;
                 }
                 let current = transaction
                     .query_row(
@@ -6351,9 +6368,13 @@ impl MissionsStore for Store {
                      FROM step_runs WHERE subject=?1", [&subject], step_run_from_row).map_err(internal)?;
                 // A renewal only moves the lease. Its view's timing, summaries and wake fold the
                 // step's whole claim history, which would hold the writer longer the older the
-                // step grows, so a renewal's view is filled from a reader after COMMIT.
-                if action != "renew" {
-                    enrich_step_queue(transaction, &mut view).map_err(internal)?;
+                // step grows, so a renewal's view is filled from a reader after COMMIT. Every
+                // other action's wake reads every message the assignee was ever sent (#5010), so
+                // it too is filled from a reader, as of the time the rest of the view was read at.
+                let snapshot = (action != "renew").then(now_ms);
+                if let Some(snapshot) = snapshot {
+                    fractal_store::store::enrich_step_queue_but_wake_at(transaction, &mut view, snapshot)
+                        .map_err(internal)?;
                 }
                 transaction
                     .execute(
@@ -6367,20 +6388,28 @@ impl MissionsStore for Store {
                 if !publish {
                     mark_replay_safe_receipt_tx(transaction, &request.idempotency_key).map_err(internal)?;
                 }
-                Ok(view)
+                Ok((view, snapshot))
             })
             .map_err(|error| St3Error::new("internal", error))?;
-        let mut view = committed?;
-        if action == "renew" && enrich_renewal {
-            // An exact retry of a renewal also replays a view cached without these fields.
-            self.enrich_work_response(&mut view)
-                .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
-        }
+        let (mut view, snapshot) = committed?;
+        // An exact retry also replays a view cached without these fields.
+        let filled = if action == "renew" {
+            if enrich_renewal { self.enrich_work_response(&mut view) } else { Ok(()) }
+        } else {
+            self.enrich_work_wake(&mut view, snapshot)
+        };
+        filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
         Ok(view)
     }
 
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()> {
         enrich_step_queue(&self.readers.get(), view).map_err(Into::into)
+    }
+
+    fn enrich_work_wake(&self, view: &mut StepRunView, snapshot_unix_ms: Option<u128>) -> Result<()> {
+        let snapshot_unix_ms = snapshot_unix_ms.unwrap_or_else(now_ms);
+        fractal_store::store::enrich_step_wake_at(&self.readers.get(), view, snapshot_unix_ms)
+            .map_err(Into::into)
     }
 
     fn set_step_state(&self, subject: &str, status: &str, reason: Option<&str>) -> Result<bool> {

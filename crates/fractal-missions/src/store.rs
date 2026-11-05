@@ -157,6 +157,8 @@ pub mod card_fold_tests;
 pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod convergence;
+#[cfg(test)]
+mod eta_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod delegation_tests_shared_seats;
 #[cfg(test)]
@@ -179,6 +181,8 @@ pub mod tests;
 mod terminal_step_guard_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_seats;
+#[cfg(test)]
+mod work_claim_production_copy_tests;
 #[cfg(test)]
 pub mod work_renew_tests;
 #[cfg(test)]

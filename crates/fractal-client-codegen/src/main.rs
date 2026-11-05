@@ -9,6 +9,7 @@ mod declarations;
 mod rich;
 mod notice;
 mod notice_schema;
+mod swift_notice;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -59,7 +60,7 @@ fn main() -> Result<()> {
         &swift_operation_methods(reads, actions)?,
     )?;
     let typescript_models = typescript_models(&schema, &operations, &constants)?;
-    let typescript_schema = rich::models(&schema)?;
+    let typescript_schemas = rich::partitioned_models(&schema, &operations)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
         "    // @st3-codegen:typescript-operation-methods",
@@ -82,6 +83,11 @@ fn main() -> Result<()> {
     output(
         &root.join("crates/fractal-client/src/notice_schema.generated.json"),
         &notice_schema,
+        check,
+    )?;
+    output(
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift"),
+        &swift_notice::models(&schema)?,
         check,
     )?;
     output(
@@ -119,11 +125,13 @@ fn main() -> Result<()> {
         &typescript_models,
         check,
     )?;
-    output(
-        &root.join("clients/typescript/fractal-client/Schema.generated.ts"),
-        &typescript_schema,
-        check,
-    )?;
+    for (name, contents) in typescript_schemas {
+        output(
+            &root.join("clients/typescript/fractal-client").join(name),
+            &contents,
+            check,
+        )?;
+    }
     output(
         &root.join("clients/typescript/fractal-client/Client.generated.ts"),
         &typescript_client,
@@ -240,6 +248,10 @@ fn rust_operation_methods(
         }
         if id == "arrangements.get" {
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
+            continue;
+        }
+        if id == "device-command.get" {
+            writeln!(out, "    pub async fn device_command_get(&self, id: &str, wait: bool) -> Result<Envelope<DeviceCommand>, ClientError> {{ self.get(&format!(\"/v1/client/device-commands/{{}}?wait={{wait}}\", percent_encode(id))).await }}")?;
             continue;
         }
         if id == "harness-questions.list" {
@@ -445,6 +457,10 @@ fn swift_operation_methods(
         }
         if id == "arrangements.get" {
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            continue;
+        }
+        if id == "device-command.get" {
+            writeln!(out, "    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> {{ let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: \"/\"))) ?? id; return try await get(\"v1/client/device-commands/\\(escaped)\", query: [.init(name: \"wait\", value: String(wait))]) }}")?;
             continue;
         }
         if id == "harness-questions.list" {
@@ -707,14 +723,19 @@ fn validate_model(
             && (rust.contains("#[serde(tag = \"type\", content = \"body\"")
                 || (rust.contains("struct TaggedBody")
                     && rust.contains("#[serde(rename = \"type\")]")));
-        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline {
+        let command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && rust_block.contains("pub command: DeviceCommandBody")
+            && rust.contains("#[serde(tag = \"command_kind\", content = \"args\")]");
+        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline && !command_body {
             bail!("Rust `{rust_name}` does not model schema field `{property}`");
         }
         let swift_field = match property.as_str() {
             "final" => "isFinal".into(),
             other => lower_camel_snake(other),
         };
-        if !swift_block.contains(&swift_field) {
+        let swift_command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && swift_block.contains("command: PhoneCommand");
+        if !swift_block.contains(&swift_field) && !swift_command_body {
             bail!("Swift `{swift_name}` does not model schema field `{property}`");
         }
     }
@@ -746,7 +767,7 @@ fn validate_surfaces(
             schema,
             definition,
             definition,
-            &format!("{definition}Resource"),
+            &if definition == "DeviceCommand" { definition.to_owned() } else { format!("{definition}Resource") },
             rust,
             swift,
         )?;
@@ -1401,6 +1422,10 @@ fn ts_object(value: &Value) -> Result<String> {
             fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
         }
     }
+    // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.
+    if fields.is_empty() && value["additionalProperties"] == false {
+        return Ok("Record<string, never>".into());
+    }
     if let Some(extra) = value.get("additionalProperties")
         && extra.is_object()
     {
@@ -1601,6 +1626,10 @@ fn typescript_operation_methods(
         if let Some((projection, request, response)) = assistant_read(read)? {
             let response = if response == "Value" { "unknown" } else { response };
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
+            continue;
+        }
+        if id == "device-command.get" {
+            writeln!(out, "    async deviceCommandGet(id: string, options: {{ wait?: boolean }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DeviceCommand>> {{ return this.get(`/v1/client/device-commands/${{encodeURIComponent(id)}}` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         let route = if path.contains("{id}") {

@@ -30,6 +30,11 @@ preserves full immutable producer input; its recipient is the addressed person.
 Delivery/integrity use tagged states, and person controls are explicitly nullable.
 Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
 serialized claim-field budget and cross-field provenance/receipt consistency.
+Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
+Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
+constructors and decoding, including Unicode-scalar lengths, URI references and
+UTC timestamps (a leap second is accepted only at 23:59 UTC). Shared
+`notice-conformance.json` fixtures exercise decoding and lossless encoding.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
@@ -96,6 +101,11 @@ fields from untyped excess-property bags.
 The collections socket's `CollectionCommand` and `CollectionFrame` definitions live in the same
 schema as HTTP resources. The operation manifest's `streams` section names its route, protocol,
 command/frame definitions, and subscription bound; see [collections](collections.md).
+
+Typed, expiring foreground phone commands use the existing resource windows and server-side
+reactive waits; see [foreground phone commands](device-commands.md). Probe `phone-commands`
+before subscribing to `commands`; commands and terminal outcome correlation are member-local
+memory only, never a durable queue.
 
 ### Paired client diagnostics
 
@@ -229,6 +239,17 @@ Step timing events are read in one batch for the selected runs, not once per ste
 open runs and the latest finished run. Published cards restrict that batch to their actual
 20-step previews; detail retains all steps. Older detail steps retain null timing. These are
 lifecycle timestamps, not elapsed execution time or an ETA.
+
+Run summaries also expose optional nullable `eta` on published cards and detail reads.
+Its exact shape is `{remaining_low_ms, remaining_high_ms, basis: {method, samples}, as_of}`.
+Durations are integer milliseconds (p25/p75); `as_of` is the integer Unix-millisecond
+publication cut, not an estimated finish timestamp. Candidate samples come only from the newest 64 terminal runs per
+definition hash (first terminal time, then subject); unusable candidates are not replaced by older runs. Step paths match; person-held time is excluded, but queueing and agent waits
+count. Remaining steps sum along declared dependency critical paths (`critical-path`),
+or sequentially when no dependencies are declared (`per-step`). `samples` is the smallest
+sample count among remaining steps, including one or two prior runs; zero means no remaining steps and zero remaining duration. A missing sample or
+a finished run yields null; older daemons omit the field. ETA remains available while a
+person holds a run, allowing a client to show “waiting on you” instead.
 
 Mission `run_details[].steps[]` and `run_details[].current_steps[]` expose nullable
 `assignee` and `claimant` actor references (`agent/...`, `daemon/...`, or `person/...`),
@@ -777,8 +798,8 @@ entry ordering, and source paths are not retained. Clients label it, for example
 copy of the definition: re-publishing it would replace the environment values with `<redacted>`.
 
 Unknown agents and agents with observations but no applied desired declaration return typed
-`not-found`. Other subject kinds return `validation-failed`: a mission is published as a compiled
-revision (read it through `/missions/{id}`) and keeps no canonical declaration AST to render.
+`not-found`. Other subject kinds return `validation-failed`: missions use
+`GET /v1/client/mission-declaration?mission=mission%2Fexample%2Fdaily` instead.
 
 For canonical structured publication values, use
 `GET /v1/client/publication-definition?subject=mission%2Fexample%2Fdaily` (also accepts
@@ -793,6 +814,13 @@ These are the same values used by the [owned-set declaration diff](../owned-sets
 A definition is never truncated:
 when its serialized value exceeds `max_response_bytes - 4096` (reserving room for the envelope),
 the server returns `validation-failed` rather than an incomplete AST or KDL document.
+
+The mission declaration read returns `{mission, revision, published_at, text, legacy}` and
+requires `read.declarations`. Optional `revision` selects an exact published revision; omission
+selects the latest. `text` is deterministic server-rendered KDL with environment values and
+embedded declaration KDL redacted, not original authored bytes. `legacy` marks removed loop
+shapes. Fractal Web shows the served text and a legacy note. Only older daemons without the
+route use the labelled, redacted structured JSON view; a missing mission remains not found.
 
 ### Usage over a period
 

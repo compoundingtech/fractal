@@ -27,6 +27,21 @@ it('retries successfully on engines that release failed module fetches', async (
   expect(importer).toHaveBeenCalledTimes(2)
 })
 
+it('isolates sticky highlighter failure from pane recovery', async () => {
+  const highlighterImport = vi.fn().mockRejectedValue(new TypeError('highlighter unavailable'))
+  const highlighter = createLazyChunk({ load: highlighterImport })
+  const paneModule = { value: 'pane' }
+  const paneImport = vi.fn().mockRejectedValueOnce(new TypeError('pane unavailable')).mockResolvedValue(paneModule)
+  const pane = createLazyChunk({ load: paneImport })
+  await expect(highlighter.load()).rejects.toThrow('highlighter unavailable')
+  await expect(pane.load()).rejects.toThrow('pane unavailable')
+  expect(pane.recovery).toBe('retry')
+  await expect(pane.retry()).resolves.toBe(paneModule)
+  await expect(highlighter.load()).rejects.toThrow('highlighter unavailable')
+  expect(highlighterImport).toHaveBeenCalledTimes(1)
+  expect(paneImport).toHaveBeenCalledTimes(2)
+})
+
 it('shares concurrent boundary retries, including the stylesheet replacement', async () => {
   const stylesheet = document.createElement('link')
   stylesheet.rel = 'stylesheet'
