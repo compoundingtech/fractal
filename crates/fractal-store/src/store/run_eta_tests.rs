@@ -318,6 +318,39 @@ fn eta_v3_trigger_layout_upgrades_once_and_reopen_preserves_schema_cookie() {
 }
 
 #[test]
+fn eta_fresh_v4_rollback_and_reupgrade_preserve_v4_triggers() {
+    let mut c = fixture(1);
+    let tx = c.transaction().unwrap();
+    super::run_eta::open(&tx).unwrap();
+    let trigger = |tx: &rusqlite::Transaction<'_>| {
+        tx.query_row::<String, _, _>(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='run_eta_run_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let current = trigger(&tx);
+    // The parent's installer runs only when its own initialization marker is absent.
+    let initialized: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    if !initialized {
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-ha4a9dd3c5d26 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER run_eta_run_update;
+            CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs
+            WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN
+            INSERT OR IGNORE INTO local_run_eta_dirty
+            SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
+            INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;
+            INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');").unwrap();
+    }
+    super::run_eta::open(&tx).unwrap();
+    assert_eq!(trigger(&tx), current);
+}
+
+#[test]
 fn eta_terminal_metadata_survives_v3_writer_draining_shared_queues() {
     let mut c = fixture(70);
     let tx = c.transaction().unwrap();
