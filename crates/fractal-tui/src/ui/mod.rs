@@ -3810,7 +3810,10 @@ impl Ui {
                 ),
                 ("ctrl+o", "zoom the split, and back"),
                 ("ctrl+s", "show or hide the sidebar"),
-                ("sidebar: ctrl+←/→", "narrow/widen; ctrl+home resets the width"),
+                (
+                    "sidebar: ctrl+←/→",
+                    "narrow/widen; ctrl+home resets the width",
+                ),
                 ("ctrl+g", "another space, or a new one"),
                 ("1-5", "open the palette at a section"),
             ],
