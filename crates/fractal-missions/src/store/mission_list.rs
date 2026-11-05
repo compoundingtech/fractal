@@ -184,9 +184,14 @@ impl MissionListStore for Store {
     fn mission_list_changes(&self, after: u64, through: u64) -> Result<MissionChanges> {
         let connection = self.readers.get();
         let mut changes = MissionChanges::default();
-        changes.missions.extend(connection.prepare_cached(
-            "SELECT 'mission/'||mission_id FROM local_run_eta_mission_changes WHERE changed_index>?1 AND changed_index<=?2"
-        )?.query_map(params![after,through], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        changes.missions.extend(
+            connection
+                .prepare_cached(
+                    "SELECT 'mission/'||mission_id FROM local_run_eta_mission_changes WHERE changed_index>?1 AND changed_index<=?2",
+                )?
+                .query_map(params![after, through], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
         let mut runs = BTreeSet::new();
         let mut steps = BTreeSet::new();
         let mut requesters = BTreeSet::new();

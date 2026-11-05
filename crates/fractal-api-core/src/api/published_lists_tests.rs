@@ -1630,24 +1630,40 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
     let clock = Clock::at(at);
     let store = Store::open_memory("node").unwrap();
     for name in ["eta/a", "eta/b"] {
-        publish(&store, &format!("version 2\nmission \"{name}\" state=\"ready\" {{ goal \"Finish.\"; concurrent-runs max=4; step \"work\" {{ agentless; }} }}"), name);
+        publish(
+            &store,
+            &format!("version 2\nmission \"{name}\" state=\"ready\" {{ goal \"Finish.\"; concurrent-runs max=4; step \"work\" {{ agentless; }} }}"),
+            name,
+        );
     }
     let waiting = start(&store, "eta/b", "waiting");
     let (before, _) = fold(&store);
     assert!(before.rows.cards["mission/eta/b"]["run_details"][0]["eta"].is_null());
-    for (index, duration) in [100, 300].into_iter().enumerate() {
+    for (index, duration) in [100_u64, 300].into_iter().enumerate() {
         let run = start(&store, "eta/a", &format!("sample-{index}"));
         clock.set(at + 1000 * (index as u128 + 1));
-        store.set_step_state(&run.steps[0].subject, "working", None).unwrap();
-        clock.set(at + 1000 * (index as u128 + 1) + duration);
-        store.set_step_state(&run.steps[0].subject, "completed", None).unwrap();
-        store.set_mission_run_state(&run.id, "completed", "terminal", Some("done")).unwrap();
+        store
+            .set_step_state(&run.steps[0].subject, "working", None)
+            .unwrap();
+        clock.set(at + 1000 * (index as u128 + 1) + u128::from(duration));
+        store
+            .set_step_state(&run.steps[0].subject, "completed", None)
+            .unwrap();
+        store
+            .set_mission_run_state(&run.id, "completed", "terminal", Some("done"))
+            .unwrap();
         let (publication, changed) = fold(&store);
         assert!(changed);
         let eta = &publication.rows.cards["mission/eta/b"]["run_details"][0]["eta"];
         assert_eq!(eta["basis"]["samples"], index + 1);
         assert_eq!(eta["remaining_low_ms"], 100);
         assert_eq!(eta["remaining_high_ms"], duration);
-        assert_eq!(*eta, store.mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into()).unwrap().unwrap());
+        assert_eq!(
+            *eta,
+            store
+                .mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into())
+                .unwrap()
+                .unwrap()
+        );
     }
 }
