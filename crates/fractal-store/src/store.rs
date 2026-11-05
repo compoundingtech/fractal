@@ -290,6 +290,7 @@ pub mod document_index_tests;
 pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
+pub mod run_eta;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
@@ -20097,6 +20098,11 @@ fn enrich_step_wake_with(
             .collect(),
         delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
             harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
+        staging_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working"
+                && current_incarnation_key == wake_incarnation_key
+                && matches!(harness.driver.as_deref(), Some("pi" | "omp"))
         }),
     };
     let failure = connection

@@ -4025,7 +4025,7 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     let barrier = root.path().join("prefer-lock");
     fs::create_dir(&barrier).unwrap();
     let mut prefer = node
-        .command(&["fleet", "transports", "prefer", "fabric", "--no-service"])
+        .command(&["fleet", "transports", "prefer", "--as", "agent/example", "fabric", "--no-service"])
         .env("ST3_TEST_REMOVAL_WRITE_BARRIER", &barrier)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4077,6 +4077,14 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     assert_eq!(configured_file(&node).fabric_protocol, before.fabric_protocol);
     assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
     assert_eq!(fs::read(registry.join("calls")).unwrap(), calls);
+    node.stop();
+    let store = fractal_daemon::store::Store::open(
+        &node.state_dir().join("claims.sqlite3"), &node.name,
+    ).unwrap();
+    let claim = store.latest_claim(
+        &format!("host/{}", node.name), Some("fleet.member-endpoints"),
+    ).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("agent/example"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6003,6 +6011,15 @@ async fn reads_seat_freshness(node: &Node) -> bool {
     })
 }
 
+/// Whether `member`'s newest `daemon.started`, as `node` holds it, advertises `feature`.
+async fn newest_start_advertises(node: &Node, member: &str, feature: &str) -> bool {
+    node.claims()
+        .await
+        .iter()
+        .rfind(|claim| claim["subject"] == format!("daemon/{member}") && claim["kind"] == "daemon.started")
+        .is_some_and(|claim| claim.pointer(&format!("/body/fields/features/{feature}")).and_then(Value::as_i64) == Some(1))
+}
+
 /// An agent's message written straight into `node`'s messages shard. Nothing in this build
 /// writes the shard yet; tests reach it through a test-support route.
 async fn append_stream_item(node: &Node, subject: &str) {
@@ -7434,7 +7451,8 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
 /// back turns marks off on the host: its next lifecycle write is a claim again, and the
 /// rolled-back member reads it from the claim. Nothing is redelivered on the host. With a
 /// release that has seat-freshness reads, the rolled-back member's delivery status still reads
-/// the mark from the host (db break-up 4b-4).
+/// the mark from the host (db break-up 4b-4). Only this build advertises `message_staged_reads`,
+/// and even beside a member that does, its host's staging is a claim the other member reads.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
@@ -7466,7 +7484,7 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     h.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
     let seat = "agent/marks/h-seat";
     let mut subjects = Vec::new();
-    for key in ["h-seat-before", "h-seat-marked"] {
+    for key in ["h-seat-before", "h-seat-marked", "h-seat-staged"] {
         let receipt: Value = h
             .client()
             .post("/v1/messages", &json!({"idempotency_key": key, "from": PERSON, "to": seat, "content": key}))
@@ -7474,7 +7492,7 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
             .unwrap();
         subjects.push(receipt["subject"].as_str().unwrap().to_owned());
     }
-    let (before, marked) = (subjects[0].clone(), subjects[1].clone());
+    let (before, marked, staged) = (subjects[0].clone(), subjects[1].clone(), subjects[2].clone());
     let lifecycle = |node: &Node, subject: &str, lifecycle: &str| {
         let client = node.client();
         let (path, key) = (
@@ -7490,8 +7508,9 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
             receipt["id"].as_str().unwrap().to_owned()
         }
     };
-    // The release writes claims.
+    // The release writes claims, and does not say its reads count a staging mark.
     assert!(!lifecycle(&h, &before, "delivered").await.starts_with("offset-receipt/"));
+    assert!(!newest_start_advertises(&h, "o", "message_staged_reads").await);
 
     // Both upgrade: marks turn on, and the host's read is a mark that `o` reads from `h`.
     for node in [&mut o, &mut h] {
@@ -7507,6 +7526,13 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     for kind in ["delivered", "read"] {
         assert!(lifecycle(&h, &marked, kind).await.starts_with("offset-receipt/"), "{kind}");
     }
+    // Every member says its reads count a staging mark, and a staging is still a claim: nothing
+    // in this build records one as a mark. `o` reads it as staged.
+    wait_until("the host holds o's start advertising message_staged_reads", 60, || {
+        newest_start_advertises(&h, "o", "message_staged_reads")
+    })
+    .await;
+    assert!(!lifecycle(&h, &staged, "staged").await.starts_with("offset-receipt/"), "a staging stays a claim");
     let view = |node: &Node, subject: &str| {
         let client = node.client();
         let path = format!("/v1/messages/read/{subject}");
@@ -7518,6 +7544,11 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     })
     .await;
     assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
+    wait_until("o reads the host's staging from its claim", 60, || {
+        let read = view(&o, &staged);
+        async move { read.await.is_some_and(|view| view["status"] == "staged") }
+    })
+    .await;
 
     // The host closes a reminder's winner as a mark; once `o` hears it, its client list makes the
     // older reminder current (#4866), and `o` keeps the close in its member-local table.
@@ -7563,6 +7594,7 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
         async move { off }
     })
     .await;
+    assert!(!newest_start_advertises(&h, "o", "message_staged_reads").await, "the rolled-back member's start");
     if release_reads_relay {
         wait_until("the rolled-back member's delivery status reads the mark from the host", 90, || {
             let client = o.client();
