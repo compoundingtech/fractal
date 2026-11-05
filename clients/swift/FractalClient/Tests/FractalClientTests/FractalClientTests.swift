@@ -424,40 +424,43 @@ final class FractalClientTests: XCTestCase {
         for _ in 0..<6 { root.deleteLastPathComponent() }
         let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/resources.json"))
         let resources = try JSONDecoder().decode([Resource].self, from: data)
-        XCTAssertEqual(resources.count, 18)
-        guard case .attention(let attention) = resources[0] else { return XCTFail("attention discriminator lost") }
+        XCTAssertEqual(resources.count, 19)
+        func resource(_ id: String) throws -> Resource {
+            try XCTUnwrap(resources.first { $0.id == id })
+        }
+        guard case .attention(let attention) = try resource("attention/release-review") else { return XCTFail("attention discriminator lost") }
         XCTAssertEqual(attention.priority, "high")
         XCTAssertEqual(attention.actions, ["launch.approve", "launch.cancel"])
-        guard case .launch(let launch) = resources[2] else { return XCTFail("launch discriminator lost") }
+        guard case .launch(let launch) = try resource("launch/release") else { return XCTFail("launch discriminator lost") }
         XCTAssertEqual(launch.variants, ["launch-variant/release/default"])
         XCTAssertEqual(launch.visualization?.version, "st3.visualization.v0")
         XCTAssertEqual(launch.visualization?.nodes.first?.goals, ["Build artifacts"])
         XCTAssertEqual(launch.visualization?.decisions.first?.decisionType, .singleChoice)
         XCTAssertEqual(launch.visualization?.diffs.first?.changes.count, 1)
         XCTAssertEqual(launch.visualization?.swimlanes.first?.nodes, ["step/build"])
-        guard case .mission(let mission) = resources[6] else { return XCTFail("mission discriminator lost") }
+        guard case .mission(let mission) = try resource("mission/release") else { return XCTFail("mission discriminator lost") }
         XCTAssertEqual(mission.runGenerations["mission-run/release/1"], "run-generation/release/1/g1")
         XCTAssertEqual(mission.visualization?.mission, "mission/release")
-        guard case .work(let work) = resources[7] else { return XCTFail("work discriminator lost") }
+        guard case .work(let work) = try resource("work/release/1/build") else { return XCTFail("work discriminator lost") }
         XCTAssertEqual(work.readinessEpoch, 3)
         XCTAssertEqual(work.goals, ["Build artifacts"])
         XCTAssertNil(work.blockedReason)
         XCTAssertEqual(work.blockers, [])
-        guard case .agent(let agent) = resources[8] else { return XCTFail("agent discriminator lost") }
+        guard case .agent(let agent) = try resource("agent/release") else { return XCTFail("agent discriminator lost") }
         XCTAssertEqual(agent.runtimeIDs, ["runtime/release-agent"])
         XCTAssertEqual(agent.workspace, "/srv/example/release")
         XCTAssertEqual(agent.checkout?.branch, "release")
-        guard case .runtime(let runtime) = resources[9] else { return XCTFail("runtime discriminator lost") }
+        guard case .runtime(let runtime) = try resource("runtime/release-agent") else { return XCTFail("runtime discriminator lost") }
         XCTAssertEqual(runtime.ownerHostID, "host/host-a")
         XCTAssertEqual(runtime.incarnationID, "runtime-9:2026-09-20T11:06:30Z")
-        guard case .machine(let machine) = resources[13] else { return XCTFail("machine discriminator lost") }
+        guard case .machine(let machine) = try resource("machine/host-a") else { return XCTFail("machine discriminator lost") }
         XCTAssertEqual(machine.hostID, "host/host-a")
         XCTAssertEqual(machine.capacity.state, "unknown")
         XCTAssertEqual(machine.occupancy.runningRuntimes, 1)
         XCTAssertEqual(machine.projects, [])
-        guard case .history(let history) = resources[16] else { return XCTFail("history discriminator lost") }
+        guard case .history(let history) = try resource("history/1842") else { return XCTFail("history discriminator lost") }
         XCTAssertEqual(history.storeIndex, 1842)
-        guard case .session(let session) = resources[17] else { return XCTFail("session discriminator lost") }
+        guard case .session(let session) = try resource("session/release-agent/9") else { return XCTFail("session discriminator lost") }
         XCTAssertEqual(session.timelineCursor, "timeline-cursor/release-agent/9/8")
     }
 
@@ -891,6 +894,12 @@ private final class TraceHTTPProtocol: URLProtocol, @unchecked Sendable {
 private final class WebSocketCaptureSession: URLSession, @unchecked Sendable {
     let capture = TraceRequestCapture()
     private let backing = URLSession(configuration: .ephemeral)
+
+    #if canImport(FoundationNetworking)
+    init() {
+        super.init(configuration: .ephemeral)
+    }
+    #endif
 
     override func webSocketTask(with request: URLRequest) -> URLSessionWebSocketTask {
         capture.append(request)
