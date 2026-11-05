@@ -527,6 +527,61 @@ async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_burst_cli_renews_as_held_and_says_lost_gives_back_and_fails_once_a_grant_is_not_renewed() {
+    use std::sync::Mutex;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    // A daemon that grants with a 3 s lease, then answers the holder's renewal as a new ask, as a
+    // daemon that restarted and no longer finds the burst in the seat's slice does.
+    let asks = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let released = Arc::new(Mutex::new(0));
+    let (posted, deleted) = (asks.clone(), released.clone());
+    let router = axum::Router::new().route("/v1/agents/lane/burst", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let asks = posted.clone();
+        async move {
+            let mut asks = asks.lock().unwrap();
+            asks.push(body);
+            let value = if asks.len() == 1 {
+                serde_json::json!({"state": "granted", "lease_secs": 3})
+            } else {
+                serde_json::json!({"state": "waiting", "why": "burst lane for agent/garden/builder waits behind agent/garden/other", "lease_secs": 3})
+            };
+            axum::Json(serde_json::json!({"api_version": "st3.v1", "value": value}))
+        }
+    }).delete(move || {
+        let released = deleted.clone();
+        async move {
+            *released.lock().unwrap() += 1;
+            axum::Json(serde_json::json!({"api_version": "st3.v1", "value": {"released": true}}))
+        }
+    }));
+    let server = serve_for_test(&socket, router).await;
+    let binary = test_bin!("fractal-fixture").to_path_buf();
+    let holder = tokio::task::spawn_blocking(move || {
+        let mut command = fractal_daemon::test_support::command(binary);
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+            .arg("--endpoint").arg(&socket)
+            .args(["agents", "burst", "garden/builder", "--cores", "8", "--memory", "24G", "--reason", "st-test", "--as", "agent/garden/builder"])
+            // Its stdin stays open, as st-test's does while the run holds the burst.
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let output = child.wait_with_output().unwrap();
+        drop(stdin);
+        output
+    });
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), holder).await.expect("the holder ends by itself").unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout),
+        "granted 8 24G\nlost burst lane for agent/garden/builder waits behind agent/garden/other\n", "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lane burst lost"), "{output:?}");
+    let asks = asks.lock().unwrap();
+    assert_eq!(asks.iter().map(|ask| ask["held"].clone()).collect::<Vec<_>>(), [Value::Bool(false), Value::Bool(true)]);
+    assert_eq!(*released.lock().unwrap(), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_workspace_cli_and_client_read_the_same_declaration_even_after_retirement() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");

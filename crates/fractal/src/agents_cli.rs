@@ -754,14 +754,16 @@ pub(super) fn admission_start_message(subject: &str, admission: &Value) -> Strin
 }
 
 /// Holds an agent's lane burst while standard input stays open (docs/st3/seat-lanes.md, "Bursts"):
-/// one line per answer on standard output for the command that started it, then a renewal of its
-/// lease every half minute. Standard input closing, or a stop signal, gives it back. A daemon
-/// without bursts answers with an empty 404, which is `none`.
+/// one line per answer on standard output for the command that started it, then a renewal every
+/// third of the lease the daemon names. Standard input closing, or a stop signal, gives it back. A daemon
+/// without bursts answers with an empty 404, which is `none`. A renewal says the burst is held, so
+/// a daemon that restarted restores it; once granted, any other answer means the lane no longer
+/// holds it: the holder says `lost` and why, gives it back and fails, and never goes on as if it held.
 async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
     const WAITING_POLL: std::time::Duration = std::time::Duration::from_secs(5);
-    const RENEW: std::time::Duration = std::time::Duration::from_secs(30);
     let subject = normalize_agent_subject(&args.subject);
-    let body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason});
+    let mut body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason,
+        "held": false});
     let (closed_tx, mut closed) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
@@ -776,16 +778,28 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
         Ok(())
     };
     let (mut told, mut granted) = (None::<String>, false);
+    // Renewed at a third of the lease the daemon names, so a renewal or two may fail and it still holds.
+    let mut renew = std::time::Duration::from_secs(30);
     loop {
         match client.post::<_, Value>("/v1/agents/lane/burst", &body).await {
             Ok(answer) => {
                 let why = answer["why"].as_str().unwrap_or_default().to_owned();
+                if let Some(lease) = answer["lease_secs"].as_u64() {
+                    renew = std::time::Duration::from_secs((lease / 3).max(1));
+                }
                 match answer["state"].as_str() {
                     Some("granted") if !granted => {
                         say(format!("granted {} {}", args.cores, args.memory))?;
                         granted = true;
+                        body["held"] = json!(true);
                     }
                     Some("granted") => {}
+                    Some(state) if granted => {
+                        let why = if why.is_empty() { format!("this host's daemon answered {state}") } else { why };
+                        say(format!("lost {why}"))?;
+                        let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
+                        anyhow::bail!("lane burst lost: {why}");
+                    }
                     Some("waiting") if told.as_deref() != Some(why.as_str()) => {
                         say(format!("waiting {why}"))?;
                         told = Some(why);
@@ -820,7 +834,7 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
             _ = &mut closed => break,
             _ = terminate.recv() => break,
             _ = tokio::signal::ctrl_c() => break,
-            () = tokio::time::sleep(if granted { RENEW } else { WAITING_POLL }) => {}
+            () = tokio::time::sleep(if granted { renew } else { WAITING_POLL }) => {}
         }
     }
     let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;

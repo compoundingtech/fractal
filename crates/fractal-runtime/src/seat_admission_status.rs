@@ -71,6 +71,13 @@ pub struct State {
     pub lane_bursts: VecDeque<LaneBurst>,
     /// Seats whose burst was asked, changed or given back since the planner last looked.
     pub burst_touched: BTreeSet<String>,
+    /// Lanes this daemon found raised above their seat's own when it started, with no burst or
+    /// step of its own to account for them: a burst the daemon before it granted, whose holder runs
+    /// on. Each counts as held, and stays raised, until its holder's renewal restores the grant or
+    /// one burst lease after this daemon started.
+    pub lane_found: BTreeMap<String, crate::Capacity>,
+    /// Whether this daemon has read its seats' slices for such raises.
+    pub lanes_found: bool,
     /// Bursts dropped because their holder stopped renewing, since this daemon started.
     pub bursts_lapsed: u64,
     /// The room admission keeps from starts for a burst, as it last judged a seat's start: the
@@ -95,6 +102,8 @@ impl Default for Status {
             lane_applied: BTreeMap::new(),
             lane_bursts: VecDeque::new(),
             burst_touched: BTreeSet::new(),
+            lane_found: BTreeMap::new(),
+            lanes_found: false,
             bursts_lapsed: 0,
             burst_reserve: None,
         }))
@@ -225,6 +234,31 @@ impl Status {
         state.lane_bursts.push_back(burst.clone());
         state.burst_touched.insert(subject.into());
         burst
+    }
+
+    /// Restores a burst to `capacity` that `subject`'s holder says the daemon before this one
+    /// granted, when this daemon has no record of it: the caller has read that the seat's slice
+    /// still holds the burst lane, which shows the grant was given and not taken back. It counts at
+    /// once, as a grant does. None when this daemon already has a record of `subject`'s burst: it
+    /// is renewed as any other.
+    pub fn burst_restore(&self, subject: &str, capacity: crate::Capacity, reason: &str, now: u64) -> Option<LaneBurst> {
+        let mut state = self.state();
+        if state.lane_bursts.iter().any(|burst| burst.subject == subject) {
+            return None;
+        }
+        let burst = LaneBurst {
+            subject: subject.into(), capacity, reason: reason.into(), since: now, expires: now + BURST_LEASE_SECS,
+            granted: true, wait: None, refused: None,
+        };
+        state.lane_bursts.push_back(burst.clone());
+        state.lane_found.remove(subject);
+        let raised = state.lane_raised.get(subject).copied().unwrap_or(capacity);
+        state.lane_raised.insert(subject.into(), crate::Capacity {
+            cores: raised.cores.max(capacity.cores),
+            memory: raised.memory.max(capacity.memory),
+        });
+        state.burst_touched.insert(subject.into());
+        Some(burst)
     }
 
     /// Gives `subject`'s burst back: true when it held or asked for one.
