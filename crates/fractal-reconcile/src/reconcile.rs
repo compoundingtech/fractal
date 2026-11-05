@@ -663,8 +663,28 @@ pub fn member_environment(
     executable: &Path,
     recorder: Option<&Path>,
 ) -> Result<BTreeMap<String, String>> {
+    member_environment_from(crate::environment::snapshot()?, declared, executable, recorder)
+}
+
+/// [`member_environment`] from the environment already captured, or `None` while the first
+/// capture runs: a read never waits on the login shell (#5209).
+pub fn member_environment_ready(
+    declared: &BTreeMap<String, String>,
+    executable: &Path,
+    recorder: Option<&Path>,
+) -> Result<Option<BTreeMap<String, String>>> {
+    crate::environment::snapshot_ready()
+        .map(|inherited| member_environment_from(inherited?, declared, executable, recorder))
+        .transpose()
+}
+
+fn member_environment_from(
+    mut inherited: BTreeMap<String, String>,
+    declared: &BTreeMap<String, String>,
+    executable: &Path,
+    recorder: Option<&Path>,
+) -> Result<BTreeMap<String, String>> {
     // Alias-family resolution lives in environment::{overlay,remove_aliases}.
-    let mut inherited = crate::environment::snapshot()?;
     for name in ["ST_AGENT", "ST_SUPERVISOR", "ST3_SUBJECT"] {
         if !declared.contains_key(name)
             && !fractal_drivers::contracts::fractal_env_name(name)
