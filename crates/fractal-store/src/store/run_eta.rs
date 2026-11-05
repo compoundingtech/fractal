@@ -9,8 +9,25 @@ pub(super) const CANDIDATES_SQL: &str = "WITH recent AS MATERIALIZED (
     JOIN step_runs s ON s.run_id=r.id AND s.generation_id=r.current_generation_id
     WHERE s.definition_hash=?1 AND s.step_path=?2 AND r.status='completed' AND s.status='completed'
     AND (?4 OR r.id IN(SELECT run_id FROM local_run_eta_pending))";
+pub(super) const INVALIDATE_MISSIONS_SQL: &str = "INSERT INTO local_run_eta_mission_changes
+    SELECT DISTINCT r.mission_id,(SELECT COALESCE(MAX(store_index),0) FROM claims)
+    FROM step_runs s INDEXED BY step_runs_eta_remaining JOIN mission_runs r ON r.id=s.run_id
+    WHERE s.definition_hash=?1 AND s.step_path=?2
+    AND s.status NOT IN('completed','failed','cancelled','skipped')
+    AND r.phase<>'terminal' AND s.generation_id=r.current_generation_id
+    ON CONFLICT(mission_id) DO UPDATE SET changed_index=excluded.changed_index";
+
+fn window(tx: &Transaction<'_>, hash: &str, path: &str) -> rusqlite::Result<Vec<(String,i64)>> {
+    tx.prepare_cached("SELECT subject,duration FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 ORDER BY subject")?
+        .query_map(params![hash,path], |row| Ok((row.get(0)?,row.get(1)?)))?.collect()
+}
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-eta-publish-schema owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ "
+CREATE TABLE IF NOT EXISTS local_run_eta_mission_changes (mission_id TEXT PRIMARY KEY,changed_index INTEGER NOT NULL) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS local_run_eta_mission_changed ON local_run_eta_mission_changes(changed_index);
+CREATE INDEX IF NOT EXISTS step_runs_eta_remaining ON step_runs(definition_hash,step_path,run_id,generation_id) WHERE status NOT IN('completed','failed','cancelled','skipped');
+")?;
     if tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_triggers_v4')",
         [],
@@ -103,7 +120,9 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         UNION SELECT definition_hash,step_path FROM local_run_eta_dirty",
         )?
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let (hash, path): (String,String) = (row.get(0)?,row.get(1)?);
+            let previous = window(tx, &hash, &path)?;
+            Ok((hash,path,previous))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-hfb7e99bd99ec owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_terminal WHERE run_id IN(SELECT run_id FROM local_run_eta_pending)", [])?;
@@ -116,11 +135,11 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         FROM local_run_eta_pending p CROSS JOIN mission_runs r ON r.id=p.run_id
         CROSS JOIN step_runs s ON s.run_id=r.id AND s.generation_id=r.current_generation_id WHERE r.phase='terminal'"), [])?;
     if rebuild {
-        for (hash, path) in &keys {
+        for (hash, path, _) in &keys {
             tx.execute(/* sqlite-large-value: allow-for-now lv-h777dc35a3cdd owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2", params![hash,path])?;
         }
     }
-    for (hash, path) in keys {
+    for (hash, path, previous) in keys {
         // Rebuilds load at most 64 terminal runs per hash times those runs' own claims,
         // including unusable candidates. Normal transitions fold only the queued new runs.
         // The candidate index bounds selection before any step claim body is loaded.
@@ -180,6 +199,9 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         tx.execute(/* sqlite-large-value: allow-for-now lv-h5433629a009d owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 AND run_id NOT IN(
             SELECT run_id FROM local_run_eta_terminal WHERE definition_hash=?1 ORDER BY ended DESC,run_id DESC LIMIT ?3)",
             params![hash,path,SAMPLE_LIMIT])?;
+        if window(tx, &hash, &path)? != previous {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-eta-publish owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ INVALIDATE_MISSIONS_SQL, params![hash,path])?;
+        }
     }
     tx.execute(/* sqlite-large-value: allow-for-now lv-h57ee6fe04659 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_pending", [])?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7dd9271f11ac owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_dirty", [])?;
