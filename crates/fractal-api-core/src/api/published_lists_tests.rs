@@ -1623,3 +1623,52 @@ fn a_word_that_hinges_on_agent_queues_waits_for_the_first_roster() {
     present(&mut working, &[], None);
     assert_eq!(working["presentation"]["word"], "working", "this word reads no queue");
 }
+
+#[test]
+fn eta_shared_step_completion_republishes_other_missions_open_run() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("node").unwrap();
+    for name in ["eta/a", "eta/b"] {
+        publish(
+            &store,
+            &format!("version 2\nmission \"{name}\" state=\"ready\" {{ goal \"Finish.\"; concurrent-runs max=4; step \"work\" {{ agentless; }} }}"),
+            name,
+        );
+    }
+    let waiting = start(&store, "eta/b", "waiting");
+    let (before, _) = fold(&store);
+    assert!(before.rows.cards["mission/eta/b"]["run_details"][0]["eta"].is_null());
+    for (index, duration) in [100_u64, 300].into_iter().enumerate() {
+        let run = start(&store, "eta/a", &format!("sample-{index}"));
+        store
+            .set_step_state(&run.steps[0].subject, "working", None)
+            .unwrap();
+        store
+            .set_step_state(&run.steps[0].subject, "completed", None)
+            .unwrap();
+        // Mission transitions stamp wall time independently of the publication clock.
+        store.connection.lock().unwrap().execute(
+            /* sqlite-large-value: allow-for-now lv-h5326fa890870 owner=fractal_api_core::api::published_lists_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CASE json_extract(body,'$.fields.status')
+            WHEN 'working' THEN '1000' WHEN 'completed' THEN CAST(1000+?2 AS TEXT) ELSE accepted_at_unix_ms END WHERE subject=?1 AND kind='step-run.state'",
+            rusqlite::params![run.steps[0].subject,duration],
+        ).unwrap();
+        // Consume fixture corrections before the independent terminal transition.
+        fold(&store);
+        store
+            .set_mission_run_state(&run.id, "completed", "terminal", Some("done"))
+            .unwrap();
+        let (publication, changed) = fold(&store);
+        assert!(changed);
+        let eta = &publication.rows.cards["mission/eta/b"]["run_details"][0]["eta"];
+        assert_eq!(eta["basis"]["samples"], index + 1);
+        assert_eq!(eta["remaining_low_ms"], 100);
+        assert_eq!(eta["remaining_high_ms"], duration);
+        assert_eq!(
+            *eta,
+            store
+                .mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into())
+                .unwrap()
+                .unwrap()
+        );
+    }
+}
