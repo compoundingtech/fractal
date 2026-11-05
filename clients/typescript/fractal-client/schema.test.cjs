@@ -35,6 +35,11 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(full.containsUnknownCase(unknown), true);
     assert.throws(() => full.decodeUnknownSync(read.ErrorCode, 'strict')('future-error'));
     assert.ok(full.ActionRequest && full.ActionResult && full.TerminalScreen && full.TerminalAttachment);
+    const terminal = { kind: 'subscribe', id: 'screen', collection: 'terminal', terminal: 'terminal/test', capability: 'test' };
+    assert.equal(full.decodeUnknownSync(full.CollectionCommand)(terminal).collection, 'terminal');
+    assert.throws(() => read.decodeUnknownSync(read.ReadCollectionCommand)(terminal));
+    const conversation = { kind: 'subscribe', id: 'thread', collection: 'conversation', conversation: 'agent/test' };
+    assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
 test('JSON Schema string bounds count Unicode code points, not UTF-16 units', async () => {
