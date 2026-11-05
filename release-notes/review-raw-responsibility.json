@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "Reads existing projections and history; no replay changes."},
   "schema": {"status": "none", "detail": "No storage or wire changes."},
   "rules": {"status": "none", "detail": "Internal helpers only; public parsers still reject agent review."},
-  "compatibility": {"status": "none", "detail": "Raw run steps preserve claimed-pool responsibility after termination or supersession. Cross-run carries include source-run requesters and reject missing source headers."},
+  "compatibility": {"status": "none", "detail": "Raw run steps and historical claimants preserve claimed-pool responsibility after termination or supersession; absent claim history fails closed. Cross-run carries include source-run requesters and reject missing source headers."},
   "downtime": {"status": "none", "detail": "No production caller or runtime effect."},
   "manual": {"status": "none", "detail": "No operator action."},
   "recovery": {"status": "none", "detail": "Revert unused preparation; no data recovery."}

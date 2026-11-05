@@ -188,6 +188,7 @@ mission-run "after" {{ mission "mission/child@{}"; workspace "/tmp"; requester "
 fn agent_review_run_terminal_pool_keeps_raw_claimant() {
     let (store, _, _) = fixture();
     let run = store.create_mission_run(&request("pool")).unwrap();
+    assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
     let subject = &run.steps[0].subject;
     store.set_step_state(subject, "ready", None).unwrap();
     store
@@ -210,6 +211,17 @@ fn agent_review_run_terminal_pool_keeps_raw_claimant() {
         .unwrap();
     assert_eq!(check(&store, &run.subject, FREE), "ok");
     assert_eq!(check(&store, &run.subject, REQUESTER), CONFLICT);
+    let raw = step_run_row_tx(&store.connection.write(), subject)
+        .unwrap()
+        .unwrap();
+    assert!(raw.claimant.is_none());
+    let mut request = request("pool");
+    request.idempotency_key = "unclaimed-pool".into();
+    let unclaimed = store.create_mission_run(&request).unwrap();
+    store
+        .set_mission_run_state(&unclaimed.subject, "completed", "terminal", None)
+        .unwrap();
+    assert_eq!(check(&store, &unclaimed.subject, FREE), UNKNOWN);
 }
 
 #[test]

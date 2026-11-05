@@ -21209,7 +21209,7 @@ fn terminalize_projected_run_tree_tx(
 }
 
 pub fn step_owner_is_terminal_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<bool, St3Error> {
     let owner = transaction

@@ -1,7 +1,8 @@
 use super::{Scope, St3Error, agent_review};
 use crate::model::StepRunView;
 use crate::store::{
-    ReferenceGraph, identities, mission_run_header_tx, step_run_row_tx, step_timing_events,
+    ReferenceGraph, identities, mission_run_header_tx, step_owner_is_terminal_tx, step_run_row_tx,
+    step_timing_events,
 };
 use rusqlite::Connection;
 use smallclaims::error::internal;
@@ -83,18 +84,28 @@ fn collect_step(
     {
         include(actor)?;
     }
-    if step.claimant.is_none() {
-        for actor in &step.available_to {
-            include(actor)?;
-        }
-    }
     // Read raw history: effective views and carried_claimants_tx intentionally drop
     // responsibility after lease expiry, terminal state, or a later claim.
     let events = step_timing_events(connection, &step.subject).map_err(internal)?;
+    let mut prior_claimant = false;
     for (_, body, _) in &events {
         let fields = body.get("fields").unwrap_or(body);
         if let Some(actor) = fields.get("claimant").and_then(serde_json::Value::as_str) {
             include(actor)?;
+            prior_claimant = true;
+        }
+    }
+    if step.claimant.is_none() && !step.available_to.is_empty() {
+        // Terminalization clears the persisted lease too; retain the historical workers
+        // instead of treating a previously claimed pool as newly unclaimed.
+        if step_owner_is_terminal_tx(connection, &step.subject)? {
+            if !prior_claimant {
+                return Err(unresolved(&step.subject));
+            }
+        } else {
+            for actor in &step.available_to {
+                include(actor)?;
+            }
         }
     }
     // Any agent writing work on this step contributed; over-exclusion is safer.
