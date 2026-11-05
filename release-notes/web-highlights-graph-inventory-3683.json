@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Track deferred Highlights in the web import-graph proof and dependency inventory",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No upgrade coordination changes." },
+  "compatibility": { "status": "none", "detail": "Import-graph tests require Highlights outside the shell and eager pane graph, but reachable through deferred pane and diff imports. License inventory and Buck lock fingerprint are regenerated from the pinned dependency lock." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Proof and dependency metadata only; reverting requires no data recovery." }
+}

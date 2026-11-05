@@ -18,7 +18,9 @@ it. Each seat has one ordered queue of mission runs:
 - Inside one run, `depends-on` and `queue {}` still decide readiness. Ready steps of one run keep
   creation order, then subject.
 - A move never releases, reassigns, or interrupts a held step. It only changes which run is next
-  once the seat is free.
+  once the seat is free. A seat without free capacity receives no queue-head wake.
+  Once it is free, the first eligible step in the current queue order is woken. A different
+  eligible head sends a work wake; an unchanged head sends no additional queue-head wake.
 - A revision does not take a held step's place either. A revision carries a claimed step into the
   new generation as a ready step with a new subject, so the seat must claim it again. Until it
   does, that step is the seat's next work, ahead of any earlier run's ready step, and the seat is
@@ -153,8 +155,9 @@ still read from the current store; no queue cache is introduced.
     completed next;
   - the seat falls through a waiting head run and returns to it once another seat's step
     completes;
-  - a held claim stays claimed after a move, the seat is not woken for other work, and a second
-    claim still fails with `agent-capacity`;
+  - a held claim stays claimed after a move, the busy seat is not woken, and a second claim
+    still fails with `agent-capacity`;
+  - new and readied runs wait for a busy seat; when it is free, its current head wakes once;
   - a claim from a later run fails with `seat-queue-order` and names the next work, and succeeds
     after a person moves that run to the top;
   - a claim passes over a head run that has no ready step;

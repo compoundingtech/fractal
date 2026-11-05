@@ -1306,9 +1306,14 @@ assert.strictEqual(durable.reading.usedTokens, 22500, "omp does not null its rea
 if (process.argv[2]?.includes("st-omp-channel")) {
   const questionFrames = () => readFrames().filter(frame =>
     frame.type === "question.open" || frame.type === "question.closed");
+  await handlers.get("session_start")({}, bareCtx);
   await handlers.get("tool_execution_start")({ toolName: "ask", toolCallId: "off-valid-ask",
     args: { questions: [{ id: "valid", question: "Disabled observation", options: [] }] } }, bareCtx);
   await handlers.get("tool_result")({ toolCallId: "off-valid-ask" }, bareCtx);
+  const offSwitchCtx = { ...bareCtx, sessionManager: { getSessionId: () => "off-next-session" } };
+  await handlers.get("session_switch")({}, offSwitchCtx);
+  await handlers.get("session_shutdown")({}, offSwitchCtx);
+  await pause(50);
   assert.deepStrictEqual(questionFrames(), [], "default-off emits no question frames");
   assert.strictEqual(globalThis.__stOmpChannel.questions, undefined, "default-off allocates no question state");
   delete globalThis.__stOmpChannel;
@@ -1387,6 +1392,31 @@ if (process.argv[2]?.includes("st-omp-channel")) {
   ]) await invoke("tool_execution_start", call(`invalid-${invalidIndex++}`, invalid));
   await pause(50);
   assert.strictEqual(questionFrames().length, beforeInvalid, "malformed/out-of-bound descriptors are withheld");
+  for (const terminal of [successfulEnd, { ...successfulEnd, willContinue: false }]) {
+    const id = terminal.willContinue === false ? "ended-false" : "ended-omitted";
+    await invoke("tool_execution_start", call(id));
+    await pause(50);
+    const beforeTurnEnd = questionFrames().length;
+    await invoke("agent_end", { willContinue: true, messages: [
+      { role: "assistant", stopReason: "error", errorId: 1, errorMessage: "retry" },
+    ] });
+    await pause(50);
+    assert.strictEqual(questionFrames().length, beforeTurnEnd,
+      "transient native retry preserves the open ask");
+    await invoke("agent_end", terminal);
+    await pause(50);
+    const terminalClose = [{
+      type: "question.closed", native_id: digest(id), session: "session-smoke", status: "cancelled",
+    }];
+    assert.deepStrictEqual(questionFrames().slice(beforeTurnEnd), terminalClose,
+      "definitive native turn end cancels an ask whose result never arrived");
+    await invoke("agent_end", terminal);
+    await invoke("tool_result", { toolCallId: id });
+    await invoke("tool_execution_end", { toolCallId: id, result: { details: { timedOut: true } } });
+    await pause(50);
+    assert.deepStrictEqual(questionFrames().slice(beforeTurnEnd), terminalClose,
+      "duplicate terminal turn and late ask results preserve a single cancelled close");
+  }
   await invoke("tool_execution_start", call("maximum", Array.from({ length: 16 }, (_, index) => ({
     ...question(`id${index}`),
     options: Array.from({ length: 64 }, (_, option) => ({ label: `option${option}` })),
@@ -1394,11 +1424,15 @@ if (process.argv[2]?.includes("st-omp-channel")) {
   await pause(50);
   assert.strictEqual(questionFrames().at(-1).questions[15].id, "q15");
   assert.strictEqual(questionFrames().at(-1).questions[15].options, 64);
+  await invoke("tool_execution_start", call("switch-open"));
+  await pause(50);
   const retained = questionFrames();
   const reconnectStart = readFrames().length;
   process.kill(globalThis.__stOmpChannel.child.pid, "SIGKILL");
   await pause(1200);
   assert.deepStrictEqual(questionFrames().slice(retained.length), retained, "reconnect replays identical opens and closes");
+  assert.strictEqual(globalThis.__stOmpChannel.questions.get(digest("maximum")).status, undefined,
+    "temporary channel loss does not cancel a native ask");
   const replay = readFrames().slice(reconnectStart);
   assert.ok(replay.findIndex(frame => frame.type === "ready") <
     replay.findIndex(frame => frame.type === "question.open"), "ready handshake precedes replay");
@@ -1410,28 +1444,100 @@ if (process.argv[2]?.includes("st-omp-channel")) {
   assert.deepStrictEqual(questionFrames().slice(beforeReplacement), retained, "channel replacement preserves observations");
   const nextCtx = { ...bareCtx, sessionManager: { getSessionId: () => "next-session" } };
   const beforeSwitch = questionFrames().length;
+  const switchWireStart = readFrames().length;
   await invoke("session_switch", {}, nextCtx);
   await invoke("tool_result", { toolCallId: "maximum", isError: true }, nextCtx);
+  await invoke("tool_execution_end", { toolCallId: "switch-open" });
   await pause(50);
-  assert.strictEqual(questionFrames().length, beforeSwitch, "native switch clears without synthesizing closes");
-  for (let index = 0; index < 257; index++) {
-    await invoke("tool_execution_start", call(`bounded-${index}`), nextCtx);
+  const switchCloses = ["maximum", "switch-open"].map(id => ({
+    type: "question.closed", native_id: digest(id), session: "session-smoke", status: "cancelled",
+  }));
+  assert.deepStrictEqual(questionFrames().slice(beforeSwitch), switchCloses,
+    "native switch cancels every still-open ask without rewriting prior terminal closes");
+  const switchWire = readFrames().slice(switchWireStart);
+  const successorBinding = switchWire.findIndex(frame => frame.type === "session" &&
+    frame.sessionId === "next-session");
+  assert.ok(successorBinding >= 0 && switchWire.filter(frame => frame.type === "question.closed").length === 2);
+  assert.ok(switchWire.every((frame, index) => frame.type !== "question.closed" || index < successorBinding),
+    "old-session cancellations drain before the successor binds");
+  await invoke("session_switch", {}, nextCtx);
+  await pause(50);
+  assert.deepStrictEqual(questionFrames().slice(beforeSwitch), switchCloses,
+    "duplicate switch cannot close a retired ask twice");
+
+  // A replacement first observed through session_start has the same teardown semantics.
+  await invoke("tool_execution_start", call("start-replaced"), nextCtx);
+  await pause(50);
+  let finalSession = "final-session";
+  const finalCtx = { ...bareCtx, sessionManager: { getSessionId: () => finalSession } };
+  const beforeStartReplacement = questionFrames().length;
+  await invoke("session_start", {}, finalCtx);
+  await pause(50);
+  assert.deepStrictEqual(questionFrames().slice(beforeStartReplacement), [{
+    type: "question.closed", native_id: digest("start-replaced"), session: "next-session", status: "cancelled",
+  }], "session_start with a new native id also cancels the predecessor");
+  for (const event of ["session_tree", "session_branch"]) {
+    const id = `rebound-${event}`;
+    await invoke("tool_execution_start", call(id), finalCtx);
+    await pause(50);
+    const beforeBranch = questionFrames().length;
+    const branchChild = globalThis.__stOmpChannel.child;
+    await invoke(event, {}, finalCtx);
+    await pause(50);
+    assert.strictEqual(questionFrames().length, beforeBranch,
+      `${event} within the same native session preserves its open ask`);
+    const oldSession = finalSession;
+    finalSession = `native-${event}`;
+    const beforeBranchWire = readFrames().length;
+    await invoke(event, {}, finalCtx);
+    await pause(50);
+    assert.deepStrictEqual(questionFrames().slice(beforeBranch), [{
+      type: "question.closed", native_id: digest(id), session: oldSession, status: "cancelled",
+    }], `${event} replacing native identity cancels its predecessor's ask`);
+    const branchWire = readFrames().slice(beforeBranchWire);
+    assert.strictEqual(branchWire[0].type, "question.closed", "cancel before branch provenance rebinds");
+    assert.strictEqual(branchWire[1].type, "session");
+    assert.strictEqual(branchWire[1].sessionId, finalSession);
+    assert.strictEqual(globalThis.__stOmpChannel.child, branchChild,
+      "native provenance replacement does not reopen delivery");
+    assert.strictEqual(globalThis.__stOmpChannel.questions.size, 0);
   }
-  await invoke("tool_result", { toolCallId: "bounded-0", isError: true }, nextCtx);
+  const beforeBounded = questionFrames().length;
+  for (let index = 0; index < 257; index++) {
+    await invoke("tool_execution_start", call(`bounded-${index}`), finalCtx);
+  }
+  await invoke("tool_result", { toolCallId: "bounded-0", isError: true }, finalCtx);
   await pause(100);
-  const bounded = questionFrames().slice(beforeSwitch);
+  const bounded = questionFrames().slice(beforeBounded);
   assert.strictEqual(bounded.filter(frame => frame.type === "question.open").length, 256);
   assert.strictEqual(bounded.at(-1).status, "cancelled", "saturation still records existing closes");
   assert.strictEqual(globalThis.__stOmpChannel.questions.size, 256, "closed entries retained without persistence acknowledgement");
+  await invoke("tool_result", { toolCallId: "bounded-1" }, finalCtx);
+  await invoke("tool_execution_end", { toolCallId: "bounded-2", result: { details: { timedOut: true } } }, finalCtx);
+  await pause(50);
+  const beforeQuestionShutdown = questionFrames().length;
+  await invoke("session_shutdown", {}, finalCtx);
+  // Earlier reconnect tests deliberately kill recorders, so their EOF counter cannot fence here.
+  await pause(100);
+  const shutdownCloses = Array.from({ length: 253 }, (_, index) => ({
+    type: "question.closed", native_id: digest(`bounded-${index + 3}`), session: finalSession, status: "cancelled",
+  }));
+  assert.deepStrictEqual(questionFrames().slice(beforeQuestionShutdown), shutdownCloses,
+    "shutdown closes all remaining native asks before closing the pipe");
+  assert.strictEqual(globalThis.__stOmpChannel.questions.get(digest("bounded-1")).status, "answered_elsewhere");
+  assert.strictEqual(globalThis.__stOmpChannel.questions.get(digest("bounded-2")).status, "expired");
+  await invoke("session_shutdown", {}, finalCtx);
+  await invoke("tool_result", { toolCallId: "bounded-3" }, finalCtx);
+  await invoke("tool_execution_end", { toolCallId: "bounded-4", result: { details: { timedOut: true } } }, finalCtx);
+  await pause(50);
+  assert.deepStrictEqual(questionFrames().slice(beforeQuestionShutdown), shutdownCloses,
+    "duplicate shutdown and late terminal events cannot duplicate or rewrite cancellations");
   const encoded = JSON.stringify(questionFrames());
   for (const privateValue of [rawId, "private-question-id", "PRIVATE-QUESTION-CANARY",
     "PRIVATE-LABEL-CANARY", "PRIVATE-DESCRIPTION-CANARY", "PRIVATE-ANSWER-CANARY",
     "PRIVATE-NOTE-CANARY", "PRIVATE-CHAT-CANARY"]) {
     assert.ok(!encoded.includes(privateValue), "question wire contains no native ids or text");
   }
-  await invoke("session_shutdown", {}, nextCtx);
-  // Earlier reconnect tests deliberately kill recorders, so their EOF counter cannot fence here.
-  await pause(100);
 }
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("omp extension smoke: ok");

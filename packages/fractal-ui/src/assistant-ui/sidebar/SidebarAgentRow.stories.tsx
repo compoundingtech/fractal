@@ -3,7 +3,8 @@ import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { AgentHoverCard, SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
+import { SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
+import { AgentHoverCard } from './DeferredRowActions.tsx'
 import type { SidebarAgentRow as Row } from './model'
 import { accentVars as accent, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
 import { baselineTheme } from '../neutral-theme'
@@ -145,6 +146,7 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
     for (let node: HTMLElement | null = target; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
     await userEvent.hover(target)
     await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
+    await expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`)
   }
   await userEvent.unhover(row)
   await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0), { timeout: hoverSettleTimeout })
@@ -161,7 +163,7 @@ async function paintedText(card: HTMLElement): Promise<string> {
 
 async function assertCompactCard(canvasElement: HTMLElement) {
   await assertRowNames(canvasElement)
-  const cards = within(canvasElement).getAllByTestId('agent-hover-card')
+  const cards = await within(canvasElement).findAllByTestId('agent-hover-card')
   await expect(cards).toHaveLength(1)
   const card = cards[0]!
   await expect(card.getBoundingClientRect().width).toBeLessThanOrEqual(400)
@@ -459,6 +461,7 @@ export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
     await userEvent.keyboard('{Shift}')
     await waitFor(() => expect(rowButton).toHaveAttribute('data-focus-visible'))
     await assertNeutralRing(rowButton, focus)
+    await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`))
   },
 }
 

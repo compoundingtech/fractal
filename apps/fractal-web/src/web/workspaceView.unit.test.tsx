@@ -22,7 +22,7 @@ describe('workspace body', () => {
     expect(html).not.toMatch(/Terminal unavailable/i)
   })
   it('states that any other non-thread view is unavailable', () => {
-    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'monitor/quota' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
+    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'unknown/view' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/data-system-state="empty"/)
     expect(html).toMatch(/View not available here\. This web client does not render this view yet</)
   })
@@ -30,6 +30,12 @@ describe('workspace body', () => {
     expect(workspaceView({ ref: 'missions' })).toEqual({ _tag: 'Missions' })
     const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: '', rosterRefs: [], view: workspaceView({ ref: 'missions' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/data-system-state="loading"[^>]*>.*Loading missions</)
+    expect(html).not.toMatch(/Choose an agent/)
+  })
+  it('opens Usage from the existing sidebar destination without an agent', () => {
+    expect(workspaceView({ ref: 'monitor/quota' })).toEqual({ _tag: 'Usage' })
+    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: '', rosterRefs: [], view: workspaceView({ ref: 'monitor/quota' }), agentName: '', onOpenTool: vi.fn() }))
+    expect(html).toMatch(/Loading usage/)
     expect(html).not.toMatch(/Choose an agent/)
   })
   it('opens a document subject, by name or exact reference, as a document view', () => {

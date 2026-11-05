@@ -70,7 +70,7 @@ async fn main() {
     let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
         .expect("unambiguous endpoint environment")
         .map(std::path::PathBuf::from);
-    let path = fractal_client::discover_unix_endpoint(endpoint).expect("a local st endpoint");
+    let identity = fractal_client::discover_unix_identity(endpoint).expect("a local st endpoint");
     // Use the TUI's accepting reader before falling back to the configured person.
     let person = environment::read("FRACTAL_PERSON", "ST3_PERSON")
         .expect("unambiguous person environment")
@@ -84,7 +84,7 @@ async fn main() {
             })
         });
     let person = person.expect("FRACTAL_PERSON, ST3_PERSON or person in ~/.config/st3/config.toml");
-    let client = Client::unix_as(&path, &person);
+    let client = Client::discovered_unix_as(identity, &person);
     let mut stream = client.collection_stream().await.expect("collections stream");
     for (id, collection) in [("attention", "attention"), ("missions", "missions"), ("agents", "agents")] {
         stream.subscribe(id, collection, 200, None, None).await.expect("subscribe");

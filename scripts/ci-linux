@@ -40,16 +40,28 @@ fleet_compat() {
     fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade \
     fleet::previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place \
     fleet::previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback \
-    fleet::previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 4 passed" "$logs/compat-result.log" || return
+    fleet::previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_across_upgrade_and_rollback \
+    fleet::previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback \
+    fleet::previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items 2>&1 | tee "$logs/compat-result.log" || return
+  grep -q "test result: ok. 6 passed" "$logs/compat-result.log" || return
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-plugin-result.log" || return
-  # A member of the previous release that depends on a repository keeps its item snapshots.
+  # A leaver's shard bounds, held by the release as an unknown kind and admitted when it upgrades.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
-    fleet::previous_release_dependent_keeps_item_snapshots_until_it_upgrades 2>&1 | tee "$logs/compat-compact-result.log" || return
-  grep -q "test result: ok. 1 passed" "$logs/compat-compact-result.log" || return
+    fleet::previous_release_holds_a_leavers_shard_bounds_and_admits_them_when_it_upgrades 2>&1 | tee "$logs/compat-bounds-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-bounds-result.log" || return
+  # A member of the previous release that depends on a repository keeps its item snapshots, and one
+  # watches beside this build's poller.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_dependent_keeps_item_snapshots_until_it_upgrades \
+    fleet::previous_release_member_watches_beside_this_builds_poller 2>&1 | tee "$logs/compat-compact-result.log" || return
+  grep -q "test result: ok. 2 passed" "$logs/compat-compact-result.log" || return
+  # The release beside this build's idle message outbox, upgraded in place and rolled back.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_back 2>&1 | tee "$logs/compat-outbox-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-outbox-result.log" || return
   # Message marks: a previous-release member beside one recording them, one store across upgrade, a v4 backup and rollback,
   # a release member that keeps this build's hosts writing lifecycle claims, one node upgraded in place to marks, and a
   # release fleet upgraded to marks with one member rolled back.

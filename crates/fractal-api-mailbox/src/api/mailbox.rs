@@ -14,6 +14,8 @@ pub use fractal_api_core::api::mailbox::*;
 pub use fractal_api_core::api::mailbox::{hold_pre_boot_mail};
 pub mod authority;
 mod questions;
+mod question_lifecycle;
+pub use question_lifecycle::start as start_question_lifecycle;
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
 pub mod profile;
@@ -2527,8 +2529,8 @@ mod tests {
                 rusqlite::params!["message/just-before-restart", format!("message.{lifecycle}")],
                 |row| row.get(0),
             ).unwrap();
-            // A staging stays a claim while marks are on (message_marks::RECORDS_STAGED).
-            assert_eq!((claimed, marked), if marks && lifecycle != "staged" { (0, 1) } else { (1, 0) }, "{lifecycle}");
+            // A member alone records its staging as a mark with the rest (marks_switch::staged_switched_tx).
+            assert_eq!((claimed, marked), if marks { (0, 1) } else { (1, 0) }, "{lifecycle}");
         }
         socket.close(None).await.unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();

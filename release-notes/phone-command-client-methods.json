@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add typed TypeScript, Rust and Swift phone-command client methods and allow held command GETs up to 65 seconds in Rust and Swift; this client-only change does not activate daemon or phone runtime handlers.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, replay or durable command delivery changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema, storage version or persisted data changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, replication, fleet coordination or authority changes; existing authorization and scopes are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive TypeScript, Rust and Swift client methods issue expiring device commands, wait for correlated results and report outcomes using the existing phone-command contract. Rust and Swift held command GETs allow 65 seconds, covering the contract's maximum 60-second TTL plus a 5-second margin. The phone.message.read selector remains message_id as defined by the owning client-v0 schema. No daemon handlers, wiring, admission, CLI commands or phone runtime behavior are activated."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption or startup migration is introduced by these client additions."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No upgrade steps are required. Using the client methods still requires separately implemented and authorized daemon and phone handlers."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state conversion or recovery steps are introduced; reverting the client additions does not change stored data."
+  }
+}

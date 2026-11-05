@@ -8,14 +8,10 @@ import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria-components'
 import { useClockLabel } from '../time/clock'
 import { formatExact, formatRelative } from '../time/human-time'
+import type { MissionRunSummary } from '../../../../clients/typescript/fractal-client/Models.generated.ts'
 
 /** Client-v0 `MissionRunSummary.eta`; `as_of` is the publication cut in Unix ms, not a finish time. */
-export type MissionEta = {
-  readonly remaining_low_ms: number
-  readonly remaining_high_ms: number
-  readonly basis: { readonly method: 'per-step' | 'critical-path'; readonly samples: number }
-  readonly as_of: number
-}
+export type MissionEta = NonNullable<MissionRunSummary['eta']>
 
 const SECOND = 1_000
 const MINUTE = 60 * SECOND

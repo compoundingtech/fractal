@@ -43,6 +43,7 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
+pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
 mod runtime_start_diagnostics;
@@ -117,6 +118,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(subject_definition),
         )
         .route("/v1/client/publication-definition", get(publication_definition))
+        .route("/v1/client/mission-declaration", get(mission_declaration::get))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -435,7 +437,7 @@ pub async fn collection_stream(
     let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
         .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
         .to_owned();
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Collections);
     Ok(websocket
         .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
@@ -5439,7 +5441,7 @@ pub async fn conversation_stream(
     } else {
         conversation_read_now(&state, &session, &session_id, query.after.as_deref())?;
     }
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Conversation);
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
         .protocols([selected])
@@ -6326,7 +6328,7 @@ pub async fn terminal_stream(
         query.incarnation.as_deref(),
         stream_capability,
     )?;
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Terminal);
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
         .protocols([selected.to_owned()])

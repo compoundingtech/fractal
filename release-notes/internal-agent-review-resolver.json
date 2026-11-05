@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Prepare internal agent-review identity checks with no user-visible effect",
+  "replay": {
+    "status": "none",
+    "detail": "No claims, replay or projections change; the resolver has no public caller."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, serialized gate variant or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Internal helpers resolve declared reviewer identities, reject retirement and check known owner/requester exclusions. Public parsing still rejects agent-review."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or publication changes; existing gate and human review behavior is unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No runtime behavior or restart-time work changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting removes the internal helpers and tests; no data recovery is needed."
+  }
+}

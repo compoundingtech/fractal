@@ -1,5 +1,5 @@
 import type { CollectionFrame, TimelineEntry } from '@fractal/client'
-import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { decodeConversationChunk } from '@fractal/sdk/read'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { mapConversationFeed, prepareTranscriptTurns } from './conversationTranscript.ts'

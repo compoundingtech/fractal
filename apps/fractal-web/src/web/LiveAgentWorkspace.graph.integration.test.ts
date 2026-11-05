@@ -9,6 +9,8 @@ import { storyGlobs } from '../../../../packages/fractal-ui/.storybook/stories.t
 const web = dirname(fileURLToPath(import.meta.url))
 const kit = resolve(web, '../../../../packages/fractal-ui')
 const kitPackage: { readonly exports: Readonly<Record<string, string>> } = JSON.parse(readFileSync(resolve(kit, 'package.json'), 'utf8'))
+const sdk = resolve(web, '../../../../packages/fractal-sdk')
+const sdkPackage: { readonly exports: Readonly<Record<string, string>> } = JSON.parse(readFileSync(resolve(sdk, 'package.json'), 'utf8'))
 
 /** Eager mode preserves the startup proof. Coverage mode additionally traverses
  * literal import() edges without evaluating modules or starting liveRuntime. */
@@ -55,6 +57,11 @@ const eagerGraph = (entry: string, includeLazy = false) => {
         const target = kitPackage.exports[key]
         if (target === undefined) throw new Error(`Missing kit export ${specifier}`)
         local = resolve(kit, target)
+      } else if (specifier === '@fractal/sdk' || specifier.startsWith('@fractal/sdk/')) {
+        const key = specifier === '@fractal/sdk' ? '.' : `.${specifier.slice('@fractal/sdk'.length)}`
+        const target = sdkPackage.exports[key]
+        if (target === undefined) throw new Error(`Missing SDK export ${specifier}`)
+        local = resolve(sdk, target)
       }
       if (local === undefined || ['.css', '.svg'].includes(extname(local))) continue
       const target = [local, `${local}.ts`, `${local}.tsx`, resolve(local, 'index.ts'), resolve(local, 'index.tsx')]
@@ -68,18 +75,53 @@ const eagerGraph = (entry: string, includeLazy = false) => {
 }
 
 describe('conversation eager graph boundary', () => {
-  it('keeps ConversationPane, the kit Transcript/Markdown and refractor outside the production shell graph', () => {
+  it('keeps ConversationPane, the kit Transcript/Markdown and Highlights outside the production shell graph', () => {
     const graph = eagerGraph(resolve(web, 'main.tsx'))
     // Positive witnesses prevent an empty or incorrectly resolved graph from passing.
     expect(graph.files).toContain(resolve(web, 'LiveAgentWorkspace.tsx'))
-    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/shell.ts'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Shell.tsx'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/shell.ts'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/sidebar/RowOverlays.tsx'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/declaration/DeclarationPanel.tsx'))
     expect(graph.files.some(file => /\/(?:ConversationPane|Transcript|Markdown)\.tsx$/.test(file))).toBe(false)
-    expect(graph.dependencies.some(specifier => /^(?:refractor|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.dependencies.some(specifier => /^(?:@pierre\/highlights|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.dependencies).not.toContain('@assistant-ui/react')
     expect(graph.files).toContain(resolve(web, 'ConversationPaneFallback.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
     expect(graph.files).not.toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(graph.files).not.toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
+  })
+
+  it('keeps the changelog registry out of the eager workspace and AgentUsage graphs', () => {
+    for (const entry of ['main.tsx', '../shell/AgentUsage.tsx']) {
+      const graph = eagerGraph(resolve(web, entry))
+      expect(graph.files).toContain(resolve(web, '../extensions/app-public.ts'))
+      expect(graph.files.some(file => file.includes('/.changelog/'))).toBe(false)
+      expect(graph.files).not.toContain(resolve(web, '../changelog/build.ts'))
+    }
+    // The on-demand development manifest still reaches the real registry; production compiles it.
+    const manifest = eagerGraph(resolve(web, '../changelog/build.ts'))
+    expect(manifest.files).toContain(resolve(web, '../../.changelog/registry.generated.ts'))
+    // Workspace stories can warm code without owning the application's virtual build identity.
+    expect(manifest.dependencies).not.toContain('virtual:build-identity')
+  })
+
+  it('keeps SDK pty and mutations outside the eager shell while retaining their on-demand coverage', () => {
+    const entry = resolve(web, 'main.tsx')
+    const eager = eagerGraph(entry)
+    const coverage = eagerGraph(entry, true)
+    // The read surface witnesses SDK export traversal in both graph modes.
+    expect(eager.dependencies).toContain('@fractal/sdk/read')
+    expect(eager.files).toContain(resolve(sdk, 'src/effect/mod.ts'))
+    expect(coverage.files).toContain(resolve(sdk, 'src/effect/mod.ts'))
+    for (const surface of ['pty', 'mutations']) {
+      expect(eager.dependencies).not.toContain(`@fractal/sdk/${surface}`)
+      expect(eager.files).not.toContain(resolve(sdk, `src/effect/${surface}.ts`))
+      expect(coverage.dependencies).toContain(`@fractal/sdk/${surface}`)
+      expect(coverage.files).toContain(resolve(sdk, `src/effect/${surface}.ts`))
+    }
   })
 
   it('still reaches the real heavy composition through the on-demand pane', () => {
@@ -89,7 +131,25 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
-    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
+    expect(eagerGraph(resolve(web, 'ConversationPane.tsx'), true).dependencies).toContain('@pierre/highlights')
+  })
+
+  it('keeps inline alert answers reachable through the on-demand Alerts tab', () => {
+    const graph = eagerGraph(resolve(web, 'AlertsTab.tsx'))
+    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
+    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AnswerAlert.tsx'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
+    const withHighlights = eagerGraph(resolve(web, 'AlertsTab.tsx'), true)
+    expect(withHighlights.dependencies).toContain('@pierre/highlights')
+    const production = eagerGraph(resolve(web, 'main.tsx'), true)
+    expect(production.files).toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(production.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
   })
 
   it('reaches the real diff viewer only through the on-demand Changes inspector', () => {
@@ -97,7 +157,10 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).toContain(resolve(web, 'capturedChanges.ts'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
-    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+    expect(graph.dependencies).not.toContain('@pierre/highlights')
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
+    expect(eagerGraph(resolve(web, 'ChangesInspector.tsx'), true).dependencies).toContain('@pierre/highlights')
     expect(graph.files).not.toContain(resolve(web, 'ConversationPane.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))

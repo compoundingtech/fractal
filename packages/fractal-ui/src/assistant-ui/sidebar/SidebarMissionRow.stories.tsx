@@ -17,7 +17,7 @@ import type { Key } from 'react-aria-components'
 import { missionHues } from './SidebarMissionLine'
 import { statuses, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
 import type { MissionEta } from '../MissionEta'
-import { sidebarRowAccessibleName } from './SidebarAgentRow'
+import { sidebarRowAccessibleName } from './rowPresentation.tsx'
 import { geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
@@ -153,6 +153,7 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'EtaAbsent:contract-fixture',
+  'EtaFinishing:contract-fixture',
   'EtaNull:contract-fixture',
   'EtaRange:contract-fixture',
   'EtaSingle:contract-fixture',
@@ -386,6 +387,7 @@ const etaStep = { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 
 const etaRows: readonly Row[] = [
   row('eta-range', 'ETA range', { missionContext: mission('eta-range', 'sidebar-polish', { ...etaStep, eta: etaRange }) }),
   row('eta-single', 'ETA single', { missionContext: mission('eta-single', 'sidebar-polish', { ...etaStep, eta: { ...etaRange, remaining_high_ms: 720_000, basis: { method: 'per-step', samples: 1 } } }) }),
+  row('eta-finishing', 'ETA finishing', { missionContext: mission('eta-finishing', 'sidebar-polish', { ...etaStep, eta: { ...etaRange, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method: 'critical-path', samples: 0 } } }) }),
   row('eta-null', 'ETA null', { missionContext: mission('eta-null', 'sidebar-polish', { ...etaStep, eta: null }) }),
   row('eta-absent', 'ETA absent', { missionContext: mission('eta-absent', 'sidebar-polish', etaStep) }),
   row('eta-finished', 'ETA finished', { missionContext: mission('eta-finished', 'sidebar-polish', { ...etaStep, progress: { _tag: 'Known', done: 5, total: 5 }, eta: null }) }),
@@ -434,6 +436,8 @@ const etaChecks: Readonly<Record<string, (row: HTMLElement, item: Row) => Promis
     /, Step Review hover scopes, Estimated 12–18 min left, served as of 2026-10-21T09:28:00\.000Z\. Critical-path basis, 12 retained samples\.$/),
   'ETA single': (row, item) => expectEta(row, item, '~12 min left', /^Estimated 12 min left, served as of .+, 2m ago\. Per-step basis, 1 retained sample\.$/,
     /, Estimated 12 min left, served as of 2026-10-21T09:28:00\.000Z\. Per-step basis, 1 retained sample\.$/),
+  'ETA finishing': (row, item) => expectEta(row, item, 'Finishing', /^No remaining steps, served as of .+, 2m ago\. Critical-path basis\.$/,
+    /, No remaining steps, served as of 2026-10-21T09:28:00\.000Z\. Critical-path basis\.$/),
   'ETA null': expectNoEta,
   'ETA absent': expectNoEta,
   'ETA finished': expectNoEta,
@@ -448,6 +452,7 @@ const etaPlay = (titles: readonly string[]): NonNullable<Story['play']> => async
 const etaScenario = { scenario: { _tag: 'contract-fixture', reason: 'Fixed served ETA rows prove the exact served description with its basis and as_of, and that no ETA state (range, single, null, absent, finished) changes the drawn row; catalog runs rarely serve every state.' } } as const
 const etaState = (title: string, name: string): Story => ({ tags: ['critical'], name: `Mission ETA · ${name}`, parameters: etaScenario, render: ({ scheme }) => <EtaStatesStory scheme={scheme} only={title} />, play: etaPlay([title]) })
 
+export const EtaFinishing: Story = etaState('ETA finishing', 'no remaining steps')
 export const EtaRange: Story = etaState('ETA range', 'served range')
 export const EtaSingle: Story = etaState('ETA single', 'served single value')
 export const EtaNull: Story = etaState('ETA null', 'served null')

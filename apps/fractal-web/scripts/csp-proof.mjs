@@ -52,6 +52,8 @@ const proveHeaders = async (url, mode) => {
   const html = await response.text()
   const policy = response.headers.get('content-security-policy')
   assert(policy?.includes("img-src 'self' data: blob:"), `${mode}: HTML policy`)
+  assert(policy?.includes("script-src 'self' 'wasm-unsafe-eval'"), `${mode}: Highlights WebAssembly compilation policy`)
+  console.log(JSON.stringify({ mode, wasmDirective: "script-src 'self' 'wasm-unsafe-eval'" }))
   const head = await fetch(url, { method: 'HEAD' })
   assert.equal(head.headers.get('content-security-policy'), policy, `${mode}: HEAD must retain inline script hashes`)
   const cached = await fetch(url, { headers: { 'if-none-match': response.headers.get('etag') } })
@@ -68,6 +70,9 @@ const prove = async (url, enforced, mode) => {
   const output = await run(['run-code', `async (page) => {
     const context = page.context()
     const testPage = await context.newPage()
+    const cdp = await context.newCDPSession(testPage)
+    await cdp.send('Network.enable')
+    await cdp.send('Network.setCacheDisabled', { cacheDisabled: true })
     const remote = 'https://example.invalid/x.png'
     let imageAttempts = 0
     const errors = []
@@ -75,6 +80,24 @@ const prove = async (url, enforced, mode) => {
     await testPage.addInitScript(() => {
       globalThis.__cspProofViolations = []
       globalThis.__cspProofImageOpens = []
+      globalThis.__cspHighlighting = {}
+      const observer = new MutationObserver(() => {
+        const code = document.querySelector('[data-testid="markdown-code"]')
+        if (!code) return
+        const timing = globalThis.__cspHighlighting
+        if (timing.sourceMs === undefined) {
+          timing.sourceMs = performance.now()
+          timing.plainTextFirst = !code.querySelector('[data-syntax-token]')
+          timing.initialHeight = code.getBoundingClientRect().height
+          requestAnimationFrame(() => setTimeout(() => { timing.firstPaintMs = performance.now() }, 0))
+        }
+        if (code.querySelector('[data-syntax-token]')) {
+          timing.highlightedMs = performance.now()
+          timing.highlightedHeight = code.getBoundingClientRect().height
+          observer.disconnect()
+        }
+      })
+      observer.observe(document, { childList: true, subtree: true })
       window.open = (...args) => { globalThis.__cspProofImageOpens.push(args); return null }
       document.addEventListener('securitypolicyviolation', (event) => globalThis.__cspProofViolations.push({
         directive: event.effectiveDirective, blockedURI: event.blockedURI, disposition: event.disposition,
@@ -93,7 +116,7 @@ const prove = async (url, enforced, mode) => {
           socket.send(JSON.stringify({ kind: 'conversation', id: command.id, collection: 'conversation',
             session_id: 'session/proof', replace: true, has_more: false, items: [{
               id: 'timeline-entry/image', sequence: 1, revision: 1, type: 'content', role: 'assistant',
-              final: true, timestamp: snapshot.created_at, body: { text: '![Preview](' + remote + ')', media_type: 'text/markdown' },
+              final: true, timestamp: snapshot.created_at, body: { text: '![Preview](' + remote + ')\\n\\n\`\`\`typescript\\nconst answer = 42\\n\`\`\`', media_type: 'text/markdown' },
             }] }))
         } else {
           socket.send(JSON.stringify({ kind: 'snapshot', id: command.id,
@@ -106,6 +129,7 @@ const prove = async (url, enforced, mode) => {
     await testPage.getByTestId('live-agent-workspace').waitFor({ timeout: 60000 })
     const placeholder = testPage.getByTestId('deferred-image')
     await placeholder.waitFor({ timeout: 60000 })
+    await testPage.locator('[data-syntax-token="keyword"]').first().waitFor({ timeout: 60000 })
     const hostShown = (await placeholder.textContent()).includes('example.invalid')
     const remoteImagesBefore = await testPage.locator('img[src="' + remote + '"]').count()
     await placeholder.getByRole('button', { name: 'Open image · example.invalid', exact: true }).click()
@@ -125,7 +149,8 @@ const prove = async (url, enforced, mode) => {
     await testPage.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)))
     const violations = await testPage.evaluate(() => [...globalThis.__cspProofViolations])
     const result = { mode: ${JSON.stringify(mode)}, enforced: ${enforced}, rendered: true,
-      policy: response.headers()['content-security-policy'] ?? null, imageBinding, imageAttempts, bootViolations, violations, errors }
+      policy: response.headers()['content-security-policy'] ?? null, highlighting: await testPage.evaluate(() => globalThis.__cspHighlighting),
+      imageBinding, imageAttempts, bootViolations, violations, errors }
     await testPage.close()
     return 'CSP_PROOF ' + JSON.stringify(result)
   }`])
@@ -185,10 +210,7 @@ try {
     optimizeDeps: { ...devLoaded.config.optimizeDeps, include: [
       ...(devLoaded.config.optimizeDeps?.include ?? []),
       'react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', '@assistant-ui/react',
-      'react-aria-components', 'react-markdown', 'remark-gfm', 'refractor/core',
-      'refractor/typescript', 'refractor/tsx', 'refractor/javascript', 'refractor/json',
-      'refractor/bash', 'refractor/diff', 'refractor/rust', 'refractor/nix', 'refractor/python',
-      'refractor/yaml', 'refractor/markdown', 'refractor/css',
+      'react-aria-components', 'react-markdown', 'remark-gfm', '@pierre/highlights',
     ] },
     // As in the existing browser proofs, never inherit a paired live gateway.
     plugins: devLoaded.config.plugins.flat().filter((plugin) => plugin?.name !== 'wf:shared-client-gateway'),

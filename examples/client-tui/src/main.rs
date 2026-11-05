@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use fractal_client::{Client, discover_unix_endpoint, set_client_name};
+use fractal_client::{Client, discover_unix_identity, set_client_name};
 use fractal_client_tui::{App, send};
 use std::{sync::mpsc, time::Duration};
 
@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
         .get(1)
         .map(Into::into)
         .or_else(|| std::env::var_os("ST3_ENDPOINT").map(Into::into));
-    let socket = discover_unix_endpoint(explicit)?;
+    let identity = discover_unix_identity(explicit)?;
     set_client_name(format!(
         "smalltalk-example-tui {}",
         env!("CARGO_PKG_VERSION")
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     let (updates, incoming) = mpsc::channel();
     let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(fractal_feed::run(
-        Client::unix_as(socket, &args[0]),
+        Client::discovered_unix_as(identity, &args[0]),
         updates,
         receiver,
     ));

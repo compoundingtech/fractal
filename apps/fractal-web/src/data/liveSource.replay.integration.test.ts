@@ -81,6 +81,19 @@ const conversationItems = (live: LiveSource) => {
 }
 
 describe('scenario replay through the real live source', () => {
+  it.live('keeps Pins reads and sockets inside the replay transports', () =>
+    withReplay(world, (live, clock) => Effect.gen(function* () {
+      const network = vi.fn(() => { throw new Error('Unexpected real transport') })
+      vi.stubGlobal('fetch', network); vi.stubGlobal('WebSocket', network)
+      const pins = live.source.pins!
+      const release = live.registry.mount(pins)
+      try {
+        yield* settle(clock)
+        expect(live.registry.get(pins).state.phase).not.toBe('connecting')
+        expect(network).not.toHaveBeenCalled()
+      } finally { release() }
+    })),
+  )
   it.live('classifies an unmodelled replay usage read as unsupported', () =>
     withReplay(world, (live, clock) => Effect.gen(function* () {
       const usage = live.source.nativeDetails!.usagePeriod(world.slices.roster.state.agents[0]!.id)

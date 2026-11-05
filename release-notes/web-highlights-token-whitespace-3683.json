@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve highlighted command whitespace in accessible names",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "Leading, trailing and whitespace-only token content remains exact source text outside highlighted inline elements, preserving command word boundaries for assistive technology." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Presentation only; reverting the web build requires no data recovery." }
+}

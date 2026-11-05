@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Render every mission gate kind as canonical KDL with environment values redacted.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No checkpoint changes." },
+  "compatibility": { "status": "none", "detail": "Adds a renderer only; no read route changes." },
+  "downtime": { "status": "none", "detail": "No startup changes." },
+  "manual": { "status": "none", "detail": "No operator actions." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

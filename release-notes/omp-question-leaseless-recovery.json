@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve native OMP questions without local generation leases as pending and indeterminate across restart; missing lifecycle evidence no longer invents an irreversible cancellation.",
+  "replay": {"status": "changed", "detail": "Removes the startup sweep that cancelled lease-less local observations. Existing immutable resolutions are not undone or replayed. A later authenticated same-binding native close can settle an unresolved lease-less observation; current leased generations retain their bounded positive-evidence reconciliation."},
+  "schema": {"status": "none", "detail": "No table, index, stored claim, numeric schema version or wire-format changes. The existing owner-local generation table remains unchanged."},
+  "rules": {"status": "none", "detail": "No checkpoint, replication or coordinated upgrade rule changes. Foreign lease-less observations remain untouched."},
+  "compatibility": {"status": "none", "detail": "No new client-v0 state. An unresolved lease-less question remains visible in the existing pending resource with answering unavailable. Native admission, same-session fences, first-winner resolution, empty lifecycle answers and absence of person receipts are unchanged."},
+  "downtime": {"status": "none", "detail": "No additional planned interruption. Reconciliation reads only owner-local generation leases in bounded keyset batches; no startup scan of lease-less observations remains."},
+  "manual": {"status": "none", "detail": "No new operator steps. Every observation and answer flag remains off by default; this does not enable answering."},
+  "recovery": {"status": "changed", "detail": "Missing exact wrapper/provider generation evidence leaves a question pending until positive native end evidence arrives or an authenticated replay attaches its current generation. This fix does not resurrect questions previously cancelled by an older build. Swapping back to that older lifecycle build restores its startup-only cancellation behavior; roll forward to preserve indeterminate lease-less questions."}
+}

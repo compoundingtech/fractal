@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Route harness questions to an explicit agent principal or configured person",
+  "replay": {
+    "status": "none",
+    "detail": "No history rewrite or replay rule change. The canonical desired tree retains the optional principal child."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Agent KDL accepts at most one principal child with exactly one canonical person ID string and no properties or body. No new claim field, claim kind or database layout."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Existing declarations remain valid. Older readers reject the principal child. Questions use the declared principal or daemon person, never inferred ownership; without either, global attention shows a configuration diagnostic. Permissions and reviews retain existing authority."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal binary restart; no storage migration."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade readers before publishing principal children. Declare a principal explicitly for portable routing, or configure the daemon person as a local fallback. No automatic backfill."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Remove principal children before submitting declarations to an older grammar reader."
+  }
+}

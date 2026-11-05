@@ -1101,7 +1101,7 @@ function useAppStore(proof?: FabricProfile) {
       if (!client || status !== 'online') throw new Error('offline');
       try {
         return await readOlder(async cursor => {
-          const found = (await client.timelineList(sessionId, { cursor, limit: OLDER_PAGE })).value;
+          const found = (await client.timelineList(sessionId, cursor ? { cursor } : { limit: OLDER_PAGE })).value;
           return { items: found.items, hasMore: found.page.has_more, cursor: found.page.next_cursor ?? undefined };
         }, older, oldest);
       } catch (e) { throw new Error(errorText(e)); }

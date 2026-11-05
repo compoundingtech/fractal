@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
-import { sidebarRowAccessibleName } from './SidebarAgentRow'
+import { sidebarRowAccessibleName } from './rowPresentation.tsx'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useScenarioSlice, type WireSlice } from '@fractal/scenarios/react'

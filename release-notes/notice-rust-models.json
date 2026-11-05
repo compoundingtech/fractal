@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Generate internal typed Rust notice models from the dependency-closed client schema, rejecting unsupported schema constructs.",
+  "replay": {"status": "none", "detail": "No stored claims or projections change."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "No admission or authorization changes."},
+  "compatibility": {"status": "none", "detail": "Models are compiled by internal conformance tests only; no public library exports, resource arms, operations, actions, watch selectors or capabilities are added. A single shared schema validator checks the decode boundary; serde then decodes typed models directly, with native field checks for constants, Unicode bounds, IDs, dates and URI syntax."},
+  "downtime": {"status": "none", "detail": "No restart work."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Rollback removes only internal generated models and their conformance proof."}
+}

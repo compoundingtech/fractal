@@ -88,6 +88,8 @@ pub mod client_messages;
 #[cfg(any(test, feature = "test-support"))]
 pub mod client_messages_version_benchmark;
 pub mod rollouts;
+pub mod refresh_intake;
+pub mod refresh;
 pub mod publication;
 pub mod publication_facts;
 pub mod seat_status;
@@ -221,6 +223,7 @@ pub mod summary_list;
 pub mod attention_ivm;
 pub mod backup;
 pub mod backup_ledgers;
+pub mod backup_shards;
 pub mod checkpoint_rules;
 pub mod harness_questions;
 pub mod checkpoint_status;
@@ -247,6 +250,12 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod message_outbox;
+#[cfg(test)]
+mod message_outbox_tests;
+pub mod relayed_closes;
+#[cfg(test)]
+mod relayed_closes_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -742,7 +751,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h409e2e2924d3 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha2f85639d60c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1225,6 +1234,9 @@ CREATE INDEX IF NOT EXISTS step_runs_run_index ON step_runs(run_id, generation_i
 -- it scanned every mission run, then built a throwaway index on parent_step_run for each level:
 -- 3.6 to 4.7 ms a call, 1,213 calls in one run-tree rebuild on a real store.
 CREATE INDEX IF NOT EXISTS step_runs_generation_index ON step_runs(generation_id);
+-- The runs that ran one step definition. Without it the run-ETA window for each definition scanned
+-- every terminal run: 29 ms a definition, about 2 minutes for 4,152 on a real store's first open.
+CREATE INDEX IF NOT EXISTS step_runs_definition_index ON step_runs(definition_hash, run_id, generation_id);
 CREATE INDEX IF NOT EXISTS mission_runs_parent_step_index ON mission_runs(parent_step_run)
 WHERE parent_step_run IS NOT NULL;
 CREATE INDEX IF NOT EXISTS step_runs_assignee_index ON step_runs(assignee, status);
@@ -1237,6 +1249,12 @@ WHERE available_to!='[]';
 -- The steps that have not finished, a few of every step a fleet has run.
 CREATE INDEX IF NOT EXISTS step_runs_open_index ON step_runs(created_at_unix_ms, step_path)
 WHERE status NOT IN ('completed','failed','cancelled');
+-- Exact local native question generations. Registered before the observation; retained
+-- until its existing resolution claim is durable. Not a replicated lease or wall-clock TTL.
+CREATE TABLE IF NOT EXISTS local_harness_question_generations (
+    question TEXT PRIMARY KEY,
+    generation TEXT NOT NULL
+) WITHOUT ROWID;
 -- This daemon's native subscription ownership is transport state, outside shared projections.
 CREATE TABLE IF NOT EXISTS local_mailbox_owners (
     subject TEXT NOT NULL,
@@ -2210,6 +2228,8 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// Daemon-local fallback for human questions, initialized before attention starts.
+    pub question_principal_default: std::sync::OnceLock<String>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2644,6 +2664,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2666,6 +2687,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2689,6 +2711,7 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -3198,6 +3221,7 @@ impl Store {
                 let normalized_actor = actor.map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
                 let actor = normalized_actor.as_deref();
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
+                validate_standing_observer_stop(intent, actor)?;
                 if let Some(options) = owned {
                     let digest = canonical_hash(&(intent, options, actor)).map_err(internal)?;
                     let cache_key = opaque_cache_key(&format!("owned-set-request:{idempotency_key}"));
@@ -7032,6 +7056,7 @@ impl Store {
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
+                | "work.handoff-returned"
                 | "work.extended"
                 | "subagent.appeared"
                 | "subagent.renewed"
@@ -17393,6 +17418,34 @@ fn clear_quarantined_claims_tx(
     Ok(())
 }
 
+/// A stop of a repository's standing GitHub observer moves its polling to the next member a watch
+/// declares it on (#5182). Only a person may: an agent moving polling waits on #4607. A host's own
+/// declarations carry no actor.
+fn validate_standing_observer_stop(
+    intent: &NormalizedIntent,
+    actor: Option<&str>,
+) -> Result<(), St3Error> {
+    let Some(actor) = actor.filter(|actor| !actor.starts_with("person/")) else {
+        return Ok(());
+    };
+    match intent
+        .subjects
+        .values()
+        .find(|desired| {
+            desired.kind == "observer"
+                && desired.owner_run.is_none()
+                && crate::graph::standing_github_observer(&desired.subject).is_some()
+                && crate::graph::observer_spec(&desired.desired).is_some_and(|spec| spec.stopped)
+        })
+    {
+        Some(observer) => Err(St3Error::new(
+            "observer-stop-person-only",
+            format!("only a person stops `{}`; `{actor}` cannot", observer.subject),
+        )),
+        None => Ok(()),
+    }
+}
+
 pub fn select_replicated_desired(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
@@ -17522,7 +17575,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -17998,6 +18051,16 @@ pub fn project_mission_run_update(
             .optional()
             .map_err(internal)?;
         if current_attempt != Some(claim_attempt) {
+            return Ok(());
+        }
+        if claim.kind == "work.handoff-returned" {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE step_runs SET assignee=?2, available_to='[]', status='ready', lease_owner=NULL,
+                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, readiness_epoch=?3,
+                 updated_at_unix_ms=?4 WHERE subject=?1",
+                params![claim.subject, fields["handoff_to"].as_str(), fields["readiness_epoch"].as_u64(),
+                    claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
             return Ok(());
         }
         if claim.kind == "work.released"
@@ -20076,6 +20139,11 @@ fn enrich_step_wake_with(
             .collect(),
         delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
             harness.state == "working" && current_incarnation_key == wake_incarnation_key
+        }),
+        staging_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working"
+                && current_incarnation_key == wake_incarnation_key
+                && matches!(harness.driver.as_deref(), Some("pi" | "omp"))
         }),
     };
     let failure = connection
@@ -22464,12 +22532,13 @@ pub fn append_claim_with_commit_context(
             }
             // A seat this member hosts records its own delivery, read and close of graph mail as a
             // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
-            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // recorded_as_mark), and its staging once every other member counts a host's staging
+            // too (marks_switch::staged_switched_tx, read here in this transaction), whoever acts for it:
             // the fences, replays and transition rules above have applied. A write acting for a
             // retired seat or under a delegation stays a claim, which carries its proof, and so
             // does a native read, whose proof links the native turn to its claim
             // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
-            if message_marks::recorded_as_mark(&input.kind)
+            if message_marks::recorded_as_mark(transaction, &input.kind).map_err(internal)?
                 && context.native_receipt.is_none()
                 && !input.fields.contains_key("acting_for")
                 && !input.fields.contains_key("delegation")

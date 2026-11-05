@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Claim backups carry the messages shard: once it holds a stream item or this member's delivery or read of one, an archive is version 5 and holds the shard's envelopes, their signatures and its stream_lifecycle rows, and restore rebuilds the shard beside the restored database (db break-up step 4c-1, part C)",
+  "replay": {"status": "none", "detail": "No claim, envelope or projection changes. Restore admits the shard's archived envelopes through the shard's own admission on the source's authority, as it already admits the graph's, after the graph is rebuilt."},
+  "schema": {"status": "none", "detail": "No table changes. The archive gains a header field (shards) and three record kinds (shard-envelope, shard-signatures, shard-local), written only in version 5 archives."},
+  "rules": {"status": "changed", "detail": "Export reads the shard in its own snapshot, pinned after the graph's, and writes version 5 only when the shard holds an admitted envelope or a lifecycle row; otherwise the archive is byte for byte what earlier builds write, at version 1 to 4. Restore checks the shard's envelope-log digest, envelope count and lifecycle digest against the header and publishes nothing on a mismatch. stream_arrivals is not carried; readers record each restored item at its first read."},
+  "compatibility": {"status": "changed", "detail": "Archives change only once the messages shard holds envelopes or lifecycle rows, which no production path writes yet; until then archives are exactly as before. A version 5 archive is refused by earlier builds as \"unsupported claim backup format/version\", so restore it with this release or later. Version 1 to 4 archives restore as before, without a shard. The restore report gains a shards field for version 5 archives."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "none", "detail": "No operator steps. An offline export of a copied database archives the shard only when the copy's shards directory sits beside it."},
+  "recovery": {"status": "changed", "detail": "Rolling back to an earlier build leaves existing archives restorable except version 5 ones, which need this release or later. A version 5 restore refuses a destination whose existing messages shard holds anything."}
+}
