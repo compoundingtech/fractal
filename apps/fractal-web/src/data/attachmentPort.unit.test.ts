@@ -1,11 +1,24 @@
 import { FractalClient } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
 import { Schema } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { gatewayAttachments } from './attachmentPort.ts'
+import type * as LazySdk from './lazySdk.ts'
 import type { AttachmentSendRequest } from './source.ts'
 import recording from './subjectReadPort.gateway.fixtures.json' with { type: 'json' }
+
+const { loadWriteSchema } = vi.hoisted(() => ({ loadWriteSchema: vi.fn() }))
+vi.mock('./lazySdk.ts', async (importOriginal) => {
+  const original = await importOriginal<typeof LazySdk>()
+  // The mock factory is hoisted before static imports are initialized.
+  const { Effect } = await import('effect')
+  return {
+    ...original,
+    loadAttachmentSchema: Effect.tap(original.loadAttachmentSchema, () => Effect.sync(loadWriteSchema)),
+  }
+})
+beforeEach(() => loadWriteSchema.mockClear())
 
 const sha256 = 'b'.repeat(64)
 const upload = { blob: `blob/${sha256}`, sha256, size: 731, media_type: 'image/webp' }
@@ -66,6 +79,24 @@ const attachmentClient = ({
 }
 
 describe('native attachment port', () => {
+  it('keeps capability and chunk reads independent of the lazy write contracts', async () => {
+    const { port } = attachmentClient()
+    expect(await port.capabilities()).toMatchObject({ _tag: 'Success' })
+    expect(await port.chunk({ sha256, message: 'message/carrier' })).toMatchObject({ _tag: 'Success' })
+    expect(loadWriteSchema).not.toHaveBeenCalled()
+  })
+
+  it('loads write contracts only for an authorized upload or a send', async () => {
+    const denied = attachmentClient({ states: { 'control.messages': 'ungranted' } })
+    expect(await denied.port.upload({ bytes: new Uint8Array([1]), mediaType: 'image/png' })).toMatchObject({ _tag: 'Refused' })
+    expect(loadWriteSchema).not.toHaveBeenCalled()
+    const { port } = attachmentClient()
+    expect(await port.upload({ bytes: new Uint8Array([1]), mediaType: 'image/png' })).toMatchObject({ _tag: 'Success' })
+    expect(loadWriteSchema).toHaveBeenCalledTimes(1)
+    expect(await port.send(request)).toMatchObject({ _tag: 'Success' })
+    expect(loadWriteSchema).toHaveBeenCalledTimes(2)
+  })
+
   it('exposes independent upload, send and read capability for composer attach/paste', async () => {
     const { port } = attachmentClient({ states: { 'control.messages': 'granted', 'message.send': 'ungranted', 'read.projections': 'unsupported' } })
     expect(await port.capabilities()).toEqual({ _tag: 'Success', value: { upload: 'granted', send: 'ungranted', read: 'ungranted' } })
