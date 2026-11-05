@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Open an agent in Fractal TUI's real terminal tab and check what the person sees, through real PTYs.
 
-stui (a production Ui, in the unit-test executable's worker) runs under one PTY, and the
+Fractal TUI (a production Ui, in the unit-test executable's worker) runs under one PTY, and the
 agent's program under the packaged `pty` daemon. Between them is a transparent relay that this
 harness can cut, refuse or let through, to drop the link the way a network does. Requires
 Python 3 and `pty` (CI provides both). Only the graph is invented: no real agent, daemon graph,
 or person's state; every case gets its own XDG_STATE_HOME.
 
-Cases, each one stui:
+Cases, each one TUI:
   default        no saved choice: opening an agent attaches its terminal
   migration      a device's old saved choice (terminal_first true or false) still attaches
   opt-in         conversation_first saved: the agent opens on its conversation; the palette
@@ -77,7 +77,7 @@ class Stui:
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.env = {**os.environ, "TERM": "xterm-256color", "PTY_ROOT": str(self.registry),
-                    "STUI_PROBE_ROOT": str(self.root), "STUI_PROBE_SOCKET": str(self.root / "relay.sock"),
+                    "FRACTAL_TUI_PROBE_ROOT": str(self.root), "FRACTAL_TUI_PROBE_SOCKET": str(self.root / "relay.sock"),
                     "XDG_CONFIG_HOME": str(self.root / "config"),
                     "XDG_CACHE_HOME": str(self.root / "cache"),
                     "XDG_STATE_HOME": str(state), "HOME": str(self.root)}

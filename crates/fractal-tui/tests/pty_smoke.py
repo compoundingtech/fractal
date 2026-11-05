@@ -79,7 +79,7 @@ def run_case(binary: str, ending: str, endpoint: str | None = None) -> None:
         # Both spellings: the TUI refuses unequal ones, and the release run sets both.
         env["FRACTAL_ENDPOINT"] = env["ST3_ENDPOINT"] = endpoint
     if ending == "panic":
-        env["STUI_TEST_PANIC_AFTER_ENTER"] = "1"
+        env["FRACTAL_TUI_TEST_PANIC_AFTER_ENTER"] = "1"
     proc = subprocess.Popen(tui_command(binary), stdin=slave, stdout=slave, stderr=slave, env=env)
     os.close(slave)
     captured = bytearray()
