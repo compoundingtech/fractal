@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
+import { createIsolatedKitWorker, reauditStorage } from './kit-play-isolation.mjs'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 
 const pageOptions = { viewport: { width: 440, height: 900 }, colorScheme: 'dark' }
@@ -52,6 +52,13 @@ const readState = async page => page.evaluate(async () => ({
   caches: await caches.keys(),
 }))
 const emptyState = { global: null, local: null, session: null, cookie: '', databases: [], caches: [] }
+
+test('a reaudit that cannot read the probe reports why instead of replacing the residue error', async () => {
+  assert.deepEqual(await reauditStorage({ evaluate: async () => ['kept'] }), { localStorage: ['kept'] })
+  // A probe closed under the read: the residue still fails the case, with this as its reaudit.
+  const closed = { evaluate: async () => { throw new Error('Target page, context or browser has been closed') } }
+  assert.deepEqual(await reauditStorage(closed), { error: 'Target page, context or browser has been closed' })
+})
 
 test('reused Chromium worker isolates cases and rejects contamination and broken plays', { timeout: 30000 }, async t => {
   const servers = []
@@ -332,6 +339,27 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
       })
       return true
     })
+    // The origin's inert probe is the one page left at the origin. If its second read (the reaudit) fails,
+    // the residue still fails the case, and the reaudit carries the probe's error instead of replacing it.
+    const probe = worker.context.pages().find(page => page.url() === new URL(base).href)
+    assert.ok(probe, 'the origin keeps an inert audit page')
+    const read = probe.evaluate.bind(probe)
+    let reads = 0
+    probe.evaluate = (...args) => ++reads === 2 ? Promise.reject(new Error('Target page, context or browser has been closed')) : read(...args)
+    try {
+      await assert.rejects(() => worker.reset(), error => {
+        assert.deepEqual(error.isolation, {
+          boundary: 'reset', origin: base,
+          storage: [{ kind: 'localStorage', keys: ['local-only-negative-control'] }],
+          workerId: 7, previousCase, reaudit: { error: 'Target page, context or browser has been closed' },
+        })
+        assert.match(error.message, /residual Web Storage/)
+        return true
+      })
+      assert.equal(reads, 2)
+    } finally {
+      probe.evaluate = read
+    }
   } finally {
     retainWebStorage = false
   }

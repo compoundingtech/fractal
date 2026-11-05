@@ -317,6 +317,87 @@ fn eta_v3_trigger_layout_upgrades_once_and_reopen_preserves_schema_cookie() {
     assert_eq!(triggers(&c), current);
 }
 
+#[test]
+fn eta_fresh_v4_rollback_and_reupgrade_preserve_v4_triggers() {
+    let mut c = fixture(1);
+    let tx = c.transaction().unwrap();
+    super::run_eta::open(&tx).unwrap();
+    let trigger = |tx: &rusqlite::Transaction<'_>| {
+        tx.query_row::<String, _, _>(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='run_eta_run_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let current = trigger(&tx);
+    // The parent's installer runs only when its own initialization marker is absent.
+    let initialized: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    if !initialized {
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-ha4a9dd3c5d26 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER run_eta_run_update;
+            CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs
+            WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN
+            INSERT OR IGNORE INTO local_run_eta_dirty
+            SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
+            INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;
+            INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');").unwrap();
+    }
+    super::run_eta::open(&tx).unwrap();
+    assert_eq!(trigger(&tx), current);
+}
+
+#[test]
+fn eta_terminal_metadata_survives_v3_writer_draining_shared_queues() {
+    let mut c = fixture(70);
+    let tx = c.transaction().unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hd14808d55e0c owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta VALUES('run_eta_samples_v3','1')", [])
+        .unwrap();
+    super::run_eta::open(&tx).unwrap();
+    seed(&tx, 70, 80);
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hc3dfb33e117b owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='r-69'", [])
+        .unwrap();
+    // The rolled-back v3 writer updates duration samples but never terminal metadata.
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h189746109b84 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE run_id IN(SELECT run_id FROM local_run_eta_pending);
+        INSERT INTO local_run_eta_samples VALUES('s-70','r-70','hash','build',80,79);
+        DELETE FROM local_run_eta_pending; DELETE FROM local_run_eta_dirty;").unwrap();
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM local_run_eta_terminal_pending",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    super::run_eta::open(&tx).unwrap();
+    assert_eq!(retained(&tx), (64, 16));
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM local_run_eta_terminal WHERE run_id='r-70'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM local_run_eta_terminal WHERE run_id='r-69'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    seed(&tx, 71, 81);
+    super::run_eta::flush(&tx).unwrap();
+    assert_eq!(retained(&tx), (64, 17));
+}
+
 /// The window's candidates as #5154 read them: every terminal run, then whether it ran the
 /// definition. Kept only to prove the indexed read answers the same.
 fn candidates_by_scanning_every_run() -> String {
