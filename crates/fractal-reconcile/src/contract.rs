@@ -160,12 +160,18 @@ mod tests {
         member.environment.insert("PATH".into(), root.path().join("bin").display().to_string());
         let mut prepared = member.clone();
         let original = declared(&store, &desired).unwrap();
-        prepared.environment.insert("PATH".into(), root.path().join("overlay").display().to_string());
+        prepared.environment.insert("PATH".into(), std::env::join_paths([root.path().join("missing"), root.path().join("overlay")]).unwrap().to_string_lossy().into_owned());
         prepared.environment.insert("CLAUDE_CONFIG_DIR".into(), root.path().join("overlay").display().to_string());
         let expected = capture(&store, &desired, &prepared, true).unwrap();
         install(&store, Box::new(move |_| Ok(prepared.clone())));
         assert_ne!(original.binary, expected.binary);
         assert_eq!(declared(&store, &desired).unwrap(), expected);
+        let seen = std::cell::RefCell::new(Vec::new());
+        declared_ready_inputs(&store, &desired, &|path| {
+            seen.borrow_mut().push(path.to_owned()); Ok(())
+        }).unwrap();
+        assert!(seen.borrow().contains(&root.path().join("missing/node")), "shadowing executable creation must invalidate");
+        assert!(seen.borrow().contains(&root.path().join("overlay/node")));
         std::fs::write(root.path().join("overlay/CLAUDE.md"), "effective account context").unwrap();
         assert_ne!(declared(&store, &desired).unwrap().prompt, expected.prompt);
     }
