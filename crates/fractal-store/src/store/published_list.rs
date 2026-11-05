@@ -50,6 +50,9 @@ pub struct PublishedList<R> {
     generation: AtomicU64,
     /// The generation the newest publication was folded in. Written under the `newest` lock.
     newest_generation: AtomicU64,
+    /// Rows a fold refolded without reaching one cut, kept for the next fold to go on from: never
+    /// served. Taken and kept under the `newest` lock, so a forget or a refold drops them.
+    pending: Mutex<Option<Publication<R>>>,
     /// Numbers every publication this list swapped in, from one, so two publications at one cut
     /// never share an identity. Written under the `newest` lock.
     sequence: AtomicU64,
@@ -78,6 +81,7 @@ impl<R> Default for PublishedList<R> {
             forgotten: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             newest_generation: AtomicU64::new(0),
+            pending: Mutex::new(None),
             sequence: AtomicU64::new(0),
             materializations: AtomicU64::new(0),
             completed_materialization: AtomicU64::new(0),
@@ -230,6 +234,29 @@ impl<R> PublishedList<R> {
             return (None, generation);
         }
         (newest.clone(), generation)
+    }
+
+    /// [`Self::base`], with the rows the previous fold kept for this one to go on from
+    /// ([`Self::keep_pending`]), if any. A fold from nothing gets none: they were folded from
+    /// projections replaced since.
+    pub fn base_and_pending(&self) -> (Option<Arc<Publication<R>>>, Option<Publication<R>>, u64) {
+        let newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        let generation = self.generation.load(Ordering::Acquire);
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if self.forgotten.swap(false, Ordering::AcqRel) {
+            return (None, None, generation);
+        }
+        (newest.clone(), pending, generation)
+    }
+
+    /// Keep rows a fold began in `generation` refolded without reaching one cut, for the next
+    /// fold to go on from rather than refold them again, unless the projections were replaced
+    /// since. Never served.
+    pub fn keep_pending(&self, rows: Publication<R>, generation: u64) {
+        let _newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.generation.load(Ordering::Acquire) == generation {
+            *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(rows);
+        }
     }
 
     /// Serve the newest publication again, as a withdrawn list whose next fold finds nothing

@@ -33,7 +33,9 @@ const FRESH_PAUSE: Duration = Duration::from_millis(100);
 /// and a last short snapshot completes the publication at one cut.
 const FOLD_CHUNK: usize = 100;
 
-/// How many rounds of chunks a fold tries before it keeps the previous publication.
+/// How many rounds of chunks a fold catches up in. A fold that still has not reached one cut,
+/// as through a burst of changes, publishes nothing and keeps its rows for the next fold to go
+/// on from (#5122), so no snapshot grows with the burst and no progress is lost.
 const FOLD_ROUNDS: usize = 3;
 
 /// How many folds in a row may fail before the refresher stops serving its list.
@@ -180,7 +182,7 @@ pub fn start_published_lists(state: &AppState) {
         |store| store.published_runtime_list(),
         "runtimes",
         "runtimes/refresh",
-        client_v0::published_runtimes::fold,
+        fold_runtimes,
         true,
         false,
     );
@@ -219,27 +221,50 @@ pub fn start_published_work(state: &AppState) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn refresh_work_once(store: &Store) {
     let list = store.published_work_list();
-    let (base, generation) = list.base();
-    match fold_work(store, base.as_deref()).unwrap() {
-        Some((publication, changed)) => {
+    let (base, pending, generation) = list.base_and_pending();
+    match fold_work(store, base.as_deref(), pending).unwrap() {
+        Folded::Published(publication, changed) => {
             if let Some(served) = list.publish(publication, generation)
                 && (changed || !served)
             {
                 store.publish_collection_view("work");
             }
         }
-        None => {
+        Folded::Current => {
             if list.serve_again(generation) {
                 store.publish_collection_view("work");
             }
         }
+        Folded::Pending(rows) => list.keep_pending(rows, generation),
     }
 }
 
-/// Fold a collection at the current cut, from the previous publication when there is one. `None`
-/// when that publication is current; with each new publication, whether any row changed, so
-/// windows reread only then.
-type Fold<R> = fn(&Store, Option<&Publication<R>>) -> anyhow::Result<Option<(Publication<R>, bool)>>;
+/// What a fold made of its base.
+pub enum Folded<R> {
+    /// The base is current.
+    Current,
+    /// A newer publication, and whether any row changed, so windows reread only then.
+    Published(Publication<R>, bool),
+    /// Rows that still do not hold at one cut after every catch-up round, as through a burst of
+    /// changes: nothing publishes, and the next fold goes on from them rather than from its base.
+    Pending(Publication<R>),
+}
+
+/// Fold a collection at the current cut, from the previous publication when there is one, and
+/// on from the rows the previous fold left pending when it left some.
+type Fold<R> = fn(&Store, Option<&Publication<R>>, Option<Publication<R>>) -> anyhow::Result<Folded<R>>;
+
+/// The runtimes list's fold: one snapshot, so it never leaves rows pending.
+fn fold_runtimes(
+    store: &Store,
+    base: Option<&Publication<crate::store::runtime_list::RuntimeRows>>,
+    _: Option<Publication<crate::store::runtime_list::RuntimeRows>>,
+) -> anyhow::Result<Folded<crate::store::runtime_list::RuntimeRows>> {
+    Ok(match client_v0::published_runtimes::fold(store, base)? {
+        Some((publication, changed)) => Folded::Published(publication, changed),
+        None => Folded::Current,
+    })
+}
 
 /// Keep one collection published: fold after commits, when a row's deadline passes, and again
 /// shortly after a failed fold, never more than one fold at a time. A `governed` list is never
@@ -292,14 +317,15 @@ fn spawn<R: Send + Sync + 'static>(
             let folded = tokio::task::spawn_blocking(move || {
                 crate::task_cpu::profiled_blocking(label, || {
                     let list = list(&reader);
-                    let (base, generation) = list.base();
-                    let folded = fold(&reader, base.as_deref());
-                    if base.is_none() && folded.is_err() {
+                    let (base, pending, generation) = list.base_and_pending();
+                    let from_nothing = base.is_none() && pending.is_none();
+                    let folded = fold(&reader, base.as_deref(), pending);
+                    if from_nothing && folded.is_err() {
                         // The next fold starts from nothing again.
                         list.fold_from_nothing_next();
                     }
                     match folded? {
-                        Some((publication, changed)) => {
+                        Folded::Published(publication, changed) => {
                             let timing = base.as_ref().map(|base| {
                                 (base.cut, publication.cut, publication.published_at_unix_ms)
                             });
@@ -319,18 +345,26 @@ fn spawn<R: Send + Sync + 'static>(
                             }
                         }
                         // Nothing new: a withdrawn list's rows are current again.
-                        None => {
+                        Folded::Current => {
                             if list.serve_again(generation) {
                                 reader.publish_collection_view(name);
                             }
                         }
+                        // Not one cut yet: the next fold goes on from these rows.
+                        Folded::Pending(rows) => {
+                            list.keep_pending(rows, generation);
+                            return anyhow::Ok(true);
+                        }
                     }
-                    anyhow::Ok(())
+                    anyhow::Ok(false)
                 })
             })
             .await;
+            // A fold that left rows pending neither failed nor published: the next one follows
+            // after the pause, with no commit or deadline to wait for.
+            let pending = matches!(folded, Ok(Ok(true)));
             let failed = match folded {
-                Ok(Ok(())) => false,
+                Ok(Ok(_)) => false,
                 Ok(Err(error)) => {
                     eprintln!("st3: {name} refresh failed: {error:#}");
                     true
@@ -342,7 +376,7 @@ fn spawn<R: Send + Sync + 'static>(
                     true
                 }
             };
-            failures = if failed { failures + 1 } else { 0 };
+            failures = if failed { failures + 1 } else if pending { failures } else { 0 };
             // A refresher that keeps failing stops serving rows it cannot keep current until a
             // fold publishes again. An ungoverned list's windows fold on read and follow commits
             // meanwhile; a governed list's readers refuse, and its windows read once and wait.
@@ -369,6 +403,9 @@ fn spawn<R: Send + Sync + 'static>(
             if failed {
                 wait = Some(wait.map_or(FAILURE_RETRY, |wait| wait.min(FAILURE_RETRY)));
             }
+            if pending {
+                wait = Some(Duration::ZERO);
+            }
             match wait {
                 Some(wait) => {
                     let _ = tokio::time::timeout(wait, wake.notified()).await;
@@ -390,6 +427,41 @@ enum Advance<R, P> {
     Rebuild,
 }
 
+#[cfg(test)]
+type CatchUpHook = Box<dyn FnMut(&Store)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called before each catch-up round, so a test can change a list while its fold catches up.
+    static BEFORE_CATCH_UP: std::cell::RefCell<Option<CatchUpHook>> =
+        const { std::cell::RefCell::new(None) };
+    /// The most rows one snapshot refolded and the catch-up rounds folds ran, for tests.
+    static MOST_REFOLDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CATCH_UP_ROUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn before_catch_up(store: &Store) {
+    #[cfg(test)]
+    {
+        CATCH_UP_ROUNDS.set(CATCH_UP_ROUNDS.get() + 1);
+        BEFORE_CATCH_UP.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(store);
+            }
+        });
+    }
+    #[cfg(not(test))]
+    let _ = store;
+}
+
+/// Count the rows one snapshot refolds, for tests.
+fn note_refolded(rows: usize) {
+    #[cfg(test)]
+    MOST_REFOLDED.set(MOST_REFOLDED.get().max(rows));
+    #[cfg(not(test))]
+    let _ = rows;
+}
+
 /// Where a fold reads changed claims from: the base's cut, or, when a replication pass has
 /// projected claims since the base was folded, the frontier the base saw, so claims the base
 /// folded before they were projected are read again. `None` when that is too many claims.
@@ -398,16 +470,23 @@ fn claims_from(base_cut: u64, base_frontier: u64, cut: u64, frontier: u64) -> Op
     (cut.saturating_sub(from) <= FOLD_CLAIMS).then_some(from)
 }
 
+/// Rows a fold left pending go on only from the publication they were folded from or a later
+/// one: they hold at their cut or later, never earlier.
+fn go_on<R>(base: Option<&Publication<R>>, pending: Option<Publication<R>>) -> Option<Publication<R>> {
+    pending.filter(|pending| base.is_none_or(|base| pending.cut >= base.cut))
+}
+
 /// Fold the missions list at the current cut: from `base` when there is one, refolding only the
-/// missions whose claims, leases, attention or recent end changed, else from nothing in chunks.
-/// `None` when `base` already is current; with each publication, whether any row changed.
+/// missions whose claims, leases, attention or recent end changed, else from nothing in chunks;
+/// or on from the rows the previous fold left `pending`.
 pub fn fold_missions(
     store: &Store,
     base: Option<&Publication<MissionRows>>,
-) -> anyhow::Result<Option<(Publication<MissionRows>, bool)>> {
+    pending: Option<Publication<MissionRows>>,
+) -> anyhow::Result<Folded<MissionRows>> {
     let started = Instant::now();
-    let result = fold_missions_inner(store, base);
-    if !matches!(&result, Ok(None)) {
+    let result = fold_missions_inner(store, base, pending);
+    if !matches!(&result, Ok(Folded::Current)) {
         client_v0::published_missions::record_rebuild(started.elapsed());
     }
     result
@@ -416,36 +495,46 @@ pub fn fold_missions(
 fn fold_missions_inner(
     store: &Store,
     base: Option<&Publication<MissionRows>>,
-) -> anyhow::Result<Option<(Publication<MissionRows>, bool)>> {
-    let advance = match base {
-        Some(base) => missions_since(store, base)?,
-        None => Advance::Rebuild,
-    };
-    let mut provisional = match advance {
-        Advance::Current => return Ok(None),
-        Advance::Published(publication, changed) => return Ok(Some((publication, changed))),
-        Advance::TooMany(plan) => {
-            store.published_missions_list().note_rebuild("chunked: missions changed");
-            plan.refold_in_chunks(store, base.expect("a base had too many changes"))?
-        }
-        Advance::Rebuild => {
-            store.published_missions_list().note_rebuild(if base.is_some() { "claims" } else { "start" });
-            missions_from_nothing(store)?
+    pending: Option<Publication<MissionRows>>,
+) -> anyhow::Result<Folded<MissionRows>> {
+    let mut provisional = if let Some(pending) = go_on(base, pending) {
+        store.published_missions_list().note_rebuild("pending: missions kept changing");
+        pending
+    } else {
+        let advance = match base {
+            Some(base) => missions_since(store, base)?,
+            None => Advance::Rebuild,
+        };
+        match advance {
+            Advance::Current => return Ok(Folded::Current),
+            Advance::Published(publication, changed) => return Ok(Folded::Published(publication, changed)),
+            Advance::TooMany(plan) => {
+                store.published_missions_list().note_rebuild("chunked: missions changed");
+                plan.refold_in_chunks(store, base.expect("a base had too many changes"))?
+            }
+            Advance::Rebuild => {
+                store.published_missions_list().note_rebuild(if base.is_some() { "claims" } else { "start" });
+                missions_from_nothing(store)?
+            }
         }
     };
     // Every row now holds at the provisional cut or later: catch up to one cut.
     for _ in 0..FOLD_ROUNDS {
+        before_catch_up(store);
         match missions_since(store, &provisional)? {
             Advance::Current => {
                 provisional.valid_until_unix_ms = Some(valid_until(&provisional.rows, now_ms()));
-                return Ok(Some((provisional, true)));
+                return Ok(Folded::Published(provisional, true));
             }
-            Advance::Published(publication, _) => return Ok(Some((publication, true))),
+            Advance::Published(publication, _) => return Ok(Folded::Published(publication, true)),
             Advance::TooMany(plan) => provisional = plan.refold_in_chunks(store, &provisional)?,
-            Advance::Rebuild => break,
+            Advance::Rebuild => {
+                anyhow::bail!("the missions list kept changing in ways no short fold can follow; keeping the previous one")
+            }
         }
     }
-    anyhow::bail!("the missions list kept changing in ways no short fold can follow; keeping the previous one")
+    // Still changing, as through a burst of mission starts: the next fold goes on from here.
+    Ok(Folded::Pending(provisional))
 }
 
 /// What a fold must refold to advance its base to `cut`.
@@ -618,6 +707,7 @@ fn refold(
     if missions.is_empty() {
         return Ok(());
     }
+    note_refolded(missions.len());
     let mut keys = store.mission_list_keys(Some(missions), now)?;
     let mut shown = Vec::new();
     for mission in missions {
@@ -748,32 +838,42 @@ mod tests;
 fn fold_work(
     store: &Store,
     base: Option<&Publication<WorkRows>>,
-) -> anyhow::Result<Option<(Publication<WorkRows>, bool)>> {
-    let advance = match base {
-        Some(base) => work_since(store, base)?,
-        None => Advance::Rebuild,
-    };
-    let mut provisional = match advance {
-        Advance::Current => return Ok(None),
-        Advance::Published(publication, changed) => return Ok(Some((publication, changed))),
-        Advance::TooMany(plan) => {
-            store.published_work_list().note_rebuild("chunked: work changed");
-            plan.refold_in_chunks(store, base.expect("a base had too many changes"))?
+    pending: Option<Publication<WorkRows>>,
+) -> anyhow::Result<Folded<WorkRows>> {
+    let mut provisional = if let Some(pending) = go_on(base, pending) {
+        store.published_work_list().note_rebuild("pending: work kept changing");
+        pending
+    } else {
+        let advance = match base {
+            Some(base) => work_since(store, base)?,
+            None => Advance::Rebuild,
+        };
+        match advance {
+            Advance::Current => return Ok(Folded::Current),
+            Advance::Published(publication, changed) => return Ok(Folded::Published(publication, changed)),
+            Advance::TooMany(plan) => {
+                store.published_work_list().note_rebuild("chunked: work changed");
+                plan.refold_in_chunks(store, base.expect("a base had too many changes"))?
+            }
+            Advance::Rebuild => {
+                store.published_work_list().note_rebuild(if base.is_some() { "claims" } else { "start" });
+                work_from_nothing(store)?
+            }
         }
-        Advance::Rebuild => {
-            store.published_work_list().note_rebuild(if base.is_some() { "claims" } else { "start" });
-            work_from_nothing(store)?
-        }
     };
+    // As the missions list's catch-up: a list still changing goes on in the next fold.
     for _ in 0..FOLD_ROUNDS {
+        before_catch_up(store);
         match work_since(store, &provisional)? {
-            Advance::Current => return Ok(Some((provisional, true))),
-            Advance::Published(publication, _) => return Ok(Some((publication, true))),
+            Advance::Current => return Ok(Folded::Published(provisional, true)),
+            Advance::Published(publication, _) => return Ok(Folded::Published(publication, true)),
             Advance::TooMany(plan) => provisional = plan.refold_in_chunks(store, &provisional)?,
-            Advance::Rebuild => break,
+            Advance::Rebuild => {
+                anyhow::bail!("the work list kept changing in ways no short fold can follow; keeping the previous one")
+            }
         }
     }
-    anyhow::bail!("the work list kept changing in ways no short fold can follow; keeping the previous one")
+    Ok(Folded::Pending(provisional))
 }
 
 /// What a work fold must refold to advance its base to `cut` at `time`.
@@ -835,6 +935,7 @@ fn refold_work(
     if steps.is_empty() {
         return Ok(());
     }
+    note_refolded(steps.len());
     let views = store.work_at_snapshot_selected(None, false, time, true, true, false, Some(steps))?;
     let subjects = views.iter().map(|view| view.subject.clone()).collect::<Vec<_>>();
     let desired = store.desired_subjects_for_owner_steps(&subjects)?;
