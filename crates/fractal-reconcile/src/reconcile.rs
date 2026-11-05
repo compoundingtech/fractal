@@ -19060,14 +19060,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let incremental = self.incremental.clone();
         let revision = self.file_watch_revision.clone();
         let watched_subject = subject.to_owned();
-        let pool = match self.file_subscriptions.get() {
-            Some(pool) => pool.clone(),
-            None => {
-                let pool = file_subscriptions::Pool::new()?;
-                let _ = self.file_subscriptions.set(pool.clone());
-                pool
-            }
-        };
+        if self.file_subscriptions.get().is_none() {
+            let _ = self.file_subscriptions.set(file_subscriptions::Pool::new()?);
+        }
+        let pool = self.file_subscriptions.get().expect("initialized subscriptions");
         let mut paths = vec![(directory.clone(), false)];
         if recursive { paths.push((target.clone(), true)); }
         if let Some(parent) = referent.as_ref().and_then(|path| path.parent()) {
@@ -19099,12 +19095,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             }))?;
         watchers.insert(subject.into(), FileWatch {
-            _subscription: subscription,
-            target,
-            directory,
-            referent,
-            recursive,
-            dirty,
+            _subscription: subscription, target, directory, referent, recursive, dirty,
         });
         // A refreshed subscription may now refer to a different file at the same stamp.
         self.file_observations
@@ -26916,6 +26907,21 @@ agent "import/omp/fixture" {{
         for path in [rules.join("nested/new.md"), missing] {
             std::fs::write(path, "new instruction").unwrap();
             tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        }
+        reconciler.ensure_file_watch("old", &rules.join("old")).unwrap();
+        for key in ["second", "old"] {
+            std::fs::remove_dir_all(&rules).unwrap();
+            std::fs::create_dir(&rules).unwrap();
+            let path = rules.join(key);
+            while key == "old" && !reconciler.file_watchers.lock().unwrap()["old"].dirty.load(Ordering::Acquire) {
+                tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            }
+            reconciler.ensure_file_watch(key, &path).unwrap(); // Acquire before releasing the old lease.
+            while tokio::time::timeout(Duration::from_millis(50), notify.notified()).await.is_ok() {}
+            reconciler.incremental.evaluated("replacement", BTreeSet::from([key.into()]), None);
+            std::fs::write(&path, "new inode").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            assert!(reconciler.incremental.needs("replacement", now_ms()));
         }
     }
 
