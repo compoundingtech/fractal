@@ -195,3 +195,174 @@ pub(super) async fn run(client: &Client, config: &Config, json_output: bool) -> 
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, routing::{get, post}};
+    use std::{os::unix::fs::PermissionsExt, sync::{Arc, Mutex}};
+
+    const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NEXT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const FLEET: &str = "68d50a41-99c6-443a-8791-b09fa2b8e468";
+
+    fn progress(phase: Phase, deadline: u64) -> Progress {
+        Progress { fleet_id:FLEET.into(), member_key:"own-key".into(),
+            old_node:OLD.into(), next_node:NEXT.into(), deadline, phase }
+    }
+
+    fn membership(rotation: Option<&Value>) -> Value {
+        let node = if rotation.is_some_and(|entry| entry["action"] == "commit") { NEXT } else { OLD };
+        let receipts = rotation.filter(|entry| entry["action"] != "abort").map(|entry| json!([{
+            "transport":"fabric-rekey-receipt", "member_key":"own-key", "old_node":OLD,
+            "next_node":NEXT, "deadline":entry["deadline"],
+            "state":if entry["action"] == "commit" {"committed"} else {"prepared"},
+        }])).unwrap_or_else(|| json!([]));
+        json!({"anchor":"anchor","members":[
+            {"name":"local","member_key":"own-key","state":"current","mode":"listening","start":1,
+                "endpoints":[{"transport":"fabric","node":node,"protocol":"st3/fleet/fleet"}]},
+            {"name":"remote","member_key":"remote-key","state":"current","mode":"listening","start":1,"endpoints":receipts}
+        ]})
+    }
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        config: Config,
+        client: Client,
+        requests: Arc<Mutex<Vec<Value>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) { self.server.abort(); }
+    }
+    impl Fixture {
+        async fn new(fail_activation: bool) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let program = root.path().join("fabric");
+            // A real subprocess boundary with durable active identity and a lost
+            // activation reply; no process-global environment changes.
+            std::fs::write(&program, format!(r#"#!/bin/sh
+echo "$*" >> '{dir}/calls'
+case "$2" in
+status)
+  if test -f '{dir}/active'; then id='{next}'; else id='{old}'; fi
+  printf '{{"current":"%s","state":"active"}}\n' "$id";;
+prepare) printf '{{"current":"{old}","next":"{next}"}}\n';;
+activate)
+  if test '{fail}' = true && ! test -f '{dir}/active'; then
+    touch '{dir}/active'
+    exit 1
+  fi
+  touch '{dir}/active'
+  printf '{{"previous":"{old}","active":"{next}","outcome":"already_active"}}\n';;
+*) exit 2;;
+esac
+"#, dir=root.path().display(), old=OLD, next=NEXT, fail=fail_activation)).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let config = Config { node:"local".into(), state_dir:root.path().to_path_buf(), ..Config::default() };
+            fractal_daemon::config::FleetFile {
+                fleet_id:FLEET.into(), node:Some("local".into()),
+                transports:vec!["fabric".into()], fabric:Some(program), ..Default::default()
+            }.save(root.path()).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let reads = requests.clone();
+            let writes = requests.clone();
+            let app = Router::new()
+                .route("/v1/internal/fleet/membership", get(move || {
+                    let reads = reads.clone();
+                    async move { Json(json!({"api_version":"st3.v1","value":membership(reads.lock().unwrap().last())})) }
+                }))
+                .route("/v1/internal/fleet/fabric-rekey", post(move |Json(request):Json<Value>| {
+                    let writes = writes.clone();
+                    async move { writes.lock().unwrap().push(request); Json(json!({"api_version":"st3.v1","value":{"published":true}})) }
+                }));
+            let socket = root.path().join("api.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            let client = Client::unix(socket);
+            Self { root, config, client, requests, server }
+        }
+    }
+
+    #[tokio::test]
+    async fn rekey_flow_prepares_publishes_both_phases_then_activates() {
+        let fixture = Fixture::new(false).await;
+        run(&fixture.client, &fixture.config, true).await.unwrap();
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.iter().map(|request| request["action"].as_str().unwrap()).collect::<Vec<_>>(), ["prepare","commit"]);
+        assert_eq!(requests[0]["deadline"], requests[1]["deadline"]);
+        let saved = load(&fixture.root.path().join("fleet/fabric-rekey.json")).unwrap().unwrap();
+        assert_eq!(saved.phase, Phase::Complete);
+        let calls = std::fs::read_to_string(fixture.root.path().join("calls")).unwrap();
+        assert!(calls.contains("identity prepare --json"));
+        assert!(calls.contains(&format!("identity activate --expect-current {OLD} --expect-next {NEXT} --json")));
+    }
+
+    #[tokio::test]
+    async fn rekey_lost_activation_reply_resumes_without_preparing_or_extending_deadline() {
+        let fixture = Fixture::new(true).await;
+        assert!(run(&fixture.client, &fixture.config, true).await.is_err());
+        let path = fixture.root.path().join("fleet/fabric-rekey.json");
+        let saved = load(&path).unwrap().unwrap();
+        assert_eq!(saved.phase, Phase::Activating);
+        run(&fixture.client, &fixture.config, true).await.unwrap();
+        let resumed = load(&path).unwrap().unwrap();
+        assert_eq!(resumed.phase, Phase::Complete);
+        assert_eq!(resumed.deadline, saved.deadline);
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+        let calls = std::fs::read_to_string(fixture.root.path().join("calls")).unwrap();
+        assert_eq!(calls.matches("identity prepare").count(), 1);
+        assert_eq!(calls.matches("identity activate").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn rekey_elapsed_unpublished_journal_aborts_without_activation() {
+        let fixture = Fixture::new(false).await;
+        let path = fixture.root.path().join("fleet/fabric-rekey.json");
+        save(&path, &progress(Phase::Prepared, now() - 1)).unwrap();
+        let error = run(&fixture.client, &fixture.config, true).await.unwrap_err();
+        assert!(error.to_string().contains("old identity remains active"));
+        assert_eq!(load(&path).unwrap().unwrap().phase, Phase::Aborted);
+        assert_eq!(fixture.requests.lock().unwrap()[0]["action"], "abort");
+        assert!(!std::fs::read_to_string(fixture.root.path().join("calls")).unwrap().contains("activate"));
+    }
+
+    #[tokio::test]
+    async fn rekey_refuses_old_fabric_before_preparing() {
+        let fixture = Fixture::new(false).await;
+        let program = fixture.root.path().join("fabric");
+        std::fs::write(&program, "#!/bin/sh\nexit 2\n").unwrap();
+        let error = run(&fixture.client, &fixture.config, true).await.unwrap_err();
+        assert!(error.to_string().contains("Fabric is too old"));
+        assert!(fixture.requests.lock().unwrap().is_empty());
+        assert!(!fixture.root.path().join("fleet/fabric-rekey.json").exists());
+    }
+
+    #[tokio::test]
+    async fn rekey_refuses_non_fabric_member_without_running_fabric() {
+        let fixture = Fixture::new(false).await;
+        let mut file = fractal_daemon::config::FleetFile::load(fixture.root.path()).unwrap().unwrap();
+        file.transports = vec!["tailscale".into()];
+        file.save(fixture.root.path()).unwrap();
+        let error = run(&fixture.client, &fixture.config, true).await.unwrap_err();
+        assert!(error.to_string().contains("not a Fabric fleet member"));
+        assert!(!fixture.root.path().join("calls").exists());
+        assert!(fixture.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rekey_receipts_require_remote_current_exact_phase_and_identity() {
+        let progress = progress(Phase::Prepared, now() + 100);
+        let request = json!({"action":"prepare","deadline":progress.deadline});
+        let mut view:fractal_daemon::fleet::FleetView = serde_json::from_value(membership(Some(&request))).unwrap();
+        assert!(confirmed(&view, &progress, "prepared"));
+        assert!(!confirmed(&view, &progress, "committed"));
+        view.members[1].endpoints[0]["deadline"] = json!(progress.deadline + 1);
+        assert!(!confirmed(&view, &progress, "prepared"));
+        view.members[1].endpoints[0]["deadline"] = json!(progress.deadline);
+        view.members[1].state = "ended".into();
+        assert!(!confirmed(&view, &progress, "prepared"));
+        view.members[1].state = "current".into();
+        view.members[1].member_key = progress.member_key.clone();
+        assert!(!confirmed(&view, &progress, "prepared"));
+    }
+}
