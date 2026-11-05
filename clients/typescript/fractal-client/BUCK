@@ -10,7 +10,9 @@ package_view(
     files = {
         "Client.generated.ts": "Client.generated.ts",
         "Models.generated.ts": "Models.generated.ts",
+        "ReadSchema.generated.ts": "ReadSchema.generated.ts",
         "Schema.generated.ts": "Schema.generated.ts",
+        "SchemaSupport.generated.ts": "SchemaSupport.generated.ts",
         "errors.ts": "errors.ts",
         "fabric.d.mts": "fabric.d.mts",
         "fabric.mjs": "fabric.mjs",
@@ -34,7 +36,9 @@ package_view(
     files = {
         "Client.generated.ts": "Client.generated.ts",
         "Models.generated.ts": "Models.generated.ts",
+        "ReadSchema.generated.ts": "ReadSchema.generated.ts",
         "Schema.generated.ts": "Schema.generated.ts",
+        "SchemaSupport.generated.ts": "SchemaSupport.generated.ts",
         "errors.ts": "errors.ts",
         "fabric.d.mts": "fabric.d.mts",
         "fabric.mjs": "fabric.mjs",
