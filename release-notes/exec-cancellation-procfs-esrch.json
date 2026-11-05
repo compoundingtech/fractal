@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Previously, live hosts could leave a cancelled gate's processes running after reporting its kill as successful. On Linux, a process reaped between opening and reading its proc stat entry is now skipped during process-group observation, just like an already absent entry. Stop and kill operations return an error when the exec generation is indeterminate, so callers cannot certify a signal that was skipped. Generation fences and process-group containment remain unchanged."
+    "detail": "Previously, live hosts could leave a cancelled gate's processes running after reporting its kill as successful. On Linux, a process reaped between opening and reading its proc stat entry is now skipped during process-group observation, just like an already absent entry. Stop and kill operations return an error when the exec generation is indeterminate, so callers cannot certify a signal that was skipped. Generation fences and process-group containment remain unchanged. Shutdown attempts both signal phases for every owned exec and reports collected errors after the sweep, so one unreadable generation cannot leave the remaining execs unsignalled."
   },
   "downtime": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "New cancellation attempts can finish group teardown despite unrelated process exits. Genuinely unreadable generation evidence remains an error rather than a successful teardown. Previously recorded kill results are retained."
+    "detail": "New cancellation attempts can finish group teardown despite unrelated process exits. Genuinely unreadable generation evidence remains an error rather than a successful teardown. Previously recorded kill results are retained. Shutdown continues tearing down other owned execs when one generation cannot be verified."
   }
 }
