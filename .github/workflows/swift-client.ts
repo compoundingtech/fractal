@@ -38,7 +38,7 @@ base = os.environ.get('BASE_SHA', '')
 relevant = True
 if os.environ['EVENT_NAME'] != 'workflow_dispatch' and base and set(base) != {'0'}:
     subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', base], check=True)
-    names = subprocess.check_output(['git', 'diff', '--name-only', '-z', base, 'HEAD']).decode().split('\\0')
+    names = subprocess.check_output(['git', 'diff', '--name-only', '--no-renames', '-z', base, 'HEAD']).decode().split('\\0')
     relevant = any(fnmatch.fnmatchcase(name, pattern) for name in names for pattern in patterns)
 with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
     output.write(f'relevant={str(relevant).lower()}\\n')
