@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { englishAriaLocales } from './scripts/aria-locales.mjs'
 import { createStylexVitePlugins } from './scripts/stylex.mjs'
 
 export default defineConfig({
   base: './',
   plugins: [
+    englishAriaLocales(),
     ...createStylexVitePlugins({
       externalPackages: ['@fractal/ui', '@overeng/devbar', '@overeng/meters', '@overeng/stylex-tokens'],
       entries: [new URL('./src/embed/main.tsx', import.meta.url).pathname],
