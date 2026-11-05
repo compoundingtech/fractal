@@ -112,6 +112,9 @@ export const spaceVars = stylex.defineVars({
   zero: '0', hairline: '1px', xxxs: '1px', row: '10px', section: '24px', control: '28px', panel: '32px',
 })
 
+/** Shared by the row's CSS and its exact virtualizer layout. */
+export const sidebarRowSize = 48
+
 /** Fixed geometry: band heights, lane widths, control sizes, gutters. */
 export const geometryVars = stylex.defineVars({
   band: '52px',
@@ -131,7 +134,7 @@ export const geometryVars = stylex.defineVars({
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
   gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
-  sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
+  sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
   /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
   workRowColumns: '16px minmax(0, 1fr) auto 16px 80px',

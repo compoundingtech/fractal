@@ -1905,19 +1905,33 @@ pub mod histogram {
 
     static SHAPES: Mutex<BTreeMap<String, Shape>> = Mutex::new(BTreeMap::new());
 
+    thread_local! {
+        static THREAD_SHAPES: std::cell::RefCell<BTreeMap<String, Shape>> =
+            const { std::cell::RefCell::new(BTreeMap::new()) };
+    }
+
     pub fn record(statement: &str, duration: Duration) {
         let shape = crate::performance::normalize_query(statement);
-        let mut shapes = SHAPES.lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = shapes.entry(shape).or_default();
         let ns = duration.as_nanos() as u64;
-        entry.count += 1;
-        entry.total_ns += ns;
-        entry.max_ns = entry.max_ns.max(ns);
+        let add = |shapes: &mut BTreeMap<String, Shape>| {
+            let entry = shapes.entry(shape.clone()).or_default();
+            entry.count += 1;
+            entry.total_ns += ns;
+            entry.max_ns = entry.max_ns.max(ns);
+        };
+        add(&mut SHAPES.lock().unwrap_or_else(PoisonError::into_inner));
+        THREAD_SHAPES.with(|shapes| add(&mut shapes.borrow_mut()));
     }
 
     /// The shapes recorded so far, emptying the table.
     pub fn take() -> BTreeMap<String, Shape> {
         std::mem::take(&mut *SHAPES.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The shapes this thread recorded so far, emptying its table: a test that asks what its own
+    /// call ran, while other tests in the process run theirs.
+    pub fn take_on_this_thread() -> BTreeMap<String, Shape> {
+        THREAD_SHAPES.with(|shapes| std::mem::take(&mut *shapes.borrow_mut()))
     }
 }
 
