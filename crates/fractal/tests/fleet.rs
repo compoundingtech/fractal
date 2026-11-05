@@ -7069,13 +7069,14 @@ async fn previous_release_hosts_a_seat_a_new_member_reads_from_its_claims() {
 
 /// One node of the previous release, upgraded in place with mail mid-delivery to a seat it hosts:
 /// it is alone, so it records that seat's delivery, read and close as local marks at once (db
-/// break-up 4b-2), and its staging still as a claim. A release that records marks itself (v0.3.26
+/// break-up 4b-2), its staging too. A release that records marks itself (v0.3.26
 /// on) has recorded the release's delivery as a mark already, beside its two stagings' claims; an
 /// older one wrote all three as claims. The release's claims and marks keep counting, the
-/// delivery finishes with no further lifecycle claim but the staging, and upgraded again after a
-/// rollback the marks still count. Rolled back to a release that reads marks (v0.3.25 on), every
-/// message reads as this build left it, so nothing is offered again; to an older one, the release
-/// reads only its own claims, as the release note says.
+/// delivery finishes with no further lifecycle claim, and upgraded again after a rollback the
+/// marks still count. Rolled back to a release that reads staging marks (v0.3.26 on), every
+/// message reads as this build left it, so nothing is offered again. Rolled back to v0.3.25, which
+/// reads every mark but a staging, the mail this build staged reads as sent and would be offered
+/// again; to an older one, the release reads only its own claims. The release note says both.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid_delivery() {
@@ -7152,7 +7153,7 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     loop {
         let doctor: Value = o.client().get("/v1/doctor").await.unwrap();
         let marks = doctor["checks"].as_array().unwrap().iter().find(|check| check["name"] == "message-marks").cloned();
-        if marks.as_ref().is_some_and(|check| check["message"].as_str().unwrap().starts_with("on:")) {
+        if marks.as_ref().is_some_and(|check| check["message"].as_str().unwrap().starts_with("on: this member records its own seats' staging")) {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "marks did not turn on for a member alone: {marks:?}");
@@ -7166,18 +7167,15 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     for (subject, lifecycles) in [(&delivered, &["read", "closed"][..]), (&staged, &["delivered", "read"][..]), (&unsent, &["staged"][..])] {
         for lifecycle in lifecycles {
             let receipt = step(&o, subject, lifecycle).await;
-            // A staging stays a claim (message_marks::RECORDS_STAGED).
-            assert_eq!(
-                receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), *lifecycle != "staged",
-                "{lifecycle}: {receipt}"
-            );
+            // A member alone records its seat's staging as a mark with the rest.
+            assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
         }
     }
     // A repeated staging of mail already delivered answers the release's own staging, and stages
     // nothing again.
     let repeat = step(&o, &delivered, "staged").await;
     assert_eq!(repeat["id"], release_staging["id"], "{repeat}");
-    assert_eq!(lifecycle_claims(&o.claims().await), claimed + 1, "a hosted seat's delivery, read or close wrote a claim");
+    assert_eq!(lifecycle_claims(&o.claims().await), claimed, "a hosted seat's staging, delivery, read or close wrote a claim");
     let upgraded = ["closed", "read", "staged"];
     assert_eq!([status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await], upgraded);
     let listed = |node: &Node| {
@@ -7203,12 +7201,19 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     o.binary = old;
     o.start().await;
     let rolled_back = [status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await];
-    if release_reads_marks {
-        assert_eq!(rolled_back, upgraded, "rolled back to a release that reads marks, mail went back");
+    if release_marks {
+        assert_eq!(rolled_back, upgraded, "rolled back to a release that reads staging marks, mail went back");
         assert_eq!(listed(&o).await, before_rollback, "rolled back, the mailbox's reads changed");
+    } else if release_reads_marks {
+        eprintln!("baseline release reads no staging marks: the mail this build staged reads as sent, as the release note says");
+        assert_eq!(rolled_back, ["closed", "read", "sent"]);
+        let unstaged = before_rollback.iter()
+            .map(|(subject, status)| (subject.clone(), if *subject == unsent { "sent".to_owned() } else { status.clone() }))
+            .collect::<Vec<_>>();
+        assert_eq!(listed(&o).await, unstaged);
     } else {
         eprintln!("baseline release reads no marks: the rollback reads its own claims only, as the release note says");
-        assert_eq!(rolled_back, ["delivered", "staged", "staged"]);
+        assert_eq!(rolled_back, ["delivered", "staged", "sent"]);
     }
 
     // Upgraded again: the marks count again beside the claims.
@@ -7274,6 +7279,12 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
         assert!(off.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{off}");
         assert!(off.contains("o: exchanges with this member outside its fleet membership and has not advertised message_view_reads=1"), "{off}");
     }
+    // The release does not count a host's staging (no message_staged_reads), so beside it this
+    // build records its seat's staging as a claim, whether or not marks are on.
+    if release_reads_marks {
+        let held = marks();
+        assert!(held.contains("stagings stay claims until every other member advertises message_staged_reads=1") && held.contains("has not advertised message_staged_reads=1"), "{held}");
+    }
     let declaration = root.path().join("new-host-seat.kdl");
     fs::write(&declaration, format!(
         "version 2\nagent \"marks/new-host-seat\" {{ host \"n1\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
@@ -7289,6 +7300,21 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
         .await
         .unwrap();
     let subject = receipt["subject"].as_str().unwrap().to_owned();
+    let staging: Value = n1
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "staged", "actor": "agent/marks/new-host-seat", "idempotency_key": "new-host-seat-staged"}),
+        )
+        .await
+        .unwrap();
+    assert!(!staging["id"].as_str().unwrap().starts_with("offset-receipt/"), "a staging beside the release is a claim: {staging}");
+    wait_until("the release reads the seat's staging from its claim", 90, || {
+        let client = o.client();
+        let path = format!("/v1/messages/read/{subject}");
+        async move { client.get::<Value>(&path).await.is_ok_and(|view| view["status"] == "staged") }
+    })
+    .await;
     for lifecycle in ["delivered", "read"] {
         let receipt: Value = n1
             .client()
@@ -7327,10 +7353,11 @@ async fn previous_release_member_reads_a_new_hosts_seat_lifecycle() {
     assert_eq!(view["status"], "read", "{view}");
 }
 
-/// Two members of this build: each advertises message view reads, so both record their own seats'
-/// delivery, read and close as marks, which never replicate. The other member reads the seat's
-/// mail from the seat's host, in its message view and its lists, and says so in `status_from`; a
-/// list of open mail leaves out what the host closed (db break-up 4b-4).
+/// Two members of this build: each advertises message view reads and staged reads, so both record
+/// their own seats' staging, delivery, read and close as marks, which never replicate. The other
+/// member reads the seat's mail from the seat's host, in its message view and its lists, staging
+/// included, and says so in `status_from`; a list of open mail leaves out what the host closed (db
+/// break-up 4b-4, and staging).
 #[tokio::test(flavor = "multi_thread")]
 async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     if fractal_daemon::test_support::supervise_test() {
@@ -7350,8 +7377,8 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     }
     assert!(reads_message_views(&a).await && reads_message_views(&b).await);
     for node in [&a, &b] {
-        wait_until("a member of this build turns marks on beside another", 120, || {
-            let on = doctor_check(node, "message-marks")["message"].as_str().unwrap().starts_with("on:");
+        wait_until("a member of this build turns marks on, stagings included, beside another", 120, || {
+            let on = doctor_check(node, "message-marks")["message"].as_str().unwrap().starts_with("on: this member records its own seats' staging");
             async move { on }
         })
         .await;
@@ -7364,7 +7391,7 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     b.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
     let seat = "agent/marks/b-seat";
     let mut subjects = Vec::new();
-    for key in ["b-seat-read", "b-seat-closed"] {
+    for key in ["b-seat-read", "b-seat-closed", "b-seat-staged"] {
         let receipt: Value = b
             .client()
             .post("/v1/messages", &json!({
@@ -7374,8 +7401,10 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
             .unwrap();
         subjects.push(receipt["subject"].as_str().unwrap().to_owned());
     }
-    let (read, closed) = (subjects[0].clone(), subjects[1].clone());
-    for (subject, lifecycles) in [(&read, &["delivered", "read"][..]), (&closed, &["delivered", "read", "closed"][..])] {
+    let (read, closed, staged) = (subjects[0].clone(), subjects[1].clone(), subjects[2].clone());
+    for (subject, lifecycles) in [
+        (&read, &["delivered", "read"][..]), (&closed, &["delivered", "read", "closed"][..]), (&staged, &["staged"][..]),
+    ] {
         for lifecycle in lifecycles {
             let receipt: Value = b
                 .client()
@@ -7425,6 +7454,10 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
     let open: Value = a.client().get(&format!("/v1/messages?to={seat}")).await.unwrap();
     assert_eq!(state(&open, &read), Some((json!("read"), answered.clone())), "{open}");
     assert_eq!(state(&open, &closed), None, "b closed it, so a's list of open mail leaves it out: {open}");
+    // The staging b recorded as a mark reads as staged on `a`, from b.
+    let view: Value = a.client().get(&format!("/v1/messages/read/{staged}")).await.unwrap();
+    assert_eq!((&view["status"], &view["status_from"]), (&json!("staged"), &answered), "{view}");
+    assert_eq!(state(&open, &staged), Some((json!("staged"), answered.clone())), "{open}");
     // The seat's own host reads its own marks, with no host to name.
     let own: Value = b.client().get(&format!("/v1/messages/read/{read}")).await.unwrap();
     assert_eq!((own["status"].clone(), own.get("status_from").cloned()), (json!("read"), None), "{own}");
@@ -7489,8 +7522,11 @@ async fn two_members_of_this_build_read_a_seats_marks_from_its_host() {
 /// reads it from the claim. Rolled back to a release with them, marks stay on: the host's next
 /// write is a mark, which the rolled-back member reads from the host. Nothing is redelivered on
 /// the host. With a release that has seat-freshness reads, the rolled-back member's delivery
-/// status still reads the mark from the host (db break-up 4b-4). Only this build advertises `message_staged_reads`,
-/// and even beside a member that does, its host's staging is a claim the other member reads.
+/// status still reads the mark from the host (db break-up 4b-4). Only this build advertises
+/// `message_staged_reads`: once every member does, the host records its seat's staging as a mark
+/// too, which the other member reads from it. Rolled back, the host records stagings as claims
+/// again; mail it staged as a mark shows as sent on the rolled-back member until its delivery, and
+/// the host offers nothing again.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
@@ -7573,13 +7609,15 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     for kind in ["delivered", "read"] {
         assert!(lifecycle(&h, &marked, kind).await.starts_with("offset-receipt/"), "{kind}");
     }
-    // Every member says its reads count a staging mark, and a staging is still a claim: nothing
-    // in this build records one as a mark. `o` reads it as staged.
-    wait_until("the host holds o's start advertising message_staged_reads", 60, || {
-        newest_start_advertises(&h, "o", "message_staged_reads")
+    // Every member says its reads count a staging mark, so the host records its seat's staging as
+    // a mark too, which `o` reads from it.
+    wait_until("the host records stagings as marks once o's start says its reads count them", 120, || {
+        let on = doctor_check(&h, "message-marks")["message"].as_str().unwrap().starts_with("on: this member records its own seats' staging");
+        async move { on }
     })
     .await;
-    assert!(!lifecycle(&h, &staged, "staged").await.starts_with("offset-receipt/"), "a staging stays a claim");
+    assert!(newest_start_advertises(&h, "o", "message_staged_reads").await);
+    assert!(lifecycle(&h, &staged, "staged").await.starts_with("offset-receipt/"), "a staging is a mark");
     let view = |node: &Node, subject: &str| {
         let client = node.client();
         let path = format!("/v1/messages/read/{subject}");
@@ -7591,9 +7629,9 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     })
     .await;
     assert_eq!(view(&o, &before).await.unwrap()["status"], "delivered", "the release's claim still counts");
-    wait_until("o reads the host's staging from its claim", 60, || {
+    wait_until("o reads the host's staging mark from it", 60, || {
         let read = view(&o, &staged);
-        async move { read.await.is_some_and(|view| view["status"] == "staged") }
+        async move { read.await.is_some_and(|view| view["status"] == "staged" && view["status_from"]["host"] == "h") }
     })
     .await;
 
@@ -7653,6 +7691,36 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
         .await;
     }
     assert!(!newest_start_advertises(&h, "o", "message_staged_reads").await, "the rolled-back member's start");
+    // Beside the rolled-back member the host records stagings as claims again, marks on or off.
+    wait_until("the host records stagings as claims again beside the rolled-back member", 150, || {
+        let message = doctor_check(&h, "message-marks")["message"].as_str().unwrap().to_owned();
+        let claims = message.starts_with("off:") || message.contains("stagings stay claims until every other member advertises message_staged_reads=1");
+        async move { claims }
+    })
+    .await;
+    // The staging the host recorded as a mark: the rolled-back member's reads do not count a host's
+    // staging, so it shows the mail as sent until delivery moves it on, as the release note says.
+    // The host holds it staged and offers nothing again.
+    assert_eq!(view(&o, &staged).await.unwrap()["status"], "sent");
+    assert_eq!(view(&h, &staged).await.unwrap()["status"], "staged");
+    let receipt: Value = h
+        .client()
+        .post("/v1/messages", &json!({"idempotency_key": "h-seat-after-rollback", "from": PERSON, "to": seat, "content": "after"}))
+        .await
+        .unwrap();
+    let after = receipt["subject"].as_str().unwrap().to_owned();
+    assert!(!lifecycle(&h, &after, "staged").await.starts_with("offset-receipt/"), "a staging after the rollback is a claim");
+    wait_until("the rolled-back member reads the host's new staging from its claim", 90, || {
+        let read = view(&o, &after);
+        async move { read.await.is_some_and(|view| view["status"] == "staged") }
+    })
+    .await;
+    assert_eq!(lifecycle(&h, &staged, "delivered").await.starts_with("offset-receipt/"), release_marks);
+    wait_until("the rolled-back member reads the delivery of the mail staged as a mark", 90, || {
+        let read = view(&o, &staged);
+        async move { read.await.is_some_and(|view| view["status"] == "delivered") }
+    })
+    .await;
     if release_reads_relay {
         wait_until("the rolled-back member's delivery status reads the mark from the host", 90, || {
             let client = o.client();

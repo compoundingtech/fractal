@@ -13,7 +13,7 @@
  * given, exported as OTLP/JSON via `fetch` directly to that explicitly configured endpoint.
  */
 import { CollectionName } from '@fractal/client/schema'
-import { normalizeDecodePath } from '@fractal/sdk/effect'
+import { normalizeDecodePath } from '@fractal/sdk/read'
 import { Context, Deferred, Effect, Exit, FiberSet, Layer, Option, Schema, Scope, Tracer } from 'effect'
 import * as FetchHttpClient from 'effect/http/FetchHttpClient'
 import * as OtlpExporter from 'effect/observability/OtlpExporter'
