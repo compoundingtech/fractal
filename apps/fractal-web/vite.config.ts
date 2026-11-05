@@ -49,6 +49,9 @@ export default defineConfig({
           includeDependenciesRecursively: false,
           groups: [
             { name: 'react', test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/, entriesAware: true },
+            // New lazy roots must not fragment the already-eager Effect payload.
+            // Lazy-only Effect modules remain in the entries-aware group below.
+            { name: 'effect-eager', test: /node_modules[\\/](?:effect[\\/]|@effect[\\/])/, tags: ['$initial'], priority: 1, entriesAware: false },
             { name: 'effect', test: /node_modules[\\/](?:effect|@effect[\\/]atom-react)[\\/]/, entriesAware: true },
             { name: 'aria', test: /node_modules[\\/](?:react-aria|react-aria-components|react-stately|@react-aria|@react-stately|@internationalized)[\\/]/, entriesAware: true },
           ],
