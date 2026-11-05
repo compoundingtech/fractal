@@ -143,6 +143,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_projection_pending",
         // Member-local duration windows and dirty runs, rebuilt from canonical claims.
         "local_run_eta_pending",
+        "local_run_eta_dirty",
         "local_run_eta_samples",
         // Member-local preparation state and queues, rebuildable from canonical claims.
         "local_resource_preparation",
