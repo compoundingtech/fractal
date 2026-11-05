@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
+import { setTimeout as delay } from 'node:timers/promises'
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
-import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
+import { HighlightedSource, Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const grammar = vi.hoisted(() => {
@@ -41,6 +42,17 @@ it('defers labelled code coloring until after first paint and leaves unlabelled 
     expect(container.querySelector('h2')?.textContent).toBe('Ready now')
     expect(container.querySelector('strong')?.textContent).toBe('prose')
     expect(container.querySelector('code')?.textContent).toBe('literal <script>\n')
+    // Flush every scheduled paint/timer: an unsupported label must never even
+    // subscribe to the loader, rather than merely waiting until after paint.
+    await act(async () => {
+      paint()
+      await delay(30)
+    })
+    expect(paints).toHaveLength(0)
+    expect(grammar.requested).toBe(false)
+    await act(async () => root.render(<HighlightedSource code="literal" language="  NOT-A-LANGUAGE  " />))
+    expect(paints).toHaveLength(0)
+    expect(grammar.requested).toBe(false)
     await act(async () => root.render(<Markdown text={'## Ready now\n\n```typescript\nconst answer = 42\n```\n\n```unknown\nliteral <script>\n```'} />))
     expect(grammar.requested).toBe(false)
     await act(async () => { paint(); await vi.waitFor(() => expect(grammar.requested).toBe(true)) })
@@ -66,6 +78,9 @@ it('defers labelled code coloring until after first paint and leaves unlabelled 
     expect(container.querySelectorAll('code')[1]).toBe(unknown)
     expect(unknown.textContent).toBe('literal <script>\n')
     expect(unknown.querySelector('[data-syntax-token]')).toBeNull()
+    await act(async () => root.render(<HighlightedSource code="const answer = 42" language="  Ts  " />))
+    expect(container.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')
+    expect(container.textContent).toBe('const answer = 42')
   } finally {
     await act(async () => root.unmount())
     container.remove()

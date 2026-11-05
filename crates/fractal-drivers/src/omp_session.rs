@@ -442,27 +442,6 @@ pub fn run(
     )
 }
 
-/// Resume supervising an omp provider a predecessor driver image launched and released.
-pub fn adopt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-) -> Result<()> {
-    pi_family_session::adopt_for(
-        catalog_root,
-        identity,
-        runtime_id,
-        &OMP_KIND,
-        pid,
-        session,
-        seq,
-        true,
-    )
-}
-
 /// Run one host-owned cold-residency attempt under its exact incarnation.
 pub fn run_residency_attempt(
     catalog_root: &Path,
@@ -1189,6 +1168,5 @@ pub fn adopt_native(
         pid,
         session,
         seq,
-        false,
     )
 }

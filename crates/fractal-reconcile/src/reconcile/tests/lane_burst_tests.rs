@@ -23,7 +23,7 @@ fn now() -> u64 {
 
 fn laned(runtime: Arc<FakeRuntime>, store: &Arc<Store>) -> Reconciler<FakeRuntime> {
     Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }))
 }
 
 fn seat(store: &Store, name: &str, lane: &str) -> MemberSpec {

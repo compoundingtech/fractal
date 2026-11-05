@@ -3,6 +3,7 @@ import type { StorybookConfig } from '@storybook/react-vite'
 // not its public entry points. The timing contracts pin the version/path/shapes.
 import type { PreviewAnnotation } from 'storybook/internal/types'
 import tailwindcss from '@tailwindcss/vite'
+import { englishAriaLocales } from '../../../apps/fractal-web/scripts/aria-locales.mjs'
 import { fileURLToPath } from 'node:url'
 import { createStylexVitePlugins } from '../../../apps/fractal-web/scripts/stylex.mjs'
 import { storyGlobs } from './stories.ts'
@@ -33,6 +34,7 @@ const config: StorybookConfig = {
     ...config,
     plugins: [
       ...(config.plugins ?? []),
+      englishAriaLocales(),
       tailwindcss(),
       // Keep compiled rules on the eager preview entry, not a lazy app pane's CSS asset.
       ...createStylexVitePlugins({ entries: [new URL('./preview.ts', import.meta.url).pathname] }),

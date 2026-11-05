@@ -90,7 +90,9 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
         let group = if step.finally { Some(("finally", None)) } else { step.queue.as_deref().map(|queue| ("queue", Some(queue))) };
         if let Some((name, argument)) = group {
             if let Some(last) = children.last_mut().filter(|last| last.name().value() == name
-                && last.get(0).and_then(|value| value.as_string()) == argument) {
+                && last.get(0).and_then(|value| value.as_string()) == argument
+                // Each authored queue block resets positions, even when its name repeats.
+                && (name != "queue" || step.queue_position != Some(1))) {
                 last.ensure_children().nodes_mut().push(rendered);
             } else {
                 let root = match argument { Some(argument) => text(name, argument), None => node(name, []) };
@@ -176,6 +178,15 @@ mod tests {
         let reread = parse(&rendered.text);
         assert_eq!(visible(serde_json::to_value(&spec).unwrap()), visible(serde_json::to_value(&reread).unwrap()));
         assert_eq!(render_mission_kdl(&spec).unwrap().text, rendered.text);
+    }
+
+    #[test]
+    fn canonical_adjacent_same_named_queue_blocks_round_trip() {
+        round_trip(r#"mission "test" state="ready" {
+          goal "Keep the independent queues separate."
+          queue "q" { agentless; step "a"; step "a-next"; }
+          queue "q" { agentless; step "b"; step "b-next"; }
+        }"#);
     }
 
     #[test]

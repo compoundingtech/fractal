@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry the sidebar tab accessibility and independent panel test corrections into Alerts",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes or accessibility exemptions."},
+  "compatibility": {"status": "none", "detail": "Keep the reviewed tab geometry and spoken labels while painting markers separately from text labels."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

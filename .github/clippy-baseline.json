@@ -10,7 +10,7 @@
       "clippy::collapsible_if": 5,
       "clippy::items_after_test_module": 2,
       "clippy::needless_borrow": 2,
-      "clippy::too_many_arguments": 9,
+      "clippy::too_many_arguments": 8,
       "clippy::useless_format": 1
     },
     "fractal": {

@@ -120,7 +120,7 @@ try:
     with socket.socket() as listener:
         listener.bind(('127.0.0.1',0)); port=listener.getsockname()[1]
     endpoint='http://127.0.0.1:'+str(port)+'/mcp'
-    adapter_args=[str(BIN/'st-chatgpt'),'--socket',str(STATE/'st3-client.sock'),'--credential-file',str(credential)]
+    adapter_args=[str(BIN/'fractal-chatgpt'),'--socket',str(STATE/'st3-client.sock'),'--credential-file',str(credential)]
     adapter=start(adapter_args+['--listen','127.0.0.1:'+str(port)],'adapter.log')
     def listening():
         try:

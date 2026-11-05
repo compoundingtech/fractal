@@ -18,6 +18,146 @@
     { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "NoticeTimestamp": {
+      "description": "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission.",
+      "type": "string", "format": "date-time", "x-st-codec": "timestamp",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "NoticeClaimId": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "NoticeId": {"type": "string", "pattern": "^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "NoticeSourceId": {"type": "string", "pattern": "^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "NoticeActor": {"type": "string", "x-st-ref": ["agent", "person"], "pattern": "^(?:agent|person)/[^\\s]+$"},
+    "NoticeRuntime": {"type": "string", "x-st-ref": "agent", "pattern": "^(?:agent)/[^\\s]+$"},
+    "NoticePerson": {"type": "string", "x-st-ref": "person", "pattern": "^(?:person)/[^\\s]+$"},
+    "NoticeLink": {
+      "type": "object", "additionalProperties": false, "required": ["label", "url"],
+      "properties": {
+        "label": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "url": {"type": "string", "format": "uri-reference", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:"}
+      }
+    },
+    "NoticeSource": {
+      "description": "Execution-context provenance; repository and cwd are informational, never authenticated sender evidence.",
+      "type": "object", "additionalProperties": false, "required": ["host"],
+      "properties": {
+        "host": {"type": "string", "x-st-ref": "host", "pattern": "^(?:host)/[^\\s]+$"},
+        "agent": {"$ref": "#/$defs/NoticeRuntime"},
+        "repo": {"type": "string"},
+        "pty": {"type": "string", "x-st-ref": "pty", "pattern": "^(?:pty)/[^\\s]+$"},
+        "cwd": {"type": "string"}
+      }
+    },
+    "NoticeCreated": {
+      "description": "Immutable producer input. Lengths count Unicode characters. Admission additionally caps serialized claim fields at 65536 UTF-8 bytes; JSON Schema cannot express an encoded-object byte budget. Logical identity is (authenticated producer, dedupe_key). Informational even at confirm urgency; an answer requires a native ask.",
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "dedupe_key", "resource", "recipient", "intent", "urgency", "requested", "summary", "links", "source", "created_at"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "dedupe_key": {"type": "string", "minLength": 1, "maxLength": 200},
+        "resource": {"type": "string", "x-st-ref": "resource", "pattern": "^(?:resource)/[^\\s]+$"},
+        "recipient": {"$ref": "#/$defs/NoticePerson"},
+        "intent": {"enum": ["done", "failed", "blocked", "fyi"]},
+        "urgency": {"enum": ["info", "attention", "confirm"]},
+        "requested": {"type": "boolean"},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\r\\n\\u0085\\u2028\\u2029]+$"},
+        "speech": {"type": "string", "minLength": 1, "maxLength": 300},
+        "body": {"type": "string", "maxLength": 20000},
+        "links": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/NoticeLink"}},
+        "source": {"$ref": "#/$defs/NoticeSource"},
+        "created_at": {"$ref": "#/$defs/NoticeTimestamp"},
+        "expires_at": {"$ref": "#/$defs/NoticeTimestamp"}
+      }
+    },
+    "NoticePolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["disposition", "reason", "revision", "availability_basis"],
+      "properties": {
+        "disposition": {"enum": ["deliver", "held", "suppressed"]},
+        "reason": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "revision": {"$ref": "#/$defs/Revision"},
+        "availability_basis": {"$ref": "#/$defs/NoticeClaimId"}
+      }
+    },
+    "NoticeDelivery": {
+      "description": "Per-adapter evidence, not physical audibility or person acknowledgement. Delivered requires an adapter outcome receipt.",
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["state", "surface"], "properties": {
+          "state": {"const": "pending"}, "surface": {"enum": ["tray", "speech", "push", "log"]}
+        }},
+        {"type": "object", "additionalProperties": false, "required": ["state", "surface", "outcome_claim", "completed_at", "evidence"], "properties": {
+          "state": {"const": "delivered"}, "surface": {"enum": ["tray", "speech", "push", "log"]},
+          "outcome_claim": {"$ref": "#/$defs/NoticeClaimId"}, "completed_at": {"$ref": "#/$defs/NoticeTimestamp"},
+          "evidence": {"enum": ["spoken", "shown", "logged"]}
+        }},
+        {"type": "object", "additionalProperties": false, "required": ["state", "surface", "outcome_claim", "reason"], "properties": {
+          "state": {"const": "failed"}, "surface": {"enum": ["tray", "speech", "push", "log"]},
+          "outcome_claim": {"$ref": "#/$defs/NoticeClaimId"}, "reason": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        }},
+        {"type": "object", "additionalProperties": false, "required": ["state", "surface", "reason"], "properties": {
+          "state": {"const": "suppressed"}, "surface": {"enum": ["tray", "speech", "push", "log"]},
+          "reason": {"type": "string", "minLength": 1, "pattern": "\\S"}
+        }}
+      ]
+    },
+    "NoticeIntegrity": {
+      "description": "Unavailable/conflicted is never an actionable empty-success substitute. Manifest projection state remains explicit.",
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["state", "manifest_state", "manifest_claim"], "properties": {
+          "state": {"const": "ready"}, "manifest_state": {"const": "ready"}, "manifest_claim": {"$ref": "#/$defs/NoticeClaimId"}
+        }},
+        {"type": "object", "additionalProperties": false, "required": ["state", "manifest_state", "reason"], "properties": {
+          "state": {"const": "unavailable"}, "manifest_state": {"enum": ["ready", "missing", "invalid", "rebuilding", "stale"]},
+          "reason": {"enum": ["invalid-source", "missing-source", "missing-registration", "rebuilding", "stale"]}
+        }},
+        {"type": "object", "additionalProperties": false, "required": ["state", "manifest_state", "creation_claims"], "properties": {
+          "state": {"const": "conflicted"}, "manifest_state": {"enum": ["ready", "conflicted"]},
+          "creation_claims": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/NoticeClaimId"}}
+        }}
+      ]
+    },
+    "NoticeSnapshot": {
+      "description": "Internal joined read model, not a registered Resource arm. Producer input and lineage are immutable; runtime owns policy/delivery, person owns controls. Null snooze is cleared/absent and never revives earlier values.",
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "schema_version", "revision", "updated_at", "source_id", "creation_claims", "basis_claim", "source_revision", "producer", "runtime", "input", "policy", "delivery", "integrity", "seen_at", "dismissed_at", "snoozed_until", "control_revision"],
+      "properties": {
+        "id": {"$ref": "#/$defs/NoticeId"}, "kind": {"const": "attention-notice"}, "schema_version": {"const": 1},
+        "revision": {"$ref": "#/$defs/Revision"}, "updated_at": {"$ref": "#/$defs/NoticeTimestamp"},
+        "source_id": {"$ref": "#/$defs/NoticeSourceId"},
+        "creation_claims": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/NoticeClaimId"}},
+        "basis_claim": {"$ref": "#/$defs/NoticeClaimId"}, "source_revision": {"$ref": "#/$defs/Revision"},
+        "producer": {"$ref": "#/$defs/NoticeActor"}, "runtime": {"$ref": "#/$defs/NoticeRuntime"},
+        "input": {"$ref": "#/$defs/NoticeCreated"}, "policy": {"$ref": "#/$defs/NoticePolicy"},
+        "delivery": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/NoticeDelivery"}},
+        "integrity": {"$ref": "#/$defs/NoticeIntegrity"},
+        "seen_at": {"oneOf": [{"$ref": "#/$defs/NoticeTimestamp"}, {"type": "null"}]},
+        "dismissed_at": {"oneOf": [{"$ref": "#/$defs/NoticeTimestamp"}, {"type": "null"}]},
+        "snoozed_until": {"oneOf": [{"$ref": "#/$defs/NoticeTimestamp"}, {"type": "null"}]},
+        "control_revision": {"oneOf": [{"$ref": "#/$defs/Revision"}, {"type": "null"}]}
+      }
+    },
+    "NoticeFence": {
+      "description": "Notice-domain fence; delivery-only changes do not invalidate person controls. Null means no control has been accepted.",
+      "type": "object", "additionalProperties": false, "required": ["notice_id", "source_revision", "control_revision"],
+      "properties": {
+        "notice_id": {"$ref": "#/$defs/NoticeId"}, "source_revision": {"$ref": "#/$defs/Revision"},
+        "control_revision": {"oneOf": [{"$ref": "#/$defs/Revision"}, {"type": "null"}]}
+      }
+    },
+    "NoticeSeenParameters": {
+      "type": "object", "additionalProperties": false, "required": ["notice_id"],
+      "properties": {"notice_id": {"$ref": "#/$defs/NoticeId"}}
+    },
+    "NoticeDismissParameters": {
+      "type": "object", "additionalProperties": false, "required": ["notice_id"],
+      "properties": {"notice_id": {"$ref": "#/$defs/NoticeId"}}
+    },
+    "NoticeSnoozeParameters": {
+      "type": "object", "additionalProperties": false, "required": ["notice_id", "until"],
+      "properties": {
+        "notice_id": {"$ref": "#/$defs/NoticeId"},
+        "until": {"oneOf": [{"$ref": "#/$defs/NoticeTimestamp"}, {"type": "null"}]}
+      }
+    },
     "HarnessQuestionAnswerabilityReason": {"anyOf": [{"enum": ["adapter_missing", "adapter_unavailable", "resolved"]}, {"type": "string"}]},
     "HarnessInvalidAnswerReason": {"enum": [
       "unknown_option",
@@ -521,6 +661,17 @@
       }
     },
     "PublicationDefinition": {"type": "object", "additionalProperties": false, "description": "Canonical publication values with resolved compiler defaults; requires read.declarations.", "required": ["kind", "subject", "declaration", "revision", "token"], "properties": {"kind": {"const": "publication-definition"}, "subject": {"type": "string", "pattern": "^(agent|mission|schedule)/[^\\s]+$"}, "declaration": {"type": "object", "additionalProperties": true}, "revision": {"$ref": "#/$defs/Revision"}, "token": {"type": "string", "minLength": 1}}},
+    "MissionDeclaration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mission", "revision", "published_at", "text", "legacy"],
+      "properties": {
+        "mission": {"type": "string", "pattern": "^mission/[^\\s]+$"},
+        "revision": {"$ref": "#/$defs/Revision"},
+        "published_at": {"type": "integer", "minimum": 0},
+        "text": {"type": "string"},
+        "legacy": {"type": "boolean", "description": "Contains removed loop shapes that the current parser rejects."}
+      }
+    },
     "SubjectDefinition": {
       "type": "object",
       "additionalProperties": false,
@@ -566,6 +717,7 @@
             { "$ref": "#/$defs/DocumentReferences" },
             { "$ref": "#/$defs/SubjectDefinition" },
             { "$ref": "#/$defs/PublicationDefinition" },
+            { "$ref": "#/$defs/MissionDeclaration" },
             { "$ref": "#/$defs/AgentWorkspace" },
             { "$ref": "#/$defs/Page" },
             { "$ref": "#/$defs/OrderedMembershipPage" },
@@ -1517,6 +1669,8 @@
         "current_steps": { "type": "array", "items": { "type": "object", "required": ["id", "title", "state", "since"], "properties": { "id": { "$ref": "#/$defs/StepRunId" }, "title": { "type": ["string", "null"] }, "assignee": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }] }, "claimant": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }] }, "state": { "$ref": "#/$defs/WorkState" }, "since": { "$ref": "#/$defs/Timestamp" }, "progress_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." } } } },
         "must_act": {"$ref": "#/$defs/MustAct"},
         "state_since": { "$ref": "#/$defs/Timestamp" },
+        "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "Run creation, in Unix milliseconds." },
+        "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "First terminal transition, in Unix milliseconds; unaffected by outcome edits." },
         "outcome": { "oneOf": [{ "$ref": "#/$defs/MissionRunOutcome" }, { "type": "null" }], "description": "The outcome a person or an authorized agent set after the run finished." },
         "last_progress": { "type": ["string", "null"] },
         "blocker": { "type": ["object", "null"] },
@@ -1658,6 +1812,8 @@
       "type": "object",
       "required": ["id", "path", "state", "attempt", "since"],
       "properties": {
+        "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "First execution opening of the selected attempt, in Unix milliseconds." },
+        "completed_at": { "type": ["integer", "null"], "minimum": 0, "description": "Authoritative terminal transition of the selected attempt, in Unix milliseconds." },
         "id": { "$ref": "#/$defs/Id" },
         "path": { "type": "string" },
         "title": { "type": ["string", "null"] },
@@ -1929,6 +2085,7 @@
             "execution_started_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
             "nudged_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms", "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
             "execution_elapsed_ms": { "type": "integer", "minimum": 0, "x-st-codec": "duration-ms" },
+            "execution_waited_ms": { "type": "integer", "minimum": 0, "x-st-codec": "duration-ms", "description": "Accumulated execution wait against this attempt's wait budget." },
             "timeout_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "duration-ms" },
             "blocked_reason": { "type": ["string", "null"] },
             "blockers": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
@@ -1985,6 +2142,7 @@
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
             "fault": { "type": ["string", "null"], "description": "Current member reconcile failure; cleared by a successful pass." },
             "incarnation_id": { "type": ["string", "null"] },
+            "launch_contract": { "type": ["object", "null"], "description": "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. Omitted on roster rows and non-owning hosts." },
             "current_session_id": { "type": ["string", "null"] },
             "todo": { "oneOf": [{ "$ref": "#/$defs/AgentTodo" }, { "type": "null" }], "description": "Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible." },
             "presentation": { "$ref": "#/$defs/AgentPresentation", "description": "st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons." },

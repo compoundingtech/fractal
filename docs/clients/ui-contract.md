@@ -665,7 +665,7 @@ The terminal UI's revision card reads them in its own PR; until then no client s
 
 A read, not a projection: `mission-declaration.get`,
 `GET /v1/client/mission-declaration?mission=mission/…`, with an optional `revision`. Mission
-ids contain slashes, so it takes the subject as a query, as `publication-definition` does. It answers `{mission, revision, published_at, text}`, where `text` is
+ids contain slashes, so it takes the subject as a query, as `publication-definition` does. It answers `{mission, revision, published_at, text, legacy}`, where `published_at` is Unix milliseconds and `text` is
 the published revision rendered as KDL by Fractal's one renderer. Clients show it monospaced. It
 needs the same `read.declarations` grant as `publication.definition`. A refusal reads "Fractal does not
 show this declaration to this device". A published revision never changes, so this read reads
@@ -676,8 +676,10 @@ It redacts environment values and embedded declaration KDL. URI edges use stored
 published revisions do not retain URI locators. Legacy collection loops use their last accepted
 syntax with a `legacy loop shape` comment; the current parser still rejects those shapes.
 
-Today no client reads a declaration: the terminal UI shows one only in the demo, and
-`subject.definition` refuses missions.
+`legacy` is true when the revision contains removed loop shapes. An omitted revision selects
+the latest published revision; an unknown mission or revision returns not found. Reads never
+fall back from an unknown explicit revision to the latest. Clients show the served text, not
+a client-side serialization.
 
 ### Graph flags
 
