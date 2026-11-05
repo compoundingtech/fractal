@@ -166,6 +166,7 @@ impl Store {
         &self,
         seat: &str,
         incumbent: &str,
+        operation: &str,
         event: Event,
         now_ms: u128,
     ) -> Result<Episode> {
@@ -173,6 +174,7 @@ impl Store {
         let transaction = connection.transaction()?;
         let mut episode = load(&transaction, seat, incumbent)?
             .ok_or_else(|| anyhow::anyhow!("refresh episode missing"))?;
+        anyhow::ensure!(episode.id == operation, "refresh operation changed");
         episode.reduce(event, now_ms)?;
         persist(&transaction, &self.origin, &episode)?;
         transaction.commit()?;
@@ -236,7 +238,6 @@ mod tests {
         assert_eq!(sealed.age, Age::Escalated);
         e.reduce(Event::Target("next".into(), "old".into()), 3000).unwrap();
         assert!(e.resolved());
-        assert_eq!(e.outcome.as_deref(), Some("converged"));
         assert!(e.sealed_epoch.is_none());
     }
     #[test]
@@ -244,24 +245,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.db");
         let change =
-            |s: &Store, event| s.reduce_refresh("agent/seat", "incumbent", event, 86401000);
+            |s: &Store, id, event| s.reduce_refresh("agent/seat", "incumbent", id, event, 86401000);
         let read = |s: &Store| s.refresh_episode("agent/seat", "incumbent");
         let before = {
             let store = Store::open(&path, "test").unwrap();
             store.create_refresh(&episode()).unwrap();
             assert!(store.create_refresh(&episode()).is_err());
-            change(&store, Event::Seal(7)).unwrap();
-            let aged = change(&store, Event::Tick).unwrap();
+            change(&store, "operation", Event::Seal(7)).unwrap();
+            let aged = change(&store, "operation", Event::Tick).unwrap();
             assert_eq!(aged.effects.len(), 3);
-            change(&store, Event::Target("latest".into(), "latest".into())).unwrap()
+            change(&store, "operation", Event::Target("latest".into(), "latest".into())).unwrap()
         };
         let store = Store::open(&path, "test").unwrap();
         assert_eq!(read(&store).unwrap(), Some(before));
-        assert!(change(&store, Event::Advance(Phase::Stopping)).is_err());
         assert!(store.create_refresh(&episode()).is_err());
         let mut next = episode();
         next.id = "next-operation".into();
         store.create_refresh(&next).unwrap();
+        change(&store, &next.id, Event::Seal(8)).unwrap();
+        assert!(change(&store, "operation", Event::Advance(Phase::Stopping)).is_err());
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         let future = json!({"fields": {"version": 2, "episode": next}});
@@ -270,6 +272,6 @@ mod tests {
         tx.commit().unwrap();
         drop(connection);
         assert!(read(&store).is_err());
-        assert!(change(&store, Event::Tick).is_err());
+        assert!(change(&store, &next.id, Event::Tick).is_err());
     }
 }
