@@ -56,12 +56,13 @@ fn check(store: &Store, step: &StepRunView, requester: &str, reviewer: &str) -> 
         requester,
         reviewer,
     )
+    .inspect_err(|error| eprintln!("{error:?}"))
     .map_or_else(|error| error.code.to_owned(), |_| "ok".into())
 }
 
 #[test]
 fn agent_review_step_concrete_boundaries() {
-    for selector in ["agentless", r#"assigned-to "agent/${ST_MISSION_RUN}/worker""#] {
+    for selector in ["agentless", r#"assigned-to "agent/example/old""#] {
         let (store, step) = fixture(selector);
         assert_eq!(check(&store, &step, PERSON, REVIEWER), "ok");
         assert_eq!(check(&store, &step, REVIEWER, REVIEWER), CONFLICT);
@@ -77,6 +78,9 @@ fn agent_review_step_concrete_boundaries() {
     );
     assert!(step.claimant.is_none());
     assert_eq!(check(&store, &step, PERSON, REVIEWER), CONFLICT);
+    // Applied run-scoped declarations are covered by slice 5b.
+    let (store, step) = fixture(r#"assigned-to "agent/${ST_MISSION_RUN}/worker""#);
+    assert_eq!(check(&store, &step, PERSON, REVIEWER), UNKNOWN);
 }
 
 #[test]
