@@ -353,6 +353,7 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
         excused: Default::default(),
         left: Default::default(),
         machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
+        verification_attempt: None,
     };
     let output = render_checkpoint_status(&status);
     assert!(output.contains("last daemon start (advertised build)"));
