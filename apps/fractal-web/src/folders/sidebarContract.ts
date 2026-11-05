@@ -46,6 +46,8 @@ export type AgentFoldersProps = {
   readonly accessibleNames?: ReadonlyMap<string, string>
   readonly onSelect?: (id: string) => void
   readonly renderAgent?: (agent: SidebarAgent, touchDisclosure?: React.ReactNode) => React.ReactNode
+  /** Opt-in exact sizes for the supplied agent renderer; folders and status messages remain content-sized. */
+  readonly agentRowHeight?: (agent: SidebarAgent) => { readonly compact: number; readonly touch?: number } | undefined
   readonly renderFolderSignal?: (folder: SidebarFolder | SidebarGroup) => React.ReactNode
   readonly ariaLabel?: string
   readonly style?: StyleXStyles

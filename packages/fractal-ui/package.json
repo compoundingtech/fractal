@@ -30,6 +30,7 @@
     "test:palettes": "node --test src/legacy-palettes.test.mjs",
     "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
     "test:controls": "node --test --test-force-exit src/assistant-ui/composition/Controls.unit.test.mjs",
+    "test:sidebar-tree": "node --test --test-force-exit src/assistant-ui/sidebar/SidebarTree.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
     "test:human-time": "node --test --test-force-exit src/time/human-time.unit.test.mjs",
     "test:clock": "node --test --test-force-exit src/time/clock.unit.test.mjs",
