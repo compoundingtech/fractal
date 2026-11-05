@@ -251,6 +251,11 @@ const InspectorFailed = ({ recovery }: { readonly recovery: LazyPanelRecovery })
     <button type="button" onClick={recovery.onPress}>{recovery.label}</button>
   </div>
 </aside>
+/** The header's View KDL control and the row/header menu items that open a declaration sheet. */
+const prefetchDeclarationIntent = (event: React.SyntheticEvent<HTMLElement>) => {
+  const control = event.target instanceof Element ? event.target.closest('[aria-label="View KDL"], [role="menuitem"]') : null
+  if (control !== null && /^View (?:KDL|mission definition)$/.test(control.getAttribute('aria-label') ?? control.textContent?.trim() ?? '')) prefetchDeclaration()
+}
 /** Demand and idle intent share one request; a failed preload never poisons the next open. */
 let terminalDetailModule: Promise<typeof TerminalDetailModule> | undefined
 /** Set once the module resolves, so a warm reopen renders it directly instead of suspending a fresh lazy identity. */
@@ -411,6 +416,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
     hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref]') : null
+    prefetchDeclarationIntent(event)
   }
   React.useLayoutEffect(() => {
     // Use the row's existing Escape contract: it cancels pending hover intent as well
@@ -476,6 +482,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // Hover or focus on a panel toggle is intent: warm that body before the press.
   const prefetchPanelIntent = (event: React.SyntheticEvent<HTMLElement>) => {
     if (!(event.target instanceof Element)) return
+    prefetchDeclarationIntent(event)
     if (event.target.closest('[aria-label="Toggle right panel"], [aria-label="Agent details"]') !== null) detailsPanel.prefetch()
     if (event.target.closest('[role="tab"][aria-label="Changes"]') !== null) changesPanel.prefetch()
     if (terminalRef === undefined || event.target.closest('[aria-label="Toggle terminal drawer"]') === null) return
