@@ -481,7 +481,7 @@ impl ExecRuntime {
             }
             Some(ExecObservation::Indeterminate(error)) => {
                 tracing::debug!(guard_decision = "skip", reason = "indeterminate_generation", %error, "exec teardown skipped");
-                return Ok(());
+                anyhow::bail!("cannot signal exec `{id}`: generation is indeterminate: {error}");
             }
             None => {
                 tracing::debug!(guard_decision = "skip", reason = "missing_generation", "exec teardown skipped");
@@ -754,11 +754,8 @@ fn process_group_is_live(group: u32) -> Result<bool> {
             if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
                 continue;
             }
-            let stat = match fs::read_to_string(entry.path().join("stat")) {
-                Ok(stat) => stat,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
-                Err(error) => return Err(error.into()),
+            let Some(stat) = read_group_process_stat(&entry.path().join("stat"))? else {
+                continue;
             };
             let Some((_, tail)) = stat.rsplit_once(") ") else {
                 continue;
@@ -786,6 +783,20 @@ fn process_group_is_live(group: u32) -> Result<bool> {
     }
     #[cfg(not(target_os = "linux"))]
     Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn read_group_process_stat(path: &Path) -> std::io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(stat) => Ok(Some(stat)),
+        // A process can be reaped after open succeeds but before the proc inode
+        // is read. Linux reports ESRCH in that window, rather than ENOENT.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn process_is_absent(error: &anyhow::Error) -> bool {
@@ -1112,6 +1123,44 @@ mod tests {
         let error = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::ESRCH));
 
         assert!(process_is_absent(&error));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_reaped_after_its_stat_is_opened_does_not_abort_a_group_scan() {
+        use std::os::fd::AsRawFd as _;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let stat = fs::File::open(format!("/proc/{}/stat", child.id())).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Keep the opened proc inode after reaping, rather than relying on load to
+        // exit between read_to_string's open and read. Reopening it has the same ESRCH.
+        let path = PathBuf::from(format!("/proc/self/fd/{}", stat.as_raw_fd()));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap_err().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(read_group_process_stat(&path).unwrap(), None);
+        assert!(read_group_process_stat(Path::new("/proc/self")).is_err());
+    }
+
+    #[test]
+    fn an_indeterminate_generation_cannot_certify_a_stop_or_kill() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        fs::create_dir_all(&runtime.state_dir).unwrap();
+        fs::write(runtime.record_path("work"), b"unreadable generation").unwrap();
+
+        assert!(matches!(
+            runtime.observe("work").unwrap(),
+            Some(ExecObservation::Indeterminate(_))
+        ));
+        assert!(runtime.stop_if("work", Some("expected-generation")).is_err());
+        assert!(runtime.kill_if("work", Some("expected-generation")).is_err());
     }
 
     #[test]
