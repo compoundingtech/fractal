@@ -36,17 +36,24 @@ impl Contract {
 /// Capture the next declaration, using its member environment.
 pub fn capture(store: &Store, desired: &DesiredSubject, binaries: &BTreeMap<String, String>) -> Result<Contract> {
     let member = desired.member.as_ref().context("launch contract needs a member")?;
-    capture_effective(store, desired, binaries, &member.environment, false)
+    capture_effective(store, desired, binaries, &member.environment, false).map(|(contract, _)| contract)
 }
 
-/// Only digests leave this boundary. Running evidence reads installed destinations, never sources.
+/// Capture evidence and authoritative watch inputs, including absent candidates.
 pub fn capture_effective(
     store: &Store,
     desired: &DesiredSubject,
     binaries: &BTreeMap<String, String>,
     environment: &BTreeMap<String, String>,
     running: bool,
-) -> Result<Contract> {
+) -> Result<(Contract, BTreeSet<PathBuf>)> {
+    capture_effective_observed(store, desired, binaries, environment, running, &|_| Ok(()))
+}
+
+/// Observe dependencies before reading them, retaining watches even when capture fails.
+pub fn capture_effective_observed(store: &Store, desired: &DesiredSubject, binaries: &BTreeMap<String, String>,
+    environment: &BTreeMap<String, String>, running: bool, observe: &dyn Fn(&Path) -> Result<()>,
+) -> Result<(Contract, BTreeSet<PathBuf>)> {
     let member = desired.member.as_ref().context("launch contract needs a member")?;
     let workspace = Path::new(&member.workspace);
     let launch = match &member.launch {
@@ -59,6 +66,12 @@ pub fn capture_effective(
     let normalize = |path: PathBuf| path.components().filter(|c| *c != Component::CurDir).collect::<PathBuf>();
     let mut files = BTreeMap::new();
     let mut paths = BTreeSet::new();
+    let inputs = std::cell::RefCell::new(BTreeSet::new());
+    let input = |path: &Path| {
+        observe(path)?;
+        inputs.borrow_mut().insert(path.to_owned());
+        Ok(())
+    };
     let mut rule_directories = BTreeSet::new();
     if let Some(render) = crate::render::children(&desired.desired).iter()
         .find(|child| crate::render::name(child) == Some("render"))
@@ -75,9 +88,9 @@ pub fn capture_effective(
                 paths.insert(normalize(workspace.join(destination)));
             }
         } else {
-            let (writes, _) = crate::render::prepare_render(store, render, workspace)?;
+            let (writes, _) = crate::render::prepare_render(store, render, workspace, &input)?;
             for write in writes.into_iter().filter(|write| !write.append_lines) {
-                context_imports(&write.destination, &write.bytes, &mut paths)?;
+                context_imports(&write.destination, &write.bytes, &mut paths, &input)?;
                 files.insert(normalize(write.destination), (hex::encode(Sha256::digest(&write.bytes)), write.mode));
             }
         }
@@ -89,9 +102,10 @@ pub fn capture_effective(
             ".claude/CLAUDE.md", ".omp/config.yml", ".omp/config.yaml", ".omp/mcp.json",
             ".mcp.json", ".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"] {
             let path = normalize(ancestor.join(name));
+            input(&path)?;
             if path.is_file() { paths.insert(path); }
         }
-        claude_rules(&ancestor.join(".claude/rules"), &mut paths, &mut rule_directories)?;
+        claude_rules(&ancestor.join(".claude/rules"), &mut paths, &mut rule_directories, &input)?;
     }
     for (variable, names) in [("HOME", &[".claude/CLAUDE.md", ".omp/AGENTS.md", ".omp/config.yml", ".codex/config.toml"][..]),
         ("CLAUDE_CONFIG_DIR", &["CLAUDE.md", "settings.json"]), ("CODEX_HOME", &["AGENTS.md", "config.toml"]),
@@ -99,6 +113,7 @@ pub fn capture_effective(
         if let Some(base) = environment.get(variable) {
             for name in names {
                 let path = normalize(Path::new(base).join(name));
+                input(&path)?;
                 if path.is_file() { paths.insert(path); }
             }
             let rules = match variable {
@@ -106,7 +121,7 @@ pub fn capture_effective(
                 "CLAUDE_CONFIG_DIR" => Some(Path::new(base).join("rules")),
                 _ => None,
             };
-            if let Some(rules) = rules { claude_rules(&rules, &mut paths, &mut rule_directories)?; }
+            if let Some(rules) = rules { claude_rules(&rules, &mut paths, &mut rule_directories, &input)?; }
         }
     }
     let resolve = |value: &str| {
@@ -128,10 +143,11 @@ pub fn capture_effective(
         for path in std::env::split_paths(overlays) { paths.insert(normalize(workspace.join(path))); }
     }
     while let Some(path) = paths.pop_first() {
+        input(&path)?;
         if let std::collections::btree_map::Entry::Vacant(entry) = files.entry(path) {
             let path = entry.key();
             let bytes = std::fs::read(path).with_context(|| format!("read launch input {}", path.display()))?;
-            context_imports(path, &bytes, &mut paths)?;
+            context_imports(path, &bytes, &mut paths, &input)?;
             let mode = std::fs::metadata(path)?.permissions().mode() & 0o7777;
             entry.insert((hex::encode(Sha256::digest(bytes)), mode));
         }
@@ -142,28 +158,31 @@ pub fn capture_effective(
     let prompt = smallclaims::hash::canonical_hash(&("launch-prompt-v1", &member.driver, launch, files))?;
     let binary = smallclaims::hash::canonical_hash(&("launch-binary-v1", binaries))?;
     let digest = smallclaims::hash::canonical_hash(&("launch-contract-v1", &prompt, &binary))?;
-    Ok(Contract { version: 1, digest, prompt, binary })
+    Ok((Contract { version: 1, digest, prompt, binary }, inputs.into_inner()))
 }
 
-fn claude_rules(root: &Path, paths: &mut BTreeSet<PathBuf>, visited: &mut BTreeSet<PathBuf>) -> Result<()> {
+fn claude_rules(root: &Path, paths: &mut BTreeSet<PathBuf>, visited: &mut BTreeSet<PathBuf>, input: &dyn Fn(&Path) -> Result<()>) -> Result<()> {
+    input(root)?;
     if !root.is_dir() || !visited.insert(std::fs::canonicalize(root)?) { return Ok(()); }
     for entry in std::fs::read_dir(root)? {
         let path = entry?.path();
         if path.is_dir() {
-            claude_rules(&path, paths, visited)?;
+            claude_rules(&path, paths, visited, input)?;
         } else if path.extension().is_some_and(|extension| extension == "md") {
+            input(&path)?;
             paths.insert(std::fs::canonicalize(path)?);
         }
     }
     Ok(())
 }
 
-fn context_imports(path: &Path, bytes: &[u8], paths: &mut BTreeSet<PathBuf>) -> Result<()> {
+fn context_imports(path: &Path, bytes: &[u8], paths: &mut BTreeSet<PathBuf>, input: &dyn Fn(&Path) -> Result<()>) -> Result<()> {
     if path.extension().is_some_and(|extension| extension == "md")
         && let Ok(text) = std::str::from_utf8(bytes)
     {
         for import in text.split_whitespace().filter_map(|word| word.strip_prefix('@')) {
             let imported = path.parent().unwrap_or(Path::new(".")).join(import);
+            input(&imported)?;
             if imported.is_file() { paths.insert(std::fs::canonicalize(imported)?); }
         }
     }
@@ -180,6 +199,29 @@ mod tests {
             "version 2\nagent \"worker\" {{ workspace {:?}; harness \"omp\" {{ model \"model-a\"; args \"--tools\" \"read,write\"; }} }}",
             workspace.to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap()
     }
+    #[test]
+    fn launch_inputs_cover_missing_imports_render_sources_and_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let mut desired = declaration(root.path());
+        let source = root.path().join("source.md");
+        let imported = root.path().join("imported.md");
+        std::fs::write(&source, "@imported.md @absent.md").unwrap();
+        std::fs::write(&imported, "@deeper.md").unwrap();
+        std::fs::create_dir_all(root.path().join(".claude/rules/nested")).unwrap();
+        render(&mut desired, &source, "AGENTS.md");
+        let (_, inputs) = capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), false).unwrap();
+        for path in [&source, &imported, &root.path().join("absent.md"), &root.path().join("deeper.md"),
+            &root.path().join("CLAUDE.local.md"), &root.path().join(".claude/rules/nested")] {
+            assert!(inputs.contains(path), "missing dependency {}", path.display());
+        }
+        std::fs::remove_file(&source).unwrap();
+        let seen = std::cell::RefCell::new(BTreeSet::new());
+        assert!(capture_effective_observed(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), false,
+            &|path| { seen.borrow_mut().insert(path.to_owned()); Ok(()) }).is_err());
+        assert!(seen.into_inner().contains(&source), "failed render input must remain watched");
+    }
+
 
     fn render(desired: &mut DesiredSubject, source: &Path, destination: &str) {
         desired.desired["children"].as_array_mut().unwrap().push(json!({
@@ -329,9 +371,9 @@ mod tests {
         let next = capture(&store, &desired, &BTreeMap::new()).unwrap();
         assert_ne!(old.prompt, next.prompt);
         std::fs::remove_file(&source).unwrap();
-        assert_eq!(old, capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), true).unwrap());
+        assert_eq!(old, capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), true).unwrap().0);
         crate::render::atomic_write_mode(&root.path().join("AGENTS.md"), b"B", 0o644).unwrap();
-        assert_eq!(next, capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), true).unwrap());
+        assert_eq!(next, capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), true).unwrap().0);
     }
 
     #[test]
