@@ -72,15 +72,12 @@ pub(super) fn claim(
     fields: serde_json::Value,
     at: i64,
 ) {
+    let at = at.to_string();
+    let body = json!({"fields":fields}).to_string();
     c.execute(
         /* sqlite-large-value: allow-for-now lv-he744e35e69c5 owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,subject,kind,body,accepted_at_unix_ms)
         VALUES(?1||'-'||?2||'-'||?3,?1,?2,?4,?3)",
-        rusqlite::params![
-            subject,
-            kind,
-            at.to_string(),
-            json!({"fields":fields}).to_string()
-        ],
+        rusqlite::params![subject, kind, at, body],
     )
     .unwrap();
 }
@@ -97,25 +94,21 @@ pub(super) fn seed(c: &rusqlite::Connection, n: i64, end: i64) {
         rusqlite::params![format!("s-{n}"), format!("r-{n}")],
     )
     .unwrap();
-    claim(
-        c,
-        &format!("s-{n}"),
-        "work.claimed",
-        json!({"attempt":1}),
-        1,
-    );
-    claim(
-        c,
-        &format!("s-{n}"),
-        "step-run.state",
-        json!({"attempt":1,"status":"completed"}),
-        end,
-    );
+    let step = format!("s-{n}");
+    let run = format!("mission-run/r-{n}");
+    let completed = json!({"attempt":1,"status":"completed"});
+    for (subject, kind, fields, at) in [
+        (&step, "work.claimed", json!({"attempt":1}), 1),
+        (&step, "step-run.state", completed, end),
+        (&run, "mission-run.state", json!({"phase":"terminal"}), end),
+    ] {
+        claim(c, subject, kind, fields, at);
+    }
 }
 
 fn retained(c: &rusqlite::Connection) -> (i64, i64) {
     c.query_row(
-        "SELECT COUNT(*),MIN(ended) FROM local_run_eta_samples",
+        "SELECT COUNT(*),COALESCE(MIN(ended),0) FROM local_run_eta_samples",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
@@ -123,17 +116,48 @@ fn retained(c: &rusqlite::Connection) -> (i64, i64) {
 }
 
 #[test]
-fn eta_populated_open_hydrates_only_retained_candidate_claims() {
-    let mut c = fixture();
-    for n in 0..1000 {
-        seed(&c, n, n + 10);
+fn eta_populated_open_is_bounded_with_unusable_and_long_history_candidates() {
+    for unusable in [false, true] {
+        let mut c = fixture();
+        for n in 0..1000 {
+            seed(&c, n, n + 10);
+        }
+        for n in 936..1000 {
+            for at in 2000..2100 {
+                claim(
+                    &c,
+                    &format!("s-{n}"),
+                    "work.claimed",
+                    json!({"attempt":2}),
+                    at,
+                );
+            }
+        }
+        if unusable {
+            c.execute(/* sqlite-large-value: allow-for-now lv-hecdc80d10d31 owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE kind='work.claimed' AND json_extract(body,'$.fields.attempt')=1 AND CAST(substr(subject,3) AS INTEGER)>=936", []).unwrap();
+        }
+        super::run_eta::BODY_ROWS.with(|count| count.set(0));
+        let tx = c.transaction().unwrap();
+        super::run_eta::open(&tx).unwrap();
+        assert_eq!(retained(&tx), if unusable { (0, 0) } else { (64, 946) });
+        super::run_eta::BODY_ROWS
+            .with(|count| assert_eq!(count.get(), if unusable { 64 } else { 128 }));
+        if unusable {
+            for (sql, expected) in [
+                (/* sqlite-large-value: allow-for-now lv-h3c1e6e8ad66d owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE subject='s-999'", (1, 945)),
+                (/* sqlite-large-value: allow-for-now lv-h85885f47ee57 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='r-998'", (2, 944)),
+                (
+                    /* sqlite-large-value: allow-for-now lv-h69dcdb7ef848 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET definition_hash='other' WHERE subject='s-997'",
+                    (3, 943),
+                ),
+            ] {
+                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h1acd02af02ee owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+                super::run_eta::flush(&tx).unwrap();
+                assert_eq!(retained(&tx), expected);
+            }
+        }
+        tx.commit().unwrap();
     }
-    super::run_eta::BODY_ROWS.with(|count| count.set(0));
-    let tx = c.transaction().unwrap();
-    super::run_eta::open(&tx).unwrap();
-    assert_eq!(retained(&tx), (64, 946));
-    super::run_eta::BODY_ROWS.with(|count| assert_eq!(count.get(), 128));
-    tx.commit().unwrap();
 }
 
 #[test]
@@ -145,70 +169,54 @@ fn eta_window_refills_after_failure_deletion_and_completion_reordering() {
     let tx = c.transaction().unwrap();
     super::run_eta::open(&tx).unwrap();
     assert_eq!(retained(&tx), (64, 16));
-    tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h287bdf68b661 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='failed' WHERE id='r-69'",
-        [],
-    )
-    .unwrap();
-    super::run_eta::flush(&tx).unwrap();
-    assert_eq!(retained(&tx), (64, 15));
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hf5ac5368b717 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='r-68'", [])
-        .unwrap();
-    super::run_eta::flush(&tx).unwrap();
-    assert_eq!(retained(&tx), (64, 14));
-    tx.execute(
-        /* sqlite-large-value: allow-for-now lv-hcbae0b7ea953 owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='2'
-        WHERE subject='s-67' AND kind='step-run.state'",
-        [],
-    )
-    .unwrap();
-    super::run_eta::flush(&tx).unwrap();
-    assert_eq!(retained(&tx), (64, 13));
-    tx.execute(
-        /* sqlite-large-value: allow-for-now lv-he076be86416d owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='100'
-        WHERE subject='s-0' AND kind='step-run.state'",
-        [],
-    )
-    .unwrap();
-    super::run_eta::flush(&tx).unwrap();
-    assert_eq!(retained(&tx), (64, 14));
+    for (sql, expected) in [
+        (
+            "UPDATE mission_runs SET status='failed' WHERE id='r-69'",
+            (63, 16),
+        ),
+        ("DELETE FROM mission_runs WHERE id='r-68'", (63, 15)),
+        (
+            /* sqlite-large-value: allow-for-now lv-hc89abf19ea11 owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='2' WHERE subject='s-67' AND kind='step-run.state'",
+            (63, 2),
+        ),
+        (
+            /* sqlite-large-value: allow-for-now lv-hac6412f7b9a9 owner=fractal_store::store::run_eta_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='100' WHERE subject IN('s-0','mission-run/r-0') AND kind IN('step-run.state','mission-run.state')",
+            (63, 2),
+        ),
+    ] {
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-haa75b699e8f2 owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+        super::run_eta::flush(&tx).unwrap();
+        assert_eq!(retained(&tx), expected);
+    }
+    assert_eq!(
+        tx.query_row(
+            "SELECT duration FROM local_run_eta_samples WHERE subject='s-0'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        99
+    );
     tx.commit().unwrap();
 }
 
 #[test]
-fn eta_window_candidate_bounds_preserve_selected_attempt_and_path_isolation() {
+fn eta_nonterminal_changes_do_not_dirty_or_refold_samples() {
     let mut c = fixture();
-    for n in 0..66 {
-        seed(&c, n, n + 10);
-    }
-    // An old attempt's late terminal edge is only a bound, not this sample's end.
-    claim(
-        &c,
-        "s-0",
-        "step-run.state",
-        json!({"attempt":2,"status":"completed"}),
-        1000,
-    );
-    c.execute(
-        /* sqlite-large-value: allow-for-now lv-hcf1e1f243a70 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET step_path='other' WHERE subject='s-65'",
+    seed(&c, 0, 10);
+    let tx = c.transaction().unwrap();
+    super::run_eta::open(&tx).unwrap();
+    super::run_eta::BODY_ROWS.with(|count| count.set(0));
+    tx.execute(/* sqlite-large-value: allow-for-now lv-he81e44f26b12 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id,current_generation_id,phase,status) VALUES('active','generation','working','running')", []).unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h1a5e4594acca owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs VALUES('active-step','active','generation','hash','build',1,'working')", []).unwrap();
+    claim(&tx, "active-step", "work.claimed", json!({"attempt":1}), 20);
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-h2b6859136770 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='claimed' WHERE subject='active-step'",
         [],
     )
     .unwrap();
-    let tx = c.transaction().unwrap();
-    super::run_eta::open(&tx).unwrap();
-    let samples = |path: &str| {
-        tx.query_row(
-            "SELECT COUNT(*),MIN(ended) FROM local_run_eta_samples WHERE step_path=?1",
-            [path],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .unwrap()
-    };
-    assert_eq!(samples("build"), (64, 11));
-    assert_eq!(samples("other"), (1, 75));
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h0de3a8c1ab61 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE subject='s-64'", [])
-        .unwrap();
+    let pending: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM local_run_eta_pending)+(SELECT COUNT(*) FROM local_run_eta_dirty)", [], |row| row.get(0)).unwrap();
+    assert_eq!(pending, 0);
     super::run_eta::flush(&tx).unwrap();
-    assert_eq!(samples("build"), (64, 10));
-    assert_eq!(samples("other"), (1, 75));
+    super::run_eta::BODY_ROWS.with(|count| assert_eq!(count.get(), 0));
 }
