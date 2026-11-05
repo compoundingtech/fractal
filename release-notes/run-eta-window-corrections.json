@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Maintain ETA windows from a bounded set of terminal runs without refolding active work",
+  "replay": {"status": "changed", "detail": "Only relevant terminal transitions and terminal-run corrections or deletions dirty windows through keyed run lookups. Explicit dirty keys preserve unsampled removals; every affected window is cleared before rebuilding so sampled steps can move to earlier definition hashes or paths."},
+  "schema": {"status": "changed", "detail": "Add the member-local rebuildable local_run_eta_dirty key set and advance initialization to version 3. Candidates are limited in SQL to the newest 64 terminal runs per definition hash, ordered by first terminal-transition time and run subject, before selected-attempt claim bodies are loaded."},
+  "rules": {"status": "none", "detail": "Unusable candidates consume the run bound but add no samples; confidence reports the true sample count and missing samples yield null. Work is bounded by 64 candidate runs per hash times those runs' own claims, never older step histories."},
+  "compatibility": {"status": "none", "detail": "No wire fields, claim kinds or serving schemas change."},
+  "downtime": {"status": "none", "detail": "Initialization runs during normal store opening without a destructive migration."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Derived samples can be rebuilt from retained claims; original data is unchanged."}
+}

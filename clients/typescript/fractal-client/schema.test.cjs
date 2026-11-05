@@ -373,7 +373,7 @@ test('prompt answers keep ordinary text bounds and optional delegation across th
     }
 });
 
-test('queued mission deadlines decode null and admission timestamps', async () => {
+test('mission runs decode queued deadlines and zero-sample ETA with no remaining steps', async () => {
     const [{ Option, Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
     for (const mode of ['strict', 'tolerant']) {
@@ -388,6 +388,12 @@ test('queued mission deadlines decode null and admission timestamps', async () =
         assert(Option.isSome(decode(queued).run_details[0].deadline));
         assert.equal(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].deadline,
             '2026-09-20T11:05:00.000Z');
+        for (const method of ['per-step', 'critical-path']) {
+            queued.run_details[0].eta = { as_of: 0, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method, samples: 0 } };
+            assert.deepEqual(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].eta, queued.run_details[0].eta);
+            queued.run_details[0].eta.basis.samples = -1;
+            assert.throws(() => decode(queued));
+        }
     }
 });
 

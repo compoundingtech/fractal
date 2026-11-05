@@ -289,6 +289,8 @@ pub mod mission_ivm;
 pub mod run_eta;
 #[cfg(test)]
 mod run_eta_tests;
+#[cfg(test)]
+mod run_eta_review_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
