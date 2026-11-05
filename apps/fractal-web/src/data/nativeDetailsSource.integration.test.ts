@@ -1,6 +1,6 @@
 import { it } from '@effect/vitest'
 import { FractalClient } from '@fractal/client'
-import { openAgent } from '@fractal/sdk/effect'
+import { openAgent } from '@fractal/sdk/read'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'

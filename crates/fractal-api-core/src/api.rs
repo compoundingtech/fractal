@@ -7985,10 +7985,11 @@ fn publication_evidence_check(store: &Store) -> DoctorCheck {
 }
 
 /// `seats` (seat, count, oldest), with each seat whose host keeps its receipts counted from what
-/// that host answers about its held mail sent before `before`: read or closed mail goes, and mail
-/// the host did not answer for stays, as this member cannot say it was read. A seat with more held
+/// that host answers about its held mail sent before `before`: mail its seat took any step with
+/// (staged, delivered, read or closed) goes, as any such claim or mark clears the host's own held
+/// flag, and mail the host did not answer for stays, as this member cannot say it was offered. A seat with more held
 /// mail than one read asks of a host keeps this member's own count, which can only be higher.
-fn relayed_held_mail(
+pub fn relayed_held_mail(
     state: &AppState,
     seats: Vec<(String, u64, u128)>,
     before: u128,
@@ -8040,7 +8041,7 @@ fn relayed_held_mail(
     for (subject, (seat, at)) in sent {
         if relayed
             .get(&subject)
-            .is_some_and(|answer| matches!(answer.status(), Some("read" | "closed")))
+            .is_some_and(|answer| answer.status().is_some())
         {
             continue;
         }
@@ -8067,7 +8068,20 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
     let switched = state.store.marks_switched();
     let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
     let message = match (switched, blockers) {
-        (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
+        (Ok(true), _) => {
+            let staged = state.store.staged_switched();
+            let staged_blockers = crate::store::marks_switch::staged_blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+            match (staged, staged_blockers) {
+                (Ok(true), _) => "on: this member records its own seats' staging, delivery, read and close as local marks".to_owned(),
+                (Ok(false), Ok(blockers)) if blockers.is_empty() => "on: this member records its own seats' delivery, read and close as local marks; every member is ready for stagings, which turn to marks at the next check".to_owned(),
+                (Ok(false), Ok(blockers)) => format!(
+                    "on: this member records its own seats' delivery, read and close as local marks; stagings stay claims until every other member advertises {}=1, whose reads count a host's staging ({})",
+                    crate::store::marks_switch::STAGED_FEATURE, blockers.join("; ")),
+                (Err(error), _) | (_, Err(error)) => {
+                    return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+                }
+            }
+        }
         (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
         (Ok(false), Ok(blockers)) => format!(
             "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",
@@ -8077,6 +8091,29 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
         }
     };
     DoctorCheck { name: "message-marks".into(), status: "pass".into(), message }
+}
+
+/// How long a staging may wait for its delivery before doctor calls it stalled: in-flight mail is
+/// staged and delivered within seconds, and a rollback never follows a staging that closely.
+const STALLED_STAGING_MS: u128 = 60_000;
+
+/// While this member's seats have mail staged as a mark over [`STALLED_STAGING_MS`] ago and not yet
+/// delivered, rolling this member back below v0.3.26 would offer that mail again: a warning that
+/// names the safe floor and the release note's steps. None while there is no such mail, so a strict
+/// doctor does not fail on ordinary in-flight mail.
+fn message_staging_check(state: &AppState, now: u128) -> Option<DoctorCheck> {
+    let name = "message-staging-rollback".to_owned();
+    match crate::store::message_marks::undelivered_staged(&state.store.readers.get(), now.saturating_sub(STALLED_STAGING_MS)) {
+        Ok((0, _)) => None,
+        Ok((count, first)) => Some(DoctorCheck {
+            name,
+            status: "warn".into(),
+            message: format!(
+                "{count} message(s) this member's seats staged as local marks over a minute ago are not delivered yet ({}): rolling this member back to v0.3.25 or earlier would offer them again; v0.3.26 is the safe floor. To roll back below it, first roll every member to v0.3.26, wait a minute for stagings to turn back to claims, and let staged mail deliver (release note staging-marks-writer)",
+                first.as_deref().unwrap_or("unknown")),
+        }),
+        Err(error) => Some(DoctorCheck { name, status: "warn".into(), message: format!("{error:#}") }),
+    }
 }
 
 /// Held silent mail is never lost: unread past a day, it is listed for its seat. A seat whose
@@ -9441,7 +9478,9 @@ fn doctor_report_within(
     checks.check("publication-evidence", || {
         Ok(vec![publication_evidence_check(&state.store)])
     });
-    checks.check("message-marks", || Ok(vec![message_marks_check(state)]));
+    checks.check("message-marks", || {
+        Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
+    });
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });

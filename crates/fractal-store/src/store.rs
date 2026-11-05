@@ -248,6 +248,9 @@ pub mod idle_mail;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
+pub mod message_outbox;
+#[cfg(test)]
+mod message_outbox_tests;
 pub mod relayed_closes;
 #[cfg(test)]
 mod relayed_closes_tests;
@@ -291,6 +294,10 @@ pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
+#[cfg(test)]
+mod run_eta_tests;
+#[cfg(test)]
+mod run_eta_review_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
@@ -20099,6 +20106,11 @@ fn enrich_step_wake_with(
         delivery_acknowledges: harness.as_ref().is_some_and(|harness| {
             harness.state == "working" && current_incarnation_key == wake_incarnation_key
         }),
+        staging_acknowledges: harness.as_ref().is_some_and(|harness| {
+            harness.state == "working"
+                && current_incarnation_key == wake_incarnation_key
+                && matches!(harness.driver.as_deref(), Some("pi" | "omp"))
+        }),
     };
     let failure = connection
         .query_row(
@@ -22486,12 +22498,13 @@ pub fn append_claim_with_commit_context(
             }
             // A seat this member hosts records its own delivery, read and close of graph mail as a
             // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
-            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // recorded_as_mark), and its staging once every other member counts a host's staging
+            // too (marks_switch::staged_switched_tx, read here in this transaction), whoever acts for it:
             // the fences, replays and transition rules above have applied. A write acting for a
             // retired seat or under a delegation stays a claim, which carries its proof, and so
             // does a native read, whose proof links the native turn to its claim
             // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
-            if message_marks::recorded_as_mark(&input.kind)
+            if message_marks::recorded_as_mark(transaction, &input.kind).map_err(internal)?
                 && context.native_receipt.is_none()
                 && !input.fields.contains_key("acting_for")
                 && !input.fields.contains_key("delegation")

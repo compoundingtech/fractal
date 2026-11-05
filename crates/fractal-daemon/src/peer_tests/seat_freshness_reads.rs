@@ -907,7 +907,7 @@ async fn a_faults_targets_and_a_wake_read_a_relay_hosts_seat_from_it() {
             last_attempt_at_unix_ms: None,
             acknowledged_by: acknowledged_by.map(str::to_owned),
             failure: None,
-            asks: crate::model::WakeAsks { messages: vec![message.into()], delivery_acknowledges },
+            asks: crate::model::WakeAsks { messages: vec![message.into()], delivery_acknowledges, staging_acknowledges: false },
         });
         step
     };
@@ -1057,4 +1057,93 @@ async fn a_hosts_close_of_a_reminders_winner_makes_the_next_one_current_on_anoth
     let resource = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
     let resource = resource.iter().find(|item| item["id"] == winner).unwrap();
     assert_eq!(resource["state"], "sent", "this member's own records: {resource}");
+}
+
+/// A staging the host records as a mark reads as staged on another member, below every mark: in
+/// the message's status and delivery, in a work wake whose driver's staging is its delivery, and
+/// in doctor's held mail, where held mail the host's seat took any step with goes, as it does from
+/// the host's own held flag. Mail the host did not stage stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_hosts_staging_mark_reads_as_staged() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _birch) = owner(root.path()).await;
+    for subject in ["message/00000000000000e1", "message/00000000000000e2"] {
+        append(
+            &owner,
+            subject,
+            "message.sent",
+            Some("agent/sender"),
+            json!({"from": "agent/sender", "to": cedar, "content": "hello", "status": "sent",
+                   "tags": [crate::silent::SILENT_TAG]}),
+        );
+    }
+    message_marks::record(&owner, "message/00000000000000e1", message_marks::STAGED, &cedar).unwrap();
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    // Held mail is indexed as the replicated mail is projected.
+    viewer.project_replication_backlog().unwrap();
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let staged = BTreeMap::from([(OWNER.to_owned(), vec!["message/00000000000000e1".to_owned()])]);
+    let answered = message_reads::read(&state, staged, message_reads::STATUS_DEADLINE).await;
+    assert_eq!(
+        answered.get("message/00000000000000e1").and_then(Relayed::status),
+        Some("staged"),
+        "{answered:?}"
+    );
+    let socket = serve(root.path(), state.clone()).await;
+    let status: Value = crate::client::Client::unix(&socket)
+        .get("/v1/messages/delivery/message/00000000000000e1")
+        .await
+        .unwrap();
+    assert_eq!(status["delivery"]["phase"], "staged", "{status}");
+
+    let worker = declare(&viewer, "viewer-seat", VIEWER);
+    let step = viewer
+        .start_work(&crate::model::WorkStartRequest {
+            actor: worker,
+            title: "Inspect a fixture".into(),
+            idempotency_key: "staged-wake-step".into(),
+        })
+        .unwrap();
+    let wake = |staging_acknowledges: bool| {
+        let mut step = step.clone();
+        step.wake = Some(crate::model::WorkWakeView {
+            assignee: cedar.clone(),
+            assignee_state: "working".into(),
+            incarnation_id: "incarnation".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: None,
+            acknowledged_by: None,
+            failure: None,
+            asks: crate::model::WakeAsks {
+                messages: vec!["message/00000000000000e1".into()],
+                delivery_acknowledges: true,
+                staging_acknowledges,
+            },
+        });
+        step
+    };
+    let mut steps = [wake(true), wake(false)];
+    crate::api::message_reads::read_work_wakes(&state, steps.iter_mut()).await.unwrap();
+    assert_eq!(
+        steps.iter().map(|step| step.wake.as_ref().unwrap().acknowledged_by.as_deref()).collect::<Vec<_>>(),
+        [Some("delivery"), None],
+        "a staging is a delivery only for a driver whose staging is its delivery"
+    );
+
+    let later = smallclaims::store::now_ms() + 60_000;
+    let runtime = tokio::runtime::Handle::current();
+    let seats = vec![(cedar.clone(), 2, 0)];
+    let held = tokio::task::spawn_blocking(move || {
+        crate::api::relayed_held_mail(&state, seats, later, Some(&runtime)).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        held.iter().map(|(seat, count, _)| (seat.as_str(), *count)).collect::<Vec<_>>(),
+        [(cedar.as_str(), 1)],
+        "the staged message is offered; the other is still held"
+    );
 }

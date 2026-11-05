@@ -271,7 +271,12 @@ pub async fn fleet_leave_claim(
 ) -> Result<Json<ClaimRecord>, ApiError> {
     concrete_person(&request.person)?;
     let store = state.store.clone();
-    let claim = blocking_action(move || store.leave_fleet(&request.person)).await?;
+    let claim = blocking_action(move || {
+        let shard_high_water = crate::store::messages_shard::leave_high_water(&store)
+            .map_err(smallclaims::error::internal)?;
+        store.leave_fleet(&request.person, &shard_high_water)
+    })
+    .await?;
     signal_changed(&state);
     Ok(Json(claim))
 }
