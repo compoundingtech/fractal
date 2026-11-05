@@ -6725,6 +6725,8 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     // The release's archive: this build restores it, and reads the same mail on it.
     let release_archive = root.path().join("release.jsonl");
     let release_records = backup(&o, &release_archive, None);
+    let release_digest = release_records[0]["data"]["registry_digest"].clone();
+    assert!(release_digest.as_str().is_some_and(|digest| !digest.is_empty()));
     let release_version = release_records[0]["data"]["version"].as_u64().unwrap();
     assert!(release_version < 5, "{}", release_records[0]);
     let (mut from_release, report) = restored_node(root.path(), "from-release", &release_archive).await;
@@ -6752,11 +6754,14 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     o.binary = old.clone();
     let theirs = backup(&o, &root.path().join("release-of-upgraded.jsonl"), Some(&copy));
     o.binary = PathBuf::from(st3());
+    let current_digest = fractal_daemon::store::Store::open_memory("archive-writer").unwrap()
+        .backup_header().unwrap().registry_digest;
+    assert_eq!(ours[0]["data"]["registry_digest"], current_digest);
+    assert_eq!(theirs[0]["data"]["registry_digest"], release_digest);
     let without_build = |records: &[Value]| {
         let mut header = records[0].clone();
         header["data"].as_object_mut().unwrap().remove("source_build");
-        // This build knows claim kinds the release does not (fleet.shard-bounds), so the registry
-        // digest differs; a restore compares what it decides only when the registries match.
+        // Like source_build, the writer's registry digest changes when a release adds claim kinds.
         header["data"].as_object_mut().unwrap().remove("registry_digest");
         // The end record's hash covers the header, so only its count can match.
         let end = &records[records.len() - 1];

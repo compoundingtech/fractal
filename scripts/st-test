@@ -25,7 +25,7 @@ prints `already signed`, so re-running on an unchanged tree is near instant (wit
 the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
 The command always runs in a clean worktree of that commit, never
 in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
-ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one; waiters are served in the build host's
+ones per repository (~/.cache/st-test/pools/<hash of the canonical origin>/tree-N, one flock each, so no two runs share one; waiters are served in the build host's
 cargo-priority order, then arrival), reset to the
 commit and stripped of untracked and ignored files (except the megarepo members, node_modules and target/compat-baselines) before every run: the same path every time keeps cargo's fingerprints and
 sccache's absolute-path keys valid, so a second run is warm. Nothing is linked in from here: when the tree
@@ -105,6 +105,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
@@ -1252,26 +1253,56 @@ def build_slot_ready():
     return True, f'{free} of {total} heavy slots free'
 
 
-def normalise_origin(url):
-    """A remote URL as the same repository whatever way it was cloned: https://host/o/r.git, ssh://git@host/o/r and git@host:o/r.git alike."""
+def normalise_origin(url, relative_to=None):
+    """An origin with transport spellings normalized; case-sensitive paths and nondefault endpoints stay distinct."""
     url = url.strip()
+    if url.startswith('file://'):
+        parsed = urlsplit(url)
+        return os.path.realpath(unquote(parsed.path)) if parsed.netloc in ('', 'localhost') else url
     match = re.fullmatch(r'(?:[\w.-]+@)?([\w.-]+):(?!//)(.+)', url)  # scp-like: git@host:owner/repo.git
     if match and not url.startswith(('/', '.')):
         host, path = match.groups()
     else:
-        match = re.fullmatch(r'[a-z][a-z0-9+.-]*://(?:[^/@]+@)?([^/:]+)(?::\d+)?/(.+)', url, re.I)
-        host, path = match.groups() if match else ('', url)
-    path = re.sub(r'(\.git)?/*$', '', path.strip('/') if host else path.rstrip('/'))
-    return f'{host}/{path}'.lower() if host else path.lower()
+        match = re.fullmatch(r'([a-z][a-z0-9+.-]*)://(?:[^/@]+@)?([^/:]+)(?::(\d+))?/(.+)', url, re.I)
+        if not match:
+            # Local Git paths are case-sensitive and repo and repo.git can be separate repositories. Resolve relative paths in the
+            # caller's checkout rather than giving identically spelled paths in different clones the same pool.
+            return os.path.realpath(os.path.join(relative_to or os.getcwd(), url)) if '://' not in url else url
+        scheme, host, port, path = match.groups()
+        default_port = {'https': 443, 'http': 80, 'ssh': 22, 'git': 9418}.get(scheme.lower())
+        if default_port is None or (port and int(port) != default_port):
+            return url  # a different endpoint is not a known spelling of the default repository
+    path = path.strip('/').removesuffix('.git')
+    if host.lower() == 'github.com':
+        host, path = host.lower(), path.lower()  # GitHub owner/repository names are case-insensitive
+    return f'{host}/{path}'
 
 
-def pool_root():
-    """The pool of this repository's ORIGIN: every clone of one origin shares it (one warm target and tree path per slot), so a throwaway
+def pool_origin_aliases(base):
+    """Pinned renames from the accepted base, never the branch or a live redirect. Missing on older bases means no renames."""
+    # Canonical identities are chosen to keep existing pools warm, not because they are the current repository names.
+    blob = config_blob(base, 'repo-aliases.json')
+    if blob is None:
+        return {}
+    try:
+        aliases = json.loads(blob)
+        if not isinstance(aliases, dict) or any(not isinstance(old, str) or not isinstance(new, str) or not old or not new
+                                                or old == new or new in aliases for old, new in aliases.items()):
+            raise ValueError('expected an object of former identities to canonical identities, without chains')
+    except (ValueError, TypeError) as error:
+        raise Failure(f'{base}:repo-aliases.json: {error}') from error
+    return aliases
+
+
+def pool_root(base='origin/main'):
+    """The pool of this repository's canonical ORIGIN: every clone of one origin shares it (one warm target and tree path per slot), so a throwaway
     clone reuses the warm slots of an existing one instead of building a 35-44 GB target of its own. A clone without an origin keeps a pool
     of its own, keyed by its git common dir."""
     origin = text(git('config', '--get', 'remote.origin.url', check=False))
     if origin:
-        key = 'o-' + hashlib.sha256(normalise_origin(origin).encode()).hexdigest()[:16]
+        identity = normalise_origin(origin, relative_to=text(git('rev-parse', '--show-toplevel')))
+        identity = pool_origin_aliases(base).get(identity, identity)
+        key = 'o-' + hashlib.sha256(identity.encode()).hexdigest()[:16]
     else:
         common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
         key = 'c-' + hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
@@ -3378,7 +3409,7 @@ def run_main(argv, cleanup):
         cleanup.callback(burst.release)
         try:
             if pool_trees:
-                root = pool_root()
+                root = pool_root(base_commit)
                 target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
                 # The slots can change while the run waits; a free tree is taken only when the run's build could start (slot first).
                 n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, slot_ready=build_slot_ready, waits=tree_waits,

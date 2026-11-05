@@ -2279,31 +2279,6 @@
     "projection": "fleet",
     "wakes_reconciler": false
   },
-  "fleet.shard-bounds": {
-    "kind": "fleet.shard-bounds",
-    "subjects": [
-      "host"
-    ],
-    "fields": {
-      "member_key": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "shard_high_water": {
-        "value_type": "object",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": "fleet",
-    "wakes_reconciler": false
-  },
   "gate.head-bound": {
     "kind": "gate.head-bound",
     "subjects": [
@@ -9837,6 +9812,77 @@
     "additional_fields": false,
     "write_policy": "authorized-participant",
     "cardinality": "once-per-attempt",
+    "projection": "work",
+    "wakes_reconciler": true
+  },
+  "work.handoff-returned": {
+    "kind": "work.handoff-returned",
+    "subjects": [
+      "step-run"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "disposition": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "withdrawn",
+          "declined"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "handoff_claim": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "handoff_message": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "handoff_to": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "readiness_epoch": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "return_request": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "status": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "authorized-participant",
+    "cardinality": "append",
     "projection": "work",
     "wakes_reconciler": true
   },

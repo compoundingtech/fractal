@@ -1400,6 +1400,14 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 | Declarative/owned-set apply, quick agent creation | Direct declarations carry a primary caller association. Compound publication operations retain their existing durable operation ids; identical retries are no-ops. Claimless unchanged apply is safe to recompute. A compound-only apply with different bytes and a reused key after expiry is a new apply, so clients must never reuse keys. Declaration and quick-agent response commit together. |
 | Resource observation completion | Recognise the primary actual observation/state/delivery claim and refuse terminally before another delivery. A completion with no recorded change has no receipt/effect to repeat. |
 
+The store's person-handoff return transition records `work.handoff-returned`: the handing
+agent may withdraw, or the assigned person may decline, the exact current note and attempt.
+Only a ready, unclaimed step in the live generation qualifies, acknowledged or not. It returns
+assignment to the handing agent and advances readiness without changing completion, acceptance,
+evidence, progress, answers or gates. The resolved note no longer requires acknowledgment.
+The actor, step, note, disposition and reason bind the key; retries recover the original
+disposition record even after subsequent work. This store transition has no client operation.
+
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
 Client actions keep their server-only `client.action-result` receipt in the owner-local

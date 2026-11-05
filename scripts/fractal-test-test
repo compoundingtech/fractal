@@ -545,6 +545,154 @@ class PoolTreeTest(unittest.TestCase):
                 self.assertIn('removed a stale', said.getvalue())
 
 
+class PoolIdentityTest(unittest.TestCase):
+    """Pool identities from pinned alias data, with real Git clones and kept targets but no build or network."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q')
+        (self.repo / '.st').mkdir()
+        self.aliases = json.loads(checkout_config('repo-aliases.json').read_text())
+        (self.repo / '.st/repo-aliases.json').write_text(json.dumps(self.aliases))
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-q', '-m', 'pinned aliases')
+        self.base = git(self.repo, 'rev-parse', 'HEAD')
+        self.enterContext(mock.patch.dict(os.environ, GIT_ENV, clear=True))
+        self.enterContext(mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL': str(self.root / 'pool')}, clear=True))
+        self.enterContext(contextlib.chdir(self.repo))
+
+    def pool_for(self, url, base=None):
+        git(self.repo, 'config', 'remote.origin.url', url)
+        return st_test.pool_root(base or self.base)
+
+    @staticmethod
+    def spellings(identity):
+        host, path = identity.split('/', 1)
+        return [f'https://{host}/{path}', f'https://{host}/{path}.git', f'https://{host}/{path}/',
+                f'https://reader@{host}/{path}.git', f'git@{host}:{path}.git', f'ssh://git@{host}/{path}',
+                f'ssh://git@{host}:22/{path}.git', f'https://{host.upper()}/{path.upper()}.git']
+
+    def test_both_repository_names_and_every_transport_spelling_share_the_pinned_pool(self):
+        self.assertTrue(self.aliases)
+        self.assertEqual(self.pool_for('https://github.com/compoundingtech/fractal.git').name, 'o-37ba1e1ba8f39cf4')
+        for former, canonical in self.aliases.items():
+            expected = 'o-' + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+            for identity in (former, canonical):
+                for url in self.spellings(identity):
+                    with self.subTest(url=url):
+                        self.assertEqual(self.pool_for(url).name, expected)
+
+    def test_aliases_apply_only_to_the_exact_normalized_identity(self):
+        for former, canonical in self.aliases.items():
+            host, path = former.split('/', 1)
+            owner, name = path.split('/', 1)
+            shared = self.pool_for(f'https://{canonical}.git')
+            unrelated = [f'https://{host}/another-owner/{name}.git', f'https://{host}/{owner}/{name}-extra.git',
+                         f'https://{host}/{owner}/prefix-{name}.git', f'https://example.invalid/{path}.git',
+                         f'https://{host}:8443/{path}.git', f'ssh://git@{host}:2222/{path}.git']
+            pools = [self.pool_for(url) for url in unrelated]
+            self.assertEqual(len(set(pools + [shared])), len(pools) + 1)
+
+    def test_case_sensitive_paths_and_different_ports_keep_distinct_pools(self):
+        for urls in [('/srv/git/Sample.git', '/srv/git/sample.git', '/srv/git/sample'),
+                     ('file:///srv/git/Sample.git', 'file:///srv/git/sample.git'),
+                     ('file://localhost/srv/git/Sample.git', 'file://localhost/srv/git/sample.git'),
+                     ('https://example.invalid/Org/Repo.git', 'https://example.invalid/org/repo.git'),
+                     ('ssh://git@example.invalid:2222/org/repo.git', 'ssh://git@example.invalid:2223/org/repo.git',
+                      'ssh://git@example.invalid/org/repo.git')]:
+            with self.subTest(urls=urls):
+                self.assertEqual(len({self.pool_for(url) for url in urls}), len(urls))
+        # Relative local remotes in different clones cannot name the same repository merely by sharing their spelling.
+        first = self.pool_for('../origin.git')
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        with contextlib.chdir(nested):
+            self.assertNotEqual(st_test.normalise_origin('../origin.git'), st_test.normalise_origin('../../origin.git'))
+            self.assertEqual(st_test.pool_root(self.base), first)  # Git resolves the remote from the worktree, even in a subdirectory
+        clone = nested / 'clone'
+        git(self.root, 'clone', '-q', str(self.repo), str(clone))
+        git(clone, 'config', 'remote.origin.url', '../origin.git')
+        with contextlib.chdir(clone):
+            self.assertNotEqual(st_test.pool_root(self.base), first)
+
+    def test_no_origin_keeps_the_common_directory_key(self):
+        common = git(self.repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        expected = 'c-' + hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
+        self.assertEqual(st_test.pool_root(self.base).name, expected)
+
+    def test_the_retired_spelling_pool_is_left_for_ordinary_unlocked_cap_eviction(self):
+        former, canonical = next(iter(self.aliases.items()))
+        warm = self.pool_for(f'https://{canonical}.git')
+        retired = warm.parent / ('o-' + hashlib.sha256(former.encode()).hexdigest()[:16])
+        for pool in (warm, retired):
+            (pool / 'tree-0').mkdir(parents=True)
+            (pool / 'target-0').mkdir()
+            (pool / 'target-0/kept').write_text('warm output')
+            (pool / 'tree-0.lock').touch()
+        self.assertEqual(self.pool_for(f'https://{former}.git'), warm)
+        self.assertTrue((retired / 'target-0/kept').exists())  # selection does not move or remove anything
+        with open(retired / 'tree-0.lock', 'a') as held, mock.patch.object(st_test, 'du_gb', return_value=0.1), \
+                contextlib.redirect_stderr(io.StringIO()):
+            fcntl.flock(held, fcntl.LOCK_EX)
+            st_test.evict_to_cap(self.root / 'pool', 0.3, keep=(warm, 0))
+            self.assertTrue((retired / 'target-0/kept').exists())  # a running old copy is protected
+            fcntl.flock(held, fcntl.LOCK_UN)
+            st_test.evict_to_cap(self.root / 'pool', 0.3, keep=(warm, 0))
+        self.assertFalse((retired / 'tree-0').exists())
+        self.assertFalse((retired / 'target-0').exists())
+        self.assertEqual((warm / 'target-0/kept').read_text(), 'warm output')
+
+    def test_alias_data_comes_from_the_pinned_base_even_in_an_extracted_script(self):
+        former, canonical = next(iter(self.aliases.items()))
+        expected = self.pool_for(f'https://{former}.git')
+        (self.repo / '.st/repo-aliases.json').write_text(json.dumps({former: 'github.com/sample-org/other'}))
+        # A detached copy has no adjacent configuration; the current branch's edited file is not authoritative either.
+        extracted = self.root / 'extracted'
+        extracted.mkdir()
+        path = extracted / 'st-test'
+        shutil.copy(ROOT / 'scripts/st-test', path)
+        loader = importlib.machinery.SourceFileLoader('pool_identity_extracted', str(path))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        with mock.patch.dict(module.POOL_SETTINGS, st_test.POOL_SETTINGS):
+            self.assertEqual(module.pool_root(self.base), expected)
+        self.assertEqual(self.pool_for(f'https://{canonical}.git'), expected)
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-q', '-m', 'different aliases')
+        self.assertNotEqual(self.pool_for(f'https://{former}.git', 'HEAD'), expected)
+
+    def test_missing_aliases_preserve_older_bases_and_malformed_aliases_fail(self):
+        for value in ('[]', '{', '{"one": 2}', '{"one": "two", "two": "one"}'):
+            (self.repo / '.st/repo-aliases.json').write_text(value)
+            git(self.repo, 'commit', '-qam', 'invalid alias data')
+            with self.subTest(value=value), self.assertRaises(st_test.Failure):
+                self.pool_for('https://github.com/sample-org/repo.git', 'HEAD')
+        git(self.repo, 'rm', '-q', '.st/repo-aliases.json')
+        git(self.repo, 'commit', '-qm', 'base without aliases')
+        self.assertEqual(st_test.pool_origin_aliases('HEAD'), {})
+
+    def test_a_clone_using_the_alias_reuses_the_tree_path_and_kept_target(self):
+        former, canonical = next(iter(self.aliases.items()))
+        pool = self.pool_for(f'https://{canonical}.git')
+        pool.mkdir(parents=True)
+        tree = st_test.prepare_tree(pool, 0, self.base)
+        target = pool / 'target-0'
+        target.mkdir()
+        (target / 'warm').write_text('kept output')
+        clone = self.root / 'clone'
+        git(self.root, 'clone', '-q', str(self.repo), str(clone))
+        git(clone, 'config', 'remote.origin.url', f'git@{former}.git'.replace('/', ':', 1))
+        with contextlib.chdir(clone):
+            self.assertEqual(st_test.pool_root(self.base), pool)
+            self.assertEqual(st_test.prepare_tree(pool, 0, self.base), tree)
+            self.assertEqual((target / 'warm').read_text(), 'kept output')
+            self.assertEqual(git(tree, 'rev-parse', '--git-common-dir'), str(clone / '.git'))
+
+
 class GovernedTest(unittest.TestCase):
     """A building check stays inside a kernel-verified build, lane or gate-slot cap; otherwise it takes builds.slice."""
 
@@ -2757,7 +2905,7 @@ finally:
                 'https://GitHub.com/org/repo/']
         self.assertEqual({st_test.normalise_origin(url) for url in same}, {'github.com/org/repo'})
         self.assertNotEqual(st_test.normalise_origin('https://github.com/org/other'), 'github.com/org/repo')
-        self.assertEqual(st_test.normalise_origin('/srv/git/repo.git'), '/srv/git/repo')  # a local path stays a path
+        self.assertEqual(st_test.normalise_origin('/srv/git/repo.git'), '/srv/git/repo.git')  # local repository names stay distinct
 
     def test_a_clone_of_the_same_origin_takes_the_warm_slot_at_the_same_path_with_the_kept_inputs(self):
         ignored = '/repos/\nnode_modules/\n/target/\nstray.txt\n'  # as the repository's .gitignore: the kept inputs are not untracked files

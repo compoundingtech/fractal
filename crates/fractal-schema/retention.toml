@@ -220,6 +220,7 @@
 "work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
 "work.released" = { class = "durable" }
+"work.handoff-returned" = { class = "durable" }
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }
 "work.submitted" = { class = "durable" }
 "workspace.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
