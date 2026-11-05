@@ -12,9 +12,8 @@ fn unresolved(subject: &str) -> St3Error {
 /// The caller supplies a raw step/assignment/pool view and requester from the same
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
 /// Includes local responsibility and every carried source step.
-/// Before production use, fractal-missions must add the run hierarchy, child runs,
-/// loop rounds, enclosing parent step, and start/reassignment entry point.
-/// Slice 5c (fractal-seats) must verify real person-work delegation.
+/// Run hierarchy validation lives in fractal-missions' `store::missions::validate_run_reviewer`.
+/// Loops and the start/reassignment boundary still require the later run-policy slice.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
     scope: &Scope<'_>,
