@@ -992,6 +992,11 @@ fn register_daemon_memory_metrics(provider: &SdkMeterProvider) {
     use opentelemetry::metrics::MeterProvider as _;
 
     let meter = provider.meter("st3");
+    meter
+        .u64_observable_gauge("st.db.checkpoint.disabled")
+        .with_description("1 when fleet checkpoint retention is disabled in the daemon configuration")
+        .with_callback(|observer| observer.observe(u64::from(crate::slo::checkpoint_disabled()), &[]))
+        .build();
     #[cfg(target_os = "linux")]
     meter
         .u64_observable_gauge("st.process.memory.rss")

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Doctor reports cached store-retention health and warns about disabled checkpoints and unreclaimable free pages",
+  "replay": {"status": "none", "detail": "No replay or rebuild."},
+  "schema": {"status": "none", "detail": "No schema changes. The hourly sampler reads indexed checkpoint metadata and auto_vacuum."},
+  "rules": {"status": "none", "detail": "Retention rules and checkpoint digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Doctor adds store-retention. The performance database row adds checkpoint_disabled and sampled checkpoint and auto_vacuum fields. Telemetry adds st.db.checkpoint.disabled."},
+  "downtime": {"status": "none", "detail": "No additional downtime."},
+  "manual": {"status": "none", "detail": "No configuration changes or database maintenance are performed."},
+  "recovery": {"status": "none", "detail": "Older builds ignore the additional report fields."}
+}
