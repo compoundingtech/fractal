@@ -1929,7 +1929,7 @@ fn validate_account_binding(
 
 /// The observer name of `observer/github/OWNER/REPO`, the one standing observer every watch of
 /// that repository uses, in the lowercase spelling its subject has.
-fn standing_github_observer(subject: &str) -> Option<String> {
+pub(crate) fn standing_github_observer(subject: &str) -> Option<String> {
     let repository = subject.strip_prefix("observer/github/")?;
     let (owner, repo) = repository.split_once('/')?;
     (!owner.is_empty() && !repo.is_empty() && !repo.contains('/'))

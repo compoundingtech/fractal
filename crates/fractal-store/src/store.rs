@@ -17411,10 +17411,9 @@ fn clear_quarantined_claims_tx(
     Ok(())
 }
 
-/// A top-level observer reaches an attributed publication only as a stop of a repository's
-/// standing GitHub observer, which moves its polling to the next member a watch declares it on
-/// (#5182). Only a person may: an agent moving polling waits on #4607. A host's own declarations
-/// carry no actor.
+/// A stop of a repository's standing GitHub observer moves its polling to the next member a watch
+/// declares it on (#5182). Only a person may: an agent moving polling waits on #4607. A host's own
+/// declarations carry no actor.
 fn validate_standing_observer_stop(
     intent: &NormalizedIntent,
     actor: Option<&str>,
@@ -17425,7 +17424,12 @@ fn validate_standing_observer_stop(
     match intent
         .subjects
         .values()
-        .find(|desired| desired.kind == "observer" && desired.owner_run.is_none())
+        .find(|desired| {
+            desired.kind == "observer"
+                && desired.owner_run.is_none()
+                && crate::graph::standing_github_observer(&desired.subject).is_some()
+                && crate::graph::observer_spec(&desired.desired).is_some_and(|spec| spec.stopped)
+        })
     {
         Some(observer) => Err(St3Error::new(
             "observer-stop-person-only",
