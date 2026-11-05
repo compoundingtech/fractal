@@ -1,8 +1,8 @@
 use super::{Scope, St3Error, agent_review};
 use crate::model::StepRunView;
 use crate::store::{
-    ReferenceGraph, identities, mission_run_header_tx, step_owner_is_terminal_tx, step_run_row_tx,
-    step_timing_events,
+    ReferenceGraph, identities, mission_run_header_tx, now_ms, step_claim_expired,
+    step_owner_is_terminal_tx, step_run_row_tx, step_timing_events,
 };
 use rusqlite::Connection;
 use smallclaims::error::internal;
@@ -53,7 +53,13 @@ pub fn validate_step_reviewer(
         Ok(())
     };
     include(requester)?;
-    collect_step(connection, step, &mut include, &mut BTreeSet::new())?;
+    collect_step(
+        connection,
+        step,
+        &mut include,
+        &mut BTreeSet::new(),
+        now_ms(),
+    )?;
     let reviewer = agent_review::resolve_reviewer(scope, connection, reviewer)?;
     agent_review::independent_reviewer(&reviewer, &excluded)?;
     Ok(excluded)
@@ -65,6 +71,7 @@ fn collect_step(
     step: &StepRunView,
     include: &mut impl FnMut(&str) -> Result<(), St3Error>,
     visiting: &mut BTreeSet<String>,
+    snapshot_unix_ms: u128,
 ) -> Result<(), St3Error> {
     if !visiting.insert(step.subject.clone()) {
         return Err(unresolved(&step.subject));
@@ -95,7 +102,9 @@ fn collect_step(
             prior_claimant = true;
         }
     }
-    if step.claimant.is_none() && !step.available_to.is_empty() {
+    if !step.available_to.is_empty()
+        && (step.claimant.is_none() || step_claim_expired(step, snapshot_unix_ms))
+    {
         // Terminalization clears the persisted lease too; retain the historical workers
         // instead of treating a previously claimed pool as newly unclaimed.
         if step_owner_is_terminal_tx(connection, &step.subject)? {
@@ -146,7 +155,7 @@ fn collect_step(
                     .map_err(internal)?;
             include(&owner.requester)?;
         }
-        collect_step(connection, &source, include, visiting)?;
+        collect_step(connection, &source, include, visiting, snapshot_unix_ms)?;
     }
     visiting.remove(&step.subject);
     Ok(())

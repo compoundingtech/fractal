@@ -206,6 +206,21 @@ fn agent_review_run_terminal_pool_keeps_raw_claimant() {
             },
         )
         .unwrap();
+    assert_eq!(check(&store, &run.subject, FREE), "ok");
+    let claimed = step_run_row_tx(&store.connection.write(), subject)
+        .unwrap()
+        .unwrap();
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    let clock = Clock;
+    smallclaims::store::set_thread_clock(claimed.claim_expires_at_unix_ms);
+    assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
+    assert_eq!(check(&store, &run.subject, REQUESTER), CONFLICT);
+    drop(clock);
     store
         .set_mission_run_state(&run.subject, "completed", "terminal", None)
         .unwrap();
