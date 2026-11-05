@@ -2600,10 +2600,11 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, mode != "listening")?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, attribution)
     }
 
     /// Explicitly withdraw rotation metadata when changing transport settings.
@@ -2615,7 +2616,7 @@ impl Store {
     ) -> Result<bool> {
         let _publication = self.fleet_endpoints_publication.lock().unwrap_or_else(PoisonError::into_inner);
         let endpoints = self.preserve_fabric_rekey(mode, endpoints, true)?;
-        self.publish_fleet_endpoints_locked(mode, &endpoints, build)
+        self.publish_fleet_endpoints_locked(mode, &endpoints, build, None)
     }
 
     fn publish_fleet_endpoints_locked(
@@ -2623,12 +2624,16 @@ impl Store {
         mode: &str,
         endpoints: &[Value],
         build: &str,
+        attribution: Option<(&str, &str)>,
     ) -> Result<bool> {
         let Some(member_key) = self.member_public_key() else {
             return Ok(false);
         };
         let subject = format!("host/{}", self.origin);
-        if let Some(latest) = self.latest_claim(&subject, Some("fleet.member-endpoints"))? {
+        // Automatic announcements are deduplicated; an attributed settings change is an audit event.
+        if let Some(latest) = self.latest_claim(&subject, Some("fleet.member-endpoints"))?
+            && attribution.is_none()
+        {
             let fields = latest.body.get("fields").cloned().unwrap_or_default();
             if fields["member_key"] == member_key
                 && fields["mode"] == mode
@@ -2640,7 +2645,7 @@ impl Store {
         self.append_claim(&ClaimInput {
             subject,
             kind: "fleet.member-endpoints".into(),
-            actor: None,
+            actor: attribution.map(|(actor, _)| actor.to_owned()),
             fields: BTreeMap::from([
                 ("member_key".into(), Value::String(member_key)),
                 ("mode".into(), Value::String(mode.into())),
@@ -2649,7 +2654,7 @@ impl Store {
             ]),
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: None,
+            idempotency_key: attribution.map(|(_, mutation_id)| mutation_id.to_owned()),
         })
         .map_err(anyhow::Error::from)?;
         // Seed and sign at once, so the announcement counts in this node's own fold.

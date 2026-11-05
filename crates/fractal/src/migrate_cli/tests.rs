@@ -866,6 +866,11 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
         let immutable = fixture.root.path().join("immutable-config");
         fs::write(&immutable, b"node = \"test\"\n")?;
         symlink(&immutable, fixture.layout.directories[0].0.join("config.toml"))?;
+        let generation = fs::read_link(retain_generation(&fixture, 0, 1, "", false)?)?;
+        let marker = generation.join("launchd-staged");
+        fs::write(&marker, b"Home Manager launchd staging\n")?;
+        symlink(&marker, fixture.layout.directories[0].0.join("launchd-staged"))?;
+        let marker_inode = fs::symlink_metadata(fixture.layout.directories[0].0.join("launchd-staged"))?.ino();
         let before = fixture.snapshot()?;
         fixture.manager.probe_failure = failed;
         let result = fixture.run(false, false).await;
@@ -879,6 +884,8 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
             assert_eq!(fs::read(legacy.join("config.toml"))?, fs::read(target.join(CONFIG_BACKING))?);
             assert!(fs::read_to_string(target.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
             assert!(!target.join(PENDING_RECEIPT).exists());
+            assert_eq!(fs::read_link(target.join("launchd-staged"))?, marker);
+            assert_eq!(fs::symlink_metadata(target.join("launchd-staged"))?.ino(), marker_inode);
         }
     }
     Ok(())
@@ -1058,6 +1065,31 @@ async fn launchd_ownership_refusals_do_not_mutate_host() -> Result<()> {
         assert_eq!(fixture.snapshot()?, before);
         assert!(!fixture.layout.journal.exists());
         assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_query_is_read_only_and_uses_recorded_domain_after_cutover() -> Result<()> {
+    for (index, domain) in ["gui/501", "user/501"].into_iter().enumerate() {
+        let mut fixture = Fixture::new()?;
+        let before = fixture.snapshot()?;
+        assert_eq!(queried_launchd_domain(&fixture.layout, 501, |candidate| Ok(launchd::Probe::Available(
+            if candidate == domain { vec!["com.compoundingtech.st3".into()] } else { vec![] }
+        )))?, domain);
+        assert_eq!(fixture.snapshot()?, before);
+        let mut jobs = [vec![], vec![]];
+        jobs[index].push("com.compoundingtech.st3".into());
+        fixture.manager.registrations = Some(jobs);
+        fixture.run(false, false).await?;
+        let before = fixture.snapshot()?;
+        assert_eq!(queried_launchd_domain(&fixture.layout, 501, |_| panic!("journal must prevent rediscovery"))?, domain);
+        assert_eq!(fixture.snapshot()?, before);
+        let mut journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+        journal.launchd_domain = None;
+        save(&fixture.layout, &journal)?;
+        assert!(matches!(queried_launchd_domain(&fixture.layout, 501, |_| panic!("missing field must fail closed"))
+            .unwrap_err().downcast_ref(), Some(launchd::DomainError::MissingJournalField)));
     }
     Ok(())
 }
