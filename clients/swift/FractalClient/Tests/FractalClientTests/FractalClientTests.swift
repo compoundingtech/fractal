@@ -46,6 +46,19 @@ final class FractalClientTests: XCTestCase {
         XCTAssertNil(legacy.retryable)
     }
 
+    func testAgentRelationshipsPreserveAbsentAndEmptyWireValues() throws {
+        let base = #"{"id":"agent/a","kind":"agent","revision":"claim/a","updated_at":"2026-10-10T12:00:00Z","name":"A","state":"stopped","reachability":"local","runtime_ids":[]}"#
+        for present in [false, true] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(base.utf8)) as? [String: Any])
+            if present { object["under"] = [] as [Any] }
+            let agent = try JSONDecoder().decode(AgentResource.self, from: JSONSerialization.data(withJSONObject: object))
+            if present { XCTAssertEqual(agent.under?.count, 0) } else { XCTAssertNil(agent.under) }
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(agent)) as? [String: Any])
+            XCTAssertEqual(encoded.keys.contains("under"), present)
+            if present { XCTAssertEqual((encoded["under"] as? [Any])?.count, 0) }
+        }
+    }
+
     func testPushRegistrationRoundTripAndRedactedDescription() throws {
         let registration = PushRegistration(token: String(repeating: "ab", count: 32),
             environment: .development, bundleID: "example.push", appVersion: "1.0")
