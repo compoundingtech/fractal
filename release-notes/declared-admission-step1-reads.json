@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Expose declared admission data in agent and mission reads with explicit declared-not-enforced CLI output",
+  "replay": {
+    "status": "none",
+    "detail": "Read projections only; no claim history rewrite or replay rule change. Declaration validation and all-member publication admission are supplied by the preceding declared-admission stack changes."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Agent cards, agent declaration reads and mission list/detail reads expose optional declared_admission priority, lane and budgets. Empty groups are omitted and future priority/lane strings are preserved. Declared-admission refusals retain stable error codes and report applied=none. No database layout or claim-kind change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "These values do not change scheduling, admission, process priority or resource limits. No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Health and daemon.started features advertise declared_admission=1 while retaining existing feature flags and messages-store read progress. Requires the preceding stack's declared-admission model, generated clients and validation barrier. Existing declarations without these fields keep their previous read shape."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal binary restart; no storage migration."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade every active member before publishing declared admission values. Human agent and mission output labels the values declared, not enforced; no resource enforcement is enabled by this change."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Before rolling back the complete declared-admission stack, remove declarations using these fields on upgraded members. This read layer adds no persisted state or backfill to undo."
+  }
+}
