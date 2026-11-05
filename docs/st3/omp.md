@@ -126,8 +126,15 @@ A closed gate visibly vetoes tools and refuses mailbox delivery. Native user/RPC
 still start: they cannot execute tools, and native resume preserves their transcript input across
 replacement. This is a tool-effect boundary, not synchronous native-turn admission. OMP's
 `tool_call` veto must fail closed on handler errors/timeouts; an adapter error returns an explicit
-blocking reason and makes further refresh closure unsupported. Person asks are counted as tools
-until their native result; this gate does not claim durable ask preservation.
+blocking reason and makes further refresh closure unsupported. Pending native questions and
+permissions report `unsupported-native-prompt-preservation` in the response's `blockers`.
+They remain busy: the text-free question observation outbox is not full display/answer capture,
+and the interrupted-ask bridge is not a durable exact-session/account continuation receipt.
+No stored permission is replayed, and a resolution for another call cannot clear this blocker.
+An interrupted ask awaiting the bridge also blocks closure; a bridge timeout keeps that
+blocker for the incarnation rather than treating an unrecovered prompt as answered.
+Durable store person asks are different: replacement context lists their original handles
+through the work context surface; refresh does not cancel, repost or change their origin attempt.
 Nested dispatches sharing a call ID are counted separately by tool name and admission count.
 Explicit native denials or terminal `message_end` tool results settle matching dispatches;
 live nested effects remain counted. Overlapping same-name dispatches require their own result

@@ -160,7 +160,7 @@ type Stash = {
   /** Tool calls announced by `tool_call` and not yet answered by `tool_result`. */
   toolCallsInFlight?: Set<string>;
   /** Synchronous tool fence; never reset by turn boundaries or channel reconnects. */
-  refresh?: { epoch: number; tools: Map<string, { count: number; overlap: boolean }>; mailbox: number; closed: boolean; fault?: boolean; user?: boolean };
+  refresh?: { epoch: number; tools: Map<string, { count: number; overlap: boolean }>; mailbox: number; closed: boolean; fault?: boolean; user?: boolean; approvals?: Set<string>; lostPrompt?: boolean };
   /** Messages held during a running turn, oldest first. */
   held?: HeldMessage[];
   /** Releases held messages after HOLD_MAX_MS behind a running tool call. */
@@ -515,13 +515,18 @@ export default function (pi: ExtensionAPI) {
     // Read jobs only AFTER checking open tools, in this same synchronous critical section.
     let tools = gate.mailbox;
     for (const pending of gate.tools.values()) tools += pending.count;
+    // Native prompts have no durable, exact-call continuation acknowledgement. Never exempt
+    // them as person work or replay a stored approval into a replacement dispatch.
+    let preservationBlocked = Boolean(state.restoringAsk || gate.lostPrompt ||
+      state.pendingAskToolCallId || state.pendingApproval || gate.approvals?.size);
+    for (const key of gate.tools.keys()) if (key.endsWith(":ask")) preservationBlocked = true;
     const jobs = tools === 0 ? backgroundJobs() : null;
     if (!managed || gate.fault || gate.user || jobs === null && tools === 0) result = "unsupported";
     else if (request.action === "activity") result = "activity";
     else if (request.incarnation === state.session && request.owner_sequence === owner &&
       request.epoch === gate.epoch) {
-      if (request.action === "close" && !gate.closed && tools === 0 && jobs === 0 &&
-        !state.running && ctx.isIdle()) {
+      if (request.action === "close" && !gate.closed && !preservationBlocked &&
+        tools === 0 && jobs === 0 && !state.running && ctx.isIdle()) {
         advance();
         gate.closed = true;
         result = "closed";
@@ -532,6 +537,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     return { type: "refresh", request_id: request.request_id, result,
+      blockers: preservationBlocked ? ["unsupported-native-prompt-preservation"] : [],
       receipt: { incarnation: state.session, owner_sequence: owner, epoch: gate.epoch,
         open_non_person_tools: tools + (jobs ?? 0), gate: gate.closed ? "closed" : "open" } };
   };
@@ -1184,6 +1190,7 @@ export default function (pi: ExtensionAPI) {
     if (!pending || pending.timer !== undefined) return;
     pending.timer = setTimeout(() => {
       if (state.restoringAsk !== pending) return;
+      gate.lostPrompt = true; // A timed-out bridge is not proof that the original ask was answered.
       state.restoringAsk = undefined;
       sendFrame({ type: "delivery_ready" });
       sendFrame({
@@ -1425,6 +1432,15 @@ export default function (pi: ExtensionAPI) {
   ) => register(event, async (payload, ctx) => {
     try {
       // Includes subagent tools: their observational events are filtered below, not admission.
+      if (managed && (event === "tool_approval_requested" || event === "tool_approval_resolved")) {
+        const call = record(payload);
+        if (typeof call?.toolCallId !== "string") gate.fault = true;
+        else {
+          const key = JSON.stringify([ctx.sessionManager.getSessionId(), call.toolCallId, call.toolName]);
+          const approvals = gate.approvals ??= new Set();
+          if (event === "tool_approval_requested") approvals.add(key); else approvals.delete(key);
+        }
+      }
       if (managed && (event === "tool_call" || event === "tool_result" || event === "message_end" || event === "tool_approval_resolved")) {
         const call = record(event === "message_end" ? record(payload)?.message : payload);
         if (event === "tool_call" && (typeof call?.toolCallId !== "string" || typeof call.toolName !== "string"))

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve durable person asks in replacement context and explicitly block unsupported native prompt refresh",
+  "replay": {"status": "none", "detail": "Existing ask and answer claims retain their original identities."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "changed", "detail": "Managed OMP refresh receipts report unsupported-native-prompt-preservation while an ask or permission is pending. Native prompts remain busy; stored approvals are not replayed."},
+  "compatibility": {"status": "changed", "detail": "Replacement boot context exposes outstanding durable person asks through the existing work surface. Native prompt capture and exact-call rebind remain unsupported."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "changed", "detail": "Durable asks remain answerable across intake seals and restart without cancellation or reposting. Automatic refresh remains disabled."}
+}
