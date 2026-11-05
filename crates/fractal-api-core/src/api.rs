@@ -149,6 +149,7 @@ mod directive_notes;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
+pub mod client_commands;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
@@ -8490,6 +8491,15 @@ impl DoctorClock {
         Self { total, check }
     }
 
+    #[cfg(test)]
+    fn with_clock_for_test(
+        total: Duration,
+        check: Duration,
+        now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Self {
+        Self { total: smallclaims::read_budget::ReadBudget::with_clock_for_test("/v1/doctor", total, now), check }
+    }
+
     /// Run one check under its own deadline. A check whose deadline passed reports `timeout`
     /// with its elapsed time, whatever it returned; an error fails this check alone.
     pub(crate) fn checks(
@@ -11653,13 +11663,18 @@ async fn work_action_response_viewing(
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
         }
-        if action == "renew" && !lease_view {
-            // A renewal caches its view without the fields the writer no longer folds.
+        if action != "renew" || !lease_view {
+            // A work action caches its view without the fields the writer no longer folds: a
+            // renewal's queue, timing, summaries and wake, and any other action's wake.
             let store = state.store.clone();
+            let renewal = action == "renew";
             response = blocking_action(move || {
-                store
-                    .enrich_work_response(&mut response)
-                    .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
+                let filled = if renewal {
+                    store.enrich_work_response(&mut response)
+                } else {
+                    store.enrich_work_wake(&mut response, None)
+                };
+                filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
                 Ok(response)
             })
             .await?;
