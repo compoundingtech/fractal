@@ -124,7 +124,7 @@ pub struct NoticeCreatedDedupeKey(pub String);
 impl TryFrom<String> for NoticeCreatedDedupeKey {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         if !(value.chars().count() <= 200) {
@@ -202,7 +202,7 @@ pub struct NoticeCreatedSpeech(pub String);
 impl TryFrom<String> for NoticeCreatedSpeech {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         if !(value.chars().count() <= 300) {
@@ -217,7 +217,7 @@ pub struct NoticeCreatedSummary(pub String);
 impl TryFrom<String> for NoticeCreatedSummary {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         if !(value.chars().count() <= 200) {
@@ -325,7 +325,7 @@ pub struct NoticeDeliveryVariant2Reason(pub String);
 impl TryFrom<String> for NoticeDeliveryVariant2Reason {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         static PATTERN: std::sync::LazyLock<regex::Regex> =
@@ -365,7 +365,7 @@ pub struct NoticeDeliveryVariant3Reason(pub String);
 impl TryFrom<String> for NoticeDeliveryVariant3Reason {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         static PATTERN: std::sync::LazyLock<regex::Regex> =
@@ -567,7 +567,7 @@ pub struct NoticeLinkLabel(pub String);
 impl TryFrom<String> for NoticeLinkLabel {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         static PATTERN: std::sync::LazyLock<regex::Regex> =
@@ -644,7 +644,7 @@ pub struct NoticePolicyReason(pub String);
 impl TryFrom<String> for NoticePolicyReason {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         static PATTERN: std::sync::LazyLock<regex::Regex> =
@@ -732,7 +732,7 @@ pub struct NoticeSnapshotCreationClaims(pub Vec<NoticeSnapshotCreationClaimsItem
 impl TryFrom<Vec<NoticeSnapshotCreationClaimsItem>> for NoticeSnapshotCreationClaims {
     type Error = String;
     fn try_from(value: Vec<NoticeSnapshotCreationClaimsItem>) -> Result<Self, String> {
-        if !(value.len() >= 1) {
+        if value.is_empty() {
             return Err("minItems".into());
         }
         if !(value.iter().collect::<std::collections::HashSet<_>>().len() == value.len()) {
@@ -993,7 +993,7 @@ pub struct Revision(pub String);
 impl TryFrom<String> for Revision {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
-        if !(value.chars().count() >= 1) {
+        if value.is_empty() {
             return Err("minLength".into());
         }
         if !(value.chars().count() <= 256) {

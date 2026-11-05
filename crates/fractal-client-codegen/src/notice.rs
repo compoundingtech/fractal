@@ -132,7 +132,14 @@ fn emit(name: &str, node: &Value, out: &mut String) -> Result<()> {
             ("maxItems", "<=", "len()"),
         ] {
             if let Some(bound) = node[keyword].as_u64() {
-                check(out, &format!("value.{length} {op} {bound}"), keyword)?;
+                if op == ">=" && bound == 1 {
+                    writeln!(
+                        out,
+                        "if value.is_empty() {{ return Err({keyword:?}.into()); }}"
+                    )?;
+                } else {
+                    check(out, &format!("value.{length} {op} {bound}"), keyword)?;
+                }
             }
         }
         if let Some(constant) = node["const"].as_u64() {
