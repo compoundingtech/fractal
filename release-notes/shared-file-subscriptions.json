@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "File gates retain logical-path filtering and replacement recovery. Reads do not wake reconciliation."},
   "downtime": {"status": "none", "detail": "No migration is required."},
   "manual": {"status": "none", "detail": "No configuration change is required."},
-  "recovery": {"status": "none", "detail": "Dropping the last logical lease releases physical subscriptions and the backend."}
+  "recovery": {"status": "none", "detail": "Directory identities are revalidated on acquisition and renewal. Directory-loss events and backend errors invalidate coverage for reinstallation. The final logical lease releases subscriptions and the backend."}
 }
