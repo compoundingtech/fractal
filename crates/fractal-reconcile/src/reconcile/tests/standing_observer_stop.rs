@@ -1,7 +1,6 @@
 //! A person stops a repository's standing GitHub observer, and a watch on another member then
 //! declares it there, which polls on from the observer's cursor (#5182).
 use super::*;
-// The real parser: this module's tests alias `parse_intent` to one that admits any top-level node.
 use serde_json::json;
 
 const SEATS: &str = "version 2\nagent \"example.local\" { workspace \"/tmp\"; command \"true\" }\nagent \"example.away\" { host \"away\"; workspace \"/tmp\"; command \"true\" }\n";
@@ -9,7 +8,8 @@ const LOCAL: &str = "agent/example.local";
 const AWAY: &str = "agent/example.away";
 const STOP: &str = "version 2\nstop \"observer/github/acme/garden\"\n";
 
-/// Publish `source` as `actor`, as `st apply` does.
+/// Publish `source` as `actor`, as `st apply` does: with the real parser, as this module's tests
+/// alias `parse_intent` to one that admits any top-level node.
 fn publish(
     store: &Store,
     source: &str,
