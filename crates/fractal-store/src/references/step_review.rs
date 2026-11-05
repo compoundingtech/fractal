@@ -16,7 +16,8 @@ fn unresolved(subject: &str) -> St3Error {
 /// Internal cross-crate adapter for missions; no production gate dispatch calls this.
 /// The caller supplies a raw step/assignment/pool view and requester from the same
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
-/// This validates one step only, not a run, child tree, or enclosing parent boundary.
+/// LOCAL step only: not carried source steps, a run, child tree, or parent boundary.
+/// Slice 5b must add those boundaries before any production caller uses this helper.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
     scope: &Scope<'_>,
@@ -27,6 +28,9 @@ pub fn validate_step_reviewer(
 ) -> Result<BTreeSet<String>, St3Error> {
     let mut excluded = BTreeSet::new();
     let mut include = |actor: &str| -> Result<(), St3Error> {
+        if actor.contains("${") {
+            return Err(unresolved(actor));
+        }
         fractal_schema::registry()
             .validate_subject(actor)
             .map_err(|_| unresolved(actor))?;
@@ -36,7 +40,13 @@ pub fn validate_step_reviewer(
         if !actor.starts_with("agent/") {
             return Err(unresolved(actor));
         }
-        let identity = identities::resolve_reference_conn(connection, actor)?;
+        let identity = identities::resolve_reference_conn(connection, actor).map_err(|error| {
+            if error.code == "lifecycle-unavailable" {
+                unresolved(actor)
+            } else {
+                error
+            }
+        })?;
         if !scope.declared_subject(&ReferenceGraph { connection }, &identity)? {
             return Err(unresolved(actor));
         }
@@ -66,36 +76,10 @@ pub fn validate_step_reviewer(
     }
     // Read raw history: effective views and carried_claimants_tx intentionally drop
     // responsibility after lease expiry, terminal state, or a later claim.
-    let mut pending = vec![step.subject.clone()];
-    let mut visited = BTreeSet::new();
-    while let Some(subject) = pending.pop() {
-        if !visited.insert(subject.clone()) {
-            continue;
-        }
-        let events = step_timing_events(connection, &subject).map_err(internal)?;
-        if events.is_empty() && subject != step.subject {
-            return Err(unresolved(&subject));
-        }
-        for (kind, body, _) in events {
-            if let Some(actor) = body
-                .pointer("/fields/claimant")
-                .and_then(serde_json::Value::as_str)
-            {
-                include(actor)?;
-            }
-            if kind == "step-run.carried" {
-                let source = body
-                    .pointer("/fields/source_step_run")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| unresolved(&subject))?;
-                fractal_schema::registry()
-                    .validate_subject(source)
-                    .map_err(|_| unresolved(source))?;
-                if !source.starts_with("step-run/") {
-                    return Err(unresolved(source));
-                }
-                pending.push(source.to_owned());
-            }
+    for (_, body, _) in step_timing_events(connection, &step.subject).map_err(internal)? {
+        let fields = body.get("fields").unwrap_or(&body);
+        if let Some(actor) = fields.get("claimant").and_then(serde_json::Value::as_str) {
+            include(actor)?;
         }
     }
     let reviewer = agent_review::resolve_reviewer(scope, connection, reviewer)?;
