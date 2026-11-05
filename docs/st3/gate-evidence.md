@@ -2118,6 +2118,7 @@ Web and `typescript-client` hold the same per-worktree file lock for their entir
 reader: their different HOME and store settings can otherwise replace the shared `node_modules` while tests use it. The parent
 runner holds the lock in Git's worktree metadata, and web acquires it before taking a heavy slot. Rust and the other light checks
 remain concurrent. `ST_EVIDENCE_SERIAL=1` restores the listed check order, with web still holding its stage slot.
+The runner's self-test fixtures select their own scheduling mode and do not inherit the enclosing run's serial setting.
 
 An explicitly authorized candidate-runner measurement uses `--out` in a disposable directory, never `--push`; its exported packs are
 deleted after measurement. When `ST_TEST_REEXEC` is set outside a base copy's `st-test-base-*` directory, the ledger records the tested
