@@ -183,7 +183,8 @@ fn agent_review_step_carried_chain_bare_and_wrapped() {
         // Only the oldest source's work actor names this reviewer.
         event(&store, &source, "work.progress", Some(REVIEWER), &json!({}));
         for (target, source) in [(&step, &middle), (&middle, &source)] {
-            let fields = json!({"source_step_run": source.subject, "attempt": 1, "status": "ready"});
+            let fields =
+                json!({"source_step_run": source.subject, "attempt": 1, "status": "ready"});
             let body = if bare {
                 fields
             } else {
