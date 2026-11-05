@@ -22,7 +22,7 @@ one.
 
 The session JSONL is stored in Fractal's driver state for the seat. The `model_change` entry and each
 assistant turn identify the selected provider and model. omp's Python `eval` tool has a filtered
-environment; run st commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
+environment; run Fractal commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
 available.
 
 ## Driver launch and native binding
