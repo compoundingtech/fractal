@@ -6981,6 +6981,22 @@ fn a_retry_records_its_backoff_boundary() {
     assert!(batch[&run.steps[1].subject].0.is_some());
 }
 
+/// The detail route's timing read (`mission_step_timestamps_for_runs`, with no subject filter) starts
+/// from the runs' own current steps and seeks each one's claims by subject and kind: it never scans
+/// the store's step and work claims, so its work follows the runs read, not the store (#5108).
+#[test]
+fn step_timing_reads_seek_the_runs_own_steps() {
+    let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(
+        &store,
+        &crate::store::missions::mission_step_timestamps_sql(),
+        rusqlite::params!["[\"run\"]", Option::<String>::None],
+    );
+    assert!(plan.iter().any(|row| row.contains("SEARCH claims USING INDEX claims_subject_kind_index")), "{plan:#?}");
+    assert!(plan.iter().any(|row| row.contains("USING INDEX step_runs_run_index")), "{plan:#?}");
+    assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
+}
+
 #[test]
 fn a_worker_can_submit_each_retry_attempt_once() {
     let store = Store::open_memory("node").unwrap();
