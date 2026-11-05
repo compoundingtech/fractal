@@ -1,3 +1,5 @@
+#[path = "file_subscriptions.rs"]
+mod file_subscriptions;
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
 pub mod schedule_declaration_clock;
@@ -29,7 +31,6 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use chrono::{Datelike as _, NaiveDate, TimeZone as _, Utc};
-use notify::Watcher as _;
 use serde_json::Value;
 use sha2::Digest as _;
 use tokio::sync::{Notify, watch};
@@ -1401,6 +1402,7 @@ pub struct Reconciler<R = NativeRuntime> {
     #[cfg(any(test, feature = "test-support"))]
     mission_declaration_parses: std::sync::atomic::AtomicUsize,
     file_watchers: Arc<Mutex<HashMap<String, FileWatch>>>,
+    file_subscriptions: std::sync::OnceLock<Arc<file_subscriptions::Pool>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
@@ -1459,7 +1461,7 @@ pub struct Reconciler<R = NativeRuntime> {
 
 struct FileWatch {
     // Keep the subscription alive, including across replacements of the target file.
-    _watcher: notify::RecommendedWatcher,
+    _subscription: file_subscriptions::Lease,
     target: PathBuf,
     directory: PathBuf,
     referent: Option<PathBuf>,
@@ -1614,6 +1616,7 @@ impl Reconciler<NativeRuntime> {
             #[cfg(any(test, feature = "test-support"))]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
+            file_subscriptions: Default::default(),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
@@ -1816,6 +1819,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(any(test, feature = "test-support"))]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
+            file_subscriptions: Default::default(),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
@@ -19055,11 +19059,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         let incremental = self.incremental.clone();
         let revision = self.file_watch_revision.clone();
         let watched_subject = subject.to_owned();
+        let pool = match self.file_subscriptions.get() {
+            Some(pool) => pool.clone(),
+            None => {
+                let pool = file_subscriptions::Pool::new()?;
+                let _ = self.file_subscriptions.set(pool.clone());
+                pool
+            }
+        };
+        let mut paths = vec![(directory.clone(), false)];
+        if recursive { paths.push((target.clone(), true)); }
+        if let Some(parent) = referent.as_ref().and_then(|path| path.parent()) {
+            paths.push((parent.to_owned(), false));
+        }
         let dirty = Arc::new(AtomicBool::new(false));
         let changed_watch = dirty.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let Ok(event) = event else { return };
+        let subscription = pool.subscribe(paths, Arc::new(move |event| {
                 if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
                     | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
                     changed_watch.store(true, std::sync::atomic::Ordering::Release);
@@ -19081,16 +19096,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::FileWatch, None);
                     notify.notify_one();
                 }
-            })?;
-        watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
-        if recursive { watcher.watch(&target, notify::RecursiveMode::Recursive)?; }
-        if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
-            && parent != directory
-        {
-            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
-        }
+            }))?;
         watchers.insert(subject.into(), FileWatch {
-            _watcher: watcher,
+            _subscription: subscription,
             target,
             directory,
             referent,

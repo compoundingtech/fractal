@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share physical file-watch subscriptions across logical input dependencies",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "Subscriptions and their logical leases remain host-local."},
+  "rules": {"status": "none", "detail": "One backend shares parent directories, reference-counts logical users and collapses descendants under recursive roots. Subscription transitions invalidate earlier captures."},
+  "compatibility": {"status": "none", "detail": "File gates retain logical-path filtering and replacement recovery. Reads do not wake reconciliation."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No configuration change is required."},
+  "recovery": {"status": "none", "detail": "Dropping the last logical lease releases physical subscriptions and the backend."}
+}
