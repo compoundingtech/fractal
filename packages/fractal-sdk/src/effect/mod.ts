@@ -655,9 +655,11 @@ const make = (options: FractalOptions) =>
           const protocol = makeProtocol(observe)
           let decoderReady = protocol.prepare === undefined
           let stopped = false
-          let pendingFrames: CollectionFrame[] = []
+          // Projected terminal frames are complete replacements (client-v0 terminal protocol).
+          // Retain at most one cold screen; raw PTY deltas never use this follow path.
+          let pendingScreen: Extract<CollectionFrame, { kind: 'screen' }> | undefined
           const resetProtocol = () => {
-            pendingFrames = []
+            pendingScreen = undefined
             protocol.reset()
           }
           // Status writes precede the terminal FollowEvent so no consumer teardown races a verdict.
@@ -852,21 +854,21 @@ const make = (options: FractalOptions) =>
                   )
                   return
                 }
-                if (decoderReady) decodeFrame(frame)
-                else pendingFrames.push(frame)
+                if (!decoderReady && frame.kind === 'screen') pendingScreen = frame
+                else decodeFrame(frame)
               },
             },
           })
           // Transport admission and attach must never wait for an optional codec chunk.
-          // Only data frames wait; control frames invalidate queued data synchronously.
+          // Only the latest complete screen waits; control frames invalidate it synchronously.
           if (protocol.prepare !== undefined && !stopped) {
             yield* Effect.forkIn(protocol.prepare.pipe(Effect.match({
               onSuccess: () => {
                 if (stopped) return
                 decoderReady = true
-                const frames = pendingFrames
-                pendingFrames = []
-                for (const frame of frames) decodeFrame(frame)
+                const screen = pendingScreen
+                pendingScreen = undefined
+                if (screen !== undefined) decodeFrame(screen)
               },
               onFailure: (error) => fail(error),
             })), scope)

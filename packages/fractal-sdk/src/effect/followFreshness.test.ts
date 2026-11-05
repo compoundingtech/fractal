@@ -296,7 +296,7 @@ describe('follow freshness', () => {
     vi.doUnmock('@fractal/client/schema')
   })
 
-  it('admits and subscribes with a cold codec, then decodes queued screens in order', async () => {
+  it('admits with a cold codec and retains only the latest complete screen across a flood', async () => {
     const { promise: pending, resolve: release } = Promise.withResolvers<void>()
     const started = Effect.runSync(Deferred.make<void>())
     vi.doMock('@fractal/client/schema', async () => {
@@ -317,7 +317,7 @@ describe('follow freshness', () => {
         const spec = { _tag: 'Terminal', runtime: 'runtime/a' } as const
         const stream = fractal.followTerminal(spec)
         const mounted = yield* watchFollow(fractal, followKey(spec), stream, (event) =>
-          event._tag === 'Observed' && ++count === 2 ? Deferred.succeed(observed, undefined) : Effect.void,
+          event._tag === 'Observed' && ++count === 1 ? Deferred.succeed(observed, undefined) : Effect.void,
         )
         yield* Deferred.await(subscribed)
         yield* Deferred.await(started)
@@ -339,15 +339,16 @@ describe('follow freshness', () => {
         gateway.send({ kind: 'resync', id: frame.id, collection: 'terminal' })
         yield* settle
         gateway.send(frame)
-        gateway.send({ ...frame, value: { ...frame.value, rows: 25, revision: '2' } })
+        for (let revision = 1; revision <= 1000; revision++)
+          gateway.send({ ...frame, value: { ...frame.value, rows: 24 + revision, revision: `${revision}` } })
         expect(mounted.events).toMatchObject([{ _tag: 'Stale' }])
         release()
         yield* Deferred.await(observed)
         expect(mounted.events).toMatchObject([
           { _tag: 'Stale' },
-          { _tag: 'Observed', value: { rows: 24 } },
-          { _tag: 'Observed', value: { rows: 25 } },
+          { _tag: 'Observed', value: { rows: 1024, revision: '1000' } },
         ])
+        expect(count).toBe(1)
         gateway.send({ ...frame, value: { ...frame.value, rows: 0, title: 'private screen text' } })
         yield* settle
         expect(mounted.events.at(-1)).toMatchObject({
@@ -387,8 +388,8 @@ describe('follow freshness', () => {
     )
   })
 
-  it('cancels a subscribed follow during cold codec loading without late events or leaked admission', async () => {
-    const { promise: pending, resolve: release } = Promise.withResolvers<void>()
+  it.each(['resolve', 'reject'] as const)('stops during cold loading without late events when the import later %ss', async (outcome) => {
+    const { promise: pending, resolve: release, reject } = Promise.withResolvers<void>()
     const started = Effect.runSync(Deferred.make<void>())
     vi.doMock('@fractal/client/schema', async () => {
       Effect.runSync(Deferred.succeed(started, undefined))
@@ -413,7 +414,8 @@ describe('follow freshness', () => {
           yield* Deferred.await(subscribed)
           expect(active.at(-1)).toBe(1)
           yield* mounted.interrupt
-          release()
+          if (outcome === 'reject') reject(new Error('late private loader detail'))
+          else release()
           yield* settle
           expect(mounted.events).toEqual([])
           expect(active.at(-1)).toBe(0)
