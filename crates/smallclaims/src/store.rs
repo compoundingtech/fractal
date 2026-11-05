@@ -2966,7 +2966,8 @@ pub const RESIDUE_PAGE: usize = 4096;
 /// from the primary-key index, which holds every column the page needs, and never the envelope
 /// rows: those keep the payload beside them, so reading them pulled about 4 KB from disk for each
 /// of millions of envelopes every hour (#5171). The few envelopes not yet validated are left out
-/// through `replica_envelopes_state`, which reaches a row only for an envelope in that state.
+/// through `replica_envelopes_state`, which reads an envelope row only at a sequence that has a
+/// pending or degraded envelope, to compare its hash.
 pub const RESIDUE_PAGE_QUERY: &str = "SELECT envelopes.sequence,
         (SELECT group_concat(member_key, ' ') FROM replica_envelope_signatures AS signatures
          WHERE signatures.writer=envelopes.writer
