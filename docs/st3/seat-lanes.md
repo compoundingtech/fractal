@@ -340,7 +340,7 @@ so the run behind may take that tree after the fallback, and a burst granted whi
 is given back and asked again when one is: no run holds a burst without a tree or a tree without
 its burst. The tree is cleared of orphans only as the granted run takes it, so one given back while the ask waits has
 nothing in it signalled. Once its burst is granted a run takes a free tree at once, even if the build slots
-have filled during the ask: its build then waits for a slot in the tree. A run that hands over to main's newer copy while it waits keeps its burst, or its ask and
+have filled during the ask: its build then waits for a slot in the tree. A run that hands over to main's newer copy while it waits, or before a top-up round, keeps its burst, or its ask and
 its place in the host's order: the holder is the run's child, and the exec keeps it and its pipes,
 so the newer copy holds the same burst or reads the answer to the same ask. A run with no pool tree asks before its checks. Either way, a branch that does not merge with the base is refused before any ask. It waits up to
 `--queue-limit` for each ask (a burst given back and asked again starts a new one), prints
