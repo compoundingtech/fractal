@@ -14,6 +14,37 @@ use axum::http::Request;
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("bound.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    let client = crate::client::Client::unix(&socket);
+    let before = store.index().unwrap();
+    for (path, actor, allowed) in [
+        ("/v1/fleet/transports", "agent/example", true),
+        ("/v1/fleet/transports", "agent/other", false),
+        ("/v1/fleet/transports", "person/operator", false),
+        ("/v1/internal/fleet/endpoints", "agent/example", false),
+    ] {
+        let result: anyhow::Result<Value> = client.post(path, &json!({
+            "actor": actor, "mutation_id": "transport-test", "dry_run": true,
+            "mode": "dial-out", "endpoints": [],
+        })).await;
+        assert_eq!(result.is_ok(), allowed, "{path}: {actor}: {result:?}");
+        assert_eq!(store.index().unwrap(), before);
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn fleet_leave_state_local_only_is_read_only_and_worker_absence_fails_closed() {
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
