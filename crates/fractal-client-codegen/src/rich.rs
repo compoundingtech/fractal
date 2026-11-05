@@ -1640,8 +1640,8 @@ export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.genera
 pub fn partitioned_models(schema: &Value, operations: &Value) -> Result<Vec<(&'static str, String)>> {
     let mut schema = schema.clone();
     let defs = schema["$defs"].as_object_mut().context("schema definitions")?;
-    // Blob reads use the raw transport route rather than the reads manifest.
-    let mut pending = BTreeSet::from(["BlobChunk".to_owned()]);
+    // Raw blob reads and stream-name telemetry sit outside the read response roots.
+    let mut pending = BTreeSet::from(["BlobChunk".to_owned(), "CollectionName".to_owned()]);
     for read in operations["reads"].as_array().context("read operations")? {
         let id = read["id"].as_str().context("read id")?;
         if id == "terminal.screen" || id == "assistant.terminal-content" {
