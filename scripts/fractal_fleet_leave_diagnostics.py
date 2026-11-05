@@ -86,7 +86,13 @@ def dump(root, reason):
                 print(log_tail(path), file=sys.stderr, flush=True)
         # This read has its own socket bound: a stuck API must not hide the dump.
         try:
-            body = live_latency(root / node / "run/st3.sock")
+            endpoint = root / node / "run/fractal.sock"
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+            legacy = root / node / "run/st3.sock"
+            if not endpoint.exists() and legacy.exists():
+                endpoint = legacy
+            # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+            body = live_latency(endpoint)
             print(f"--- {node} live request-latency\n{body}",
                   file=sys.stderr, flush=True)
         except OSError as error:

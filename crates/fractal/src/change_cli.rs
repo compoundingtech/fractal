@@ -13,6 +13,9 @@ pub struct ChangesArgs {
 pub enum ChangesCommand {
     /// Explicitly fetch and validate retained metadata history within the shared read budget.
     Sync {
+        /// Attribute synchronization to this person or agent.
+        #[arg(long = "as", value_parser = crate::parse_actor_subject)]
+        actor: Option<String>,
         #[arg(long)]
         repository: String,
     },
@@ -41,7 +44,7 @@ pub enum ChangesCommand {
 
 pub async fn run(client: &Client, arguments: ChangesArgs, json: bool) -> Result<()> {
     let (path, query) = match arguments.command {
-        ChangesCommand::Sync { repository } => {
+        ChangesCommand::Sync { repository, .. } => {
             let response: Value = client
                 .post(
                     "/v1/client/changes/sync",

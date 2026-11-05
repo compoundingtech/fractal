@@ -177,6 +177,14 @@ fn unchanged_failed_input_is_not_copied_or_replayed_even_after_restart() {
     note(&store);
     context.now_unix_ms += CHECKPOINT_PROOF_BACKOFF_MS;
     assert!(store.checkpoint_step(&context).unwrap().is_empty());
+    let attempt = store.checkpoint_status(context.now_unix_ms, &[]).unwrap()
+        .verification_attempt.unwrap();
+    assert_eq!(attempt.phases.iter().map(|phase| phase.phase.as_str()).collect::<Vec<_>>(),
+        ["capture", "plan", "input_digest"]);
+    let digest = attempt.phases.last().unwrap();
+    assert!(serde_json::to_value(digest).unwrap()["wall_ms"].as_u64().is_some());
+    #[cfg(target_os = "linux")]
+    assert!(digest.read_bytes.is_some() && digest.write_bytes.is_some());
     // The persisted decision survives a new Store. A proof copies the store and replays it on
     // the copy, so an unchanged replay count proves the copy phase is skipped, not merely that
     // its diagnostic is deduplicated. No proof copy is left in the scratch directory either.

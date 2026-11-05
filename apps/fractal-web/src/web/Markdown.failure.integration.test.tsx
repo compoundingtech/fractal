@@ -13,10 +13,10 @@ const failedImport = vi.hoisted(() => {
   const ready = new Promise<void>(resolve => { release = resolve })
   return { ready, release, attempts: 0 }
 })
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGrammar', async () => {
+vi.mock('@pierre/highlights', async () => {
   failedImport.attempts++
   await failedImport.ready
-  throw new Error('Grammar chunk unavailable')
+  throw new Error('Highlighter chunk unavailable')
 })
 vi.mock('../data/react.tsx', async () => {
   const Atom = await import('effect/reactivity/Atom')
@@ -34,10 +34,10 @@ vi.mock('../data/react.tsx', async () => {
   }
 })
 
-it('contains a rejected grammar import to plain code and retries on a later transcript render', async () => {
+it('contains a rejected highlighter import to plain code and retries on transcript reopen', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
-  vi.stubGlobal('requestAnimationFrame', () => 1)
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0))
   vi.stubGlobal('cancelAnimationFrame', () => {})
   const container = document.createElement('div')
   document.body.append(container)
@@ -51,9 +51,17 @@ it('contains a rejected grammar import to plain code and retries on a later tran
   }
   try {
     await show('const answer = 42')
+    await act(async () => { await vi.waitFor(() => expect(failedImport.attempts).toBe(1)) })
     const transcript = container.querySelector('[data-testid="transcript-scroll"]')!
     const composer = container.querySelector<HTMLTextAreaElement>('textarea')!
     const code = transcript.querySelector('code')!
+    const pre = code.closest('pre')!
+    const wrap = transcript.querySelector<HTMLButtonElement>('[aria-label="Wrap code"]')!
+    const copy = transcript.querySelector<HTMLButtonElement>('[aria-label="Copy code"]')!
+    expect(pre.getAttribute('role')).toBe('group')
+    expect(pre.tabIndex).toBe(0)
+    expect(copy).not.toBeNull()
+    await act(async () => wrap.click())
     expect(composer).not.toBeNull()
     expect(code.textContent).toBe('const answer = 42\n')
     await act(async () => composer.focus())
@@ -65,14 +73,27 @@ it('contains a rejected grammar import to plain code and retries on a later tran
     expect(transcript.textContent).toContain('Readable answer.')
     expect(code.textContent).toBe('const answer = 42\n')
     expect(code.querySelector('[data-syntax-token]')).toBeNull()
-    vi.doMock('../../../../packages/fractal-ui/src/assistant-ui/composition/syntaxGrammar', async importOriginal => importOriginal())
+    expect(transcript.querySelector('code')).toBe(code)
+    expect(code.closest('pre')).toBe(pre)
+    expect(transcript.querySelector('[aria-label="Copy code"]')).toBe(copy)
+    expect(wrap.getAttribute('aria-pressed')).toBe('true')
+    vi.doMock('@pierre/highlights', async importOriginal => {
+      failedImport.attempts++
+      return importOriginal()
+    })
     await show('const answer = 43')
     expect(container.querySelector('[data-testid="transcript-scroll"]')).toBe(transcript)
     expect(container.querySelector('textarea')).toBe(composer)
     await act(async () => { await vi.dynamicImportSettled() })
     expect(document.activeElement).toBe(composer)
     expect(code.textContent).toBe('const answer = 43\n')
-    expect(code.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')
+    expect(failedImport.attempts).toBe(1)
+    expect(code.querySelector('[data-syntax-token]')).toBeNull()
+    await act(async () => root.render(null))
+    await show('const answer = 43')
+    await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-syntax-token="keyword"]')?.textContent).toBe('const')) })
+    expect(failedImport.attempts).toBe(2)
+    expect(container.querySelector('code')?.textContent).toBe('const answer = 43\n')
   } finally {
     failedImport.release()
     await act(async () => root.unmount())

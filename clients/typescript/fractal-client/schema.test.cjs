@@ -1136,3 +1136,15 @@ test('a later daemon adding a tone word does not fail the objectives and budgets
         assert.equal(list.rows.length, 3);
     }
 });
+
+test('notice summary bounds match JSON Schema at 200 Unicode code points', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const input = require('../../../docs/st3/client-v0/fixtures/notice-conformance.json').snapshot.input;
+    const decode = Rich.decodeUnknownSync(Rich.NoticeCreated, 'strict');
+    const boundary = { ...input, summary: '😀'.repeat(200) };
+    assert.equal(Schema.encodeSync(Rich.NoticeCreated)(decode(boundary)).summary, boundary.summary);
+    assert.throws(() => decode({ ...input, summary: '😀'.repeat(201) }));
+    for (const url of ['https://example.com/a b', 'https://example.com/%xy', '/relative']) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeLink, 'strict')({ label: 'Result', url }));
+    }
+});

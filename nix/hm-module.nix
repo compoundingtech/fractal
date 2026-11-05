@@ -54,7 +54,7 @@ let
     ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
     ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
-      [ "--client-gateway-socket" "${cfg.stateDir}/run/st3-client.sock" ]
+      [ "--client-gateway-socket" "${cfg.stateDir}/run/fractal-client.sock" ]
     ++ (if externallyManaged then
       [ "--pty-binary" "${binDir}/pty" ]
     else
@@ -123,6 +123,23 @@ let
       if [ -e "$legacy" ] && [ ! -L "$legacy" ]; then exit 1; fi
     done
   '';
+  hmDomain = config.launchd.agents.${if completed then "fractal" else "smalltalk"}.domain or "gui";
+  domainQuery = lib.escapeShellArgs [ (if externallyManaged then cfg.binary.path else "${effectivePackage}/bin/fractal") "migrate" "launchd-domain" ];
+  resolveDomain = ''
+    domain=$(${domainQuery}) || exit 1
+    [ "$domain" = "${hmDomain}/$(id -u)" ] || {
+      echo "Refusing launchd domain change: loaded/journal domain $domain, Home Manager domain ${hmDomain}" >&2
+      exit 1
+    }
+    ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) ''
+      [ "$domain" = "${config.launchd.agents.${if completed then "fractal-apply" else "smalltalk-apply"}.domain or "gui"}/$(id -u)" ] || exit 1
+    ''}
+  '';
+  stageSession = agent:
+    let session = config.launchd.agents.${agent}.config.LimitLoadToSessionType or null;
+    in lib.optionalAttrs (!completed && (session != null || hmDomain == "user")) {
+      LimitLoadToSessionType = if session != null then session else "Background";
+    };
   targetGuard = pkgs.writeShellScript "fractal-migration-ready" (''
     set -eu
   '' + migrationReady + (if pkgs.stdenv.hostPlatform.isLinux then ''
@@ -133,8 +150,26 @@ let
       printf '%s\n' "$status" | ${pkgs.gnugrep}/bin/grep -Eq '^ActiveState=(inactive|failed)$' || exit 1
     done
   '' else ''
+    if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ] || [ -L ${lib.escapeShellArg "${config.xdg.configHome}/.fractal-host-cutover.json"} ]; then
+      ${resolveDomain}
+    else
+      for marker in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" configFence ]}; do
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+          echo "Refusing launchd ownership: migration marker/fence $marker exists but .fractal-host-cutover.json is missing" >&2
+          exit 1
+        fi
+      done
+      if [ -e ${lib.escapeShellArg "${config.xdg.configHome}/st3/launchd-staged"} ] || [ -L ${lib.escapeShellArg "${config.xdg.configHome}/st3/launchd-staged"} ]; then
+        ${resolveDomain}
+      elif [ "${hmDomain}" != gui ]; then
+        echo "Fresh user-domain launchd installation without a migration journal is unsupported" >&2
+        exit 1
+      else
+        domain="gui/$(id -u)"
+      fi
+    fi
     for label in org.nix-community.home.smalltalk com.compoundingtech.st3; do
-      if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then exit 1
+      if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then exit 1
       elif [ "$?" -ne 113 ]; then exit 1
       fi
     done
@@ -162,12 +197,12 @@ let
     SoftResourceLimits.NumberOfFiles = 8192;
     StandardOutPath = "${targetDaemonState}/logs/st3.stdout.log";
     StandardErrorPath = "${targetDaemonState}/logs/st3.stderr.log";
-  };
+  } // stageSession "smalltalk";
   targetApplyPlist = {
     Label = "com.compoundingtech.fractal-apply";
     ProgramArguments = [ (toString targetApplyScript) ];
     EnvironmentVariables = targetEnvironment;
-  };
+  } // stageSession "smalltalk-apply";
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
 in
 {
@@ -225,7 +260,7 @@ in
     };
     ptyRoot = mkOption { type = types.nullOr types.str; default = null; description = "PTY registry root; null uses the daemon default."; };
     socket = mkOption { type = types.nullOr types.str; default = null; description = "API socket; null uses the daemon default."; };
-    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/st3-client.sock on Linux, stateDir/run/st3-client.sock on Darwin)."; };
+    clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/fractal-client.sock on Linux, stateDir/run/fractal-client.sock on Darwin)."; };
     webListen = mkOption {
       type = types.nullOr types.str;
       default = "127.0.0.1:7410";
@@ -312,6 +347,10 @@ in
           text = lib.generators.toPlist { escape = true; } targetApplyPlist;
         };
     };
+    xdg.configFile."st3/launchd-staged" = {
+      enable = staging && !completed && pkgs.stdenv.hostPlatform.isDarwin;
+      text = "Home Manager launchd staging\n"; force = lib.mkForce false;
+    };
     home.activation.fractalMigrationPreflight = lib.hm.dag.entryBetween
       [ "writeBoundary" ] [ ] ''
         ${if completed then ''
@@ -326,20 +365,24 @@ in
               exit 1
             fi
           done
+          ${lib.optionalString (staging && pkgs.stdenv.hostPlatform.isDarwin) resolveDomain}
         ''}
       '';
     home.activation.fractalStageDisabled = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin)
       (lib.hm.dag.entryBetween [ "linkGeneration" ] [ "writeBoundary" ] ''
         if [[ -z "''${DRY_RUN_CMD:-}" ]]; then
+          ${resolveDomain}
           for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
-            if /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+            if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then
               echo "Refusing to stage an already loaded Fractal launchd job: $label" >&2
               exit 1
             elif [ "$?" -ne 113 ]; then
               echo "Cannot establish launchd staging state for $label" >&2
               exit 1
             fi
-            /bin/launchctl disable "gui/$(id -u)/$label"
+          done
+          for label in com.compoundingtech.fractal ${lib.optionalString (cfg.declarationsApply.enable && hasDeclarations) "com.compoundingtech.fractal-apply"}; do
+            /bin/launchctl disable "$domain/$label"
           done
         fi
       '');
@@ -359,10 +402,44 @@ in
             installReceipt="$binDir/.fractal-install.json"
             pendingReceipt="$installReceipt.pending"
             receiptOwned=false
+            # Boundary for rollback through a pre-receipt HM generation: that
+            # generation replaces the payload but leaves the newer HM receipt.
+            # Trust only the previous active generation's immutable package and
+            # intact reverse aliases, never an arbitrary digest mismatch.
+            previousHmPayload() {
+              local previous name hash
+              [[ -f "$installReceipt" && ! -L "$installReceipt" ]] || return 1
+              [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
+              [[ -f "$target" && -x "$target" ]] || return 1
+              for name in st st3; do
+                [[ -L "$binDir/$name" ]] || return 1
+                case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                  fractal|"$target") ;;
+                  *) return 1 ;;
+                esac
+              done
+              [[ -n "''${oldGenPath:-}" ]] || return 1
+              previous=$(${pkgs.coreutils}/bin/readlink -e "$oldGenPath/home-path/bin/fractal") || return 1
+              [[ "$previous" =~ ^/nix/store/[0-9a-z]{32}-[^/]+/ ]] || return 1
+              [[ -f "$previous" && -x "$previous" ]] || return 1
+              ${pkgs.diffutils}/bin/cmp -s "$previous" "$target" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$target") || return 1
+              hash=''${hash%% *}
+              ${pkgs.jq}/bin/jq -e -s --arg hash "$hash" '
+                length == 1 and (.[0] |
+                  type == "object" and .schema == 1 and .name == "fractal"
+                  and .installer == "hm"
+                  and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
+                  and .sha256 != $hash)
+              ' "$installReceipt" >/dev/null 2>&1
+            }
             if [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
               # The incoming executable owns the receipt parser and checks it
               # against the prior installed payload before any replacement.
-              if ! "$source" setup --receipt-verify "$binDir"; then
+              if receiptError=$("$source" setup --receipt-verify "$binDir" 2>&1); then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
+              elif ! previousHmPayload; then
+                if [[ -n "$receiptError" ]]; then printf '%s\n' "$receiptError" >&2; fi
                 printf 'Home Manager: invalid install receipt %s; reinstall Fractal to restore ownership.\n' "$installReceipt" >&2
                 exit 1
               fi
@@ -506,7 +583,7 @@ in
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ executable ] ++ upArgs))
             # Preserve systemd's runtime-directory specifier; systemdArg escapes literal percent signs.
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (environment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
@@ -550,7 +627,7 @@ in
           ExecCondition = toString targetGuard;
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ targetExecutable ] ++ targetUpArgs))
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/st3-client.sock"'';
+              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (targetEnvironment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";

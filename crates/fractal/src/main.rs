@@ -88,6 +88,7 @@ mod release_version;
 mod follow_tests;
 mod presentation;
 mod actor_contract;
+mod inspection_actor;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -178,6 +179,11 @@ const CLI_ENVIRONMENT_NAMES: [(&str, &str); 5] = [
     ("ST3_INCARNATION", "FRACTAL_INCARNATION"),
 ];
 
+/// The canonical argv graph, including attribution-only operational read options.
+fn command_graph() -> clap::Command {
+    inspection_actor::augment(Cli::command())
+}
+
 fn cli_command() -> clap::Command {
     // Resolve each family once, not once per argument, to warn once per conflict.
     // Leave legacy bindings untouched unless the preferred alias is actually present.
@@ -186,7 +192,7 @@ fn cli_command() -> clap::Command {
             (old, fractal_drivers::contracts::env(old).map(|_| new))
         })
     });
-    let mut command = cli_command_with_bindings(Cli::command(), &bindings);
+    let mut command = cli_command_with_bindings(command_graph(), &bindings);
     // Materialize inherited globals before hiding only web's copies. They remain
     // parseable so the explicit refusal below still reports unsupported options.
     command.build();
@@ -1086,6 +1092,9 @@ struct FleetModeArgs {
 enum FleetTransportsCommand {
     /// Expose Fabric, then announce it. Requires a listening member with a port.
     Add {
+        /// The person or agent applying this change.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         #[arg(value_parser = ["fabric"])]
         transport: String,
         /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
@@ -1100,6 +1109,9 @@ enum FleetTransportsCommand {
     },
     /// Withdraw Fabric's endpoint, then unexpose it. Keep at least one usable transport.
     Remove {
+        /// The person or agent applying this change.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         #[arg(value_parser = ["fabric"])]
         transport: String,
         /// Leave the daemon and replication worker restarts to the operator.
@@ -1108,6 +1120,9 @@ enum FleetTransportsCommand {
     },
     /// Prefer an enabled transport without changing exposure or removing any carrier.
     Prefer {
+        /// The person or agent applying this change.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         #[arg(value_parser = ["tailscale", "fabric"])]
         transport: String,
         /// Leave the daemon and replication worker restarts to the operator.
@@ -1390,6 +1405,9 @@ struct MissionPublishArgs {
 
 #[derive(Args)]
 struct MissionCheckArgs {
+    /// Attribute gate execution to this person or agent.
+    #[arg(long = "as", value_parser = parse_actor_subject)]
+    actor: Option<String>,
     /// KDL file to check; use `-` to read standard input.
     file: PathBuf,
     /// The workspace a run would use: `${ST_WORKSPACE}` and relative gate workspaces stand for
@@ -1421,6 +1439,9 @@ enum GateCommand {
     },
     /// Whether a cargo test target passes at a ref, built in a worktree fractal keeps between checks.
     CargoTest {
+        /// Attribute this local execution in its output.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
         /// The test target, as `cargo test --test TARGET` names it.
         target: String,
         #[arg(long)]
@@ -2420,6 +2441,9 @@ enum RepairCommand {
 enum MigrateCommand {
     /// Migrate the default host after its Fractal services have been staged disabled.
     Host(migrate_cli::HostArgs),
+    /// Print the discovered or journal-recorded launchd domain without changing the host.
+    #[command(hide = true)]
+    LaunchdDomain,
 }
 
 #[cfg(test)]
@@ -2966,7 +2990,7 @@ fn rename_proof_verdict(
     }
 }
 
-fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
+fn offline_rename_proof(command: &Command, matches: &clap::ArgMatches) -> Option<ExitCode> {
     let args = match command {
         Command::Agents { command: AgentsCommand::RenameId(args) }
         | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
@@ -2977,6 +3001,10 @@ fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
     }) = &args.command else {
         return None;
     };
+    if let Err(error) = inspection_actor::attribute(matches) {
+        stderr_message("st", format_args!("{error:#}"));
+        return Some(ExitCode::FAILURE);
+    }
     let (verdict, code) = rename_proof_verdict(file, fleet_anchor, after_revision.as_deref());
     println!("{verdict}");
     Some(ExitCode::from(code))
@@ -2990,7 +3018,7 @@ fn offline_rename_proof_arguments(arguments: &[std::ffi::OsString]) -> Option<Ex
     }
     let matches = cli_command().try_get_matches_from_mut(arguments).ok()?;
     let cli = Cli::from_arg_matches(&matches).ok()?;
-    offline_rename_proof(&cli.command)
+    offline_rename_proof(&cli.command, &matches)
 }
 
 async fn run_identity_rename(
@@ -5014,7 +5042,7 @@ fn read_contract_inventory_for_command(mut command: clap::Command) -> Value {
 }
 
 fn read_contract_inventory_json() -> Value {
-    read_contract_inventory_for_command(Cli::command())
+    read_contract_inventory_for_command(command_graph())
 }
 
 fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
@@ -5230,6 +5258,10 @@ fn cli_main() -> ExitCode {
     };
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
+    if let Err(error) = inspection_actor::attribute(&matches) {
+        stderr_message("st", format_args!("{error:#}"));
+        return ExitCode::FAILURE;
+    }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
@@ -5446,7 +5478,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         .as_deref()
         .map(Endpoint::parse)
         .transpose()?
-        .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
+        .unwrap_or_else(|| Endpoint::DiscoveredUnix(config.client_discovery()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -5755,6 +5787,9 @@ async fn run(cli: Cli) -> Result<()> {
             config.as_deref(),
         );
     }
+    if matches!(&cli.command, Command::Migrate { command: MigrateCommand::LaunchdDomain }) {
+        return migrate_cli::print_launchd_domain();
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -5876,7 +5911,7 @@ async fn run(cli: Cli) -> Result<()> {
         .as_deref()
         .map(Endpoint::parse)
         .transpose()?
-        .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
+        .unwrap_or_else(|| Endpoint::DiscoveredUnix(config.client_discovery()));
     let _ = DAEMON_WAIT.set(Duration::from_secs(cli.daemon_wait));
     let client = cli_client(&endpoint);
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
@@ -5955,24 +5990,15 @@ async fn run(cli: Cli) -> Result<()> {
             ) {
                 client
             } else {
-                let actor = match fractal_drivers::contracts::env("ST_AGENT")
-                    .filter(|agent| agent.starts_with("agent/"))
-                {
-                    Some(agent) => agent,
-                    None => parse_person_subject(config.person.as_deref().context(
-                        "Git change sync needs a configured person or the current agent seat",
-                    )?)
-                    .map_err(anyhow::Error::msg)?,
+                let change_cli::ChangesCommand::Sync { actor, .. } = &arguments.command else {
+                    unreachable!()
                 };
-                let Endpoint::Unix(socket) = &endpoint else {
-                    anyhow::bail!("Git change control commands require the trusted local Unix socket");
-                };
-                let named = if actor.starts_with("agent/") {
-                    Client::unix_agent(socket, actor)?
-                } else {
-                    Client::unix_as(socket, actor)?
-                };
-                named.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                let actor = configured_actor(
+                    actor.as_deref(),
+                    config.person.as_deref(),
+                    "changes sync",
+                )?;
+                execution_client(&endpoint, actor)?
             };
             change_cli::run(&client, arguments, cli.json).await
         }
@@ -5986,13 +6012,13 @@ async fn run(cli: Cli) -> Result<()> {
                 // A read relayed to the poller is made as a person or agent.
                 Some(actor) => {
                     let actor = actor.map(str::to_owned).or_else(|| config.person.clone());
-                    let named = match (&endpoint, actor) {
-                        (Endpoint::Unix(socket), Some(actor)) if actor.starts_with("agent/") => {
-                            Client::unix_agent(socket, actor)?.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                    let named = match (endpoint.unix_socket(), actor) {
+                        (Some(socket), Some(actor)) if actor.starts_with("agent/") => {
+                            Client::unix_agent(socket.as_ref(), actor)?.with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
                         }
-                        (Endpoint::Unix(socket), Some(actor)) => {
-                            Client::unix_as(socket, parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
-                                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        (Some(socket), Some(actor)) => {
+                            Client::unix_as(socket.as_ref(), parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
+                                .with_endpoint(endpoint.clone()).with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
                         }
                         _ => client.clone(),
                     };
@@ -6086,6 +6112,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
         }
+        Command::Migrate { command: MigrateCommand::LaunchdDomain } => migrate_cli::print_launchd_domain(),
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
@@ -6143,12 +6170,16 @@ async fn run_gate(command: GateCommand) -> Result<()> {
             reference,
         } => github_gates::check_passed(&repo, &reference, &check).await,
         GateCommand::CargoTest {
+            actor,
             target,
             package,
             reference,
             repository,
             worktree,
         } => {
+            if let Some(actor) = actor {
+                eprintln!("Executing gate cargo-test as {actor}");
+            }
             tokio::task::spawn_blocking(move || {
                 fractal_daemon::gate_kinds::cargo_test(&fractal_daemon::gate_kinds::CargoTest {
                     target: &target,
@@ -6195,12 +6226,26 @@ fn guard_mutating_cli_actor(
     }
     let actor = match command {
         Command::Apply(args) => Some(args.actor.as_str()),
+        Command::Changes(change_cli::ChangesArgs {
+            command: change_cli::ChangesCommand::Sync { actor, .. },
+        }) | Command::Gate {
+            command: GateCommand::CargoTest { actor, .. },
+        } => actor.as_deref(),
         Command::Fleet { command: FleetCommand::AdmitWithout { actor, .. } } => Some(actor.as_str()),
+        Command::Fleet { command: FleetCommand::Transports { command } } => {
+            let (FleetTransportsCommand::Add { actor, .. }
+                | FleetTransportsCommand::Remove { actor, .. }
+                | FleetTransportsCommand::Prefer { actor, .. }) = command;
+            Some(actor.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("a harness transport change needs explicit --as {own}")
+            })?)
+        }
         Command::Missions { command } => match command {
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
@@ -6881,7 +6926,7 @@ fn select_private_gateway(
     };
     config.client_gateway_socket = parent
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("st3-client.sock");
+        .join("fractal-client.sock");
     if gateway_path_for_comparison(&config.client_gateway_socket)?
         == gateway_path_for_comparison(&Config::default().client_gateway_socket)?
     {
@@ -6919,6 +6964,9 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    if let Some(person) = &config.person {
+        let _ = store.question_principal_default.set(person.clone());
+    }
     if admitted.is_some() {
         fractal_daemon::node_identity::record_store_writer(
             config, admitted.as_deref(), &config.node,
@@ -7149,12 +7197,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     };
     config.validate()?;
     fractal_daemon::resource::configure_github(&config)?;
-    validate_unix_socket_path(&config.socket, "--socket")?;
-    validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
+    validate_unix_socket_path(&fractal_daemon::config::socket_binding_path(&config.socket), "--socket")?;
+    validate_unix_socket_path(
+        &fractal_daemon::config::socket_binding_path(&config.client_gateway_socket),
+        "--client-gateway-socket",
+    )?;
     let startup = begin_admitted_startup(&config, &state_identity)?;
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
-    let state_socket = config.state_dir.join("run/st3.sock");
+    let state_socket = config.state_dir.join("run/fractal.sock");
     state_identity.verify_store_directory(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
@@ -7271,6 +7322,21 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if !projected {
         stderr_message("st", format_args!("the replicated projection remains deferred; the daemon will use its last good graph"));
     }
+    // The shard admitted its backlog before the graph admitted its own. Membership the graph
+    // admitted since (a leaver's bounds an older build held) decides envelopes the shard held.
+    if let Ok(shard) = &messages_shard {
+        let readmitted = fractal_daemon::task_cpu::blocking("startup.readmit_messages_shard", || {
+            if shard.fleet_moved_since_admission()? {
+                shard.validate_replication_backlog()?;
+                shard.apply_replication_repairs()?;
+                shard.project_replication_backlog()?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        if let Err(error) = readmitted {
+            stderr_message("st", format_args!("the messages shard's held envelopes wait for its next exchange: {error:#}"));
+        }
+    }
     if admission.unknown != 0 {
         stderr_message("st", format_args!("{} claims waiting for a newer build", admission.unknown));
     }
@@ -7287,7 +7353,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
@@ -7388,6 +7454,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
     )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
@@ -7420,6 +7487,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
     spawn_response_expiry(store.clone());
+    // After the shard opened, or failed to: a member without one drains to the graph.
+    spawn_message_outbox(store.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -7610,8 +7679,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
-            stderr_message("st", format_args!("local API listening at {}", config.socket.display()));
-            stderr_message("st", format_args!("paired client gateway listening at {}", config.client_gateway_socket.display()));
+            stderr_message("st", format_args!("local API listening at {}", fractal_daemon::config::socket_binding_path(&config.socket).display()));
+            stderr_message("st", format_args!("paired client gateway listening at {}", fractal_daemon::config::socket_binding_path(&config.client_gateway_socket).display()));
         }
     };
     let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
@@ -8535,6 +8604,7 @@ async fn attach_terminal(
 fn endpoint_label(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Unix(socket) => socket.display().to_string(),
+        Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix discovery").display().to_string(),
         Endpoint::Http(url) => url.clone(),
         Endpoint::Fabric(endpoint) => endpoint.to_string(),
     }
@@ -8954,7 +9024,7 @@ fn trace_scalar(value: &Value) -> String {
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
     let socket = match endpoint {
-        Endpoint::Unix(socket) => socket,
+        Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix endpoint"),
         Endpoint::Fabric(endpoint) => {
             let mut client = GeneratedClient::fabric(endpoint.clone());
             if let Some(credential) = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL") {
@@ -8970,14 +9040,14 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
             "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
         ),
     };
-    if let Some(startup) = fractal_daemon::startup::read(socket)
+    if let Some(startup) = fractal_daemon::startup::read(socket.as_ref())
         && startup.status == "starting"
         // A bound API can already answer before both listeners have published `serving`.
         // Try the connection before interpreting an observation as an outage.
-        && std::os::unix::net::UnixStream::connect(socket).is_err()
+        && std::os::unix::net::UnixStream::connect(socket.as_ref()).is_err()
     {
         if startup.full_replay() {
-            if let Some(outage) = fractal_daemon::client::DaemonUnreachable::during_startup(socket)
+            if let Some(outage) = fractal_daemon::client::DaemonUnreachable::during_startup(socket.as_ref())
                 && outage.full_replay()
             {
                 return Err(outage.into());
@@ -8986,12 +9056,17 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
             stderr_message("st", format_args!("{}", startup.summary()));
         }
     }
-    Ok(person
-        .map_or_else(
-            || GeneratedClient::unix(socket),
-            |person| GeneratedClient::unix_as(socket, person),
-        )
-        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
+    let client = match endpoint {
+        Endpoint::DiscoveredUnix(identity) => person.map_or_else(
+            || GeneratedClient::discovered_unix(identity.clone()),
+            |person| GeneratedClient::discovered_unix_as(identity.clone(), person),
+        ),
+        _ => person.map_or_else(
+            || GeneratedClient::unix(socket.as_ref()),
+            |person| GeneratedClient::unix_as(socket.as_ref(), person),
+        ),
+    };
+    Ok(client.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
 async fn run_now(
@@ -9173,7 +9248,13 @@ async fn run_devices_fabric(
                 );
             }
             fabric
-                .expose_socket(&service, &config.client_gateway_socket)
+                .expose_socket(
+                    &service,
+                    &fractal_client::default_unix_socket(
+                        &config.client_gateway_socket,
+                        &config.client_gateway_socket,
+                    ),
+                )
                 .await
                 .context("Fabric could not expose the client gateway; nothing changed")?;
             GatewayExposure {
@@ -9743,6 +9824,21 @@ fn with_device_presence(
         out.push('\n');
     }
     out
+}
+
+/// Carry execution attribution on the trusted local request, as mutation clients do.
+fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
+    let Some(socket) = endpoint.unix_socket() else {
+        anyhow::bail!("execution attribution requires the trusted local Unix socket");
+    };
+    let client = if actor.starts_with("agent/") {
+        Client::unix_agent(socket.as_ref(), actor)?
+    } else {
+        Client::unix_as(socket.as_ref(), actor)?
+    };
+    Ok(client
+        .with_endpoint(endpoint.clone())
+        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
 /// The actor of a terminal or client-v0 command: an explicit person or agent, else the harness's
@@ -11842,13 +11938,26 @@ fn render_performance(view: &Value) -> String {
         let _ = writeln!(out);
     }
     if let Some(lapsed) = view["lane_bursts"]["dropped_by_lease"].as_u64() {
-        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start",
+        let reserve = &view["lane_bursts"]["reserve"];
+        let seat = reserve["subject"].as_str().unwrap_or("a seat");
+        let reserve = match (reserve["full"].as_u64(), reserve["kept"].as_u64()) {
+            (Some(full), Some(kept)) if full == kept => format!(" · {} kept from starts for a burst (last judged for {seat})", show_gib(full)),
+            (Some(full), Some(kept)) => format!(" · {} kept from starts for a burst ({} while one is held; last judged for {seat})",
+                show_gib(full), show_gib(kept)),
+            _ => String::new(),
+        };
+        let _ = writeln!(out, "LANE BURSTS  {} held · {} waiting · {lapsed} dropped by lease since start{reserve}",
             view["lane_bursts"]["held"], view["lane_bursts"]["waiting"]);
     }
     if let Some(note) = view["query_time_note"].as_str() {
         let _ = writeln!(out, "{note}");
     }
     out
+}
+
+/// Bytes as the lane reasons show them: GiB with one decimal.
+fn show_gib(bytes: u64) -> String {
+    format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
 }
 
 async fn doctor_request<T: serde::de::DeserializeOwned>(
@@ -11921,7 +12030,7 @@ async fn run_doctor(
         );
         return Ok(());
     }
-    let readiness = client.socket_path().and_then(fractal_daemon::startup::read);
+    let readiness = client.socket_path().as_deref().and_then(fractal_daemon::startup::read);
 
     if args.performance {
         let mut report: Value =
@@ -12674,12 +12783,13 @@ async fn resolve_member_subject(
     if subject.contains('/') {
         return Ok(literal);
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         return Ok(literal);
     };
     let discovered = completion::LocalTarget::discover(&[]);
     let target = completion::LocalTarget {
-        socket: socket.clone(),
+        socket: socket.into_owned(),
+        discovery: match endpoint { Endpoint::DiscoveredUnix(identity) => Some(identity.clone()), _ => None },
         caller: discovered.as_ref().and_then(|target| target.caller.clone()),
         person: discovered.and_then(|target| target.person),
     };
@@ -20718,6 +20828,87 @@ fn spawn_publication_evidence(store: Arc<Store>) {
     }));
 }
 
+/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
+/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
+/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
+/// is in this build, a commit costs no more than that. A message a drain could not write (the
+/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
+/// commit, so it never holds up new mail.
+fn spawn_message_outbox(store: Arc<Store>) {
+    const RETRY: Duration = Duration::from_secs(30);
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = store.observe_commits(move |connection| {
+        if connection.is_autocommit() {
+            changed.send_replace(());
+        }
+    });
+    let waiting = |store: Arc<Store>| async move {
+        tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_waiting", || {
+            fractal_store::store::message_outbox::waiting(&store.readers.get())
+        }))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|waiting| waiting)
+    };
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.outbox", async move {
+        let _observer = observer;
+        let mut retry_at: Option<Instant> = None;
+        loop {
+            receiver.borrow_and_update();
+            match waiting(store.clone()).await {
+                Ok((fresh, any)) if fresh || (any && retry_at.is_none_or(|at| Instant::now() >= at)) => {
+                    // New mail alone drains only new mail: a refused message waits out its pause.
+                    let retry_due = any && retry_at.is_none_or(|at| Instant::now() >= at);
+                    let drain_store = store.clone();
+                    match drain_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("messages.outbox_drain", || {
+                        if retry_due {
+                            fractal_store::store::message_outbox::drain(&drain_store)
+                        } else {
+                            fractal_store::store::message_outbox::drain_fresh(&drain_store)
+                        }
+                    }))
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => stderr_message("st3", format_args!("message outbox drain failed: {error:#}")),
+                        Err(error) => stderr_message("st3", format_args!("message outbox drain stopped: {error}")),
+                    }
+                    // A new message queued meanwhile has its own commit; what stays waits a while,
+                    // counted from its last try, so new mail does not put its retry off.
+                    retry_at = match waiting(store.clone()).await {
+                        Ok((_, false)) => None,
+                        _ if retry_due || retry_at.is_none() => Some(Instant::now() + RETRY),
+                        _ => retry_at,
+                    };
+                }
+                // Waiting for a retry, or emptied by another drain (a backup's).
+                Ok((_, any)) => {
+                    if !any {
+                        retry_at = None;
+                    }
+                }
+                Err(error) => {
+                    stderr_message("st3", format_args!("message outbox check failed: {error:#}"));
+                    retry_at = Some(Instant::now() + RETRY);
+                }
+            }
+            match retry_at {
+                Some(at) => tokio::select! {
+                    changed = receiver.changed() => if changed.is_err() {
+                        return;
+                    },
+                    () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+                },
+                None => {
+                    if receiver.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }));
+}
+
 async fn migrate_event_payloads(store: Arc<Store>) {
     match fractal_daemon::maintenance::migrate_event_payloads(store).await {
         Ok(report) if report.pending_at_start => {
@@ -20962,6 +21153,21 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 0
             }
         };
+        // A seat's host's relayed closes this member's own records now cover (relayed_closes.rs).
+        let relayed_store = store.clone();
+        let relayed = match relayed_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("relayed_closes.trim", || {
+            fractal_daemon::store::relayed_closes::trim(&relayed_store, LOCAL_OBSERVATION_TRIM_CHUNK)
+        })).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                stderr_message("st3", format_args!("relayed close trim failed: {error:#}"));
+                0
+            }
+            Err(error) => {
+                stderr_message("st3", format_args!("relayed close trim stopped: {error}"));
+                0
+            }
+        };
         let trim = match trimmed {
             Ok(Ok(trim)) => Some(trim),
             Ok(Err(error)) => {
@@ -20995,7 +21201,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         // One line a pass, so a slow one shows without a blocked checkpoint to name it.
         if let Some(trim) = trim {
             stderr_message("st3", format_args!(
-                "local observation trim: deleted {} rows and {marks} message marks, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
+                "local observation trim: deleted {} rows, {marks} message marks and {relayed} relayed closes, gave {released} free pages back, longest writer hold {} ms, pass {} ms",
                 trim.deleted,
                 trim.longest_writer_hold.as_millis(),
                 pass_started.elapsed().as_millis(),
