@@ -218,7 +218,7 @@ mod tests {
         // The channel text is the skill's paragraph without its closing pointer clause.
         let rule = channel.trim_end_matches('.');
         assert!(skill.contains(rule), "{rule}");
-        assert!(SKILL.contains("people have no inbox, so do not reply with st"));
+        assert!(SKILL.contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION));
         assert!(!SKILL.contains("NO REPLY"));
         assert!(!SKILL.contains("people read st replies in st"));
     }
