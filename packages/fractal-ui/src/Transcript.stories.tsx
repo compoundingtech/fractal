@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, spyOn, userEvent, waitFor, within } from 'storybook/test'
+import { idleFramePeriod, transcriptFrameBudget } from './transcript-frame-budget'
 import { Transcript, type TranscriptAvailability, type TranscriptHistory, type TranscriptOlderRequest, type TranscriptProps, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { TranscriptEmptyState } from './assistant-ui/composition/TranscriptFeedback'
 import { EmbraceRuntimeProvider, RuntimeAdoptedIds } from './assistant-ui/EmbraceRuntime'
@@ -840,11 +841,7 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
       if (onAbort !== undefined) abortSignal.removeEventListener('abort', onAbort)
       if (observer !== undefined) { collect(observer.takeRecords()); observer.disconnect() }
     }
-    const sorted = [...intervals].sort((a, b) => a - b)
-    const periodMs = (sorted[sorted.length / 2 - 1]! + sorted[sorted.length / 2]!) / 2
-    // rAF timestamps quantize to vsync: 50.0/50.1ms can both be three 60Hz periods.
-    // Classify nearest whole periods, with the four-period boundary halfway above three.
-    return { startedAt, endedAt, intervals, periodMs, max: sorted.at(-1)!, maxPeriods: sorted.at(-1)! / periodMs, longFrames: intervals.filter(duration => duration > 3.5 * periodMs).length, loafSupported, longAnimationFrames }
+    return { startedAt, endedAt, intervals, loafSupported, longAnimationFrames }
   }
   for (let iteration = 0; iteration < 5; iteration++) {
     if (iteration > 0) await userEvent.click(canvas.getByRole('button', { name: 'Reset transcript' }))
@@ -855,23 +852,23 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
     await nextFrame()
     await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
     await nextFrame()
-    const control = await sampleFrames()
+    const idle = await sampleFrames()
+    const control = { ...idle, ...transcriptFrameBudget(idle.intervals, idleFramePeriod(idle.intervals)) }
     const before = laneOffset(lane, 'tail-0/prompt')
     const deliver = canvas.getByRole('button', { name: 'Deliver older page' })
     const host = canvas.getByTestId('paging-host')
     delete host.dataset.prependReactMs
     host.dataset.prependMeasuring = 'true'
-    const prepend = await sampleFrames(deliver).finally(() => { host.dataset.prependMeasuring = 'false' })
+    const delivered = await sampleFrames(deliver).finally(() => { host.dataset.prependMeasuring = 'false' })
+    const prepend = { ...delivered, ...transcriptFrameBudget(delivered.intervals, control.periodMs) }
     const detail = { iteration: iteration + 1, scheme: host.dataset.scheme, width: window.innerWidth, height: window.innerHeight, control, prepend, reactMilliseconds: host.dataset.prependReactMs ?? null }
     console.log(`HISTORY_PREPEND_DIAGNOSTIC ${JSON.stringify(detail)}`)
     window.dispatchEvent(new CustomEvent('kit-prepend-benchmark', { detail }))
     const { intervals } = prepend
-    const sorted = [...intervals].sort((a, b) => a - b)
-    const max = sorted.at(-1)!, p95 = sorted[Math.ceil(sorted.length * 0.95) - 1]!
+    const { max, p95Ms: p95, p95Periods } = prepend
     maxima.push(max)
     maximaPeriods.push(prepend.maxPeriods)
     const longFrames = prepend.longFrames
-    const p95Periods = Math.round(p95 / prepend.periodMs)
     host.dataset.prependFrameMaxMs = max.toFixed(1)
     host.dataset.prependFrameP95Ms = p95.toFixed(1)
     host.dataset.prependFrameMaxPeriods = prepend.maxPeriods.toFixed(2)

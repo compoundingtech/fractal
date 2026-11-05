@@ -452,14 +452,15 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
       return true
     }
     const committed = turns.flatMap(turn => {
-      if (turn.prompt !== undefined && !visible(turn.prompt.id)) return []
-      const pendingIndex = turn.items.findIndex(item => !visible(item.id))
-      if (pendingIndex === -1) return [turn]
-      // Keep the existing turn mounted while waiting, and defer only its pending suffix.
-      const items = turn.items.slice(0, pendingIndex)
-      if (turn.prompt === undefined && items.length === 0) return []
+      // Adoption can split either end of a turn: a pending prompt or earlier item must
+      // not hide the already-published suffix while an older page is being prepared.
+      const prompt = turn.prompt !== undefined && visible(turn.prompt.id) ? turn.prompt : undefined
+      const pendingItems = turn.items.some(item => !visible(item.id))
+      if (prompt === turn.prompt && !pendingItems) return [turn]
+      const items = pendingItems ? turn.items.filter(item => visible(item.id)) : turn.items
+      if (prompt === undefined && items.length === 0) return []
       const itemIds = new Set(items.map(item => item.id))
-      return [{ ...turn, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
+      return [{ ...turn, prompt, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
     })
     return { committed, stranded }
   }, [published, turns, adoptionEpoch, runtimeIds])
