@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Index terminal ETA candidates and fold new terminal runs without rebuilding windows",
+  "replay": {"status": "changed", "detail": "Normal terminal transitions fold only the new run. Corrections and deletions refill affected windows through an indexed newest-64 terminal-run selection before selected-attempt execution claims are loaded."},
+  "schema": {"status": "changed", "detail": "Add the member-local rebuildable local_run_eta_terminal metadata projection with ordered definition-hash/terminal-time/run-id and run-id indexes. A one-time version-4 sample migration backfills terminal metadata; a distinct run_eta_triggers_v4 revision installs the exact current trigger layout even when an earlier v3 sample marker exists, without changing the schema cookie on subsequent opens."},
+  "rules": {"status": "none", "detail": "Unusable terminal candidates still consume the 64-run bound. Existing selected-attempt durations, person-held exclusion, quartiles and true sample counts are unchanged."},
+  "compatibility": {"status": "none", "detail": "The integer Unix-ms ETA publication cut and public wire shape are unchanged."},
+  "downtime": {"status": "none", "detail": "The additive local projection initializes during normal store opening."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Rollback leaves the local projection unused; original claims and shared projections are unchanged."}
+}
