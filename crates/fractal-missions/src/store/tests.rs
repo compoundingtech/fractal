@@ -6997,6 +6997,59 @@ fn step_timing_reads_seek_the_runs_own_steps() {
     assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
 }
 
+/// The run-driven timing read returns the rows the claims-driven read of #5108 returned, in the same
+/// order: across two runs, a retried step, a step never started and a subject filter.
+#[test]
+fn step_timing_reads_return_what_the_store_wide_read_returned() {
+    let store = Store::open_memory("node").unwrap();
+    let runs = ["one", "two"].map(|key| {
+        publish_mission(
+            &store,
+            &format!(r#"version 2
+ mission "timed-{key}" state="ready" {{ goal "Time work."; step "a" {{ agentless; }}; step "b" {{ agentless; }}; step "c" {{ agentless; }} }} "#),
+            &format!("timed-{key}-mission"),
+        );
+        store.create_mission_run(&MissionRunRequest {
+            mission: format!("timed-{key}"), revision: None, workspace: "/tmp".into(), requester: Some("person/test".into()),
+            mode: Some("run".into()), inputs: BTreeMap::new(), idempotency_key: format!("timed-{key}"),
+        }).unwrap()
+    });
+    for run in &runs {
+        let (a, b) = (&run.steps[0].subject, &run.steps[1].subject);
+        store.set_step_state(a, "working", None).unwrap();
+        store.set_step_state(a, "failed", Some("first attempt failed")).unwrap();
+        store.retry_step(a, "retry policy", 0).unwrap();
+        store.set_step_state(a, "working", None).unwrap();
+        store.set_step_state(a, "completed", None).unwrap();
+        store.set_step_state(b, "working", None).unwrap();
+    }
+    let before_5108 = format!(
+        "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM claims JOIN batches ON batches.id=claims.batch_id
+         JOIN step_runs s ON s.subject=claims.subject
+         JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
+         WHERE r.id IN (SELECT value FROM json_each(?1))
+           AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
+           AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+               'work.claimed','work.failed','work.person-done','work.person-cancelled')
+         ORDER BY claims.subject, {CANONICAL_ORDER}");
+    let rows = |sql: &str, runs: &[&str], subjects: Option<&[&str]>| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h297ac3fac461 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+        statement.query_map(
+            rusqlite::params![serde_json::to_string(runs).unwrap(), subjects.map(|subjects| serde_json::to_string(subjects).unwrap())],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
+        ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let ids = runs.iter().map(|run| run.subject.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+    let one_step = [runs[1].steps[0].subject.as_str()];
+    for (runs, subjects) in [(&ids[..], None), (&ids[..1], None), (&ids[..], Some(&one_step[..]))] {
+        let old = rows(&before_5108, runs, subjects);
+        assert!(!old.is_empty());
+        assert_eq!(rows(&crate::store::missions::mission_step_timestamps_sql(), runs, subjects), old, "{runs:?} {subjects:?}");
+    }
+}
+
 #[test]
 fn a_worker_can_submit_each_retry_attempt_once() {
     let store = Store::open_memory("node").unwrap();
