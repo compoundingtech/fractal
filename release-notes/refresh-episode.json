@@ -3,8 +3,8 @@
   "summary": "Persist refresh episodes with clock-injected age transitions and target coalescing",
   "replay": {"status": "none", "detail": "Refresh state is read from runtime.refresh claims; existing projections are unchanged."},
   "schema": {"status": "changed", "detail": "Adds the system-only runtime.refresh claim kind using the existing log, without new tables."},
-  "rules": {"status": "changed", "detail": "One episode per seat/incumbent; target changes preserve first-pending age until sealing. Convergence resolves without restart."},
-  "compatibility": {"status": "changed", "detail": "Older readers do not recognize runtime.refresh claims. No detection, actuation or configuration changes."},
+  "rules": {"status": "changed", "detail": "One active episode per seat/incumbent; pre-seal target changes preserve first-pending age. Post-seal target changes supersede and block advancement, permitting a fresh operation. Convergence resolves without restart."},
+  "compatibility": {"status": "changed", "detail": "Refresh envelopes are versioned; unsupported versions and unknown episode fields are rejected. Older readers do not recognize runtime.refresh claims. No detection, actuation or configuration changes."},
   "downtime": {"status": "none", "detail": "No runtime lifecycle changes."},
   "manual": {"status": "none", "detail": "No enablement or operator action required."},
   "recovery": {"status": "changed", "detail": "Age, ordered effect identities and execution provenance survive reopening; failed execution remains unresolved and can escalate."}

@@ -3813,7 +3813,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("shutdown_timeout_ms", integer()),
         ],
         "render.applied" => &[("writes", array()), ("warnings", array())],
-        "runtime.refresh" => &[("episode", FieldSpec { required: true, ..object() })],
+        "runtime.refresh" => &[("version", required_integer()), ("episode", FieldSpec { required: true, ..object() })],
         "runtime.restart-window-reset" => &[
             ("desired_token", string()),
             ("incarnation_id", required_string()),

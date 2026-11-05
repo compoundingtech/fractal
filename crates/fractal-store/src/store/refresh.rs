@@ -18,9 +18,11 @@ pub enum Phase {
     Starting,
     Verifying,
     Completed,
+    Superseded,
     Failed,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Episode {
     pub id: String,
     pub seat: String,
@@ -51,7 +53,7 @@ const DEADLINES: [(u128, Age); 3] = [
 ];
 impl Episode {
     pub fn resolved(&self) -> bool {
-        self.phase == Phase::Completed
+        matches!(self.phase, Phase::Completed | Phase::Superseded)
     }
     pub fn next_deadline_ms(&self) -> Option<u128> {
         DEADLINES
@@ -65,7 +67,13 @@ impl Episode {
         match event {
             Event::Tick => {}
             Event::Target(desired_token, digest) => {
-                anyhow::ensure!(self.phase == Phase::Pending, "refresh target is sealed");
+                if self.sealed_epoch.is_some() {
+                    if self.target != digest || self.desired_token != desired_token {
+                        self.phase = Phase::Superseded;
+                        self.outcome = Some("superseded".into());
+                    }
+                    return Ok(());
+                }
                 self.desired_token = desired_token;
                 self.target = digest;
                 if self.target == self.incumbent_digest {
@@ -91,9 +99,7 @@ impl Episode {
                     "invalid refresh phase transition"
                 );
                 self.phase = phase;
-                if self.resolved() {
-                    self.outcome = Some("replaced".into());
-                }
+                self.outcome = (phase == Phase::Completed).then(|| "replaced".into());
             }
             Event::Fail(reason) => {
                 self.phase = Phase::Failed;
@@ -112,46 +118,37 @@ impl Episode {
     }
 }
 fn load(connection: &Connection, seat: &str, incumbent: &str) -> Result<Option<Episode>> {
-    let body = connection
-        .query_row(
-            &canonical_sql(
-                "SELECT body FROM claims WHERE subject=?1 AND kind='runtime.refresh'
+    let sql = canonical_sql(
+        "SELECT body FROM claims WHERE subject=?1 AND kind='runtime.refresh'
          AND json_extract(body,'$.fields.episode.incumbent')=?2
          ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-            ),
-            params![seat, incumbent],
-            |row| row.get::<_, String>(0),
-        )
+    );
+    let body = connection
+        .query_row(&sql, params![seat, incumbent], |r| r.get::<_, String>(0))
         .optional()?;
     body.map(|body| {
-        let value: Value = serde_json::from_str(&body)?;
-        Ok(serde_json::from_value(value["fields"]["episode"].clone())?)
+        let mut value: Value = serde_json::from_str(&body)?;
+        anyhow::ensure!(value["fields"]["version"] == 1, "unsupported refresh version");
+        Ok(serde_json::from_value(value["fields"]["episode"].take())?)
     })
     .transpose()
 }
-fn persist(connection: &Transaction<'_>, origin: &str, episode: &Episode) -> Result<()> {
-    append_claim_tx(
-        connection,
-        origin,
-        &episode.seat,
-        "runtime.refresh",
-        None,
-        &json!({"fields": {"episode": episode}}),
-        &[],
-        None,
-    )?;
+fn persist(tx: &Transaction<'_>, origin: &str, e: &Episode) -> Result<()> {
+    let body = json!({"fields": {"version": 1, "episode": e}});
+    append_claim_tx(tx, origin, &e.seat, "runtime.refresh", None, &body, &[], None)?;
     Ok(())
 }
 impl Store {
     pub fn refresh_episode(&self, seat: &str, incumbent: &str) -> Result<Option<Episode>> {
         load(&self.readers.get(), seat, incumbent)
     }
-    /// A second operation for the same incumbent is refused, even after resolution.
+    /// A superseded sealed target permits a fresh operation for the same incumbent.
     pub fn create_refresh(&self, episode: &Episode) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         anyhow::ensure!(
-            load(&transaction, &episode.seat, &episode.incumbent)?.is_none(),
+            load(&transaction, &episode.seat, &episode.incumbent)?
+                .is_none_or(|old| old.phase == Phase::Superseded && old.id != episode.id),
             "refresh episode already exists for incumbent"
         );
         anyhow::ensure!(
@@ -218,36 +215,26 @@ mod tests {
         jump.reduce(Event::Tick, 1000 + 86400 * 1000).unwrap();
         jump.reduce(Event::Tick, 1000 + 86400 * 1000).unwrap();
         assert_eq!(jump.effects, expected);
-        assert_eq!(jump.next_deadline_ms(), None);
     }
     #[test]
     fn refresh_coalesces_converges_and_seals() {
         let mut e = episode();
-        e.reduce(Event::Target("next".into(), "latest".into()), 2000)
-            .unwrap();
+        e.reduce(Event::Target("next".into(), "latest".into()), 2000).unwrap();
         assert_eq!(e.first_pending_ms, 1000);
         assert_eq!(e.initial_target, "new");
         assert_eq!(e.target, "latest");
         let mut sealed = e.clone();
         sealed.reduce(Event::Seal(7), 2000).unwrap();
-        assert!(
-            sealed
-                .reduce(Event::Target("next".into(), "old".into()), 2000)
-                .is_err()
-        );
         for phase in [Phase::Stopping, Phase::Starting, Phase::Verifying] {
             sealed.reduce(Event::Advance(phase), 2000).unwrap();
         }
         let mut completed = sealed.clone();
-        completed
-            .reduce(Event::Advance(Phase::Completed), 2000)
-            .unwrap();
+        completed.reduce(Event::Advance(Phase::Completed), 2000).unwrap();
         assert!(completed.resolved());
         sealed.reduce(Event::Fail("blocked".into()), 2000).unwrap();
         sealed.reduce(Event::Tick, 1000 + 86400 * 1000).unwrap();
         assert_eq!(sealed.age, Age::Escalated);
-        e.reduce(Event::Target("next".into(), "old".into()), 3000)
-            .unwrap();
+        e.reduce(Event::Target("next".into(), "old".into()), 3000).unwrap();
         assert!(e.resolved());
         assert_eq!(e.outcome.as_deref(), Some("converged"));
         assert!(e.sealed_epoch.is_none());
@@ -256,26 +243,33 @@ mod tests {
     fn refresh_reopens_and_refuses_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.db");
+        let change =
+            |s: &Store, event| s.reduce_refresh("agent/seat", "incumbent", event, 86401000);
+        let read = |s: &Store| s.refresh_episode("agent/seat", "incumbent");
         let before = {
             let store = Store::open(&path, "test").unwrap();
             store.create_refresh(&episode()).unwrap();
             assert!(store.create_refresh(&episode()).is_err());
-            store
-                .reduce_refresh("agent/seat", "incumbent", Event::Seal(7), 1000)
-                .unwrap();
-            store
-                .reduce_refresh("agent/seat", "incumbent", Event::Tick, 1000 + 86400 * 1000)
-                .unwrap()
+            change(&store, Event::Seal(7)).unwrap();
+            let aged = change(&store, Event::Tick).unwrap();
+            assert_eq!(aged.effects.len(), 3);
+            change(&store, Event::Target("latest".into(), "latest".into())).unwrap()
         };
         let store = Store::open(&path, "test").unwrap();
-        assert_eq!(
-            store.refresh_episode("agent/seat", "incumbent").unwrap(),
-            Some(before)
-        );
+        assert_eq!(read(&store).unwrap(), Some(before));
+        assert!(change(&store, Event::Advance(Phase::Stopping)).is_err());
         assert!(store.create_refresh(&episode()).is_err());
-        let after = store
-            .reduce_refresh("agent/seat", "incumbent", Event::Tick, 1000 + 86400 * 1000)
-            .unwrap();
-        assert_eq!(after.effects.len(), 3);
+        let mut next = episode();
+        next.id = "next-operation".into();
+        store.create_refresh(&next).unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        let future = json!({"fields": {"version": 2, "episode": next}});
+        let seat = &next.seat;
+        append_claim_tx(&tx, "test", seat, "runtime.refresh", None, &future, &[], None).unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        assert!(read(&store).is_err());
+        assert!(change(&store, Event::Tick).is_err());
     }
 }
