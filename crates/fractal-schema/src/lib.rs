@@ -2096,6 +2096,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "runtime.refresh", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("runtimes"), true, &[],
+        ),
+        (
             "runtime.restart-window-reset",
             &["agent", "exec", "pty"],
             WritePolicy::SystemOnly,
@@ -3809,6 +3813,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("shutdown_timeout_ms", integer()),
         ],
         "render.applied" => &[("writes", array()), ("warnings", array())],
+        "runtime.refresh" => &[("episode", FieldSpec { required: true, ..object() })],
         "runtime.restart-window-reset" => &[
             ("desired_token", string()),
             ("incarnation_id", required_string()),
