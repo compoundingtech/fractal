@@ -26835,7 +26835,10 @@ agent "import/omp/fixture" {{
             while tokio::time::timeout(Duration::from_millis(50), notify.notified()).await.is_ok() {}
             reconciler.incremental.evaluated("replacement", BTreeSet::from([key.into()]), None);
             std::fs::write(&path, "new inode").unwrap();
-            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            // An earlier logical callback can wake us before this dependency is touched.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !reconciler.incremental.needs("replacement", now_ms()) { notify.notified().await; }
+            }).await.unwrap();
             assert!(reconciler.incremental.needs("replacement", now_ms()));
         }
     }
