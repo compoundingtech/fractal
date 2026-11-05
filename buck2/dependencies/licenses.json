@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "f89437286e3603ac464e4728233e1f181834d0fe6364baf234032a1fa493bb49",
+  "lockfileSha256": "d38a1358cb20980dcadccdc389806fdfe8b2c509dc05e7354e16145154a3019e",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -392,11 +392,6 @@
     {
       "name": "@dual-bundle/import-meta-resolve",
       "version": "4.2.1",
-      "license": "MIT"
-    },
-    {
-      "name": "@effect/atom-react",
-      "version": "4.0.3",
       "license": "MIT"
     },
     {
@@ -2657,11 +2652,6 @@
     {
       "name": "ee-first",
       "version": "1.1.1",
-      "license": "MIT"
-    },
-    {
-      "name": "effect",
-      "version": "4.0.3",
       "license": "MIT"
     },
     {
