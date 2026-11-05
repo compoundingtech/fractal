@@ -1581,8 +1581,15 @@ impl Ui {
         scored.into_iter().map(|(choice, _)| choice).collect()
     }
 
-    /// Keep a usable main pane; on a narrow terminal the sidebar waits off-screen.
+    /// Preserve the responsive default; chosen widths keep the main pane usable.
     fn sidebar_columns(&self, total: u16, wanted: Option<u16>) -> u16 {
+        let Some(wanted) = wanted else {
+            return if total > 40 {
+                (total / 3).clamp(28, 44)
+            } else {
+                0
+            };
+        };
         fn terminal(layout: &Layout) -> bool {
             match layout {
                 Layout::Group(group) => group
@@ -1597,9 +1604,7 @@ impl Ui {
         if maximum < 24 {
             return 0;
         }
-        wanted
-            .unwrap_or_else(|| (total / 3).clamp(28, 44))
-            .clamp(24, maximum)
+        wanted.clamp(24, maximum)
     }
 
     pub(crate) fn render_glass(&self, buf: &mut Buffer, area: Rect) {
@@ -5272,6 +5277,18 @@ mod tests {
         assert_eq!(ui.sidebar_width, Some(57));
         assert_eq!(ui.frame.borrow().glass_sidebar.width, 57);
         assert_eq!(ui.frame.borrow().glass_leaves[0].width, 82);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 139, y);
+        terminal.backend_mut().resize(120, 24);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 37);
+        assert_eq!(ui.frame.borrow().glass_leaves[0].width, 82);
+        ui.sidebar_width = None;
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(
+            ui.frame.borrow().glass_sidebar.width,
+            40,
+            "reset keeps the original default"
+        );
         for total in [0, 40, 82, 106] {
             assert_eq!(ui.sidebar_columns(total, Some(36)), 0);
         }
