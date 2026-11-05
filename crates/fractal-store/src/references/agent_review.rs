@@ -102,7 +102,12 @@ mod tests {
     fn agent_review_resolver_same_publication() {
         let store = Store::open_memory("example").unwrap();
         assert_eq!(
-            resolve_reviewer(&Scope::empty(&intent()), &store.connection.write(), REVIEWER).unwrap(),
+            resolve_reviewer(
+                &Scope::empty(&intent()),
+                &store.connection.write(),
+                REVIEWER
+            )
+            .unwrap(),
             REVIEWER
         );
     }
@@ -120,7 +125,8 @@ mod tests {
     #[test]
     fn agent_review_resolver_unknown() {
         let store = Store::open_memory("example").unwrap();
-        let error = resolve_reviewer(&empty_scope(), &store.connection.write(), REVIEWER).unwrap_err();
+        let error =
+            resolve_reviewer(&empty_scope(), &store.connection.write(), REVIEWER).unwrap_err();
         assert_eq!(error.code, "reviewer-unknown");
         assert!(error.message.contains(REVIEWER));
     }
@@ -183,8 +189,12 @@ mod tests {
             },
         )
         .unwrap();
-        let error = resolve_reviewer(&Scope::empty(&intent()), &store.connection.write(), REVIEWER)
-            .unwrap_err();
+        let error = resolve_reviewer(
+            &Scope::empty(&intent()),
+            &store.connection.write(),
+            REVIEWER,
+        )
+        .unwrap_err();
         assert_eq!(error.code, "reviewer-retired");
         assert!(error.message.contains(REVIEWER));
     }
