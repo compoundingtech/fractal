@@ -1,5 +1,5 @@
 import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
-import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { expect, test, vi } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
