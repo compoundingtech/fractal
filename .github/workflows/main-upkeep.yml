@@ -1130,6 +1130,7 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
+          restore-keys: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-"
       - name: Fill missing dependencies
         shell: bash
         run: "nix develop '.#web' -c pnpm fetch"
@@ -1190,6 +1191,7 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-"
           lookup-only: true
       - name: Restore the web shell closure
         id: web-shell
@@ -2882,6 +2884,7 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
+          restore-keys: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-"
         if: needs.proof-evidence-gate-typescript-client.outputs.skip != 'true' && needs.proof-evidence-gate-typescript-client.outputs.refuse != 'true'
       - name: Install the frozen workspace
         shell: bash
@@ -5208,7 +5211,7 @@ jobs:
   proof-fractal-web-changes:
     name: post-merge fractal-web-changes
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     permissions:
       contents: read
     outputs:
@@ -5446,7 +5449,9 @@ jobs:
               "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
               "apps/fractal-web/src/web/AgentActions.tsx",
               "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
-              "apps/fractal-web/src/web/AlertsPopover.tsx",
+              "apps/fractal-web/src/web/AlertsTab.tsx",
+              "apps/fractal-web/src/web/AlertsTab.stories.tsx",
+              "apps/fractal-web/src/web/alertsTab.ts",
               "apps/fractal-web/src/web/AttentionControls.tsx",
               "apps/fractal-web/src/web/capturedChanges.ts",
               "apps/fractal-web/src/web/ChangesInspector.tsx",
@@ -5686,6 +5691,7 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-"
       - name: Enable user namespaces for Buck TypeScript sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Restore the web shell closure
@@ -5799,7 +5805,7 @@ jobs:
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) ) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     permissions:
       contents: read
     steps:

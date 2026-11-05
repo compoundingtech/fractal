@@ -2073,6 +2073,7 @@
             "execution_started_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
             "nudged_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms", "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
             "execution_elapsed_ms": { "type": "integer", "minimum": 0, "x-st-codec": "duration-ms" },
+            "execution_waited_ms": { "type": "integer", "minimum": 0, "x-st-codec": "duration-ms", "description": "Accumulated execution wait against this attempt's wait budget." },
             "timeout_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "duration-ms" },
             "blocked_reason": { "type": ["string", "null"] },
             "blockers": { "type": "array", "items": { "$ref": "#/$defs/Id" } },

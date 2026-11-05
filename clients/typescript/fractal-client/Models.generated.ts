@@ -4191,6 +4191,7 @@ export type Work = ResourceHeader & {
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
+  execution_waited_ms?: number;
   gate_kind?: 
   "watch"
   | "predicate"
