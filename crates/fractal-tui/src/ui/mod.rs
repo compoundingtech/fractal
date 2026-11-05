@@ -6084,6 +6084,16 @@ impl Ui {
                 return;
             }
         }
+        // The sidebar owns its resize through release, even over a mouse-enabled program.
+        if self.glasses.sidebar_resizing()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+            && self.drag_mouse(mouse)
+        {
+            return;
+        }
         if self.terminal_mouse(mouse) {
             return;
         }

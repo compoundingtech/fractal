@@ -677,6 +677,12 @@ impl Glass {
 }
 
 impl Glasses {
+    pub(crate) fn sidebar_resizing(&self) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|drag| matches!(drag.from, DragFrom::Sidebar))
+    }
+
     pub(crate) fn palette_open(&self) -> bool {
         self.palette.is_some()
     }
@@ -5294,6 +5300,47 @@ mod tests {
         }
         assert_eq!(ui.sidebar_columns(107, Some(36)), 24);
         assert_eq!(ui.sidebar_columns(200, Some(36)), 36);
+    }
+
+    #[test]
+    fn sidebar_resize_owns_drag_and_release_over_a_mouse_enabled_terminal() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+        use std::{io::{Read as _, Write as _}, os::unix::net::UnixStream};
+        let mut ui = terminal_details_fixture();
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
+            client, "agent/example/atlas/builder", "one".into(), 24, 80,
+        ));
+        peer.write_all(&encode_packet(MessageType::Screen, b"\x1b[?1000h\x1b[?1006h")).unwrap();
+        let start = Instant::now();
+        while !ui.native_terminal().unwrap().mode()
+            .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+        {
+            assert!(start.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let body = ui.terminal_body.get().unwrap();
+        let y = body.y + 1;
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), 44, y);
+        assert!(ui.glasses.sidebar_resizing());
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 100, y);
+        assert_eq!(ui.sidebar_width, Some(57));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 100, y);
+        assert!(!ui.glasses.sidebar_resizing(), "release finishes and persists resize");
+        peer.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let mut reader = PacketReader::new();
+        let mut bytes = [0; 1024];
+        while let Ok(count) = peer.read(&mut bytes) {
+            if count == 0 { break; }
+            for packet in reader.feed(&bytes[..count]).unwrap() {
+                assert_ne!(packet.type_, MessageType::Data, "resize never reaches child");
+            }
+        }
     }
 
     fn terminal_details_fixture() -> Ui {
