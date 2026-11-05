@@ -238,7 +238,7 @@ fn agent_review_step_carried_source_fails_closed() {
     store
         .connection
         .write()
-        .execute("DELETE FROM step_runs WHERE subject=?1", [&source.subject])
+        .execute(/* sqlite-large-value: allow-for-now lv-hf97024592eee owner=fractal_store::references::step_review::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE subject=?1", [&source.subject])
         .unwrap();
     assert_eq!(check(&store, &step, PERSON, REVIEWER), UNKNOWN);
 }
@@ -266,6 +266,7 @@ fn agent_review_step_owner_rename_and_pending_naming() {
     assert_eq!(check(&store, &step, PERSON, "agent/example/old"), CONFLICT);
     assert_eq!(check(&store, &step, PERSON, REVIEWER), "ok");
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hdc4eec22f34b owner=fractal_store::references::step_review::tests TODO=chunk-or-reference-exact-wire-values */
         "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
          VALUES('record/pending','example-peer',1,'pending',0,'{}','unknown',?1,'agent.renamed','1')",
         ["agent/example/old"],
