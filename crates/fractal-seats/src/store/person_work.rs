@@ -286,7 +286,7 @@ pub mod tests {
             drop(store);
             let store = Store::open(&path, &node).unwrap();
             let retained = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
-            assert_eq!(retained.claim_id, original.claim_id);
+            assert_eq!(retained.id, original.id);
             assert_eq!(retained.body, original.body, "display, origin, deadline and answer IDs unchanged");
             assert!(store.unseal_refresh_intake(&input.actor, &seal.operation).unwrap());
             if answer_at == 2 {
