@@ -2636,6 +2636,7 @@ version = "0.1.0"
 dependencies = [
  "fractal-client",
  "fractal-schema",
+ "jsonschema",
  "serde",
  "serde_json",
 ]
