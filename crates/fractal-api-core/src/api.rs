@@ -8068,7 +8068,20 @@ fn message_marks_check(state: &AppState) -> DoctorCheck {
     let switched = state.store.marks_switched();
     let blockers = crate::store::marks_switch::blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
     let message = match (switched, blockers) {
-        (Ok(true), _) => "on: this member records its own seats' delivery, read and close as local marks".to_owned(),
+        (Ok(true), _) => {
+            let staged = state.store.staged_switched();
+            let staged_blockers = crate::store::marks_switch::staged_blockers(&state.store.readers.get(), state.store.origin(), &state.configured_peers);
+            match (staged, staged_blockers) {
+                (Ok(true), _) => "on: this member records its own seats' staging, delivery, read and close as local marks".to_owned(),
+                (Ok(false), Ok(blockers)) if blockers.is_empty() => "on: this member records its own seats' delivery, read and close as local marks; every member is ready for stagings, which turn to marks at the next check".to_owned(),
+                (Ok(false), Ok(blockers)) => format!(
+                    "on: this member records its own seats' delivery, read and close as local marks; stagings stay claims until every other member advertises {}=1, whose reads count a host's staging ({})",
+                    crate::store::marks_switch::STAGED_FEATURE, blockers.join("; ")),
+                (Err(error), _) | (_, Err(error)) => {
+                    return DoctorCheck { name: "message-marks".into(), status: "warn".into(), message: format!("{error:#}") };
+                }
+            }
+        }
         (Ok(false), Ok(blockers)) if blockers.is_empty() => "off: every member is ready; marks turn on at the next check".to_owned(),
         (Ok(false), Ok(blockers)) => format!(
             "off: lifecycle claims until every other member advertises {}=1, whose message view and lists ask a seat's host for its marks ({})",

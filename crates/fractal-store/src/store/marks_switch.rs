@@ -15,6 +15,12 @@
 //! ([`Store::refresh_marks_switch`]), cached in `meta`, and read by each writer in its own
 //! transaction ([`marks_switched_tx`]); a member that joins without the feature turns it off
 //! again, and writers return to claims from then on.
+//!
+//! A staging becomes a mark behind a second barrier of the same kind: marks are on and every other
+//! member advertises [`STAGED_FEATURE`], whose reads of another host's seats count the host's
+//! staging (`message_reads::status_of`). Until then a staging stays a claim, so a member that reads
+//! staged claims only never shows staged mail as sent. It is cached in `meta` as `staged_switched`
+//! and read by the writer in its own transaction ([`staged_switched_tx`]).
 use super::*;
 
 /// The `daemon.started` feature every other member advertises before this one records marks: its
@@ -23,7 +29,7 @@ pub const FEATURE: &str = "message_view_reads";
 
 /// The `daemon.started` feature of a build whose reads of another host's seats count a staging the
 /// host answers, below every mark. A staging becomes a mark only once every other member
-/// advertises it; this build advertises it and still records stagings as claims.
+/// advertises it ([`staged_switched_tx`]).
 pub const STAGED_FEATURE: &str = "message_staged_reads";
 
 const WRITER_TABLES: [(&str, &str); 3] = [
@@ -33,15 +39,15 @@ fn writer_seek(table: &str, column: &str) -> String {
     format!("SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1")
 }
 
-/// Whether `member`'s newest own `daemon.started` at or after `start` advertises [`FEATURE`].
-fn advertises(connection: &Connection, member: &str, start: u64) -> Result<bool> {
+/// Whether `member`'s newest own `daemon.started` at or after `start` advertises `feature`.
+fn advertises(connection: &Connection, member: &str, start: u64, feature: &str) -> Result<bool> {
     let advertised: Option<Option<bool>> = connection
         .query_row(/* sqlite-large-value: allow-for-now lv-h68c3476e60b3 owner=fractal_store::store::marks_switch TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(claims.body,'$.fields.features.message_view_reads')=1
+            "SELECT json_extract(claims.body,?4)=1
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
                AND batches.replica_sequence>=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-            params![format!("daemon/{member}"), member, start],
+            params![format!("daemon/{member}"), member, start, format!("$.fields.features.{feature}")],
             |row| row.get(0))
         .optional()?;
     Ok(advertised.flatten() == Some(true))
@@ -51,6 +57,17 @@ fn advertises(connection: &Connection, member: &str, start: u64) -> Result<bool>
 /// may. `peers` are the members this daemon is configured to exchange with: one whose start has
 /// not reached this member yet, as on a member's first sync, is not ready.
 pub fn blockers(connection: &Connection, origin: &str, peers: &[String]) -> Result<Vec<String>> {
+    feature_blockers(connection, origin, peers, FEATURE)
+}
+
+/// Why this member may not record stagings as marks yet, beyond [`blockers`]: the members, peers
+/// and writers that have not advertised [`STAGED_FEATURE`].
+pub fn staged_blockers(connection: &Connection, origin: &str, peers: &[String]) -> Result<Vec<String>> {
+    feature_blockers(connection, origin, peers, STAGED_FEATURE)
+}
+
+/// The barrier for one `daemon.started` feature, read the same strict way for each.
+fn feature_blockers(connection: &Connection, origin: &str, peers: &[String], feature: &str) -> Result<Vec<String>> {
     let membership = fleet_membership_tx(connection)?;
     let mut blockers = Vec::new();
     let mut members = BTreeSet::new();
@@ -59,8 +76,8 @@ pub fn blockers(connection: &Connection, origin: &str, peers: &[String]) -> Resu
             members.insert(member.name.clone());
             if !matches!(membership.state(&member.name), crate::fleet::MemberState::Current(_)) {
                 blockers.push(format!("host/{}: its fleet membership is ambiguous", member.name));
-            } else if !advertises(connection, &member.name, member.start)? {
-                blockers.push(format!("host/{}: has not advertised {FEATURE}=1", member.name));
+            } else if !advertises(connection, &member.name, member.start, feature)? {
+                blockers.push(format!("host/{}: has not advertised {feature}=1", member.name));
             }
         }
     }
@@ -81,8 +98,8 @@ pub fn blockers(connection: &Connection, origin: &str, peers: &[String]) -> Resu
     }
     writers.extend(peers.iter().filter(|peer| **peer != origin && !members.contains(*peer)).cloned());
     for writer in writers {
-        if !advertises(connection, &writer, 0)? {
-            blockers.push(format!("{writer}: exchanges with this member outside its fleet membership and has not advertised {FEATURE}=1"));
+        if !advertises(connection, &writer, 0, feature)? {
+            blockers.push(format!("{writer}: exchanges with this member outside its fleet membership and has not advertised {feature}=1"));
         }
     }
     Ok(blockers)
@@ -98,29 +115,67 @@ pub fn marks_switched_tx(connection: &Connection) -> Result<bool> {
         == Some("1"))
 }
 
+/// Whether this member records its seats' stagings as marks too, as [`Store::refresh_marks_switch`]
+/// last decided, read in the writer's own transaction. Only while marks are on.
+pub fn staged_switched_tx(connection: &Connection) -> Result<bool> {
+    Ok(marks_switched_tx(connection)? && staged_recorded_tx(connection)?)
+}
+
+/// The recorded staging switch alone.
+fn staged_recorded_tx(connection: &Connection) -> Result<bool> {
+    Ok(connection
+        .query_row("SELECT value FROM meta WHERE key='staged_switched'", [], |row| row.get::<_, String>(0))
+        .optional()?
+        .as_deref()
+        == Some("1"))
+}
+
+/// Record a switch in `meta` when it changed, answering whether it did.
+fn record_switch(store: &Store, key: &str, switched: bool) -> Result<bool> {
+    let connection = store.readers.get();
+    let recorded = if key == "marks_switched" { marks_switched_tx(&connection)? } else { staged_recorded_tx(&connection)? };
+    drop(connection);
+    if recorded == switched {
+        return Ok(false);
+    }
+    let value = if switched { "1" } else { "0" };
+    store
+        .connection
+        .batched(|transaction| {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he3398ba708bb owner=fractal_store::store::marks_switch TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [key, value],
+            )
+        })
+        .map_err(anyhow::Error::msg)??;
+    Ok(true)
+}
+
 impl Store {
     /// Whether this member records its seats' lifecycle as marks (see the module).
     pub fn marks_switched(&self) -> Result<bool> {
         marks_switched_tx(&self.readers.get())
     }
 
-    /// Decide the barrier again, with the daemon's configured `peers`, and record it when it
-    /// changed. Answers whether marks are on and, when they are not, why.
+    /// Whether this member records its seats' stagings as marks too (see the module).
+    pub fn staged_switched(&self) -> Result<bool> {
+        staged_switched_tx(&self.readers.get())
+    }
+
+    /// Decide both barriers again, with the daemon's configured `peers`, and record each when it
+    /// changed. Answers whether marks are on and, when they are not, why; the staging switch
+    /// follows, and is on only while marks are.
     pub fn refresh_marks_switch(&self, peers: &[String]) -> Result<(bool, Vec<String>)> {
         let blockers = blockers(&self.readers.get(), &self.origin, peers)?;
         let switched = blockers.is_empty();
-        if self.marks_switched()? != switched {
-            let value = if switched { "1" } else { "0" };
-            self.connection
-                .batched(|transaction| {
-                    transaction.execute(
-                        /* sqlite-large-value: allow-for-now lv-he3398ba708bb owner=fractal_store::store::marks_switch TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('marks_switched', ?1)
-                         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        [value],
-                    )
-                })
-                .map_err(anyhow::Error::msg)??;
+        if record_switch(self, "marks_switched", switched)? {
             tracing::debug!(switched, ?blockers, "message marks switch changed");
+        }
+        let staged_blockers = if switched { staged_blockers(&self.readers.get(), &self.origin, peers)? } else { Vec::new() };
+        let staged = switched && staged_blockers.is_empty();
+        if record_switch(self, "staged_switched", staged)? {
+            tracing::debug!(staged, ?staged_blockers, "message staging marks switch changed");
         }
         Ok((switched, blockers))
     }
@@ -135,6 +190,27 @@ mod tests {
     fn started(store: &Store, reads: bool) {
         claim(store, &format!("daemon/{}", store.origin), "daemon.started", None,
             json!({"status": "running", "features": {FEATURE: u8::from(reads)}}));
+    }
+
+    fn started_with(store: &Store, reads: bool, staged_reads: bool) {
+        claim(store, &format!("daemon/{}", store.origin), "daemon.started", None,
+            json!({"status": "running", "features": {FEATURE: u8::from(reads), STAGED_FEATURE: u8::from(staged_reads)}}));
+    }
+
+    /// alder's fleet with birch admitted, each holding the other's records so far.
+    fn fleet_of_two() -> (Store, Store) {
+        let store = Store::open_memory("alder").unwrap();
+        let anchor = enable(&store);
+        let peer_key = Arc::new(MemberKey::generate().unwrap().0);
+        claim(&store, "host/birch", "fleet.member-admitted", None,
+            json!({"fleet_id": FLEET, "member_key": peer_key.public(), "via": "invite", "sponsor": "host/alder", "mode": "listening"}));
+        store.replication_snapshot().unwrap();
+        let peer = Store::open_memory("birch").unwrap();
+        peer.bind_fleet(FLEET).unwrap();
+        peer.pin_fleet_anchor(anchor.public()).unwrap();
+        peer.set_member_key(Some(peer_key.clone())).unwrap();
+        sync(&store, &peer);
+        (store, peer)
     }
 
     /// A member alone switches at once, with or without a fleet. With another member it waits
@@ -154,17 +230,7 @@ mod tests {
         assert!(!switched);
         assert_eq!(blockers, ["birch: exchanges with this member outside its fleet membership and has not advertised message_view_reads=1"]);
 
-        let store = Store::open_memory("alder").unwrap();
-        let anchor = enable(&store);
-        let peer_key = Arc::new(MemberKey::generate().unwrap().0);
-        claim(&store, "host/birch", "fleet.member-admitted", None,
-            json!({"fleet_id": FLEET, "member_key": peer_key.public(), "via": "invite", "sponsor": "host/alder", "mode": "listening"}));
-        store.replication_snapshot().unwrap();
-        let peer = Store::open_memory("birch").unwrap();
-        peer.bind_fleet(FLEET).unwrap();
-        peer.pin_fleet_anchor(anchor.public()).unwrap();
-        peer.set_member_key(Some(peer_key.clone())).unwrap();
-        sync(&store, &peer);
+        let (store, peer) = fleet_of_two();
         started(&peer, false);
         sync(&peer, &store);
         let (switched, blockers) = store.refresh_marks_switch(&[]).unwrap();
@@ -182,6 +248,56 @@ mod tests {
         sync(&peer, &store);
         assert!(!store.refresh_marks_switch(&[]).unwrap().0);
         assert!(!store.marks_switched().unwrap());
+    }
+
+    /// Stagings turn to marks only while marks are on and every other member's own newest start
+    /// advertises [`STAGED_FEATURE`] too, read the same strict way. A member alone turns both on at
+    /// once. A member that restarts without the staged reads turns stagings back to claims while
+    /// marks stay on, and one without the view reads turns both off.
+    #[test]
+    fn stagings_switch_on_only_once_every_other_member_counts_a_hosts_staging() {
+        let alone = Store::open_memory("alder").unwrap();
+        assert!(!alone.staged_switched().unwrap(), "off until decided");
+        assert!(alone.refresh_marks_switch(&[]).unwrap().0);
+        assert!(alone.staged_switched().unwrap());
+        let unheard = Store::open_memory("alder").unwrap();
+        assert!(!unheard.refresh_marks_switch(&["birch".to_owned()]).unwrap().0);
+        assert!(!unheard.staged_switched().unwrap());
+
+        let (store, peer) = fleet_of_two();
+        // birch runs a build that reads marks but does not count a host's staging (v0.3.26).
+        started_with(&peer, true, false);
+        sync(&peer, &store);
+        assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+        assert!(store.marks_switched().unwrap() && !store.staged_switched().unwrap());
+        assert_eq!(
+            staged_blockers(&store.readers.get(), &store.origin, &[]).unwrap(),
+            ["host/birch: has not advertised message_staged_reads=1"]
+        );
+        // Another origin cannot speak for the member.
+        claim(&store, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {FEATURE: 1, STAGED_FEATURE: 1}}));
+        store.refresh_marks_switch(&[]).unwrap();
+        assert!(!store.staged_switched().unwrap());
+        started_with(&peer, true, true);
+        sync(&peer, &store);
+        store.refresh_marks_switch(&[]).unwrap();
+        assert!(store.staged_switched().unwrap());
+        // birch rolls back to a build without the staged reads: stagings are claims again.
+        started_with(&peer, true, false);
+        sync(&peer, &store);
+        assert!(store.refresh_marks_switch(&[]).unwrap().0);
+        assert!(store.marks_switched().unwrap() && !store.staged_switched().unwrap());
+        // And to one without the view reads: both are off, whatever it says of stagings.
+        started_with(&peer, true, true);
+        sync(&peer, &store);
+        store.refresh_marks_switch(&[]).unwrap();
+        assert!(store.staged_switched().unwrap());
+        started_with(&peer, false, true);
+        sync(&peer, &store);
+        assert!(!store.refresh_marks_switch(&[]).unwrap().0);
+        assert!(!store.marks_switched().unwrap() && !store.staged_switched().unwrap());
+        assert!(!staged_switched_tx(&store.readers.get()).unwrap());
     }
 
     /// Each statement a barrier check starts, with the full-scan steps it took.

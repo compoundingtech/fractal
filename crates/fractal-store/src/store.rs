@@ -22491,12 +22491,13 @@ pub fn append_claim_with_commit_context(
             }
             // A seat this member hosts records its own delivery, read and close of graph mail as a
             // local mark once marks are on (db break-up 4b-2; message_marks::local_consumer and
-            // recorded_as_mark: a staging stays a claim for now), whoever acts for it:
+            // recorded_as_mark), and its staging once every other member counts a host's staging
+            // too (marks_switch::staged_switched_tx, read here in this transaction), whoever acts for it:
             // the fences, replays and transition rules above have applied. A write acting for a
             // retired seat or under a delegation stays a claim, which carries its proof, and so
             // does a native read, whose proof links the native turn to its claim
             // (local_native_delivery_receipts_v2, conversation_deliveries.rs).
-            if message_marks::recorded_as_mark(&input.kind)
+            if message_marks::recorded_as_mark(transaction, &input.kind).map_err(internal)?
                 && context.native_receipt.is_none()
                 && !input.fields.contains_key("acting_for")
                 && !input.fields.contains_key("delegation")

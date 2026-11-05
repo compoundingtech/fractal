@@ -20,15 +20,14 @@ pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.clos
 /// it does not know, and a backup of marks restores on it. It ranks below every mark.
 pub const STAGED: &str = "message.staged";
 
-/// Whether a hosted seat's staging is recorded as a mark. Not yet: a build that reads marks but not
-/// `local_message_staged` (v0.3.25) would read a staged mark as unoffered mail and offer it again
-/// after a rollback, so a staging stays a claim until a release that reads these exists. Readers
-/// read both already.
-pub const RECORDS_STAGED: bool = false;
-
-/// Whether the claim append path records `kind` as a mark for a hosted seat.
-pub fn recorded_as_mark(kind: &str) -> bool {
-    MARKS.contains(&kind) || RECORDS_STAGED && kind == STAGED
+/// Whether the claim append path records `kind` as a mark for a hosted seat, read in the writer's
+/// transaction. A delivery, read or close is, once marks are on. A staging is only once every other
+/// member also counts a host's staging ([`super::marks_switch::staged_switched_tx`]): until then a
+/// member that reads staged claims only would show the mail as sent. A build that reads marks but
+/// not `local_message_staged` (v0.3.25 and earlier) reads a staged mark as unoffered mail and offers
+/// it again after a rollback, so a release note names that rollback.
+pub fn recorded_as_mark(connection: &Connection, kind: &str) -> Result<bool> {
+    Ok(MARKS.contains(&kind) || kind == STAGED && super::marks_switch::staged_switched_tx(connection)?)
 }
 
 /// How many of the newest mark events stay (`local_message_mark_events`).

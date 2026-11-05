@@ -2529,8 +2529,8 @@ mod tests {
                 rusqlite::params!["message/just-before-restart", format!("message.{lifecycle}")],
                 |row| row.get(0),
             ).unwrap();
-            // A staging stays a claim while marks are on (message_marks::RECORDS_STAGED).
-            assert_eq!((claimed, marked), if marks && lifecycle != "staged" { (0, 1) } else { (1, 0) }, "{lifecycle}");
+            // A member alone records its staging as a mark with the rest (marks_switch::staged_switched_tx).
+            assert_eq!((claimed, marked), if marks { (0, 1) } else { (1, 0) }, "{lifecycle}");
         }
         socket.close(None).await.unwrap();
         let mut socket = client.open_mailbox(&fence).await.unwrap();

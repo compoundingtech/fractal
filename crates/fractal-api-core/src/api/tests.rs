@@ -1930,7 +1930,7 @@ fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
     assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
     let on = marks(&state);
     assert_eq!(on.status, "pass");
-    assert!(on.message.starts_with("on:"), "{on:?}");
+    assert!(on.message.starts_with("on: this member records its own seats' staging, delivery, read and close"), "{on:?}");
     state.configured_peers = vec!["birch".into()];
     assert!(!state.store.refresh_marks_switch(&state.configured_peers).unwrap().0);
     let held = marks(&state);
