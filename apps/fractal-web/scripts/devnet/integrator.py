@@ -394,16 +394,27 @@ def prepare_dependencies():
         inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
-        if not cache.stat().st_size:
+        # Read even empty entries so cache I/O errors cannot become cache misses.
+        if not cache.read_bytes():
             install()
             return
         # Outputs can change without changing generator inputs. Check without
         # mutating the index/worktree; a stale patch is a miss, not a tick failure.
-        if git('apply','--check','--index',cache,capture=True,check=False).returncode == 0:
+        checked=git('apply','--check','--index',cache,capture=True,check=False)
+        if checked.returncode == 0:
             git('apply','--index',cache)
             git('commit','-m','live-r3: reuse generated dependency metadata')
             install()
             return
+        # Git apply.c: apply_fragments emits "patch failed"; check_patch emits
+        # the summary and missing/existing index-path diagnostics. Everything
+        # else (including mixed corruption/I/O diagnostics) must remain fatal.
+        errors=[line for line in (checked.stderr or '').splitlines() if line]
+        applicability=re.compile(r'error: (?:patch failed: .+:[0-9]+|.+: (?:patch does not apply|does not exist in index|already exists in index))')
+        if (checked.returncode != 1 or checked.stdout or not errors or
+                not all(applicability.fullmatch(line) for line in errors)):
+            raise RuntimeError(f'metadata cache check failed ({checked.returncode}) for {cache}'
+                               f'\nstdout:\n{checked.stdout or ""}\nstderr:\n{checked.stderr or ""}')
     before=text('rev-parse','HEAD')
     regenerate()
     cache.parent.mkdir(exist_ok=True)

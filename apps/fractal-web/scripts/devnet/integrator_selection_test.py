@@ -163,6 +163,69 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
             install.assert_not_called()
 
+    def failed_metadata_tick(self):
+        """Exercise metadata errors inside the tick's persisted failure boundary."""
+        with patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'prepare_clone', side_effect=self.module.prepare_dependencies), \
+                patch.object(self.module, 'observe_served'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(row['build'], 'failed')
+        self.assertIsNone(row['sha'])
+        return row
+
+    def test_corrupt_metadata_patch_fails_tick_with_git_diagnostics(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            valid = cache.read_text()
+            for content, message in (
+                    ('not a patch\n', 'No valid patches in input'),
+                    (valid.rsplit('\n', 2)[0] + '\n', 'corrupt patch at'),
+                    ('@@ -1 +1 @@\n-base\n+generated\n', 'patch fragment without header')):
+                with self.subTest(message=message):
+                    cache.write_text(content)
+                    checked = git('apply', '--check', '--index', cache, capture=True, check=False)
+                    self.assertNotEqual(checked.returncode, 0)
+                    self.assertIn(message, checked.stderr)
+                    row = self.failed_metadata_tick()
+                    self.assertIn(checked.stderr, row['error'])
+                    self.assertIn('stdout:', row['error'])
+                    self.assertEqual(cache.read_text(), content)
+                    self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_unreadable_metadata_entry_fails_tick_without_regeneration(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            cache.unlink()
+            cache.mkdir()
+            row = self.failed_metadata_tick()
+            self.assertIn('Is a directory', row['error'])
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(list(cache.iterdir()), [])
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_mixed_metadata_check_diagnostics_are_fatal(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            original = cache.read_text()
+            for stdout, stderr in (
+                    ('', 'error: file: patch does not apply\nerror: unknown failure\n'),
+                    ('unexpected stdout\n', 'error: file: patch does not apply\n')):
+                def mixed_git(*args, **kwargs):
+                    if args[:3] == ('apply', '--check', '--index'):
+                        return subprocess.CompletedProcess(args, 1, stdout, stderr)
+                    return git(*args, **kwargs)
+
+                with self.subTest(stdout=stdout), patch.object(self.module, 'git', side_effect=mixed_git):
+                    row = self.failed_metadata_tick()
+                self.assertIn(stderr, row['error'])
+                self.assertIn(stdout, row['error'])
+                self.assertEqual(cache.read_text(), original)
+            generator.assert_not_called()
+            install.assert_not_called()
+
     def test_capacity_sandbox_cli_preserves_nix_tempfail(self):
         sandbox = self.module.candidate_sandbox
         for code in (75, 1):

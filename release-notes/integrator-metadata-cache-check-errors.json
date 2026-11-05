@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve live-integrator metadata-cache corruption and I/O diagnostics instead of treating every Git check failure as a stale patch.",
+  "replay": {"status": "none", "detail": "No event replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination changes."},
+  "compatibility": {"status": "changed", "detail": "Metadata cache regeneration is limited to recognized Git patch-applicability diagnostics. Corrupt patches, unreadable entries, mixed or unknown diagnostics fail the tick without replacing the entry; Git failures include stdout and stderr."},
+  "downtime": {"status": "none", "detail": "The previous immutable build continues serving when metadata preparation fails."},
+  "manual": {"status": "changed", "detail": "Deploy the updated integrator helper. Investigate preserved corruption or I/O diagnostics before repairing or removing an invalid cache entry; ordinary stale patches still regenerate automatically."},
+  "recovery": {"status": "changed", "detail": "Roll forward with a repaired or removed invalid cache entry after resolving the reported cause. Rolling back the helper restores broader regeneration fallback without changing the cache format."}
+}
