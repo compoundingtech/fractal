@@ -1,6 +1,6 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
-import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
+import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   Fractal,
