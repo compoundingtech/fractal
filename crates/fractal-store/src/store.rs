@@ -294,6 +294,8 @@ pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
+#[cfg(test)]
+mod run_eta_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
