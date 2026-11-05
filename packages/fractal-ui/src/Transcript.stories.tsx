@@ -789,6 +789,58 @@ function RepeatedLoadEarlierStory({ scheme }: { scheme?: Scheme }) {
 export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarlierStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
   const canvas = within(canvasElement)
   const maxima: number[] = []
+  const sampleFrames = async (deliver?: HTMLElement) => {
+    const intervals: number[] = []
+    const longAnimationFrames: unknown[] = []
+    const loafSupported = PerformanceObserver.supportedEntryTypes.includes('long-animation-frame')
+    const collect = (entries: PerformanceEntry[]) => {
+      for (const raw of entries) {
+        // Chromium exposes LoAF before the UI kit's DOM library declares its extended entry type.
+        const entry = raw as PerformanceEntry & {
+          blockingDuration?: number; renderStart?: number; styleAndLayoutStart?: number
+          scripts?: { sourceURL?: string; sourceFunctionName?: string; invoker?: string; duration: number }[]
+        }
+        longAnimationFrames.push({
+          startTime: entry.startTime, duration: entry.duration,
+          blockingDuration: entry.blockingDuration ?? null, renderStart: entry.renderStart ?? null,
+          styleAndLayoutStart: entry.styleAndLayoutStart ?? null,
+          scripts: [...(entry.scripts ?? [])].sort((a, b) => b.duration - a.duration).slice(0, 3).map(script => ({
+            sourceURL: script.sourceURL ?? null, sourceFunctionName: script.sourceFunctionName ?? null,
+            invoker: script.invoker ?? null, duration: script.duration,
+          })),
+        })
+      }
+    }
+    const observer = loafSupported ? new PerformanceObserver(list => collect(list.getEntries())) : undefined
+    let frame = 0, startedAt = 0, endedAt = 0
+    let onAbort: (() => void) | undefined
+    try {
+      // The UI kit's TS library predates Promise.withResolvers.
+      await new Promise<void>((resolve, reject) => {
+        onAbort = () => reject(new Error('Prepend measurement aborted'))
+        if (abortSignal.aborted) { onAbort(); return }
+        abortSignal.addEventListener('abort', onAbort, { once: true })
+        frame = requestAnimationFrame(start => {
+          startedAt = start
+          observer?.observe({ type: 'long-animation-frame', buffered: false })
+          let last = start
+          const record = (time: number) => {
+            intervals.push(time - last)
+            last = time
+            if (intervals.length === 24) { endedAt = time; resolve() }
+            else frame = requestAnimationFrame(record)
+          }
+          deliver?.click()
+          frame = requestAnimationFrame(record)
+        })
+      })
+    } finally {
+      cancelAnimationFrame(frame)
+      if (onAbort !== undefined) abortSignal.removeEventListener('abort', onAbort)
+      if (observer !== undefined) { collect(observer.takeRecords()); observer.disconnect() }
+    }
+    return { startedAt, endedAt, intervals, max: Math.max(...intervals), longFrames: intervals.filter(duration => duration > 50).length, loafSupported, longAnimationFrames }
+  }
   for (let iteration = 0; iteration < 5; iteration++) {
     if (iteration > 0) await userEvent.click(canvas.getByRole('button', { name: 'Reset transcript' }))
     await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
@@ -798,37 +850,17 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
     await nextFrame()
     await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
     await nextFrame()
+    const control = await sampleFrames()
     const before = laneOffset(lane, 'tail-0/prompt')
     const deliver = canvas.getByRole('button', { name: 'Deliver older page' })
     const host = canvas.getByTestId('paging-host')
-    const intervals: number[] = []
-    let frame = 0
-    let onAbort: (() => void) | undefined
     delete host.dataset.prependReactMs
     host.dataset.prependMeasuring = 'true'
-    try {
-      // The UI kit's TS library predates Promise.withResolvers.
-      await new Promise<void>((resolve, reject) => {
-        onAbort = () => reject(new Error('Prepend measurement aborted'))
-        if (abortSignal.aborted) { onAbort(); return }
-        abortSignal.addEventListener('abort', onAbort, { once: true })
-        frame = requestAnimationFrame(start => {
-          let last = start
-          const record = (time: number) => {
-            intervals.push(time - last)
-            last = time
-            if (intervals.length === 24) resolve()
-            else frame = requestAnimationFrame(record)
-          }
-          deliver.click()
-          frame = requestAnimationFrame(record)
-        })
-      })
-    } finally {
-      cancelAnimationFrame(frame)
-      if (onAbort !== undefined) abortSignal.removeEventListener('abort', onAbort)
-      host.dataset.prependMeasuring = 'false'
-    }
+    const prepend = await sampleFrames(deliver).finally(() => { host.dataset.prependMeasuring = 'false' })
+    const detail = { iteration: iteration + 1, scheme: host.dataset.scheme, width: window.innerWidth, height: window.innerHeight, control, prepend, reactMilliseconds: host.dataset.prependReactMs ?? null }
+    console.log(`HISTORY_PREPEND_DIAGNOSTIC ${JSON.stringify(detail)}`)
+    window.dispatchEvent(new CustomEvent('kit-prepend-benchmark', { detail }))
+    const { intervals } = prepend
     const sorted = [...intervals].sort((a, b) => a - b)
     const max = sorted.at(-1)!, p95 = sorted[Math.ceil(sorted.length * 0.95) - 1]!
     maxima.push(max)
