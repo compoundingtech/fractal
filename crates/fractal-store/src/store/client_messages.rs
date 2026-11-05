@@ -311,10 +311,11 @@ fn folded_header(connection: &Connection, work: &mut FoldWork) -> Result<Option<
         base.sent_key = sent_key;
         return Ok(Some(base));
     }
-    // The shared index's closed, or this member's closed mark (message_marks.rs), which never
-    // changes the shared index.
+    // The shared index's closed, this member's closed mark (message_marks.rs), or a seat's host's
+    // close it relayed (relayed_closes.rs), neither of which changes the shared index.
     let indexed: Option<(u64,bool)> = connection.prepare_cached("SELECT created_index,closed OR EXISTS(SELECT 1 FROM local_message_marks
-        WHERE message=message_index.subject AND kind='message.closed') FROM message_index WHERE subject=?1")?
+        WHERE message=message_index.subject AND kind='message.closed')
+        OR EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=message_index.subject) FROM message_index WHERE subject=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h28ac822f10fc owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     let Some((created_index,index_closed)) = indexed else { return Ok(None); };
     let [sender,recipient,tags,status] = std::mem::take(&mut work.values).map(|value| value.and_then(|(_, value)| value));
@@ -1117,7 +1118,7 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
     let eligible=if history { String::new() } else { format!("AND {flag}=1") };
     let recipient_scope=if person { "AND recipient=?2 AND mailbox=1" } else { "" };
     let branch=|index: &str,scope: &str,alive: &str| {
-        let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{flag} current FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {eligible} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) ORDER BY sent_key DESC,subject LIMIT ?6");
+        let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{flag} current,closed FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {eligible} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) ORDER BY sent_key DESC,subject LIMIT ?6");
         if after {
             let tied=range("AND sent_key=?4 AND subject>?5");
             let earlier=range("AND sent_key<?4");
@@ -1144,7 +1145,7 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
             eligible_branch("client_selector_order","client_selector_global_eligible","client_selector_global_retired_eligible","")
         }
     };
-    format!("SELECT subject,created_index,current FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
+    format!("SELECT subject,created_index,current,closed FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
 }
 
 fn selectors_not_ready() -> St3Error {
@@ -1227,8 +1228,8 @@ impl Store {
         static SQL: std::sync::LazyLock<[String;32]>=std::sync::LazyLock::new(||std::array::from_fn(|flags|page_sql(flags&1!=0,flags&2!=0,flags&4!=0,flags&8!=0,flags&16!=0)));
         let flags=usize::from(person.is_some())|(usize::from(actor.is_some())<<1)|(usize::from(history)<<2)|(usize::from(current)<<3)|(usize::from(after.is_some())<<4);
         let key=after.map(|(at,_)|crate::client_values::client_timestamp(*at));
-        let rows=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a47c2ff7e59 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL[flags])?.query_map(params![through,person,actor,key,after.map(|(_,subject)|subject),limit.saturating_add(1)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,bool>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        let subjects=rows.iter().map(|(subject,_,_)|subject).collect::<Vec<_>>();
+        let rows=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a47c2ff7e59 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL[flags])?.query_map(params![through,person,actor,key,after.map(|(_,subject)|subject),limit.saturating_add(1)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,bool>(2)?,row.get::<_,bool>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let subjects=rows.iter().map(|(subject,..)|subject).collect::<Vec<_>>();
         static METADATA_SQL: std::sync::LazyLock<String>=std::sync::LazyLock::new(||canonical_sql(r#"
 WITH subjects AS (SELECT value subject FROM json_each(?1)),ends AS (
  SELECT subject,
@@ -1241,9 +1242,12 @@ SELECT ends.subject,first.accepted_at_unix_ms,last.accepted_at_unix_ms,last.id,
 FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.id=ends.last_id
 "#));
         let mut metadata=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd0a352d48f07 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &METADATA_SQL)?.query_map(params![serde_json::to_string(&subjects)?,through],|row|Ok((row.get::<_,String>(0)?,json!({"sent_at":row.get::<_,String>(1)?,"updated_at":row.get::<_,String>(2)?,"revision":row.get::<_,String>(3)?,"session_id":row.get::<_,Option<String>>(4)?}))))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?;
-        rows.into_iter().map(|(subject,created,current)| {
+        rows.into_iter().map(|(subject,created,current,closed)| {
             let message=message_view_at(&connection,&subject,created,Some(through))?;
-            let metadata=metadata.remove(&subject).ok_or_else(||anyhow::anyhow!("message cut metadata is unavailable"))?;
+            let mut metadata=metadata.remove(&subject).ok_or_else(||anyhow::anyhow!("message cut metadata is unavailable"))?;
+            // The header's closed counts a seat's host's relayed close (relayed_closes.rs), which
+            // the message's own status does not.
+            metadata["closed"]=json!(closed);
             Ok((message,metadata,current))
         }).collect()
     }
