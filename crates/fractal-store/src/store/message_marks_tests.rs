@@ -214,9 +214,11 @@ fn a_hosted_seat_marks_staging_delivery_read_and_close_once_both_switches_are_on
     assert!(message_marks::staged(&store.readers.get(), "message/hosted").unwrap().is_some());
     assert_eq!(message_marks::status(&store.readers.get(), "message/hosted").unwrap(), Some("closed"));
     assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 4);
-    // A repeat answers its mark's receipt and records nothing again.
+    // A repeat answers its mark's receipt and records nothing again; a repeat of the staging the
+    // close superseded records nothing either.
     assert_eq!(store.append_claim(&lifecycle("message/hosted", "message.closed", RECIPIENT)).unwrap().id, closed);
-    assert_eq!(store.append_claim(&lifecycle("message/hosted", "message.staged", RECIPIENT)).unwrap().id, staged);
+    store.append_claim(&lifecycle("message/hosted", "message.staged", RECIPIENT)).unwrap();
+    assert_eq!(kinds("message/hosted"), ["message.sent"]);
     assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 4);
 
     // The staging switch off with marks on, as the barrier decides beside a member that does not
