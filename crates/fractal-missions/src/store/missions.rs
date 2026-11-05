@@ -1656,6 +1656,8 @@ pub trait MissionsStore {
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
     /// First execution opening and authoritative terminal edge of the selected attempt.
     fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
+    /// Remaining duration from bounded, incrementally projected completed-run samples.
+    fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -2113,6 +2115,10 @@ fn set_step_state_guarded(
 }
 
 impl MissionsStore for Store {
+    fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>> {
+        fractal_delivery::store::run_eta::read(&self.readers.get(), run, at_unix_ms)
+    }
+
 
     fn agent_roster_refresher_running(&self) -> bool {
         self.fractal.agent_roster_refresh.get().is_some()
