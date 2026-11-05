@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "Refill corrected mission duration windows without hydrating all historical claims",
-  "replay": {"status": "changed", "detail": "Dirty runs recompute only affected definition-hash and step-path windows, restoring previously evicted valid samples after deletion, failure or completion-time correction."},
-  "schema": {"status": "changed", "detail": "Advance the local ETA initialization marker to version 2 so existing stores refill retained windows. Historical candidates are traversed newest-first using terminal timestamp metadata; claim bodies are loaded only until older candidates cannot enter the latest 64 samples."},
-  "rules": {"status": "none", "detail": "Selected-attempt timing and advisory-only estimates remain unchanged."},
+  "summary": "Maintain ETA windows from a bounded set of terminal runs without refolding active work",
+  "replay": {"status": "changed", "detail": "Only terminal transitions and terminal-run corrections or deletions dirty affected windows. Explicit dirty keys preserve invalidation when an unsampled step is removed or changes definition."},
+  "schema": {"status": "changed", "detail": "Add the member-local rebuildable local_run_eta_dirty key set and advance initialization to version 3. Candidates are limited in SQL to the newest 64 terminal runs per definition hash, ordered by first terminal-transition time and run subject, before selected-attempt claim bodies are loaded."},
+  "rules": {"status": "none", "detail": "Unusable candidates consume the run bound but add no samples; confidence reports the true sample count and missing samples yield null. Work is bounded by 64 candidate runs per hash times those runs' own claims, never older step histories."},
   "compatibility": {"status": "none", "detail": "No wire fields, claim kinds or serving schemas change."},
   "downtime": {"status": "none", "detail": "Initialization runs during normal store opening without a destructive migration."},
   "manual": {"status": "none", "detail": "No operator action is required."},
