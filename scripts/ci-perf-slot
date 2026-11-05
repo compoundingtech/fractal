@@ -171,11 +171,30 @@ def branch_of(cwd):
     return '%s@%s' % (branch, sha) if branch else 'unknown branch'
 
 
+def join_line(directory, who):
+    """Join the line with a ticket named for when it asked, locked before it enters the line: a
+    scan (another waiter's, or a status read) takes an unlocked ticket for a gone waiter's and
+    removes it, and a waiter whose ticket is gone is never shown in line and never first. The lock
+    is the inode's, so it moves into the line with the rename. Returns the ticket and its fd."""
+    name = '%020d-%d-%s' % (time.time_ns(), os.getpid(), who)
+    joining = directory / ('.joining-' + name)
+    fd = open_shared(joining)
+    try:
+        if not lock(fd):
+            raise OSError('another process holds the new ticket %s' % joining)
+        ticket = directory / 'line' / name
+        os.rename(joining, ticket)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            joining.unlink()
+        os.close(fd)
+        raise
+    return ticket, fd
+
+
 def acquire(directory, who):
     """Wait in line, oldest first, then hold the slot's flock. Returns the held fd."""
-    ticket = directory / 'line' / ('%020d-%d-%s' % (time.time_ns(), os.getpid(), who))
-    ticket_fd = open_shared(ticket)
-    lock(ticket_fd)
+    ticket, ticket_fd = join_line(directory, who)
     slot_fd = open_shared(directory / 'slot.lock')
     last, announced = None, 0.0
     try:
