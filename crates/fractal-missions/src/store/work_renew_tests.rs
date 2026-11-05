@@ -482,7 +482,7 @@ fn refresh_writer_barrier(store: &Store, opponent: impl FnOnce() + Send) {
     let (entered, wait) = std::sync::mpsc::channel();
     let (release, resume) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
-        scope.spawn(move || store.connection.batched(move |_| { entered.send(()).unwrap(); resume.recv().unwrap(); }).unwrap());
+        scope.spawn(move || store.connection.batched(move |_| { entered.send(()).unwrap(); resume.recv().unwrap(); Ok::<_, rusqlite::Error>(()) }).unwrap().unwrap());
         wait.recv().unwrap();
         let opponent = scope.spawn(opponent);
         release.send(()).unwrap();
