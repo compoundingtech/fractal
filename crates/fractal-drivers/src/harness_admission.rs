@@ -768,8 +768,9 @@ fn executable_identity_ready_recorded(
         return Ok(Some(identity));
     }
     // A completed measurement of these exact files answers even when the racy-git rule kept it
-    // out of the cache, and so does its error. Measure once more only when its files have since
-    // settled, so the identity reaches the cache; a future-dated file is not re-hashed per read.
+    // out of the cache, and so does its error. An unsettled result cannot prove the bytes are
+    // unchanged (a same-size rewrite within one timestamp tick keeps the metadata), so every
+    // answer from it also measures again; once its files settle, the identity reaches the cache.
     let measured = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter().find(|entry| entry.dependencies == dependencies)
         .map(|entry| (entry.result.clone(), entry.settled));
@@ -777,7 +778,7 @@ fn executable_identity_ready_recorded(
         start_measurement(files, probes, dependencies, recorded_at);
         return Ok(None);
     };
-    if !settled && dependencies_settled(&dependencies, settled_before(recorded_at().duration_since(UNIX_EPOCH)?)) {
+    if !settled {
         start_measurement(files, probes, dependencies, recorded_at);
     }
     result.map(Some).map_err(anyhow::Error::msg)
@@ -796,6 +797,8 @@ fn start_measurement(
         return;
     }
     measuring.push(dependencies.clone());
+    #[cfg(test)]
+    identity_tests::MEASUREMENTS_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     thread::spawn(move || {
         let (result, settled) = match recorded_at().duration_since(UNIX_EPOCH) {
             Ok(now) => {

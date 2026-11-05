@@ -6,6 +6,9 @@ thread_local! {
     pub(super) static HASHED_FILES: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Background measurements started, process-wide (each test reads only its own increments).
+pub(super) static MEASUREMENTS_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn hashed_files() -> usize {
     HASHED_FILES.with(Cell::get)
 }
@@ -141,22 +144,37 @@ fn a_ready_identity_is_measured_off_the_caller_and_again_when_the_binary_changes
 }
 
 #[test]
-fn a_ready_identity_the_cache_declines_still_answers_and_is_not_rehashed_per_read() {
+fn a_ready_identity_the_cache_declines_still_answers_and_is_measured_again_until_it_settles() {
     let directory = tempfile::tempdir().unwrap();
     let binary = directory.path().join("future-dated");
-    fs::write(&binary, "a launcher with a future timestamp").unwrap();
-    // A clock-skewed write: never settled, so the racy-git rule keeps it out of the cache.
-    File::options().write(true).open(&binary).unwrap()
-        .set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(3600))).unwrap();
+    // Same-size contents in one future timestamp tick: never settled, so the racy-git rule keeps
+    // every measurement out of the cache.
+    let tick = SystemTime::now() + Duration::from_secs(3600);
+    let write = |contents: &str| {
+        fs::write(&binary, contents).unwrap();
+        File::options().write(true).open(&binary).unwrap().set_times(fs::FileTimes::new().set_modified(tick)).unwrap();
+    };
+    write("first");
     let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the launcher has no shebang") };
-    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap(), None);
+    let ready = || executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap();
+    assert_eq!(ready(), None);
     identity_measurements_settled();
-    let expected = executable_identity_with(&binary, &no_runtime).unwrap();
-    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap(), Some(expected.clone()));
-    // Still unsettled, so no new measurement starts: the next read answers the same identity.
-    let measuring_this = IDENTITY_MEASURING.0.lock().unwrap().iter().any(|dependencies| dependencies[0].path == binary);
-    assert!(!measuring_this, "a read must not start another measurement of it");
-    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap(), Some(expected));
+    let first = executable_identity_with(&binary, &no_runtime).unwrap();
+    // The completed measurement answers, and the answer measures again: it cannot prove the
+    // bytes unchanged, so it never becomes a lasting identity.
+    let started = MEASUREMENTS_STARTED.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(ready(), Some(first.clone()));
+    assert!(MEASUREMENTS_STARTED.load(std::sync::atomic::Ordering::Relaxed) > started, "an unsettled answer must measure again");
+    identity_measurements_settled();
+    write("other");
+    assert_eq!(fs::metadata(&binary).unwrap().modified().unwrap(), tick);
+    let other = executable_identity_with(&binary, &no_runtime).unwrap();
+    assert_ne!(first, other);
+    // Whatever the next read answers (pending where the rewrite changed the metadata, the old
+    // unsettled digest where it did not), it measures the current bytes, which then answer.
+    let _ = ready();
+    identity_measurements_settled();
+    assert_eq!(ready(), Some(other));
 }
 
 #[test]
