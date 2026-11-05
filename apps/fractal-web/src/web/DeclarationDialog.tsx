@@ -24,13 +24,14 @@ export const DeclarationDialog = ({ subject, isOpen, onOpenChange }: {
       <Aria.Modal {...stylex.props(styles.modal)}>
         <LazyPanelBoundary panel={declarationBody}
           // The sheet already has its final size; only its close action shows until the body arrives.
-          pending={<Aria.Dialog aria-label={subject} aria-busy="true" {...stylex.props(styles.dialog)}>{({ close }) => <Aria.Button onPress={close} {...stylex.props(styles.button)}>Close declaration</Aria.Button>}</Aria.Dialog>}
-          fallback={recovery => <Aria.Dialog aria-label={subject} {...stylex.props(styles.dialog)}>{({ close }) => <>
+          // Each state mounts its own Dialog: a loaded one must register its Heading on first mount.
+          pending={<Aria.Dialog key="pending" aria-label={subject} aria-busy="true" {...stylex.props(styles.dialog)}>{({ close }) => <Aria.Button onPress={close} {...stylex.props(styles.button)}>Close declaration</Aria.Button>}</Aria.Dialog>}
+          fallback={recovery => <Aria.Dialog key="failed" aria-label={subject} {...stylex.props(styles.dialog)}>{({ close }) => <>
             <p role="alert">This declaration view could not load.</p>
             <Aria.Button onPress={recovery.onPress} {...stylex.props(styles.button)}>{recovery.label}</Aria.Button>
             <Aria.Button onPress={close} {...stylex.props(styles.button)}>Close declaration</Aria.Button>
           </>}</Aria.Dialog>}>
-          {module => <Aria.Dialog data-testid="declaration-dialog" {...stylex.props(styles.dialog)}>
+          {module => <Aria.Dialog key="ready" data-testid="declaration-dialog" {...stylex.props(styles.dialog)}>
             {({ close }) => <module.DeclarationBody subject={subject} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} />}
           </Aria.Dialog>}
         </LazyPanelBoundary>

@@ -547,6 +547,8 @@ describe('conversation import boundary', () => {
       await renderShell()
       await paintShellFrame()
       await act(async () => paintTasks.shift()?.())
+      // Wait until the import has attached its rejection handler before rejecting its transport.
+      await act(async () => { await vi.waitFor(() => expect(requested).toHaveBeenCalledTimes(1)) })
       await act(async () => rejectImport(new Error('Chunk unavailable')))
       expect(requested).toHaveBeenCalledTimes(1)
       expect(unhandled).not.toHaveBeenCalled()
