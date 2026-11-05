@@ -394,16 +394,28 @@ def prepare_dependencies():
         inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
-        if not cache.stat().st_size:
+        # Read even empty entries so cache I/O errors cannot become cache misses.
+        if not cache.read_bytes():
             install()
             return
         # Outputs can change without changing generator inputs. Check without
         # mutating the index/worktree; a stale patch is a miss, not a tick failure.
-        if git('apply','--check','--index',cache,capture=True,check=False).returncode == 0:
+        checked=git('apply','--check','--index',cache,capture=True,check=False,
+                    stable_messages=True)
+        if checked.returncode == 0:
             git('apply','--index',cache)
             git('commit','-m','live-r3: reuse generated dependency metadata')
             install()
             return
+        # Git apply.c: apply_fragments emits "patch failed"; check_patch emits
+        # the summary and missing/existing index-path diagnostics. Everything
+        # else (including mixed corruption/I/O diagnostics) must remain fatal.
+        errors=[line for line in (checked.stderr or '').splitlines() if line]
+        applicability=re.compile(r'error: (?:patch failed: .+:[0-9]+|.+: (?:patch does not apply|does not exist in index|already exists in index))')
+        if (checked.returncode != 1 or checked.stdout or not errors or
+                not all(applicability.fullmatch(line) for line in errors)):
+            raise RuntimeError(f'metadata cache check failed ({checked.returncode}) for {cache}'
+                               f'\nstdout:\n{checked.stdout or ""}\nstderr:\n{checked.stderr or ""}')
     before=text('rev-parse','HEAD')
     regenerate()
     cache.parent.mkdir(exist_ok=True)
@@ -532,7 +544,7 @@ def regenerate():
         git('commit', '-m', 'live-r3: regenerate merged dependency metadata')
 
 def run(args, cwd=None, capture=False, check=True, timeout=None, *,
-        sandbox_shell=None, network=False, package=None):
+        sandbox_shell=None, network=False, package=None, stable_git_messages=False):
     started=time.monotonic()
     category = ('fetch' if 'fetch' in args else 'merge' if args[0]=='git' else
                 'install' if 'pnpm' in args else 'regenerate' if 'genie' in args or 'scripts/ci-fractal-web-licenses' in args else
@@ -557,11 +569,14 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
             host_git = command[0] == 'git'
             if command[0] == 'git':
                 command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
+            host_env={**os.environ, 'CI':'1'}
+            if host_git and stable_git_messages:
+                host_env.update(LC_ALL='C', LANGUAGE='C')
             result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
                                   stdout=subprocess.PIPE if capture or log_capture else None,
                                   stderr=subprocess.PIPE if capture or log_capture or host_git else None,
                                   check=check and not log_capture and not host_git, timeout=timeout,
-                                  env={**os.environ, 'CI':'1'})
+                                  env=host_env)
             if host_git:
                 if not capture and result.stderr:
                     print(result.stderr, end='', file=sys.stderr, flush=True)
@@ -584,7 +599,9 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
     finally:
         if TIMINGS is not None:
             TIMINGS[category]=TIMINGS.get(category,0)+round((time.monotonic()-started)*1000)
-def git(*args, capture=False, check=True): return run(['git','-C',C,*args], capture=capture, check=check)
+def git(*args, capture=False, check=True, stable_messages=False):
+    return run(['git','-C',C,*args], capture=capture, check=check,
+               stable_git_messages=stable_messages)
 def text(*args): return git(*args,capture=True).stdout.strip()
 def digest(root):
     h=hashlib.sha256()
