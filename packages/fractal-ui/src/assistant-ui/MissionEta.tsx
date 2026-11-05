@@ -25,11 +25,12 @@ const amount = (ms: number) => { const unit = unitOf(ms); return { value: Math.r
 
 /**
  * `~12–18 min left`; `~12 min left` when both bounds read the same; `~40 sec–2 min left` when the bounds need different
- * units; a served zero reads `~0 sec left`. Each bound takes the largest of sec/min/hr it fills and rounds to it. Null only
- * when there is no ETA.
+ * units. An open run with no remaining steps (zero bounds and samples) reads `Finishing`; a sampled zero reads `~0 sec left`.
+ * Each bound takes the largest of sec/min/hr it fills and rounds to it. Null only when there is no ETA.
  */
 export const formatMissionEta = (eta: MissionEta | null | undefined): string | null => {
   if (eta === null || eta === undefined) return null
+  if (eta.basis.samples === 0 && eta.remaining_low_ms === 0 && eta.remaining_high_ms === 0) return 'Finishing'
   const low = amount(eta.remaining_low_ms)
   const high = amount(eta.remaining_high_ms)
   if (low.unit !== high.unit) return `~${low.value} ${low.unit}–${high.value} ${high.unit} left`
@@ -43,6 +44,7 @@ const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ?
 export const describeMissionEta = (eta: MissionEta | null | undefined, servedAs: string): string | null => {
   const text = formatMissionEta(eta)
   if (text === null || eta === null || eta === undefined) return null
+  if (text === 'Finishing') return `No remaining steps, served as of ${servedAs}. ${methodLabel[eta.basis.method]} basis.`
   return `Estimated ${text.slice(1)}, served as of ${servedAs}. ${methodLabel[eta.basis.method]} basis, ${plural(eta.basis.samples, 'retained sample')}.`
 }
 

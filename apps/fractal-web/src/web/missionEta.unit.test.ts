@@ -19,6 +19,23 @@ describe('served mission ETA', () => {
     expect(formatMissionEta({ ...eta, remaining_low_ms: 0, remaining_high_ms: 0 })).toBe('~0 sec left')
   })
 
+  it.each(['per-step', 'critical-path'] as const)('describes an open run with no remaining steps (%s)', method => {
+    const finishing: MissionEta = { ...eta, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method, samples: 0 } }
+    expect(formatMissionEta(finishing)).toBe('Finishing')
+    expect(describeMissionEta(finishing, 'now')).toBe(`No remaining steps, served as of now. ${method === 'per-step' ? 'Per-step' : 'Critical-path'} basis.`)
+    for (const variant of ['inline', 'description'] as const) {
+      const markup = renderToStaticMarkup(createElement(MissionEtaLabel, { eta: finishing, now: finishing.as_of, variant }))
+      expect(markup).toContain('No remaining steps, served as of')
+      expect(markup).not.toContain('0 retained samples')
+      expect(markup).not.toContain('~0')
+      if (variant === 'inline') expect(markup).toContain('>Finishing<')
+    }
+    const run = decodeUnknownSync(MissionRunSummary)({ id: 'mission-run/example/run', requester: 'agent/example-worker',
+      status: 'running', phase: 'working', state_since: '2026-11-04T12:00:00Z',
+      progress: { done: 5, total: 5 }, current_steps: [], must_act: 'agent', eta: finishing })
+    expect(Option.getOrThrow(run.eta)).toEqual(finishing)
+  })
+
   it('ages the observation description without reducing the served range', () => {
     const fresh = renderToStaticMarkup(createElement(MissionEtaLabel, { eta, now: eta.as_of }))
     const aged = renderToStaticMarkup(createElement(MissionEtaLabel, { eta, now: eta.as_of + 300_000 }))

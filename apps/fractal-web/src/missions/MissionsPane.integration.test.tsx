@@ -60,6 +60,11 @@ it('lists missions by word with who must act, folds away Fractal\'s own, and ope
   data.missions = { _tag: 'Observed', freshness: 'live', value: [served] }
   await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
   expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('~12–18 min left')
+  served.run_details[0]!.eta = Option.some({ ...eta, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method: 'critical-path', samples: 0 } })
+  await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
+  expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('Finishing')
+  expect(container.querySelector('[data-mission-eta]')?.textContent).toContain('No remaining steps')
+  expect(container.querySelector('[data-mission-eta]')?.textContent).not.toContain('0 retained samples')
   served.run_details[0]!.status = 'completed'
   await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
   expect(container.querySelector('[data-mission-eta]')).toBeNull()
