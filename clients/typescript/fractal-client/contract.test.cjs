@@ -242,7 +242,7 @@ test('push registration commands use paired credentials and a local response wit
 test('phone commands preserve typed bodies, full ids, reactive wait and normal envelopes', async () => {
     const wire = require('../../../docs/st3/client-v0/fixtures/device-command.json');
     const report = require('../../../docs/st3/client-v0/fixtures/device-command-result.json');
-    const command = { api_version: 'st3.client.v0', device: wire.value.device_id, kind: 'phone.navigate', args: wire.value.args, ttl_ms: 30000 };
+    const command = { api_version: 'st3.client.v0', device: wire.value.device_id, kind: wire.value.command_kind, args: wire.value.args, ttl_ms: 30000 };
     const calls = [];
     const controller = new AbortController();
     const client = new FractalClient({
