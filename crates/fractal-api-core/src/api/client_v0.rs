@@ -995,9 +995,21 @@ pub fn mission_list_cards_with(
         let active = overview["counts"].as_object().unwrap().iter()
             .filter(|(state,_)| !matches!(state.as_str(),"completed"|"failed"|"cancelled"))
             .map(|(_,count)| count.as_u64().unwrap_or(0)).sum::<u64>();
+        let run_subjects = newest.iter().filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let run_states = store.mission_run_states_for_runs(&run_subjects)?;
+        let latest_finished = newest.iter().find(|run| matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled")));
+        let timing_runs = newest.iter().filter(|run|
+            !matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled"))
+                || latest_finished.is_some_and(|latest| latest["id"] == run["id"]))
+            .filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let previews = run_subjects.iter().map(|run| {
+            Ok((run.as_str(), crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run, at_unix_ms))?))
+        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let subjects = previews.values().flat_map(|(_, _, steps)| steps.iter().map(|step| step.subject.clone())).collect::<Vec<_>>();
+        let timing = store.mission_step_timestamps_for_runs(&timing_runs, Some(&subjects))?;
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
-            let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
+            let (total,done,steps)=&previews[run_id];
             let terminal=matches!(run["status"].as_str(),Some("completed"|"failed"|"cancelled"));
             let scheduler_fault=store.reconcile_fault(run_id, crate::reconcile::FIRST_READINESS_FAULT_SCOPE)?;
             let must_act=if terminal {"nobody"} else if attention.contains(run_id) {"you"}
@@ -1009,6 +1021,8 @@ pub fn mission_list_cards_with(
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
                 "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
+                "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
+                "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),
                 "keep_open":crate::mission::step_keeps_open(definition.map(|d| &d.mission), &step.step),
                 "progress_at": null,
                 "blocked_reason":step.blocked_reason.as_deref().or_else(|| scheduler_fault.as_deref().filter(|_| step.status=="pending")),"blockers":step.blockers,
@@ -1022,6 +1036,8 @@ pub fn mission_list_cards_with(
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
                 "state_since":client_timestamp(run["updated_at_unix_ms"].as_u64().unwrap_or(0) as u128),
+                "started_at":run["created_at_unix_ms"].as_u64(),
+                "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
                 "steps":shown
             }))
         }).collect::<anyhow::Result<Vec<_>>>()?;
@@ -1731,7 +1747,7 @@ pub async fn now(
     if history && actor.is_none() && owner_run.is_none() {
         return super::attention_history::page(state, snapshot, effective_query, "now").await;
     }
-    client_snapshot_page(
+    let (snapshot, Json(mut page)) = client_snapshot_page(
         &state,
         snapshot,
         "now",
@@ -1759,7 +1775,12 @@ pub async fn now(
             Ok(items)
         },
     )
-    .await
+    .await?;
+    // After the page's cache and digest: a seat's host's answer is never part of either.
+    super::relay_attention_target_states(&state, &mut page.items)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((snapshot, Json(page)))
 }
 
 pub fn device_resources(

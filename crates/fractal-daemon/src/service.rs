@@ -605,57 +605,92 @@ fn is_daemon_argv(argv: &[String]) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    matches!(name, "fractal" | "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+    // The test-only CLI runs this same daemon entry point without a build stamp.
+    let daemon_name = matches!(name, "fractal" | "st3" | "st")
+        || (cfg!(feature = "test-support") && name == "fractal-unstamped");
+    daemon_name && argv[1..].iter().any(|argument| argument == "up")
+}
+
+/// Whether this pid currently names a live Fractal daemon.
+/// Callers must verify its identity again before signalling it.
+pub fn is_daemon_process(pid: u32) -> bool {
+    process_identity(pid).is_some_and(|identity| !identity.ended && is_daemon_argv(&identity.argv))
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
 /// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
 /// that holds its startup lock) is signalled, and only when it is a Fractal daemon; a signal goes to
 /// the process whose start time was read first, never to a later process that reused its pid.
-/// Returns whether such a daemon was found and has ended.
-pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
+/// Returns whether such a daemon was found and has ended, after both state locks are released.
+pub fn stop_daemon_at(socket: &Path, state_dir: &Path, grace: std::time::Duration) -> Result<bool> {
     let pid = socket_owner_pid(socket).or_else(|| crate::startup::read(socket).map(|r| r.pid));
     let Some(pid) = pid.filter(|pid| *pid != std::process::id()) else {
+        crate::node_identity::wait_for_release(
+            state_dir,
+            std::time::Instant::now() + grace + std::time::Duration::from_secs(5),
+        )?;
         return Ok(false);
     };
-    stop_daemon_process(pid, grace, std::time::Duration::from_secs(5))
+    stop_daemon_process(pid, state_dir, grace, std::time::Duration::from_secs(5))
 }
 
-fn stop_daemon_process(
+/// Stop a verified daemon and then prove release of its state-directory lock.
+/// Both signal escalation and inherited-descriptor closure share one deadline.
+pub fn stop_daemon_process(
     pid: u32,
+    state_dir: &Path,
     grace: std::time::Duration,
     kill_wait: std::time::Duration,
 ) -> Result<bool> {
+    let started = std::time::Instant::now();
+    let deadline = started + grace + kill_wait;
+    let released = || {
+        crate::node_identity::wait_for_release(state_dir, deadline)?;
+        Ok(true)
+    };
     let target = libc::pid_t::try_from(pid).context("the daemon's pid is out of range")?;
-    let Some(identity) = process_identity(pid) else {
-        anyhow::bail!("the process on the daemon socket (pid {pid}) is gone; try again");
+    let identity = match process_identity(pid) {
+        Some(identity) if !identity.ended => identity,
+        Some(_) => return released(),
+        None => {
+            // An unreadable identity is not proof of exit. Only ESRCH establishes
+            // that the leader is gone; signal zero does not change the process.
+            let gone = unsafe { libc::kill(target, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            anyhow::ensure!(gone, "cannot read the daemon's identity (pid {pid}); not stopping it");
+            return released();
+        }
     };
     anyhow::ensure!(
-        !identity.ended && is_daemon_argv(&identity.argv),
+        is_daemon_argv(&identity.argv),
         "the process on the daemon socket (pid {pid}, {}) is not a Fractal daemon; not stopping it",
         identity.argv.join(" ")
     );
     let still_running =
         || process_identity(pid).is_some_and(|now| now.start == identity.start && !now.ended);
-    for (signal, wait) in [(libc::SIGTERM, grace), (libc::SIGKILL, kill_wait)] {
+    for (signal, phase_deadline) in [(libc::SIGTERM, started + grace), (libc::SIGKILL, deadline)] {
         // Re-check just before each signal: the daemon may have ended and its pid been reused.
         if !still_running() {
-            return Ok(true);
+            return released();
         }
         if unsafe { libc::kill(target, signal) } != 0
-            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
         {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("signal the Fractal daemon (pid {pid})"));
         }
-        let deadline = std::time::Instant::now() + wait;
-        while still_running() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        while still_running() && std::time::Instant::now() < phase_deadline {
+            std::thread::sleep(
+                phase_deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_millis(50)),
+            );
         }
         if !still_running() {
-            return Ok(true);
+            return released();
         }
     }
+    crate::node_identity::wait_for_release(state_dir, deadline)?;
     Ok(false)
 }
 
@@ -1163,7 +1198,12 @@ fn systemd_instance_environment() -> String {
 fn systemd_environment_lines(variables: &[(String, String)]) -> String {
     variables
         .iter()
-        .map(|(name, value)| format!("Environment={}\n", systemd_quote_arg(&format!("{name}={value}"))))
+        .map(|(name, value)| {
+            format!(
+                "Environment={}\n",
+                systemd_quote_arg(&format!("{name}={value}"))
+            )
+        })
         .collect()
 }
 
@@ -1334,7 +1374,13 @@ fn plist_environment(variables: &[(String, String)]) -> String {
     }
     let entries = variables
         .iter()
-        .map(|(name, value)| format!("<key>{}</key><string>{}</string>", xml_escape(name), xml_escape(value)))
+        .map(|(name, value)| {
+            format!(
+                "<key>{}</key><string>{}</string>",
+                xml_escape(name),
+                xml_escape(value)
+            )
+        })
         .collect::<String>();
     format!("  <key>EnvironmentVariables</key><dict>{entries}</dict>\n")
 }
@@ -1382,6 +1428,7 @@ mod tests {
         let mut other = std::process::Command::new("sleep").arg("60").spawn()?;
         let error = stop_daemon_process(
             other.id(),
+            tempfile::tempdir()?.path(),
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
         )
@@ -1395,10 +1442,42 @@ mod tests {
     }
 
     #[test]
+    fn stop_waits_for_inherited_state_lock() -> Result<()> {
+        use crate::node_identity::stop_fixture::{self, RetainedLock};
+        if stop_fixture::run_if_requested()? {
+            return Ok(());
+        }
+        let state = tempfile::tempdir()?;
+        for (ignore_term, legacy_only) in [(false, false), (true, false), (false, true)] {
+            let test = "service::tests::stop_waits_for_inherited_state_lock";
+            let mut fixture = if legacy_only {
+                RetainedLock::spawn_legacy(test, state.path())?
+            } else {
+                RetainedLock::spawn(test, state.path(), ignore_term)?
+            };
+            let error = stop_daemon_process(
+                fixture.leader.id(),
+                state.path(),
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(100),
+            )
+            .expect_err("leader exit is not lock closure");
+            fixture.assert_held_error(&error)?;
+            fixture.release()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a_daemon_is_fractal_or_a_transitional_name_started_with_up() {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
         assert!(is_daemon_argv(&argv("/opt/example/bin/fractal up --config c")));
         assert!(!is_daemon_argv(&argv("fractal agents ls")));
+        #[cfg(feature = "test-support")]
+        {
+            assert!(is_daemon_argv(&argv("/opt/example/bin/fractal-unstamped up")));
+            assert!(!is_daemon_argv(&argv("fractal-unstamped agents ls")));
+        }
         assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));
@@ -1432,6 +1511,9 @@ mod tests {
         let arguments = spec.program_arguments();
         assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
         assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--client-gateway-socket" && pair[1].ends_with("/fractal-client.sock")));
+        assert!(render_systemd_user_unit(&spec).contains("fractal-client.sock"));
+        assert!(render_launchd_plist(&spec).contains("fractal-client.sock"));
         assert!(spec.replication_program_arguments().contains(&"--config".into()));
         Ok(())
     }
@@ -1443,8 +1525,8 @@ mod tests {
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
             shared_secret_file: Some("/var/lib/st3/fleet/secret".into()),
             state_dir: "/var/lib/st3".into(),
-            socket: "/run/user/1000/st3.sock".into(),
-            client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+            socket: "/run/user/1000/fractal.sock".into(),
+            client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
             peer_listen: Some("127.0.0.1:31313".into()),
             peers: vec![PeerConfig {
                 name: "node-b".into(),
@@ -1495,8 +1577,9 @@ mod tests {
         state_dir: "/var/lib/st3".into(),
         store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
-        socket: "/run/user/1000/st3.sock".into(),
-        client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+        socket: "/run/user/1000/fractal.sock".into(),
+        socket_is_explicit: true,
+        client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
         peer_listen: Some("0.0.0.0:31313".into()),
         work_root: None,
         peer_listen_allow_plain_http: true,
@@ -1521,7 +1604,7 @@ mod tests {
         assert!(unit.contains("ExecStart=/usr/bin/st3 up --node node-a"));
         assert!(unit.contains("--state-dir /var/lib/st3"));
         assert!(unit.contains("--pty-root /var/lib/pty"));
-        assert!(unit.contains("--client-gateway-socket /run/user/1000/st3-client.sock"));
+        assert!(unit.contains("--client-gateway-socket /run/user/1000/fractal-client.sock"));
         assert!(unit.contains("--peer node-b=http://127.0.0.1:31314"));
         assert!(unit.contains("--peer-listen 0.0.0.0:31313 --peer-listen-allow-plain-http"));
         assert!(unit.contains("MemoryMax=1024M"));

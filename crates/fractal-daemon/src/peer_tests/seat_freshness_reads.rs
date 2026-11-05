@@ -14,6 +14,7 @@ use tokio::sync::watch;
 
 use crate::api::message_reads::{self, Relayed};
 use crate::config::{Config, PeerConfig};
+use crate::AdhocWorkStore as _;
 use crate::model::ClaimInput;
 use crate::store::Store;
 use crate::store::message_marks;
@@ -296,8 +297,16 @@ async fn a_viewer_reads_a_relay_hosts_seat_from_it_and_unknown_when_it_does_not_
         Some(&Relayed::Answered {
             host: OWNER.into(),
             held: true,
-            status: Some("read")
+            status: Some("read"),
+            latest: answered.get(&message.subject).and_then(|relayed| match relayed {
+                Relayed::Answered { latest, .. } => latest.clone(),
+                Relayed::Unknown { .. } => None,
+            }),
         })
+    );
+    assert!(
+        matches!(answered.get(&message.subject), Some(Relayed::Answered { latest: Some((receipt, _)), .. }) if receipt.starts_with("offset-receipt/")),
+        "the newest of the seat's marks: {answered:?}"
     );
     let socket = serve(root.path(), state.clone()).await;
     let client = crate::client::Client::unix(&socket);
@@ -631,4 +640,421 @@ async fn a_batched_read_asks_each_host_in_bounded_requests() {
             (format!("one read asks at most {} hosts", message_reads::MAX_HOSTS), 1),
         ])
     );
+}
+
+/// The owner of [`owner`], with two more messages to `cedar`: one its seat closed and one it has
+/// not had yet, each sent with an idempotency key.
+fn more_mail(owner: &Store, cedar: &str) {
+    for (subject, key) in [
+        ("message/00000000000000c2", "send-closed"),
+        ("message/00000000000000c3", "send-unread"),
+    ] {
+        owner
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: serde_json::from_value(
+                    json!({"from": "agent/sender", "to": cedar, "content": "hello", "status": "sent"}),
+                )
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap();
+    }
+    for kind in ["message.delivered", "message.read", "message.closed"] {
+        message_marks::record(owner, "message/00000000000000c2", kind, cedar).unwrap();
+    }
+}
+
+/// The subjects and statuses of a list of message views, and who said each status.
+fn statuses(messages: &Value) -> Vec<(String, String, Option<String>)> {
+    messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| {
+            (
+                message["subject"].as_str().unwrap().to_owned(),
+                message["status"].as_str().unwrap().to_owned(),
+                message["status_from"]["state"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// A message view and every list of another host's seat's mail read that host's answer: the read,
+/// the lists and pages of open mail, which drop what the host closed, the send receipt and the
+/// client's message resources, each saying in `status_from` which host answered. Mail whose
+/// host keeps no receipts of its own (`birch`, declared elsewhere) has no `status_from`.
+#[tokio::test(flavor = "multi_thread")]
+async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, birch) = owner(root.path()).await;
+    more_mail(&owner, &cedar);
+    send(&owner, "message/00000000000000b1", &birch);
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let client = crate::client::Client::unix(&serve(root.path(), state.clone()).await);
+    let answered = (OWNER.to_owned(), "answered".to_owned());
+
+    let read: Value = client.get("/v1/messages/read/message/00000000000000c1").await.unwrap();
+    assert_eq!(read["status"], "read", "{read}");
+    assert_eq!(read["status_from"], json!({"host": OWNER, "state": "answered"}));
+
+    let open: Value = client.get(&format!("/v1/messages?to={cedar}")).await.unwrap();
+    assert_eq!(
+        statuses(&open),
+        [
+            ("message/00000000000000c1".into(), "read".into(), Some(answered.1.clone())),
+            ("message/00000000000000c3".into(), "sent".into(), Some(answered.1.clone())),
+        ],
+        "the host closed c2, so a list of open mail leaves it out"
+    );
+    let all: Value = client
+        .get(&format!("/v1/messages?to={cedar}&include_closed=true"))
+        .await
+        .unwrap();
+    assert!(
+        statuses(&all).contains(&("message/00000000000000c2".into(), "closed".into(), Some(answered.1.clone()))),
+        "{all}"
+    );
+    let page: Value = client
+        .get(&format!("/v1/messages/page?to={cedar}&limit=2"))
+        .await
+        .unwrap();
+    let paged = statuses(&page["items"]);
+    assert!(
+        paged.iter().all(|(subject, status, from)| subject != "message/00000000000000c2"
+            && status != "closed"
+            && from.as_deref() == Some("answered")),
+        "{page}"
+    );
+    let mut seen = paged.into_iter().map(|(subject, ..)| subject).collect::<Vec<_>>();
+    if let Some(cursor) = page["next_cursor"].as_str() {
+        let next: Value = client
+            .get(&format!("/v1/messages/page?to={cedar}&limit=2&cursor={cursor}"))
+            .await
+            .unwrap();
+        seen.extend(statuses(&next["items"]).into_iter().map(|(subject, ..)| subject));
+    }
+    seen.sort();
+    assert_eq!(seen, ["message/00000000000000c1", "message/00000000000000c3"], "{page}");
+    let sent: Value = client
+        .get("/v1/messages/page?from=agent/sender&include_closed=true")
+        .await
+        .unwrap();
+    let sent = statuses(&sent["items"]);
+    assert!(
+        sent.contains(&("message/00000000000000b1".into(), "sent".into(), None)),
+        "a seat whose host keeps claims reads from them: {sent:?}"
+    );
+    assert!(sent.contains(&("message/00000000000000c2".into(), "closed".into(), Some(answered.1.clone()))));
+
+    let receipt: Value = client.get("/v1/messages/by-key?key=send-closed").await.unwrap();
+    assert_eq!(receipt["status"], "closed", "{receipt}");
+    assert_eq!(receipt["status_from"]["host"], OWNER);
+
+    // The client's message resources: state, status_from, the delivery the host answered, and
+    // history for the mail the host closed.
+    let mut resources = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    crate::api::relay_client_message_items(&state, &mut resources, now, false).await.unwrap();
+    let resource = |id: &str| resources.iter().find(|resource| resource["id"] == id).unwrap().clone();
+    let read = resource("message/00000000000000c1");
+    assert_eq!(read["state"], "read", "{read}");
+    assert_eq!(read["status_from"], json!({"host": OWNER, "state": "answered"}));
+    assert_eq!(read["delivery"]["phase"], "read", "{read}");
+    assert_eq!(read["operational"]["layer"], "current");
+    let local = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let local = local.iter().find(|resource| resource["id"] == "message/00000000000000c1").unwrap();
+    assert_eq!(
+        (&read["revision"], &read["updated_at"]),
+        (&local["revision"], &local["updated_at"]),
+        "a host's answer never feeds the revision, which a client takes as monotonic: {read}"
+    );
+    let closed = resource("message/00000000000000c2");
+    assert_eq!(closed["state"], "closed");
+    assert_eq!(closed["operational"], json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
+    assert!(resource("message/00000000000000b1").get("status_from").is_none());
+    let mut current = crate::api::client_message_resources(&viewer, None, false, None).unwrap();
+    crate::api::relay_client_message_items(&state, &mut current, now, true).await.unwrap();
+    assert!(
+        current.iter().all(|resource| resource["id"] != "message/00000000000000c2"),
+        "current messages leave out what the host closed"
+    );
+
+    // A paging client's current pages, one message each: once the reads above have recorded the
+    // host's close, the selector leaves it out, so no page comes back empty and the walk reaches
+    // every other message once (#4866).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::store::relayed_closes::closed(&viewer.readers.get(), "message/00000000000000c2").unwrap() {
+        assert!(Instant::now() < deadline, "the background writer never recorded the host's close");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let mut query = crate::api::ClientListQuery { limit: Some(1), ..Default::default() };
+    let mut snapshot = crate::api::new_client_snapshot(&state);
+    let (mut walked, mut empty) = (Vec::new(), 0);
+    for _ in 0..10 {
+        let (axum::Extension(next), axum::Json(page)) =
+            crate::api::client_reads::client_messages_sql_page_for_tests(&state, snapshot.clone(), &query)
+                .await
+                .unwrap();
+        snapshot = next;
+        walked.extend(page.items.iter().map(|item| item["id"].as_str().unwrap().to_owned()));
+        empty += usize::from(page.items.is_empty() && page.page.next_cursor.is_some());
+        match page.page.next_cursor {
+            Some(cursor) => query.cursor = Some(cursor),
+            None => break,
+        }
+    }
+    walked.sort();
+    assert_eq!(
+        walked,
+        ["message/00000000000000b1", "message/00000000000000c1", "message/00000000000000c3"]
+    );
+    assert_eq!(empty, 0, "the selector counts the host's close, so it leaves no empty page");
+}
+
+/// A view does not wait for a host that does not answer: it waits a second, then shows this
+/// member's own records with `status_from` unknown and drops nothing, and for half a minute it does
+/// not ask that host again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_waits_a_second_for_a_silent_host_and_then_does_not_ask_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, _url, cedar, _birch) = owner(root.path()).await;
+    more_mail(&owner, &cedar);
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    let state = app(viewer, VIEWER, root.path(), Some(relay(root.path(), hung().await)));
+    let client = crate::client::Client::unix(&serve(root.path(), state).await);
+
+    let started = Instant::now();
+    let read: Value = client.get("/v1/messages/read/message/00000000000000c1").await.unwrap();
+    let waited = started.elapsed();
+    assert!(
+        waited >= message_reads::VIEW_DEADLINE && waited < Duration::from_secs(3),
+        "{waited:?}"
+    );
+    assert_eq!(read["status"], "sent", "only this member's own records: {read}");
+    assert_eq!(read["status_from"]["host"], OWNER);
+    assert_eq!(read["status_from"]["state"], "unknown");
+    assert!(read["status_from"]["reason"].as_str().unwrap().contains(OWNER), "{read}");
+
+    let started = Instant::now();
+    let open: Value = client.get(&format!("/v1/messages?to={cedar}")).await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+    assert_eq!(
+        statuses(&open).into_iter().map(|(subject, _, from)| (subject, from)).collect::<Vec<_>>(),
+        ["c1", "c2", "c3"].map(|name| (format!("message/00000000000000{name}"), Some("unknown".to_owned()))),
+        "an unknown message stays open"
+    );
+}
+
+/// A fault's target states and a work wake read another host's seat from it, at serve time: a
+/// fault about mail the host's seat read shows it read since the host's mark, and a wake whose
+/// message the seat read there is consumed, or delivered while the seat works in the wake's
+/// incarnation. A claim still wins, and mail whose host keeps no receipts (`birch`) stays as this
+/// member's records say.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_faults_targets_and_a_wake_read_a_relay_hosts_seat_from_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, birch) = owner(root.path()).await;
+    send(&owner, "message/00000000000000b1", &birch);
+    send(&owner, "message/00000000000000d1", &cedar);
+    message_marks::record(&owner, "message/00000000000000d1", "message.delivered", &cedar).unwrap();
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+
+    let mut items = vec![json!({"id": "attention/fault", "target_states": [
+        {"id": "message/00000000000000c1", "state": "sent", "since": "2026-01-01T00:00:00Z"},
+        {"id": "message/00000000000000b1", "state": "sent"},
+        {"id": "mission-run/example", "state": "running"},
+    ]})];
+    crate::api::relay_attention_target_states(&state, &mut items).await.unwrap();
+    let states = &items[0]["target_states"];
+    assert_eq!(states[0]["state"], "read", "{states}");
+    assert_ne!(states[0]["since"], "2026-01-01T00:00:00Z", "the host's mark is its since: {states}");
+    assert_eq!(states[1], json!({"id": "message/00000000000000b1", "state": "sent"}));
+    assert_eq!(states[2], json!({"id": "mission-run/example", "state": "running"}));
+
+    let worker = declare(&viewer, "viewer-seat", VIEWER);
+    let step = viewer
+        .start_work(&crate::model::WorkStartRequest {
+            actor: worker,
+            title: "Inspect a fixture".into(),
+            idempotency_key: "wake-step".into(),
+        })
+        .unwrap();
+    let wake = |message: &str, acknowledged_by: Option<&str>, delivery_acknowledges: bool| {
+        let mut step = step.clone();
+        step.wake = Some(crate::model::WorkWakeView {
+            assignee: cedar.clone(),
+            assignee_state: "working".into(),
+            incarnation_id: "incarnation".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: None,
+            acknowledged_by: acknowledged_by.map(str::to_owned),
+            failure: None,
+            asks: crate::model::WakeAsks { messages: vec![message.into()], delivery_acknowledges },
+        });
+        step
+    };
+    let mut steps = [
+        wake("message/00000000000000c1", None, false),
+        wake("message/00000000000000c1", Some("turn"), true),
+        wake("message/00000000000000c1", Some("claim"), true),
+        wake("message/00000000000000d1", None, true),
+        wake("message/00000000000000d1", None, false),
+        wake("message/00000000000000b1", Some("turn"), true),
+    ];
+    steps[5].wake.as_mut().unwrap().assignee = birch.clone();
+    crate::api::message_reads::read_work_wakes(&state, steps.iter_mut()).await.unwrap();
+    assert_eq!(
+        steps.iter().map(|step| step.wake.as_ref().unwrap().acknowledged_by.as_deref()).collect::<Vec<_>>(),
+        [Some("consumed"), Some("consumed"), Some("claim"), Some("delivery"), None, Some("turn")]
+    );
+}
+
+/// A reminder group of two to `cedar`, `message/00000000000000e1` (version 1) and its newer
+/// `message/00000000000000e2` (version 2), whose winner `e2` the seat closed on its host.
+fn reminders(owner: &Store, cedar: &str) {
+    for (subject, version) in [("message/00000000000000e1", 1), ("message/00000000000000e2", 2)] {
+        append(
+            owner,
+            subject,
+            "message.sent",
+            Some("agent/sender"),
+            json!({
+                "from": "agent/sender", "to": cedar, "content": "stand-up", "status": "sent",
+                "tags": ["reminder:standup", format!("version:{version}")],
+            }),
+        );
+    }
+    for kind in ["message.delivered", "message.read", "message.closed"] {
+        message_marks::record(owner, "message/00000000000000e2", kind, cedar).unwrap();
+    }
+}
+
+/// The ids and layers of a paging client's first page of current or all messages.
+async fn client_page(state: &crate::api::AppState, history: bool) -> Vec<(String, Value)> {
+    let query = crate::api::ClientListQuery { history, limit: Some(50), ..Default::default() };
+    let (_, axum::Json(page)) = crate::api::client_reads::client_messages_sql_page_for_tests(
+        state,
+        crate::api::new_client_snapshot(state),
+        &query,
+    )
+    .await
+    .unwrap();
+    page.items
+        .iter()
+        .map(|item| (item["id"].as_str().unwrap().to_owned(), item["operational"].clone()))
+        .collect()
+}
+
+/// Two members of this build: the seat's host closed a reminder's winner as a mark, which never
+/// replicates. The other member's read hears the close from the host and queues it without waiting
+/// for its writer, held here for the whole read; that read leaves the closed winner out of current
+/// mail, as before. Once the close is recorded, the older reminder is current in the paging and
+/// the non-paging lists, the closed one is history even with the host silent, and no revision moves
+/// (#4866).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosts_close_of_a_reminders_winner_makes_the_next_one_current_on_another_member() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _birch) = owner(root.path()).await;
+    reminders(&owner, &cedar);
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let (winner, older) = ("message/00000000000000e2", "message/00000000000000e1");
+    let ids = |page: &[(String, Value)]| page.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let before = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+
+    // The first read, with this member's writer held throughout.
+    let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let holder = {
+        let viewer = viewer.clone();
+        let (held, release) = (held.0, release.1);
+        std::thread::spawn(move || {
+            let _writer = viewer.connection.write();
+            held.send(()).unwrap();
+            release.recv().unwrap();
+        })
+    };
+    held.1.recv().unwrap();
+    let started = Instant::now();
+    let first = tokio::time::timeout(Duration::from_secs(5), client_page(&state, false))
+        .await
+        .expect("a read waited for the writer");
+    assert!(started.elapsed() < message_reads::VIEW_DEADLINE * 2, "{:?}", started.elapsed());
+    assert!(
+        !ids(&first).contains(&winner.to_owned()) && !ids(&first).contains(&older.to_owned()),
+        "the first read leaves the closed winner out, and the older one is still superseded: {first:?}"
+    );
+    assert!(!crate::store::relayed_closes::closed(&viewer.readers.get(), winner).unwrap());
+    release.0.send(()).unwrap();
+    holder.join().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::store::relayed_closes::closed(&viewer.readers.get(), winner).unwrap() {
+        assert!(Instant::now() < deadline, "the background writer never recorded the host's close");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        owner.claims_for(winner, Some("message.closed")).unwrap().is_empty()
+            && viewer.claims_for(winner, Some("message.closed")).unwrap().is_empty(),
+        "the host's close is a mark, and nothing replicated it"
+    );
+
+    // The next read: the older reminder is current, and the winner the host closed is history.
+    let current = client_page(&state, false).await;
+    assert!(ids(&current).contains(&older.to_owned()), "{current:?}");
+    assert!(!ids(&current).contains(&winner.to_owned()), "{current:?}");
+    let all = client_page(&state, true).await;
+    let layer = |page: &[(String, Value)], id: &str| page.iter().find(|(item, _)| item == id).unwrap().1.clone();
+    assert_eq!(layer(&all, older), json!({"layer": "current", "actionable": true, "reasons": []}));
+    assert_eq!(layer(&all, winner), json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
+    // The non-paging client's lists pick the same winner.
+    let listed = crate::api::client_message_resources(&viewer, None, false, None).unwrap();
+    assert_eq!(
+        listed.iter().filter(|item| item["id"] == older || item["id"] == winner).map(|item| item["id"].clone()).collect::<Vec<_>>(),
+        [json!(older)]
+    );
+    // No revision moves: a relayed close never feeds one.
+    let after = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let revision = |items: &[Value], id: &str| {
+        let item = items.iter().find(|item| item["id"] == id).unwrap();
+        (item["revision"].clone(), item["updated_at"].clone())
+    };
+    for id in [winner, older] {
+        assert_eq!(revision(&after, id), revision(&before, id), "{id}");
+    }
+    let unpatched = after.iter().find(|item| item["id"] == winner).unwrap();
+    assert_eq!(unpatched["operational"]["reasons"], json!(["closed"]), "{unpatched}");
+
+    // With the host silent, once its kept answer has lapsed, the close still counts, and the
+    // message's state is this member's own records.
+    tokio::time::sleep(Duration::from_millis(5_200)).await;
+    let silent = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), hung().await)));
+    let all = client_page(&silent, true).await;
+    assert_eq!(layer(&all, winner), json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
+    let current = client_page(&silent, false).await;
+    assert!(ids(&current).contains(&older.to_owned()) && !ids(&current).contains(&winner.to_owned()), "{current:?}");
+    let resource = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let resource = resource.iter().find(|item| item["id"] == winner).unwrap();
+    assert_eq!(resource["state"], "sent", "this member's own records: {resource}");
 }

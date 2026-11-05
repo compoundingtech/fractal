@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Replace the header alert inbox with a sidebar Alerts tab and inline served answers",
+  "replay": {"status": "none", "detail": "Existing revision-fenced alert and prompt action ports are reused; no replay changes."},
+  "schema": {"status": "none", "detail": "No wire or persistent schema changes."},
+  "rules": {"status": "none", "detail": "No rules or accessibility/scanner exemptions are added."},
+  "compatibility": {"status": "none", "detail": "Only served alert facts and actions are shown. The header inbox is removed, leaving one sidebar inbox."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent alert data or action fencing changes. Earlier clients ignore the stored Alerts tab selection."}
+}

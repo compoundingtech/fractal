@@ -79,7 +79,8 @@ pub async fn message_by_key(
     State(state): State<AppState>,
     Query(query): Query<MessageKeyQuery>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
-    blocking_api(move || {
+    let reads = state.clone();
+    let mut receipt = blocking_api(move || {
         let not_sent = || ApiError {
             status: StatusCode::NOT_FOUND,
             code: "message-not-sent".into(),
@@ -99,7 +100,7 @@ pub async fn message_by_key(
             .ok_or_else(not_sent)?;
         let requested_recipient = message.to.clone();
         let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
-        Ok(Json(MessageSendReceipt {
+        Ok(MessageSendReceipt {
             requested_recipient,
             recipient,
             recipient_identity,
@@ -115,9 +116,14 @@ pub async fn message_by_key(
             idempotency_key: query.key.clone(),
             already_sent: true,
             sent_at: Some(client_timestamp(claim.accepted_at_unix_ms)),
-        }))
+        })
     })
-    .await
+    .await?;
+    // The recipient's host keeps how far it got.
+    super::message_reads::read_view(&reads, &mut receipt.message)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(receipt))
 }
 
 #[derive(Deserialize)]
@@ -229,7 +235,15 @@ impl MessagesPageQuery {
 
 #[derive(Serialize, Deserialize)]
 struct MessagesPageCursor {
-    after: u64,
+    /// Where the next page starts in the graph. A cursor past the graph names its position in
+    /// `stream_after` instead and leaves this out: every earlier build needs it, so it refuses
+    /// such a cursor as invalid, and one before the messages stream doesn't read a stream position
+    /// as a graph index and end the listing early.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after: Option<u64>,
+    /// Where the next page starts in the messages stream, at or past `STREAM_INDEX_BASE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stream_after: Option<u64>,
     through: u64,
     to: Option<String>,
     #[serde(default)]
@@ -245,6 +259,36 @@ struct MessagesPageCursor {
 }
 
 impl MessagesPageCursor {
+    /// A cursor to the page after `after`, in the store it falls in.
+    fn at(after: u64) -> (Option<u64>, Option<u64>) {
+        if after >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            (None, Some(after))
+        } else {
+            (Some(after), None)
+        }
+    }
+
+    /// Where the page starts. A 4a build (v0.3.25) still gives a stream position in `after`, and
+    /// it reads as one. A stream position on a member without a messages shard, as when the
+    /// shard's file did not open, is a gap: the listing starts over.
+    fn position(&self, stream: bool) -> Result<u64, ApiError> {
+        let base = crate::store::messages_shard::STREAM_INDEX_BASE;
+        let after = match (self.after, self.stream_after) {
+            (Some(after), None) => after,
+            (None, Some(after)) if after >= base => after,
+            _ => return Err(ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))),
+        };
+        if after >= base && !stream {
+            return Err(ApiError {
+                status: StatusCode::GONE,
+                code: "cursor-gap".into(),
+                message: "this member has no messages stream to continue the listing in; start it over".into(),
+                details: Box::new(serde_json::Map::from_iter([("full_resync".into(), Value::Bool(true))])),
+            });
+        }
+        Ok(after)
+    }
+
     fn validate(
         &self,
         query: &MessagesPageQuery,
@@ -332,18 +376,20 @@ pub async fn list_messages_page(
         Some(cursor) => cursor.through,
         None => state.store.index().map_err(ApiError::internal)?,
     };
-    let after = cursor.as_ref().map(|cursor| cursor.after);
+    let stream = crate::store::messages_shard::shard(&state.store).is_some();
+    let after = cursor.as_ref().map(|cursor| cursor.position(stream)).transpose()?;
     let subject = query.subject.clone();
     let subject_prefix = query.subject_prefix.clone();
     let store = state.store.clone();
     let cursor_to = to.clone();
     let cursor_from = from.clone();
     let cursor_actor = acting_as.clone();
-    let (items, next_after) = blocking_store(move || {
-        let native = !query.include_closed
-            && peer
-                .as_ref()
-                .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+    let native = !query.include_closed
+        && peer
+            .as_ref()
+            .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+    let include_closed = query.include_closed;
+    let (mut items, next_after) = blocking_store(move || {
         let filtered = from.is_some() || subject.is_some() || subject_prefix.is_some();
         let (mut items, next_after) = if filtered {
             store.messages_page_filtered(
@@ -367,10 +413,20 @@ pub async fn list_messages_page(
         Ok((items, next_after))
     })
     .await?;
+    // A seat's own delivery poll reads its own host's records. Any other page asks each
+    // message's seat's host; a page of open mail can come back shorter than `limit` when a host
+    // says some of it is closed, and the cursor goes on from where the records left off.
+    if !native {
+        super::message_reads::read_views(&state, &mut items, !include_closed)
+            .await
+            .map_err(ApiError::internal)?;
+    }
     let next_cursor = next_after
         .map(|after| {
+            let (after, stream_after) = MessagesPageCursor::at(after);
             let cursor = MessagesPageCursor {
                 after,
+                stream_after,
                 through,
                 to: cursor_to.clone(),
                 from: cursor_from.clone(),
@@ -413,11 +469,12 @@ pub async fn list_messages(
         query.include_closed,
     );
     let store = state.store.clone();
-    blocking_store(move || {
-        let native = !query.include_closed
-            && peer
-                .as_ref()
-                .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+    let native = !query.include_closed
+        && peer
+            .as_ref()
+            .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+    let include_closed = query.include_closed;
+    let mut messages = blocking_store(move || {
         let mut messages = if native {
             store.messages_for_delivery_through(recipient.as_deref().unwrap(), store.index()?)?
         } else {
@@ -428,8 +485,15 @@ pub async fn list_messages(
         )?;
         Ok(messages)
     })
-    .await
-    .map(Json)
+    .await?;
+    // A seat's own delivery poll reads its own host's records. Any other list asks each
+    // message's seat's host.
+    if !native {
+        super::message_reads::read_views(&state, &mut messages, !include_closed)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(messages))
 }
 
 pub async fn read_message(
@@ -443,9 +507,13 @@ pub async fn read_message(
     };
     let store = state.store.clone();
     let lookup = subject.clone();
-    let message = blocking_store(move || store.message(&lookup))
+    let mut message = blocking_store(move || store.message(&lookup))
         .await?
         .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
+    // The recipient's host keeps how far it got.
+    super::message_reads::read_view(&state, &mut message)
+        .await
+        .map_err(ApiError::internal)?;
     let provenance = {
         let state = state.clone();
         let lookup = message.subject.clone();
@@ -639,6 +707,61 @@ mod page_cursor_tests {
             let error = validate(changed).expect_err("accepted changed cursor filters");
             assert_eq!(error.code, "validation-failed");
             assert_eq!(error.message, "message cursor filters changed");
+        }
+    }
+
+    /// A cursor past the graph names its stream position apart, so an earlier build, whose cursor
+    /// needs `after`, refuses it rather than misread it; this build reads both,
+    /// and a member without a shard answers a stream cursor with a cursor-gap.
+    #[test]
+    fn a_stream_cursor_is_refused_by_an_older_build_and_a_gap_without_a_shard() {
+        /// The cursor as an earlier build reads it (v0.3.25 and before).
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OlderCursor {
+            after: u64,
+            through: u64,
+            to: Option<String>,
+            include_closed: bool,
+            limit: usize,
+        }
+        let base = crate::store::messages_shard::STREAM_INDEX_BASE;
+        let encode = |after: u64| {
+            let (after, stream_after) = MessagesPageCursor::at(after);
+            serde_json::to_vec(&MessagesPageCursor {
+                after, stream_after, through: 100, to: Some("agent/reviewer".into()), from: None,
+                subject: None, subject_prefix: None, acting_as: None, include_closed: false, limit: 2,
+            })
+            .unwrap()
+        };
+        let graph = encode(10);
+        assert_eq!(serde_json::from_slice::<OlderCursor>(&graph).unwrap().after, 10, "a graph cursor reads as before");
+        let stream = encode(base + 7);
+        assert!(serde_json::from_slice::<OlderCursor>(&stream).is_err(), "an earlier build refuses a stream cursor");
+        let read = |bytes: &[u8]| serde_json::from_slice::<MessagesPageCursor>(bytes).unwrap();
+        assert_eq!(read(&graph).position(false).unwrap(), 10);
+        assert_eq!(read(&stream).position(true).unwrap(), base + 7);
+        let gap = read(&stream).position(false).unwrap_err();
+        assert_eq!((gap.status, gap.code.as_str()), (StatusCode::GONE, "cursor-gap"));
+        // An older build's own cursor, `after` alone, still reads.
+        let older: MessagesPageCursor = serde_json::from_value(json!({
+            "after": 10, "through": 100, "to": null, "include_closed": true, "limit": 2
+        }))
+        .unwrap();
+        assert_eq!(older.position(true).unwrap(), 10);
+        // A 4a build's stream cursor names its position in `after`, and reads as one.
+        let from_4a: MessagesPageCursor = serde_json::from_value(json!({
+            "after": base + 3, "through": 100, "to": null, "include_closed": true, "limit": 2
+        }))
+        .unwrap();
+        assert_eq!(from_4a.position(true).unwrap(), base + 3);
+        assert_eq!(from_4a.position(false).unwrap_err().code, "cursor-gap");
+        // A graph index in `stream_after`, neither, or both, is no cursor a build gave.
+        for bad in [json!({"stream_after": 5}), json!({}), json!({"after": 1, "stream_after": base})] {
+            let mut value = json!({"through": 100, "to": null, "include_closed": true, "limit": 2});
+            value.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            let cursor: MessagesPageCursor = serde_json::from_value(value).unwrap();
+            assert_eq!(cursor.position(true).unwrap_err().code, "validation-failed");
         }
     }
 

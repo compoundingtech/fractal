@@ -245,11 +245,38 @@ failure to let an older pass decide; the signed evidence log reports a record th
 user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
 `scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
 `~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
-cannot change what deletes). It reads the open pull requests' heads from the GitHub API without a login (if that
+cannot change what deletes). For a new plan it reads the open pull requests' heads from the GitHub API without a login (if that
 fails, nothing runs), runs GC with `--fetch --apply --open-heads-from`, keeps 30 days of summaries and plans, and
 stores each summary as a new version of the Fractal document `doc/fleet/factory/evidence-gc/runs`. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
 and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
 writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
+
+The wrapper passes `--resume-state` with `pending-plan.json` in its state directory. The complete original plan is fsynced before
+its hook runs and held under a file lock. A killed or failed deletion leaves that journal in place. The next run finishes it
+before reading another open-head list, fetching the evidence namespace, or recomputing record and input-key protection. Remote
+progress is authoritative: refs already gone need no push, and every remaining deletion is leased to its original object id.
+Migration replay keeps an already-created matching destination; a changed ref, remote, repository or hook is refused. Whole-group
+atomic pushes and remote protection remain in force. For live migrations and redundant-name cleanup, each deletion batch first
+re-reads the replacement from the remote and requires its original object id; these records remain live and need no GC line.
+Local cleanup is idempotent too, including a kill after its transaction
+committed but before the journal was removed. Protection-kept groups are a completed outcome: their remaining names stay
+remote, the journal closes, and the next run reads fresh open heads and plans again. Other failures retain the journal.
+The journal is not part of the 30-day summary cleanup.
+The saved plan has a unique `operation_id`; in journal mode `plan_sha256` includes that id with `delete` and `migrate`. The same
+operation keeps its hash on resume, while a later operation over identical refs gets a distinct GC marker. The pure plan's choices
+and `inputs_sha256` remain deterministic; commands without journal mode keep their existing plan hashes.
+A newly created tree-prefixed alias still incurs the existing per-name verification on its first log pull, even if that object
+was verified under another name. Checkpointed pulls retain that progress across interruptions; GC resume itself does not replan
+or re-verify the records. Reusing verification across aliases is a separate optimization.
+
+Every resumed attempt runs the original hook again before any deletion, so the signed GC lines must still publish through the
+existing fast-forward guard. A resumed plan is marked in its plan file: its hook reuses existing GC lines without duplicating them
+or dropping copies of newer records. If an old target was logged again after this operation's GC line, resume refuses its
+deletion even if a later GC line followed. Pending-name expiration is bounded as described below. A failed publication leaves the previous pending set and copies intact and deletes no
+remote refs. Its signed local GC commit can remain and be published by an intervening pull while copies are retained; finishing
+the journal converges that state. Commands without a journal require a later successful GC run to converge after this failure.
+The wrapper uses `--no-wait` for the log lock, refusing promptly when a pull is active; a collision can defer deletion until the
+next daily invocation. The hook's 600-second limit and the service's one-hour limit are unchanged. The durable journal allows the next scheduled invocation to continue.
 
 **Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
 file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero
@@ -313,9 +340,21 @@ evidence-gc plan and drops their copies; it runs before the plan's deletions (`e
 does not restore them. It also keeps the plan's ref names as pending deletions in the copy
 (`evidence-log.gc-pending.json`): a pull that runs between the GC lines and the deletions does not log those records
 again after the GC line, which would turn their deletion into `missing` and let `--restore` push them back. A name stops
-being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
-any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
-next pull.
+being pending once the remote no longer has it. After 24 hours (`TOMBSTONE_HOURS`), a pull rechecks at most 500 pending
+names (`TOMBSTONE_RELEASE_REFS`), oldest timestamp first, with ref name breaking ties. New records are verified and
+checkpointed before this expiry work starts. Every expired record still needs the usual signature check unless an exact
+verified copy is already active after the log path's last GC line. A copy left by GC before it dropped copies is rechecked
+and logged after that line. Selected names remain pending until the signed checkpoint and, with `--publish`, its guarded
+publication succeed. A kill before then selects the same oldest names next time; a verified copy written before pending
+cleanup completes that cleanup without another check. Rejected names remain held and their timestamps advance, making them
+eligible again after 24 hours while older names proceed. The pending file keeps its name-to-unix-time format.
+
+For 20,000 expired valid names, 500 per pull means 40 successful pulls, about 80 minutes at the two-minute cadence after
+expiry, without another GC run re-holding them. With GC paused, pending state cannot grow: absent names are pruned, accepted
+names drain, and rejected names remain bounded by that existing set and are periodically rechecked. This bounds expiry work;
+new refs retain their existing checkpointed processing. Pending state identifies names, not object IDs: a changed object under
+a held name remains hidden until its expiry attempt, as before. GC's exact-OID leases and record verification are unchanged.
+`gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the next pull.
 
 A stalled pull alerts within minutes. `scripts/evidence-log-watch` (`scripts/evidence-log-watch.timer`, every 2 minutes)
 fetches only the head of `refs/evidence-log/main` from the remote, not the log host's own copy, so a pull that commits but
@@ -326,6 +365,11 @@ it lasts, and once when the log moves again. A notification that fails is sent a
 stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although the pulls ran on time: evidence-gc had
 written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
 GC now keeps the crate keys of live trees.
+
+The watcher rebuilds its disposable fetch repository once when a fetch fails with demonstrated local object damage,
+or its fetched head cannot be read. It retains the newest `head.git.broken-*` copy for inspection and preserves
+`watch.json`, synced before replacement, so recovery sends the usual single notification. A healthy copy with an
+unreachable remote reports the fetch failure without rebuilding; a fetch timeout also leaves the copy in place.
 
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
@@ -345,6 +389,20 @@ not seeded) publishes nothing and exits 1 with `publish_refused`. It never overw
 was refused recovers by seeding from the published head (`git fetch origin +refs/evidence-log/main:refs/evidence-log/main`),
 so its chain continues rather than starting again. Without that seed, a pull on an empty copy starts a new chain that it
 cannot publish.
+
+A failed checkpoint publication stops further checkpoints, then still packs refs and restores missing records when
+`--restore` was requested. Missing records retain alarm exit 4; a publication failure without missing records exits 1.
+
+Before other fetches, the publisher checks chain connectivity and streams the current tree's contents to detect
+unreadable bodies as well as empty objects. Historical blob bodies are not rescanned on every heartbeat. An unreadable
+local view is repaired from a trusted published continuation in an isolated repository. Repair scans full objects once
+to identify damaged loose files, including blobs whose headers still read. The published head must verify against the
+existing `--log-keys`, using the publisher's working directory and effective signature verification settings, including
+revocations, and contain the exact damaged local head in its ancestry. Broken loose objects are retained under
+`evidence-log.broken-objects`; no published head,
+an untrusted head, or a chain that cannot prove it continues the damaged local head is an alarm (exit 1).
+An unpublished damaged head requires operator recovery. Empty copies are not automatically seeded. The timer sets
+`core.fsync=objects,reference` on existing and new log repositories with Git's default fsync method.
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
@@ -1334,7 +1392,9 @@ requests skip CI entirely; the merge queue's full run is the comparison). Each f
 ### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
 
 `scripts/evidence-skip-report [--hours 24] [--actor LOGIN]... [--receipts FILE]... [--markdown]` counts, for the pull request runs in the
-window (started by the given accounts), each check as `skipped` or as run, and why it ran: `lane_edit` (the pull request changes a file
+window (started by the given accounts), each check as `skipped`, as `not_relevant` (no note covered the tree, but the check's own job
+passed with its `<check>-execution` job skipped, because nothing it reads changed: fractal-web, which st-test does not sign then), or as
+run, and why it ran: `lane_edit` (the pull request changes a file
 of the check's lane, so a local run could not sign it), `merge_tree` (the gate asked about the merge tree, `tree_of=merge`, because a
 protected file changed since the branch point, an author is not listed or the branch is too far behind, and no note covered it), `not_signed` (no note covered the tree although the lane is untouched: pushed
 unsigned), `failed` (the note recorded a failure), `protected` (a file that decides skipping changed), `sampled` (the one-in-five canary),
@@ -1695,14 +1755,25 @@ and this bridge marker. Do not prefer or copy the shim while copy-only bases rem
 
 `scripts/fractal-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
+records the exit code and output digest.
+
+If the local `typescript-client` check exits 127, the runner prints its caller's `PATH` and `BASH_ENV`, plus
+the web shell hook's start/end snapshots: `PATH`, `command -v pnpm`, `BASH_ENV`, and the publisher's exit status.
+A missing report or end marker means that hook entry or completion was not observed. These snapshots describe
+the hook before the child Bash starts; inherited startup code can still change the child's environment afterward.
+The check keeps its failed status and is not rerun. The report lives in the run's private scratch directory;
+the shell hook writes it only when the runner supplies `CI_WEB_SHELL_DIAGNOSTICS`, and ordinary developer
+shells print no additional output. This gathers evidence for the unresolved environment incident in
+[#4659](https://github.com/compoundingtech/fractal/issues/4659), rather than claiming a later pass fixed it.
+
+The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
 `linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
 linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
 worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
-of persistent ones per ORIGIN (`~/.cache/st-test/pools/<hash of the normalised origin URL>/tree-N`; a clone without an origin has a pool of its own, keyed by its git common dir), each held by an flock while a run uses it
+of persistent ones per canonical ORIGIN (`~/.cache/st-test/pools/<hash of the canonical origin identity>/tree-N`; a clone without an origin has a pool of its own, keyed by its git common dir), each held by an flock while a run uses it
 (a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit and stripped of
 untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
@@ -1721,7 +1792,19 @@ starves no run. A host without the shim's slots, or a gate that cannot be read, 
 shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
 counted). A run that builds asks for its seat's lane burst before any of this (docs/st3/seat-lanes.md, "Bursts"), and its record has `burst`
 (the size held, or null with `burst_none` saying why) and `burst_wait_s`, the wait for it; a handover gives the burst back and the newer copy
-asks again. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+asks again. **Every clone of one origin shares the pool**. Origins normalize HTTPS, SSH and scp transport spellings, default ports and
+the remote `.git` suffix. Only GitHub host and owner/repository names fold case; local and `file://` paths keep their case and `.git`
+suffix, and nondefault ports stay distinct. Relative local paths resolve from the caller's checkout. Pinned renames in
+`.st/repo-aliases.json` (or the preferred `.fractal/repo-aliases.json`, when present) map exact normalized identities to the canonical
+pool identity. The data is read from the pinned accepted base, including when the runner is extracted alone; an absent file on an
+older base means no aliases. A malformed alias file refuses the run. Canonical identities keep existing pools warm and need not be
+the current repository name. No redirect or other network lookup discovers aliases. Selecting a pool never moves or deletes another
+pool. Duplicate pools under former keys, including keys changed by stricter normalization, remain eligible for ordinary global
+least-recently-used eviction when the pool cap is enabled and exceeded. With the cap off or not exceeded, an idle duplicate can persist
+indefinitely: there is no idle-age timer. No manual migration is needed; operators may independently reclaim unlocked duplicate build
+output after rollout under their existing cleanup policy. Unknown schemes (for example `fabric://`) keep their whole URL and may also
+change pool key once.
+Thus a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
@@ -1813,9 +1896,9 @@ Every check runs with one fixed `PATH` (`~/.local/bin`, `~/.cargo/bin`, `/run/cu
 the `clippy 0.1.97` that `cargo clippy -V` prints with it, not the longer one it prints without): cargo's build scripts record `PATH`, so two seats whose
 PATHs differ would otherwise rebuild nearly the whole workspace in the same pool tree. `ST_EVIDENCE_PATH=keep` leaves the caller's `PATH`.
 All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
-tree already held, `fractal-test` removes the least recently used trees and their targets whose lock is free, oldest first, until the pool directory
+tree already held, `fractal-test` removes the least recently used trees and both their workspace and fleet-compat targets whose lock is free, oldest first, until the pool directory
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
-compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
+compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. Where cargo's
 `build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
 A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
 `/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
@@ -1892,6 +1975,11 @@ The check that builds the Rust workspace (`linux-gate`) builds in one cargo targ
 trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
 trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
+Fleet compatibility uses the kept sibling `target-N-fleet-compat`, about 20 GB extra per pool tree. Its Cargo target is separate because
+its feature selection can relink binaries that the tests are executing (#4128). Both targets count toward the pool cap, are evicted
+together under the tree's lock, and are emptied together before a run when their combined size exceeds the existing 80 GB target limit. A shared
+`ST_EVIDENCE_TARGET=PATH` uses `PATH-fleet-compat` under the same exclusive lock. With `off`, fleet compatibility builds in the tree's
+`target/fleet-compat` (under the usual ignored `target/`, also excluded by the dependency-input checker); an explicit `CARGO_TARGET_DIR=PATH` uses the separate `PATH-fleet-compat` without st-test trimming either directory.
 Operations' terms: it is emptied before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it). st-test empties only a target it or cargo made, by its CACHEDIR.TAG, or a pool tree's own target inside the pool directory; st-test writes the tag when it creates a target, since cargo tags only a target directory it creates itself. It is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
@@ -2022,7 +2110,11 @@ ratchet compared with the base (as CI compares with the event's base): fractal-t
 fetched (`CLIPPY_BASE_SHA`) and records it in the note as the input `clippy_base_sha`, which a host or agent `linux-gate` note must
 carry; run by hand, `ci-local` fetches main itself and never trusts a local ref, and refuses when it cannot. Every other input
 `evidence-wrap --input NAME=VALUE` adds is recorded the same way; it refuses the names it sets itself. Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
-installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
+installing the rendered hooks as the job's test-archive setup does, in a home of its own.
+Clippy and fleet compatibility each run in a buffered lane beside tests. Clippy shares the workspace target and Cargo's build lock;
+fleet compatibility uses its own target, so its compiles can overlap the tests build; every Cargo command still takes host build admission. Their logs are printed after foreground stages, in the requested stage order, and the first
+failure in that order is returned, including a lane that leaves no result. `CI_LOCAL_SERIAL=1` restores sequential stages while keeping
+the separate targets. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness

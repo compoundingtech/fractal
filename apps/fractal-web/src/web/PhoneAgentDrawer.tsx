@@ -6,7 +6,7 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { borderVars as border, colorVars as c, elevationVars as elevation, geometryVars as g, surfaceVars as surface, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex'
 import { SidebarHeader, useCoarsePointer } from './ResponsiveAgentSidebar.tsx'
 
-export interface PhoneAgentDrawerHandle { close: () => void; toggle: () => void }
+export interface PhoneAgentDrawerHandle { open: () => void; close: () => void; toggle: () => void }
 
 /**
  * React Aria's modal hooks keep one roster mounted. Drawer state never reaches the thread.
@@ -42,7 +42,7 @@ export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, hea
     const frame = window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
     return () => window.cancelAnimationFrame(frame)
   }, [isOpen, triggerRef])
-  React.useImperativeHandle(ref, () => ({ close, toggle: () => { if (isOpen) close(); else open() } }), [close, isOpen, open])
+  React.useImperativeHandle(ref, () => ({ open, close, toggle: () => { if (isOpen) close(); else open() } }), [close, isOpen, open])
   return <>
     {header(open, { open: isOpen, id })}
     <div {...underlayProps} hidden={!isOpen} {...stylex.props(styles.overlay, !isOpen && styles.hidden)}>

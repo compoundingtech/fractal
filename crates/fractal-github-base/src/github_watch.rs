@@ -1296,6 +1296,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
         };
         assert_eq!(
             named_object(&message),
@@ -1382,6 +1383,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
         };
         let post = PostInFlight::begin("agent/example.planner", &thread);
         assert!(post_in_flight(

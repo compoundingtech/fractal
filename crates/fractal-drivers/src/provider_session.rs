@@ -267,32 +267,6 @@ impl SessionObserver {
     /// — coalescing, heartbeat eligibility, terminal fencing — is decided by the claim across
     /// all of them. A claim that cannot be written is fatal at construction: acting without
     /// ownership would silently produce a writer every record refuses.
-    pub(crate) fn new(
-        agent_dir: &Path,
-        identity: &str,
-        harness: &'static str,
-        pty_session: &str,
-    ) -> anyhow::Result<Self> {
-        Self::with_session(
-            agent_dir,
-            identity,
-            harness,
-            pty_session,
-            harness_state::session_token(),
-        )
-    }
-
-    /// Claim an explicitly supplied session incarnation for a host-owned launch attempt.
-    pub(crate) fn with_session(
-        agent_dir: &Path,
-        identity: &str,
-        harness: &'static str,
-        pty_session: &str,
-        session: String,
-    ) -> anyhow::Result<Self> {
-        Self::with_session_policy(agent_dir, identity, harness, pty_session, session, false)
-    }
-
     pub(crate) fn new_claude_with_primary_ownership(
         agent_dir: &Path,
         identity: &str,
@@ -837,7 +811,12 @@ mod tests {
     #[test]
     fn native_supervision_keeps_observations_without_creating_status() {
         let root = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(root.path(), "h.native", "claude", "native").unwrap();
+        let observer = SessionObserver::new_claude_with_primary_ownership(
+            root.path(),
+            "h.native",
+            "native",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
         run_provider(
             "native",
@@ -862,11 +841,11 @@ mod tests {
     fn an_unspawnable_provider_writes_a_real_terminal_record() {
         use crate::harness_state::{self, Activity};
         let tmp = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(
+        let observer = SessionObserver::new_claude_with_primary_ownership(
             tmp.path(),
             "example-linux.worker",
-            "claude",
             "example-linux.worker",
+            false,
         )
         .unwrap();
         let stop = AtomicBool::new(false);
@@ -948,11 +927,11 @@ mod tests {
     #[test]
     fn detaching_releases_a_live_provider_with_its_observed_session() {
         let tmp = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(
+        let observer = SessionObserver::new_claude_with_primary_ownership(
             tmp.path(),
             "example-linux.worker",
-            "claude",
             "example-linux.worker",
+            false,
         )
         .unwrap();
         let pid = spawn_sleeper("30");
@@ -1062,7 +1041,12 @@ mod tests {
         use crate::claude_process::{self, Admission, Caller};
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let legacy = SessionObserver::new(dir, "fixture", "claude", "runtime").unwrap();
+        let legacy = SessionObserver::new_claude_with_primary_ownership(
+            dir,
+            "fixture",
+            "runtime",
+            false,
+        ).unwrap();
         assert!(!claude_process::recorded(dir).unwrap());
         assert!(!dir.join("claude-primary-process.lock").exists());
         // An impossible kernel caller still reaches the EXACT old admission callback. Off
@@ -1131,12 +1115,13 @@ mod tests {
     #[test]
     fn an_explicit_session_incarnation_is_claimed_exactly() {
         let tmp = tempfile::tempdir().unwrap();
-        let _observer = SessionObserver::with_session(
+        let _observer = SessionObserver::with_session_policy(
             tmp.path(),
             "example-linux.worker",
             "claude",
             "example-linux.worker",
             "attempt-exact".into(),
+            false,
         )
         .unwrap();
         let record: serde_json::Value = serde_json::from_slice(
@@ -1145,12 +1130,13 @@ mod tests {
         .unwrap();
         assert_eq!(record["incarnation"], "attempt-exact");
 
-        let error = SessionObserver::with_session(
+        let error = SessionObserver::with_session_policy(
             tmp.path(),
             "example-linux.worker",
             "claude",
             "example-linux.worker",
             String::new(),
+            false,
         )
         .err()
         .unwrap();

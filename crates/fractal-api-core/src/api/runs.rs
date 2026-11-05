@@ -326,13 +326,15 @@ pub async fn outcome_history(
 pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     let mut report = crate::performance::snapshot();
     // Lane bursts held and asked now, and those dropped since start because their holder stopped
-    // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here.
-    let (held, waiting, lapsed) = {
+    // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here. With them, the
+    // room admission keeps from starts for a burst, as it last judged a seat's start.
+    let (held, waiting, lapsed, reserve) = {
         let admission = state.seat_admission.state();
         let held = admission.lane_bursts.iter().filter(|burst| burst.granted).count();
-        (held, admission.lane_bursts.len() - held, admission.bursts_lapsed)
+        (held, admission.lane_bursts.len() - held, admission.bursts_lapsed, admission.burst_reserve.clone())
     };
-    report["lane_bursts"] = json!({"held": held, "waiting": waiting, "dropped_by_lease": lapsed});
+    report["lane_bursts"] = json!({"held": held, "waiting": waiting, "dropped_by_lease": lapsed,
+        "reserve": reserve.map(|(subject, full, kept)| json!({"subject": subject, "full": full, "kept": kept}))});
     Json(report)
 }
 
@@ -341,29 +343,32 @@ pub async fn list_mission_runs(
     Query(query): Query<MissionRunQuery>,
 ) -> Result<Json<Vec<MissionRunView>>, ApiError> {
     let store = state.store.clone();
-    match (query.root, query.mission) {
+    let mut runs = match (query.root, query.mission) {
         (Some(root), None) => blocking_store(move || {
             let mut runs = store.mission_runs_for_root(&root)?;
             annotate_stuck_gates(&store, &mut runs)?;
             for run in &mut runs { present_mission_run(&store, run)?; }
             Ok(runs)
         })
-        .await
-        .map(Json),
+        .await?,
         (None, Some(mission)) => {
             blocking_store(move || {
                 let mut runs = store.active_mission_runs_for_mission(&mission)?;
                 for run in &mut runs { present_mission_run(&store, run)?; }
                 Ok(runs)
             })
-                .await
-                .map(Json)
+                .await?
         }
-        _ => Err(ApiError::bad(St3Error::new(
+        _ => return Err(ApiError::bad(St3Error::new(
             "invalid-mission-run-query",
             "select exactly one mission or root mission run",
         ))),
-    }
+    };
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    super::message_reads::read_work_wakes(&state, runs.iter_mut().flat_map(|run| run.steps.iter_mut()))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(runs))
 }
 
 pub async fn list_mission_run_tree(
@@ -431,7 +436,7 @@ pub async fn get_mission_run(
 ) -> Result<Json<MissionRunView>, ApiError> {
     let store = state.store.clone();
     let run_for_read = run.clone();
-    blocking_store(move || {
+    let mut found = blocking_store(move || {
         let Some(mut run) = store.mission_run(&run_for_read)? else {
             return Ok(None);
         };
@@ -440,8 +445,12 @@ pub async fn get_mission_run(
         Ok(Some(run))
     })
     .await?
-    .map(Json)
-    .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))
+    .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))?;
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    super::message_reads::read_work_wakes(&state, found.steps.iter_mut())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(found))
 }
 
 pub async fn revise_mission_run(

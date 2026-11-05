@@ -2,7 +2,7 @@
 //!
 //! Claude can close its stdio MCP child after startup. That child cannot prove that the interactive
 //! provider still lives. This wrapper supervises that exact child and refreshes its observed
-//! record while it remains alive. Catalog launches also maintain their status lease. It uses the provider's existing terminal process group. The launch body
+//! record while it remains alive. It uses the provider's existing terminal process group. The launch body
 //! itself lives in [`crate::provider_session`], which every interactive harness wrapper shares.
 //!
 //! Observed harness state for Claude has two producers with one owner each: hook invocations
@@ -26,113 +26,7 @@ use crate::harness_state::{Activity, Ask, BlockedOn, InputBuffer, Observation};
 use crate::provider_session::{
     PROVIDER_POLL, STOP, SessionObserver, install_signal_handler, run_provider_with_env_removals,
 };
-use crate::{driver_diagnostic, harness_state, message, status};
-
-/// Run one interactive Claude provider and maintain its presence until it exits.
-pub fn run(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    claude_argv: Vec<String>,
-) -> Result<()> {
-    run_with_required_resume(catalog_root, identity, runtime_id, claude_argv, None, None)
-}
-
-/// Run one host-owned cold-residency attempt under its exact incarnation.
-pub fn run_residency_attempt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    claude_argv: Vec<String>,
-    resume_generation: crate::residency::Generation,
-    required_incarnation: String,
-) -> Result<()> {
-    anyhow::ensure!(
-        !required_incarnation.is_empty(),
-        "Claude required runtime incarnation is empty"
-    );
-    run_with_required_resume(
-        catalog_root,
-        identity,
-        runtime_id,
-        claude_argv,
-        Some(resume_generation),
-        Some(required_incarnation),
-    )
-}
-
-fn run_with_required_resume(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    claude_argv: Vec<String>,
-    required_resume_generation: Option<crate::residency::Generation>,
-    required_incarnation: Option<String>,
-) -> Result<()> {
-    anyhow::ensure!(
-        !claude_argv.is_empty(),
-        "Claude driver '{runtime_id}' has no provider argv"
-    );
-    anyhow::ensure!(
-        required_resume_generation.is_some() == required_incarnation.is_some(),
-        "Claude residency launch has an incomplete attempt fence"
-    );
-    let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
-    let required_native_session = match required_resume_generation {
-        Some(generation) => Some(required_residency_resume(
-            &state_dir(catalog_root, &identity),
-            &identity,
-            &runtime_id,
-            &workspace,
-            generation,
-            &claude_argv,
-        )?),
-        None => None,
-    };
-    let claude_argv =
-        with_resume_and_option_terminator(claude_argv, required_native_session.as_deref())?;
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, &identity, &crate::run::detect_host())?
-            .with_context(|| format!("Claude driver agent '{identity}' is not declared"))?;
-    let claude_argv = prepare_channel_argv(catalog_root, &identity, claude_argv)?;
-    crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
-        .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
-    install_signal_handler();
-    let observer = match required_incarnation {
-        Some(session) => {
-            SessionObserver::with_session(&agent_dir, &identity, "claude", &runtime_id, session)?
-        }
-        None => SessionObserver::new(&agent_dir, &identity, "claude", &runtime_id)?,
-    };
-    let mut env = vec![
-        (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),
-        (SESSION_ENV.to_string(), observer.session().to_string()),
-        (SESSION_SEQ_ENV.to_string(), observer.seq().to_string()),
-        ("ST_CLAUDE_IDENTITY".to_string(), identity.clone()),
-        (
-            "CATALOG".to_string(),
-            catalog_root.to_string_lossy().into_owned(),
-        ),
-    ];
-    if let Some(generation) = required_resume_generation {
-        env.push((RESUME_GENERATION_ENV.to_string(), generation.0.to_string()));
-    }
-    if let Some(native_session) = required_native_session {
-        env.push((EXPECTED_NATIVE_SESSION_ENV.to_string(), native_session));
-    }
-    run_provider_with_env_removals(
-        "Claude",
-        Some(&status::status_path(&agent_dir)),
-        &claude_argv,
-        &env,
-        &[EXPECTED_NATIVE_SESSION_ENV, RESUME_GENERATION_ENV],
-        crate::provider_session::SESSION_REFRESH,
-        PROVIDER_POLL,
-        &STOP,
-        Some(&observer),
-    )
-    .with_context(|| format!("running Claude driver '{runtime_id}'"))
-}
+use crate::{driver_diagnostic, harness_state, message};
 
 /// Set on every st3-managed interactive Claude: a seat has no person to accept an in-place
 /// update, so the provider must not update itself under a running seat.
@@ -311,11 +205,6 @@ fn project_declares_st_server(workspace: &Path) -> bool {
     fs::read(workspace.join(".mcp.json")).ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .is_some_and(|config| config["mcpServers"].get("st").is_some())
-}
-
-fn requires_st2_channel(argv: &[String]) -> bool {
-    argv.windows(2)
-        .any(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::CHANNEL)
 }
 
 fn requires_fractal_channel(argv: &[String]) -> bool {
@@ -591,79 +480,6 @@ fn development_fractal_channel_argv(
     Ok(output)
 }
 
-/// Prefer the approved plugin, but preserve an interactive development path when it is absent.
-///
-/// The fallback keeps its MCP declaration in provider arguments. It does not write project state.
-fn prepare_channel_argv(
-    catalog_root: &Path,
-    identity: &str,
-    argv: Vec<String>,
-) -> Result<Vec<String>> {
-    if !requires_st2_channel(&argv) {
-        return Ok(argv);
-    }
-    match crate::claude_channel::verify_installed() {
-        Ok(()) => Ok(argv),
-        Err(error) => {
-            eprintln!(
-                "warning: the approved st2 Claude channel plugin is unavailable: {error:#}\n\
-                 warning: using Claude's interactive development channel; Claude can ask for confirmation\n\
-                 warning: run `st2 claude-channel install` for unattended startup"
-            );
-            let executable = std::env::current_exe()
-                .context("resolving the st2 executable for the Claude development channel")?;
-            development_channel_argv(argv, &executable, catalog_root, identity)
-        }
-    }
-}
-
-fn development_channel_argv(
-    argv: Vec<String>,
-    executable: &Path,
-    catalog_root: &Path,
-    identity: &str,
-) -> Result<Vec<String>> {
-    let mcp = serde_json::json!({
-        "mcpServers": {
-            "st2": {
-                "type": "stdio",
-                "command": executable,
-                "args": [
-                    "--catalog",
-                    catalog_root,
-                    "driver",
-                    "claude-mcp",
-                    "--identity",
-                    identity
-                ]
-            }
-        }
-    });
-    let mut output = Vec::with_capacity(argv.len() + 1);
-    let mut index = 0;
-    let mut replaced = false;
-    while index < argv.len() {
-        if !replaced
-            && argv[index] == "--channels"
-            && argv.get(index + 1).map(String::as_str) == Some(crate::claude_channel::CHANNEL)
-        {
-            output.extend([
-                "--mcp-config".to_string(),
-                serde_json::to_string(&mcp)
-                    .context("serializing the Claude development channel")?,
-                "--dangerously-load-development-channels=server:st2".to_string(),
-            ]);
-            replaced = true;
-            index += 2;
-            continue;
-        }
-        output.push(argv[index].clone());
-        index += 1;
-    }
-    anyhow::ensure!(replaced, "the Claude plugin channel selector is missing");
-    Ok(output)
-}
-
 /// Apply one Claude hook event (payload on stdin) to the agent's observed-harness-state record.
 ///
 /// Invoked per event by the fail-open `claude-observe.sh` hook, so each invocation is its own
@@ -760,36 +576,6 @@ fn ensure_no_authored_session_selection(argv: &[String]) -> Result<()> {
         "authored Claude session selection conflicts with mandatory residency resume"
     );
     Ok(())
-}
-
-fn with_resume_and_option_terminator(
-    mut argv: Vec<String>,
-    native_session_id: Option<&str>,
-) -> Result<Vec<String>> {
-    anyhow::ensure!(argv.len() >= 2, "Claude provider argv has no boot prompt");
-    if native_session_id.is_some() {
-        ensure_no_authored_session_selection(&argv)?;
-    }
-    let prompt = argv
-        .pop()
-        .context("Claude provider argv has no boot prompt")?;
-    let terminator = argv.iter().position(|argument| argument == "--");
-    if let Some(native_session_id) = native_session_id {
-        match terminator {
-            Some(index) => {
-                argv.splice(
-                    index..index,
-                    ["--resume".to_string(), native_session_id.to_string()],
-                );
-            }
-            None => argv.extend(["--resume".to_string(), native_session_id.to_string()]),
-        }
-    }
-    if terminator.is_none() {
-        argv.push("--".to_string());
-    }
-    argv.push(prompt);
-    Ok(argv)
 }
 
 fn transcript_matches(root: &Path, native_session_id: &str, codex: bool) -> Result<Vec<PathBuf>> {
@@ -2341,6 +2127,7 @@ mod tests {
     use super::*;
     use crate::harness_state::harness_state_path;
     use crate::provider_session::run_provider;
+    use crate::status;
 
     #[test]
     fn receipt_identity_requires_the_same_current_binding_and_transcript() {
@@ -2690,65 +2477,6 @@ mod tests {
                 .is_err()
             );
         }
-    }
-
-    #[test]
-    fn only_the_packaged_channel_requests_the_installation_preflight() {
-        assert!(requires_st2_channel(&[
-            "claude".into(),
-            "--channels".into(),
-            "plugin:st2-channel@st2".into(),
-        ]));
-        assert!(!requires_st2_channel(&[
-            "claude".into(),
-            "--channels".into(),
-            "plugin:other@marketplace".into(),
-        ]));
-    }
-
-    #[test]
-    fn development_channel_fallback_is_inline_and_keeps_the_provider_arguments() {
-        let argv = vec![
-            "claude".into(),
-            "--model".into(),
-            "sonnet".into(),
-            "--channels".into(),
-            "plugin:st2-channel@st2".into(),
-            "prompt".into(),
-        ];
-        let output = development_channel_argv(
-            argv,
-            Path::new("/opt/st2/bin/st2"),
-            Path::new("/var/lib/st2/catalog"),
-            "host.worker",
-        )
-        .unwrap();
-        assert_eq!(&output[..3], &["claude", "--model", "sonnet"]);
-        assert_eq!(
-            output.last().map(String::as_str),
-            Some("prompt"),
-            "the user prompt remains last"
-        );
-        let config_index = output.iter().position(|arg| arg == "--mcp-config").unwrap();
-        let mcp: serde_json::Value = serde_json::from_str(&output[config_index + 1]).unwrap();
-        assert_eq!(mcp["mcpServers"]["st2"]["command"], "/opt/st2/bin/st2");
-        assert_eq!(
-            mcp["mcpServers"]["st2"]["args"],
-            serde_json::json!([
-                "--catalog",
-                "/var/lib/st2/catalog",
-                "driver",
-                "claude-mcp",
-                "--identity",
-                "host.worker"
-            ])
-        );
-        assert!(
-            output
-                .iter()
-                .any(|arg| arg == "--dangerously-load-development-channels=server:st2")
-        );
-        assert!(!output.iter().any(|arg| arg == "--channels"));
     }
 
     #[test]
@@ -3244,7 +2972,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let record = harness_state_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
 
         // A hook process wrote a blocked observation between wrapper ticks — carrying the
         // wrapper's exported token, exactly as the env plumbing arranges in a real seat.
@@ -3275,7 +3008,12 @@ mod tests {
         let presence = status::status_path(tmp.path());
         let record = harness_state_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
 
         // A turn is in flight when the provider dies by signal.
@@ -3310,7 +3048,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let presence = status::status_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
 
         run_provider(
@@ -3361,7 +3104,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let record = harness_state_path(tmp.path());
         let observer =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         observer.ended("exit 0");
 
         // The straggler hook shares the session token (env plumbing) and is suppressed.
@@ -3408,7 +3156,12 @@ mod tests {
 
         // A claimed new session — the wrapper path — supersedes the old terminal record.
         let next =
-            SessionObserver::new(tmp.path(), "example-linux.worker", "claude", "example-linux.worker").unwrap();
+            SessionObserver::new_claude_with_primary_ownership(
+            tmp.path(),
+            "example-linux.worker",
+            "example-linux.worker",
+            false,
+        ).unwrap();
         let mut fresh = harness_state::Writer::new(
             tmp.path(),
             "example-linux.worker",
@@ -3719,7 +3472,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_residency_validates_transcript_and_lowers_exact_native_resume() {
+    fn claude_residency_validates_transcript_and_selects_exact_native_resume() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -3751,22 +3504,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(native, RESUME_ID);
-        assert_eq!(
-            with_resume_and_option_terminator(
-                vec![
-                    "claude".into(),
-                    "--model".into(),
-                    "sonnet".into(),
-                    "boot".into(),
-                ],
-                Some(&native),
-            )
-            .unwrap(),
-            [
-                "claude", "--model", "sonnet", "--resume", RESUME_ID, "--", "boot",
-            ]
-        );
-
         fs::OpenOptions::new()
             .append(true)
             .open(&transcript)
@@ -4098,7 +3835,7 @@ mod tests {
         assert!(error.to_string().contains("across managed harness stores"));
     }
     #[test]
-    fn mandatory_claude_resume_refuses_authored_selectors_and_precedes_provider_spawn() {
+    fn mandatory_claude_resume_refuses_authored_selectors_and_missing_checkpoints() {
         for authored in [
             vec!["claude".into(), "--continue".into(), "boot".into()],
             vec![
@@ -4120,41 +3857,16 @@ mod tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let empty_incarnation = run_residency_attempt(
+        let error = required_residency_resume(
             temp.path(),
-            "no-spawn.worker".into(),
-            "no-spawn.worker".into(),
-            vec!["claude".into()],
-            crate::residency::Generation(2),
-            String::new(),
-        )
-        .unwrap_err();
-        assert!(
-            empty_incarnation
-                .to_string()
-                .contains("required runtime incarnation is empty")
-        );
-        let marker = temp.path().join("provider-started");
-        let provider = temp.path().join("claude");
-        fs::write(
-            &provider,
-            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&provider).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-        fs::set_permissions(&provider, permissions).unwrap();
-        let error = run_residency_attempt(
+            "worker",
+            "worker",
             temp.path(),
-            "no-spawn.worker".into(),
-            "no-spawn.worker".into(),
-            vec![provider.display().to_string(), "boot".into()],
             crate::residency::Generation(2),
-            "attempt-test".into(),
+            &["claude".into(), "boot".into()],
         )
         .unwrap_err();
         assert!(error.to_string().contains("residency checkpoint"));
-        assert!(!marker.exists());
     }
 
     fn declare_renderer(dir: &Path, command: &str) -> PathBuf {

@@ -152,13 +152,17 @@ async fn read_message(
     };
     let store = state.store.clone();
     let lookup = subject.clone();
-    let message = blocking_store(move || store.message(&lookup))
+    let mut message = blocking_store(move || store.message(&lookup))
         .await?
         .filter(|message| {
             normalize_message_party(&message.to) == caller.agent
                 || normalize_message_party(&message.from) == caller.agent
         })
         .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
+    // Mail the tile's agent sent to a seat on another host: that host keeps how far it got.
+    super::message_reads::read_view(&state, &mut message)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(MessageRead {
         message,
         provenance: None,

@@ -77,7 +77,8 @@ pub(super) async fn plan_waiting_for_proof(
     wait: Duration,
     mut busy: impl FnMut(),
 ) -> Result<crate::store::CheckpointPlanView, ApiError> {
-    let deadline = Instant::now() + wait;
+    // Use the timer's clock for the deadline too, so paused-time tests control the whole wait.
+    let deadline = tokio::time::Instant::now() + wait;
     loop {
         let error = match plan_once(state, cut).await? {
             Ok(plan) => return Ok(plan),
@@ -86,7 +87,7 @@ pub(super) async fn plan_waiting_for_proof(
         if error.downcast_ref::<smallclaims::store::checkpoint::CheckpointProofBusy>().is_none() {
             return Err(ApiError::internal(error));
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(ApiError::bad(St3Error::new(
                 "checkpoint-proof-in-progress",

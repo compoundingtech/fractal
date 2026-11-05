@@ -11,10 +11,16 @@
 //! a host's silence, so doctor's checks, one after another, wait for a silent host once. One read
 //! asks at most [`MAX_HOSTS`] hosts, all at once, and at most [`MAX_MESSAGES_PER_HOST`] messages
 //! of each, so a slow host costs one deadline and a large backlog a bounded number of requests.
+//!
+//! A message view or list asks the same way ([`read_views`]), but a UI never waits long: it waits
+//! [`VIEW_DEADLINE`], and a host that did not answer is not asked again by views for
+//! [`VIEW_SILENT_FOR`]. Its messages then read as this member's own records, with
+//! `status_from` saying the host's answer is unknown.
 
 use super::*;
 use crate::peer::{MAX_READ_MESSAGES, MessageMarksAnswer, SEAT_FRESHNESS_READS_FEATURE};
-use crate::store::message_marks;
+use crate::model::StatusFrom;
+use crate::store::{message_marks, relayed_closes};
 use std::collections::HashMap;
 
 /// How long `conversations status` waits for the recipient's host.
@@ -23,6 +29,10 @@ pub const STATUS_DEADLINE: Duration = Duration::from_secs(3);
 pub const CHECK_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a host's answer about a message, or its silence, is reused.
 const KEEP_FOR: Duration = Duration::from_secs(5);
+/// How long a message view or list waits for every host it asks.
+pub const VIEW_DEADLINE: Duration = Duration::from_secs(1);
+/// How long views do not ask a host that did not answer.
+pub const VIEW_SILENT_FOR: Duration = Duration::from_secs(30);
 /// The most answers kept; past it the oldest half goes.
 const KEPT_ANSWERS: usize = 8_192;
 /// The most hosts one read asks.
@@ -36,11 +46,13 @@ pub const MESSAGE_OFFSETS_FEATURE: &str = "message_offsets";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Relayed {
     /// The host's seats' marks of the message, those the host is declared to hold. `held` is
-    /// false when the host does not hold the message at all.
+    /// false when the host does not hold the message at all. `latest` is the newest of those
+    /// marks: its receipt and when the host recorded it.
     Answered {
         host: String,
         held: bool,
         status: Option<&'static str>,
+        latest: Option<(String, u64)>,
     },
     /// The host did not answer: the reason, naming it.
     Unknown { host: String, reason: String },
@@ -65,14 +77,15 @@ pub struct KeptAnswers {
 }
 
 impl KeptAnswers {
-    fn silent(&self, host: &str) -> Option<String> {
+    /// Why `host` did not answer, if it did not within the last `within`.
+    fn silent(&self, host: &str, within: Duration) -> Option<String> {
         let silent = self.silent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        silent.get(host).filter(|(at, _)| at.elapsed() < KEEP_FOR).map(|(_, reason)| reason.clone())
+        silent.get(host).filter(|(at, _)| at.elapsed() < within).map(|(_, reason)| reason.clone())
     }
 
     fn fell_silent(&self, host: &str, reason: &str) {
         let mut silent = self.silent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        silent.retain(|_, (at, _)| at.elapsed() < KEEP_FOR);
+        silent.retain(|_, (at, _)| at.elapsed() < VIEW_SILENT_FOR.max(KEEP_FOR));
         silent.insert(host.to_owned(), (Instant::now(), reason.to_owned()));
     }
 
@@ -194,6 +207,17 @@ fn seats_on(store: &Store, host: &str) -> anyhow::Result<BTreeSet<String>> {
         .collect())
 }
 
+/// The newest of `answer`'s marks of seats this member places on the host: its receipt and when
+/// it was recorded.
+fn latest_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<(String, u64)> {
+    answer
+        .marks
+        .iter()
+        .filter(|mark| seats.contains(&mark.consumer))
+        .max_by_key(|mark| mark.recorded_at_unix_ms)
+        .map(|mark| (mark.receipt.clone(), mark.recorded_at_unix_ms))
+}
+
 /// How far `answer`'s marks took the message, keeping only those of seats this member places on
 /// `host`: a host speaks for its own seats.
 fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<&'static str> {
@@ -213,6 +237,16 @@ pub async fn read(
     asks: BTreeMap<String, Vec<String>>,
     deadline: Duration,
 ) -> BTreeMap<String, Relayed> {
+    read_paced(state, asks, deadline, KEEP_FOR).await
+}
+
+/// [`read`], not asking a host that did not answer within the last `silent_for`.
+async fn read_paced(
+    state: &AppState,
+    asks: BTreeMap<String, Vec<String>>,
+    deadline: Duration,
+    silent_for: Duration,
+) -> BTreeMap<String, Relayed> {
     let kept = state.store.extension::<KeptAnswers>();
     // Each message's host, and what it answered or why it did not.
     let mut heard = Vec::<Heard>::new();
@@ -228,7 +262,7 @@ pub async fn read(
             continue;
         }
         let mut asked = Vec::new();
-        let silent = kept.silent(&host);
+        let silent = kept.silent(&host, silent_for);
         for subject in subjects {
             match (kept.get(&subject), &silent) {
                 (Some(answer), _) => heard.push((host.clone(), Ok(answer))),
@@ -306,13 +340,15 @@ pub async fn read(
 /// A message's host, and what it answered or, with the message, why it did not.
 type Heard = (String, Result<MessageMarksAnswer, (String, String)>);
 
-/// What each message's host said, as a status over the seats this member places on that host.
+/// What each message's host said, as a status over the seats this member places on that host. A
+/// close a host answered is queued for the client selectors (`relayed_closes`), which this read
+/// does not wait for.
 fn settle(
-    store: &Store,
+    store: &Arc<Store>,
     heard: Vec<Heard>,
 ) -> BTreeMap<String, Relayed> {
     let mut seats = BTreeMap::<String, Result<BTreeSet<String>, String>>::new();
-    heard
+    let settled: BTreeMap<String, Relayed> = heard
         .into_iter()
         .map(|(host, heard)| match heard {
             Ok(answer) => {
@@ -324,6 +360,7 @@ fn settle(
                         host,
                         held: answer.held,
                         status: status_of(&answer, on_host),
+                        latest: latest_of(&answer, on_host),
                     },
                     Err(reason) => Relayed::Unknown {
                         host,
@@ -334,7 +371,25 @@ fn settle(
             }
             Err((subject, reason)) => (subject, Relayed::Unknown { host, reason }),
         })
-        .collect()
+        .collect();
+    let closes = settled
+        .iter()
+        .filter_map(|(subject, relayed)| match relayed {
+            Relayed::Answered { host, held: true, status: Some("closed"), latest: Some((receipt, at)) } => {
+                Some(relayed_closes::RelayedClose {
+                    message: subject.clone(),
+                    host: host.clone(),
+                    receipt: receipt.clone(),
+                    closed_at_unix_ms: *at,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    if let Err(error) = relayed_closes::queue(store, closes) {
+        tracing::warn!(error = %format!("{error:#}"), "could not queue relayed closes");
+    }
+    settled
 }
 
 /// [`read`] from a thread outside the runtime, such as a doctor worker, through the runtime
@@ -384,10 +439,299 @@ pub fn asks_for<'a>(
     messages: impl IntoIterator<Item = &'a MessageView>,
 ) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
     let mut asks = BTreeMap::<String, Vec<String>>::new();
+    // Messages to one recipient, of one kind, share a host: the key names every input of
+    // `relay_host` besides the store, and must keep doing so.
+    let mut hosts = HashMap::<(String, bool), Option<String>>::new();
     for message in messages {
-        if let Some(host) = relay_host(store, message)? {
+        let kind = (
+            message.to.clone(),
+            crate::store::messages_shard::mailbox_reads::is_stream_item(message),
+        );
+        let host = match hosts.get(&kind) {
+            Some(host) => host.clone(),
+            None => {
+                let host = relay_host(store, message)?;
+                hosts.insert(kind, host.clone());
+                host
+            }
+        };
+        if let Some(host) = host {
             asks.entry(host).or_default().push(message.subject.clone());
         }
     }
     Ok(asks)
+}
+
+/// Ask the hosts of `messages` how far each got, within [`VIEW_DEADLINE`], and take each
+/// answer in: a message whose seat's host keeps its receipts is as far as the further of this
+/// member's records and the host's answer, and says in `status_from` which host it asked and
+/// whether that host answered. A message the host says is closed leaves the list when
+/// `drop_closed`, as a list of open mail drops closed mail of its own. Every other message is
+/// left as it is.
+pub async fn read_views(
+    state: &AppState,
+    messages: &mut Vec<MessageView>,
+    drop_closed: bool,
+) -> anyhow::Result<()> {
+    let relayed = read_for_views(state, messages).await?;
+    let mut closed = BTreeSet::new();
+    for message in messages.iter_mut() {
+        let Some(relayed) = relayed.get(&message.subject) else {
+            continue;
+        };
+        take_in(message, relayed);
+        if message.status == "closed" {
+            closed.insert(message.subject.clone());
+        }
+    }
+    if drop_closed {
+        messages.retain(|message| !closed.contains(&message.subject));
+    }
+    Ok(())
+}
+
+/// What the hosts of `messages` said about them, within [`VIEW_DEADLINE`], for the messages whose
+/// seat's host keeps their receipts. Asks nobody when none of them has such a host.
+pub async fn read_for_views(
+    state: &AppState,
+    messages: &[MessageView],
+) -> anyhow::Result<BTreeMap<String, Relayed>> {
+    if messages.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let asks = {
+        let store = state.store.clone();
+        let views = messages.to_vec();
+        tokio::task::spawn_blocking(move || asks_for(&store, views.iter())).await??
+    };
+    if asks.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(read_paced(state, asks, VIEW_DEADLINE, VIEW_SILENT_FOR).await)
+}
+
+/// [`read_views`] for one message, which is never dropped.
+pub async fn read_view(state: &AppState, message: &mut MessageView) -> anyhow::Result<()> {
+    let mut messages = vec![message.clone()];
+    read_views(state, &mut messages, false).await?;
+    if let Some(read) = messages.pop() {
+        *message = read;
+    }
+    Ok(())
+}
+
+/// Take a host's answer about `message` in.
+pub fn take_in(message: &mut MessageView, relayed: &Relayed) {
+    message.status_from = Some(match relayed {
+        Relayed::Answered { host, status, .. } => {
+            if let Some(status) = status
+                && message_marks::rank(status) > message_marks::rank(&message.status)
+            {
+                message.status = (*status).to_owned();
+            }
+            StatusFrom {
+                host: host.clone(),
+                state: "answered".into(),
+                reason: None,
+            }
+        }
+        Relayed::Unknown { host, reason } => StatusFrom {
+            host: host.clone(),
+            state: "unknown".into(),
+            reason: Some(reason.clone()),
+        },
+    });
+}
+
+/// Ask the assignees' hosts, within [`VIEW_DEADLINE`], about the wake messages of `steps` that
+/// this member has not seen consumed, and count what they say as this member counts its own
+/// records: read or closed acknowledges the wake as `consumed`, and delivered as `delivery` while
+/// the assignee works in the wake's incarnation. It only raises `acknowledged_by`: a claim still
+/// wins, and a host that does not answer leaves the wake as this member counted it. What it says
+/// is never part of a revision. Asks nobody and reads no message when no host keeps its seats'
+/// receipts, or no wake waits on a seat of one.
+pub async fn read_work_wakes<'a>(
+    state: &AppState,
+    steps: impl IntoIterator<Item = &'a mut crate::model::StepRunView>,
+) -> anyhow::Result<()> {
+    let mut steps = steps
+        .into_iter()
+        .filter(|step| {
+            step.wake.as_ref().is_some_and(|wake| {
+                !wake.asks.messages.is_empty()
+                    && !matches!(wake.acknowledged_by.as_deref(), Some("claim" | "consumed"))
+            })
+        })
+        .collect::<Vec<_>>();
+    if steps.is_empty() {
+        return Ok(());
+    }
+    let waiting = steps
+        .iter()
+        .filter_map(|step| step.wake.as_ref())
+        .map(|wake| (wake.assignee.clone(), wake.asks.messages.clone()))
+        .collect::<Vec<_>>();
+    let store = state.store.clone();
+    let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MessageView>> {
+        let seats = relay_hosts(&store)?.into_values().flatten().collect::<BTreeSet<_>>();
+        let subjects = waiting
+            .into_iter()
+            .filter(|(assignee, _)| seats.contains(assignee))
+            .flat_map(|(_, messages)| messages)
+            .collect::<BTreeSet<_>>();
+        let mut messages = Vec::new();
+        for subject in subjects {
+            messages.extend(store.message(&subject)?);
+        }
+        Ok(messages)
+    })
+    .await??;
+    let relayed = read_for_views(state, &messages).await?;
+    if relayed.is_empty() {
+        return Ok(());
+    }
+    for step in &mut steps {
+        let Some(wake) = step.wake.as_mut() else {
+            continue;
+        };
+        let furthest = wake
+            .asks
+            .messages
+            .iter()
+            .filter_map(|message| relayed.get(message)?.status())
+            .max_by_key(|status| message_marks::rank(status));
+        let acknowledged = match furthest {
+            Some("read" | "closed") => "consumed",
+            Some("delivered")
+                if wake.asks.delivery_acknowledges
+                    && !matches!(wake.acknowledged_by.as_deref(), Some("delivery")) =>
+            {
+                "delivery"
+            }
+            _ => continue,
+        };
+        wake.acknowledged_by = Some(acknowledged.to_owned());
+    }
+    Ok(())
+}
+
+/// [`read_work_wakes`] for client resources whose steps carry wakes: `steps[].wake`, or
+/// `run_details[].steps[].wake` as a mission's detail has them. A step whose wake is not yet
+/// acknowledged by a claim or consumption, and whose assignee is a seat of a host that keeps its
+/// receipts, is read again and its `acknowledged_by` raised by that host's answer. Asks nobody and
+/// reads no step when no host keeps receipts.
+pub async fn relay_client_wakes(state: &AppState, items: &mut [Value]) -> anyhow::Result<()> {
+    let waiting = waiting_client_wakes(items);
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let store = state.store.clone();
+    let mut steps = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<crate::model::StepRunView>> {
+        let seats = relay_hosts(&store)?.into_values().flatten().collect::<BTreeSet<_>>();
+        let mut steps = Vec::new();
+        for (step, assignee) in waiting {
+            if seats.contains(&assignee) {
+                steps.extend(store.step_run(&step)?);
+            }
+        }
+        Ok(steps)
+    })
+    .await??;
+    if steps.is_empty() {
+        return Ok(());
+    }
+    read_work_wakes(state, steps.iter_mut()).await?;
+    let acknowledged = steps
+        .into_iter()
+        .filter_map(|step| Some((step.subject, step.wake?.acknowledged_by?)))
+        .collect::<BTreeMap<_, _>>();
+    take_in_client_wakes(items, &acknowledged);
+    Ok(())
+}
+
+/// The steps of client resources, at `steps` and at `run_details[].steps`.
+fn client_steps(items: &mut [Value]) -> impl Iterator<Item = &mut Value> {
+    items.iter_mut().flat_map(|item| {
+        let Value::Object(item) = item else {
+            return Vec::new();
+        };
+        let mut steps = Vec::new();
+        for (key, value) in item.iter_mut() {
+            match (key.as_str(), value) {
+                ("steps", Value::Array(list)) => steps.extend(list.iter_mut()),
+                ("run_details", Value::Array(runs)) => {
+                    for run in runs {
+                        if let Some(Value::Array(list)) = run.get_mut("steps") {
+                            steps.extend(list.iter_mut());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        steps
+    })
+}
+
+/// Whether a client step's wake waits for an acknowledgement a host could give.
+fn waits(step: &Value) -> bool {
+    step["wake"].is_object() && !matches!(step["wake"]["acknowledged_by"].as_str(), Some("claim" | "consumed"))
+}
+
+/// The steps of `items` whose wakes wait, each with its wake's assignee.
+fn waiting_client_wakes(items: &mut [Value]) -> Vec<(String, String)> {
+    client_steps(items)
+        .filter(|step| waits(step))
+        .filter_map(|step| Some((step["id"].as_str()?.to_owned(), step["wake"]["assignee"].as_str()?.to_owned())))
+        .collect()
+}
+
+/// Raise each waiting step's `acknowledged_by` to what `acknowledged` names for it.
+fn take_in_client_wakes(items: &mut [Value], acknowledged: &BTreeMap<String, String>) {
+    for step in client_steps(items) {
+        if waits(step)
+            && let Some(by) = step["id"].as_str().and_then(|id| acknowledged.get(id))
+        {
+            step["wake"]["acknowledged_by"] = json!(by);
+        }
+    }
+}
+
+#[cfg(test)]
+mod client_wake_tests {
+    use super::*;
+
+    /// A mission's detail nests its steps under each run; a work list has them at the top. Both
+    /// are found, a wake a claim or consumption acknowledged is left alone, and a step without a
+    /// wake is not asked about.
+    #[test]
+    fn client_wakes_are_found_under_runs_and_steps_and_only_waiting_ones_change() {
+        let wake = |by: Option<&str>| json!({"assignee": "agent/example/cedar", "acknowledged_by": by});
+        let mut items = [
+            json!({"id": "mission/example", "run_details": [{"steps": [
+                {"id": "step-run/a", "wake": wake(None)},
+                {"id": "step-run/b", "wake": wake(Some("claim"))},
+                {"id": "step-run/c"},
+            ]}]}),
+            json!({"id": "mission-run/example", "steps": [{"id": "step-run/d", "wake": wake(Some("turn"))}]}),
+        ];
+        assert_eq!(
+            waiting_client_wakes(&mut items),
+            [
+                ("step-run/a".to_owned(), "agent/example/cedar".to_owned()),
+                ("step-run/d".to_owned(), "agent/example/cedar".to_owned()),
+            ]
+        );
+        let acknowledged = BTreeMap::from([
+            ("step-run/a".to_owned(), "consumed".to_owned()),
+            ("step-run/b".to_owned(), "consumed".to_owned()),
+            ("step-run/d".to_owned(), "delivery".to_owned()),
+        ]);
+        take_in_client_wakes(&mut items, &acknowledged);
+        let steps = &items[0]["run_details"][0]["steps"];
+        assert_eq!(steps[0]["wake"]["acknowledged_by"], "consumed");
+        assert_eq!(steps[1]["wake"]["acknowledged_by"], "claim", "a claim still wins");
+        assert!(steps[2].get("wake").is_none());
+        assert_eq!(items[1]["steps"][0]["wake"]["acknowledged_by"], "delivery");
+    }
 }

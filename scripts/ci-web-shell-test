@@ -264,6 +264,44 @@ class WebShellKeyTest(unittest.TestCase):
         self.assertNotIn('webPkgs =', flake, 'The entire web shell body belongs in its hashed file')
         self.assertIn('webPkgs.mkShell', code)
 
+    def test_hook_diagnostics_preserve_publisher_status_and_report_pnpm_resolution(self):
+        source = (REPO / 'nix/web-shell.nix').read_text()
+        hook = source.split("  shellHook = ''\n", 1)[1].rsplit("  '';", 1)[0]
+        bash = shutil.which('bash')
+        for status, has_pnpm, requested in ((0, True, True), (7, False, True), (7, False, False)):
+            with self.subTest(status=status, pnpm=has_pnpm, requested=requested), \
+                    tempfile.TemporaryDirectory(prefix='web-shell-hook-') as temporary:
+                root = Path(temporary)
+                tools = root / 'bin'
+                tools.mkdir()
+                for name in ('mkdir', 'ln'):
+                    (tools / name).symlink_to(shutil.which(name))
+                publisher = tools / 'python3'
+                publisher.write_text('#!/bin/sh\nexit "$PUBLISH_STATUS"\n')
+                publisher.chmod(0o755)
+                if has_pnpm:
+                    (tools / 'pnpm').symlink_to(shutil.which('true'))
+                startup = root / 'startup.sh'
+                startup.write_text(':\n')
+                report = root / 'report'
+                env = dict(clean_env(), PATH=str(tools), BASH_ENV=str(startup), PUBLISH_STATUS=str(status))
+                env.pop('CI_WEB_SHELL_DIAGNOSTICS', None)
+                if requested:
+                    env['CI_WEB_SHELL_DIAGNOSTICS'] = str(report)
+                script = hook.replace('${buckRoot}', str(root / 'buck')) \
+                    .replace('${effect-utils}', str(root / 'provider')).replace("''${", '${')
+                done = subprocess.run([bash, '-c', script], cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(done.returncode, status, done.stderr)
+                self.assertEqual(report.exists(), requested)
+                if requested:
+                    snapshot = report.read_text()
+                    self.assertIn('shellHook=started status=0', snapshot)
+                    self.assertIn(f'shellHook=finished status={status}', snapshot)
+                    self.assertIn(f'PATH={tools}', snapshot)
+                    self.assertIn(f'BASH_ENV={startup}', snapshot)
+                    resolution = str(tools / 'pnpm') if has_pnpm else '<not found>'
+                    self.assertIn(f'command -v pnpm: {resolution}', snapshot)
+
     def test_restore_requires_matching_key_and_complete_record(self):
         with tempfile.TemporaryDirectory(prefix='web-shell-restore-') as temporary:
             root = Path(temporary)

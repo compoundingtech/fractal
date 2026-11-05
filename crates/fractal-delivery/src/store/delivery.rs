@@ -776,11 +776,19 @@ impl DeliveryStore for Store {
             recipient: Option<&str>,
             include_history: bool,
         ) -> Result<Vec<MessageView>> {
-        let messages = self.messages(recipient, include_history)?;
+        let mut messages = self.messages(recipient, include_history)?;
         Ok(if include_history {
             messages
         } else {
-            selected_actionable_messages(&self.readers.get(), messages)?
+            // A message a seat's host closed is not a reminder's winner, as one closed here is not.
+            let connection = self.readers.get();
+            let mut kept = Vec::with_capacity(messages.len());
+            for message in messages.drain(..) {
+                if !fractal_store::store::relayed_closes::closed(&connection, &message.subject)? {
+                    kept.push(message);
+                }
+            }
+            selected_actionable_messages(&connection, kept)?
         })
     }
 
@@ -1159,6 +1167,7 @@ impl DeliveryStore for Store {
                 .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hea5ac5c547c1 owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ [&fence.subject], |row| row.get(0))
                 .optional().map_err(internal)?,
             stream: fractal_store::store::messages_shard::mailbox_reads::position(self).map_err(internal)?,
+            marks: fractal_store::store::message_marks::event_position(&connection).map_err(internal)?,
         })
     }
 

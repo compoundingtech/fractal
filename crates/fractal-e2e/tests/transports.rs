@@ -59,17 +59,23 @@ fn the_fixture_store_takes_a_write_while_a_reader_holds_a_snapshot() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path(), "reader-writer");
     state.store.read_snapshot(|_| {
-        state.store.append_claim(&ClaimInput {
-            subject: "agent/reader-writer".into(),
-            kind: "runtime.observed".into(),
-            actor: Some("agent/reader-writer".into()),
-            fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })?;
+        assert!(state.store.latest_claim("agent/reader-writer", None)?.is_none());
+        // Join the other thread's commit while this thread still holds its read snapshot.
+        std::thread::scope(|scope| scope.spawn(|| {
+            state.store.append_claim(&ClaimInput {
+                subject: "agent/reader-writer".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/reader-writer".into()),
+                fields: BTreeMap::from([("status".into(), Value::String("running".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+        }).join().unwrap())?;
+        assert!(state.store.latest_claim("agent/reader-writer", None)?.is_none());
         Ok(())
     }).unwrap();
+    assert!(state.store.latest_claim("agent/reader-writer", None).unwrap().is_some());
 }
 
 async fn publish_fixture_lists(state: &AppState) {
@@ -858,6 +864,14 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_fractal_mes
         "an idle conversation must send nothing"
     );
     stream.unsubscribe("chat").await.unwrap();
+    // Sending unsubscribe does not wait for the server to read it. Its next snapshot
+    // confirms that the preceding command was processed on this socket.
+    // The later message does not change the work collection.
+    stream.subscribe("barrier", "work", 2, None, None).await.unwrap();
+    match next_collection_event(&mut stream, "the unsubscribe barrier snapshot").await {
+        CollectionEvent::Snapshot { id, .. } if id == "barrier" => {}
+        other => panic!("expected the unsubscribe barrier snapshot, got {other:?}"),
+    }
     state
         .store
         .append_claim(&ClaimInput {
@@ -875,12 +889,9 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_fractal_mes
             idempotency_key: None,
         })
         .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1_000), stream.next_event())
-            .await
-            .is_err(),
-        "an unsubscribed conversation must send nothing more"
-    );
+    if let Ok(event) = tokio::time::timeout(Duration::from_millis(1_000), stream.next_event()).await {
+        panic!("an unsubscribed conversation must send nothing more, got {event:?}");
+    }
     server.abort();
 }
 

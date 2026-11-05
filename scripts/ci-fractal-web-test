@@ -344,7 +344,7 @@ for pattern in ("crates/fractal-client*/**", "crates/fractal-schema/**", "docs/s
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
-assert "timeout-minutes: 1" in changes and "timeout-minutes: 1" in gate_job and "timeout-minutes: 25" in execution
+assert "timeout-minutes: 3" in changes and "timeout-minutes: 3" in gate_job and "timeout-minutes: 25" in execution
 assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in changes
 assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha" in changes
 assert "github.event.merge_group.base_sha || github.event.before" in changes
@@ -622,6 +622,8 @@ app_story = ["apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx", "apps/fr
 assert detector_kit_paths(app_story) == app_story, "the production app suites and their state fixtures select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/web/subagentThreadFocus.ts", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
+pins_closure = ["apps/fractal-web/src/data/pins.ts", "apps/fractal-web/src/data/sidebarPins.ts"]
+assert detector_kit_paths(pins_closure) == pins_closure, "the workspace sidebar bundles the ordered Pins binding"
 embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json", "apps/fractal-web/src/state/storageAdapter.ts"]
 assert detector_kit_paths(embed_closure) == embed_closure, "the product embed story and its nested fixtures select kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"

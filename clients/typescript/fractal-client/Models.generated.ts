@@ -4,6 +4,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>. */
+export const PINS_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000002" as const;
+
 /** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
 export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
 
@@ -1675,7 +1678,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2196,6 +2199,7 @@ export type Message = ResourceHeader & {
   sent_at: Timestamp;
   session_id?: (Id | null);
   state: "sent" | "delivered" | "read" | "closed";
+  status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;
   to: Id;
@@ -2228,6 +2232,12 @@ export type MessageSendRefusal = ({
   variant: "LifecycleUnavailable";
 });
 
+export type MessageStatusFrom = {
+  host: string;
+  reason?: string;
+  state: string;
+};
+
 export type Mission = ResourceHeader & {
   active_runs?: number;
   id?: MissionId;
@@ -2258,6 +2268,14 @@ export type MissionActionOffer = {
   confirm: boolean;
   id: "retry-step" | "restart-agent" | "cancel-run" | "chat";
   target: Id;
+};
+
+export type MissionDeclaration = {
+  legacy: boolean;
+  mission: string;
+  published_at: number;
+  revision: Revision;
+  text: string;
 };
 
 export type MissionId = string;
@@ -2319,6 +2337,7 @@ export type MissionRunSummary = {
   blocker?: {
 
 } | null;
+  completed_at?: number | null;
   current_steps: Array<{
   assignee?: (ActorRef | null);
   claimant?: (ActorRef | null);
@@ -2340,6 +2359,7 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  started_at?: number | null;
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
@@ -2364,6 +2384,7 @@ export type MissionStep = {
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
+  completed_at?: number | null;
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
@@ -2377,6 +2398,7 @@ export type MissionStep = {
   path: string;
   progress_at?: (Timestamp | null);
   since: Timestamp;
+  started_at?: number | null;
   state: WorkState;
   title?: string | null;
   wake?: (MissionWake | null);
@@ -4177,6 +4199,7 @@ export type Work = ResourceHeader & {
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
+  execution_waited_ms?: number;
   gate_kind?: 
   "watch"
   | "predicate"

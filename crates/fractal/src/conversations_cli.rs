@@ -293,10 +293,16 @@ pub(super) async fn run_message(
                         print!("{}", serde_json::to_string(&message)?);
                         first = false;
                     } else {
+                        // A seat's host that did not answer leaves only this member's records,
+                        // which are not how far the message got.
+                        let unknown = message
+                            .status_from
+                            .as_ref()
+                            .is_some_and(|from| from.state == "unknown");
                         rows.push(format!(
                             "{}\t{}\t{}\t{}",
                             message.subject,
-                            message.status,
+                            if unknown { "unknown" } else { message.status.as_str() },
                             message.from,
                             message.title.as_deref().unwrap_or("message")
                         ));

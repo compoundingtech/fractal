@@ -15,13 +15,47 @@ use super::*;
 /// The marks a consumer records, in rank order: a later one is further along.
 pub const MARKS: [&str; 3] = ["message.delivered", "message.read", "message.closed"];
 
+/// The staging of a message for a seat's native transport, recorded like a mark but in
+/// `local_message_staged`, so a build that reads `local_message_marks` (4b-1) never meets a kind
+/// it does not know, and a backup of marks restores on it. It ranks below every mark.
+pub const STAGED: &str = "message.staged";
+
+/// Whether a hosted seat's staging is recorded as a mark. Not yet: a build that reads marks but not
+/// `local_message_staged` (v0.3.25) would read a staged mark as unoffered mail and offer it again
+/// after a rollback, so a staging stays a claim until a release that reads these exists. Readers
+/// read both already.
+pub const RECORDS_STAGED: bool = false;
+
+/// Whether the claim append path records `kind` as a mark for a hosted seat.
+pub fn recorded_as_mark(kind: &str) -> bool {
+    MARKS.contains(&kind) || RECORDS_STAGED && kind == STAGED
+}
+
+/// How many of the newest mark events stay (`local_message_mark_events`).
+pub const EVENTS_KEPT: i64 = 16_384;
+
+/// The newest mark event, or 0: a position readers of mark changes start from.
+pub fn event_position(connection: &Connection) -> Result<u64> {
+    Ok(connection
+        .prepare_cached("SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5a3089cd7513 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+}
+
+/// The mark events after `after`, at most `limit`, as (id, message, consumer).
+pub fn events_after(connection: &Connection, after: u64, limit: usize) -> Result<Vec<(u64, String, String)>> {
+    Ok(connection
+        .prepare_cached("SELECT id, message, consumer FROM local_message_mark_events WHERE id>?1 ORDER BY id LIMIT ?2")?
+        .query_map(params![after, limit as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// How long a mark that something further along has superseded stays.
 pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h5e219940ed04 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-hfe0fdba03f21 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_message_marks (
     message TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
@@ -32,6 +66,21 @@ CREATE TABLE IF NOT EXISTS local_message_marks (
 );
 CREATE INDEX IF NOT EXISTS local_message_marks_consumer ON local_message_marks(consumer, message);
 CREATE INDEX IF NOT EXISTS local_message_marks_age ON local_message_marks(recorded_at_unix_ms);
+CREATE TABLE IF NOT EXISTS local_message_staged (
+    message TEXT NOT NULL,
+    consumer TEXT NOT NULL,
+    recorded_at_unix_ms INTEGER NOT NULL,
+    receipt TEXT NOT NULL,
+    PRIMARY KEY(message, consumer)
+);
+CREATE INDEX IF NOT EXISTS local_message_staged_age ON local_message_staged(recorded_at_unix_ms);
+-- Each new mark or staging, in order: what a mailbox wake or a cache reads as a change, since a
+-- mark moves no claim index. The trim keeps the newest EVENTS_KEPT.
+CREATE TABLE IF NOT EXISTS local_message_mark_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT NOT NULL,
+    consumer TEXT NOT NULL
+);
 ",
     )?;
     Ok(())
@@ -40,7 +89,7 @@ CREATE INDEX IF NOT EXISTS local_message_marks_age ON local_message_marks(record
 /// The triggers, once every projection they maintain exists.
 pub fn create_triggers(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h101527c32d2e owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
+        /* sqlite-large-value: allow-for-now lv-h074f8716f6c1 owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
 -- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
 -- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs). A lifecycle
 -- claim carries a status field, so it always marks the client selector dirty; a mark does too.
@@ -75,6 +124,29 @@ BEGIN
     VALUES(OLD.message,-1,1,2)
     ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
 END;
+CREATE TRIGGER IF NOT EXISTS local_message_marks_event AFTER INSERT ON local_message_marks
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(NEW.message, NEW.consumer);
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_staged_event AFTER INSERT ON local_message_staged
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(NEW.message, NEW.consumer);
+END;
+-- A staging offers held mail and changes the client header, as a `message.staged` claim does;
+-- idle and unread mail do not count it.
+CREATE TRIGGER IF NOT EXISTS local_message_staged_insert AFTER INSERT ON local_message_staged
+BEGIN
+    UPDATE coordination_sends SET held=0 WHERE subject=NEW.message AND held!=0;
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(NEW.message,-1,1,1)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|excluded.dirty_flags,created_index=created_index+1;
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_staged_delete AFTER DELETE ON local_message_staged
+BEGIN
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(OLD.message,-1,1,2)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
+END;
 ",
     )?;
     Ok(())
@@ -89,20 +161,41 @@ pub fn record(
     kind: &str,
     consumer: &str,
 ) -> Result<(ClaimRecord, bool), St3Error> {
-    if !MARKS.contains(&kind) {
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().map_err(internal)?;
+    let recorded = record_tx(&transaction, &store.origin, message, kind, consumer)?;
+    transaction.commit().map_err(internal)?;
+    Ok(recorded)
+}
+
+/// [`record`] inside the caller's writer transaction, so a fence it checks and the mark commit
+/// together. `kind` is a mark or [`STAGED`].
+pub fn record_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    message: &str,
+    kind: &str,
+    consumer: &str,
+) -> Result<(ClaimRecord, bool), St3Error> {
+    if !MARKS.contains(&kind) && kind != STAGED {
         return Err(St3Error::new("invalid-message-mark", format!("`{kind}` is not a message mark")));
     }
     let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
-    let receipt = super::messages_shard::lifecycle_receipt(&store.origin, message, kind, Some(consumer), &fields);
-    let mut connection = store.connection.write();
-    let transaction = connection.transaction().map_err(internal)?;
-    let inserted = transaction
-        .execute(
+    let receipt = super::messages_shard::lifecycle_receipt(origin, message, kind, Some(consumer), &fields);
+    let inserted = if kind == STAGED {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h2d30ef9f972a owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_staged(message, consumer, recorded_at_unix_ms, receipt)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
+            params![message, consumer, now_ms() as i64, receipt.id],
+        )
+    } else {
+        transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h3644dd9ee6f6 owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)
              SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM message_index WHERE subject=?1)",
             params![message, kind, consumer, now_ms() as i64, receipt.id],
         )
-        .map_err(internal)?;
+    }
+    .map_err(internal)?;
     if inserted == 0 {
         let known: bool = transaction
             .query_row("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)", [message], |row| row.get(0))
@@ -113,23 +206,117 @@ pub fn record(
     } else {
         // The client selectors fold their dirty headers at the end of a write, as a claim's
         // commit does: a closed mark closes the message's current header.
-        super::client_messages::finalize_commit(&transaction).map_err(internal)?;
+        super::client_messages::finalize_commit(transaction).map_err(internal)?;
     }
-    transaction.commit().map_err(internal)?;
     Ok((receipt, inserted > 0))
 }
 
-/// The furthest-along mark of `message`, as its status ("delivered", "read" or "closed").
+/// Who staged `message` and when, if a seat this member hosts staged it as a mark.
+pub fn staged(connection: &Connection, message: &str) -> Result<Option<(String, u128)>> {
+    Ok(connection
+        .prepare_cached("SELECT consumer, recorded_at_unix_ms FROM local_message_staged WHERE message=?1 ORDER BY recorded_at_unix_ms LIMIT 1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h34c24f65b594 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
+        .optional()?)
+}
+
+/// The receipt of `kind` (a mark or [`STAGED`]) already recorded for `message`, when that mark is
+/// as far as the message got: what a repeated write answers, as a repeated claim answers the
+/// claim. A message further along answers its head claim instead, as it would without marks.
+pub fn recorded(connection: &Connection, origin: &str, message: &str, kind: &str) -> Result<Option<ClaimRecord>> {
+    let requested = kind.trim_start_matches("message.");
+    if status(connection, message)? != Some(requested) {
+        return Ok(None);
+    }
+    let claimed = connection
+        .prepare_cached("SELECT kind FROM claims WHERE subject=?1 AND kind IN
+            ('message.staged','message.delivered','message.read','message.closed')")?
+        .query_map([message], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if claimed.iter().any(|kind| rank(kind.trim_start_matches("message.")) >= rank(requested)) {
+        return Ok(None);
+    }
+    let consumer: Option<String> = if kind == STAGED {
+        connection
+            .prepare_cached("SELECT consumer FROM local_message_staged WHERE message=?1 ORDER BY recorded_at_unix_ms LIMIT 1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))
+            .optional()?
+    } else if MARKS.contains(&kind) {
+        connection
+            .prepare_cached("SELECT consumer FROM local_message_marks WHERE message=?1 AND kind=?2 ORDER BY recorded_at_unix_ms LIMIT 1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h01ddb4f0b68e owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message, kind], |row| row.get(0))
+            .optional()?
+    } else {
+        None
+    };
+    Ok(consumer.map(|consumer| {
+        let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
+        super::messages_shard::lifecycle_receipt(origin, message, kind, Some(&consumer), &fields)
+    }))
+}
+
+/// The newest mark or staging of `message`: its receipt and when it was recorded. A resource
+/// revised by a mark names it, since no claim moved.
+pub fn latest(connection: &Connection, message: &str) -> Result<Option<(String, u128)>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT receipt, recorded_at_unix_ms FROM (
+                 SELECT receipt, recorded_at_unix_ms FROM local_message_marks WHERE message=?1
+                 UNION ALL SELECT receipt, recorded_at_unix_ms FROM local_message_staged WHERE message=?1)
+             ORDER BY recorded_at_unix_ms DESC, receipt DESC LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h7d8afd8a5d72 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u128)))
+        .optional()?)
+}
+
+/// Whether `id` is a mark's (or a stream item's lifecycle) receipt rather than a graph claim: it
+/// is no predecessor, no evidence and no subject head.
+pub fn is_receipt(id: &str) -> bool {
+    id.starts_with("offset-receipt/")
+}
+
+/// Whether this member records `consumer`'s lifecycle of the graph message `message` as a mark
+/// instead of a lifecycle claim: marks are on ([`super::marks_switch`]), and the consumer is a seat
+/// this member's own declarations place on itself, so the seat's host, which other members ask
+/// about it, holds every mark of it. A person, a seat on another host and a seat this member does
+/// not declare keep lifecycle claims, which replicate, and readers count both. So does a delivery
+/// probe's mail (tagged `delivery-probe`): the probe's sender and every member's doctor prove its
+/// read by the recipient's replicated read claim (docs/st3/delivery-probes.md).
+pub fn local_consumer(connection: &Connection, origin: &str, message: &str, consumer: &str) -> Result<bool> {
+    if !super::marks_switch::marks_switched_tx(connection)? || !consumer.starts_with("agent/") {
+        return Ok(false);
+    }
+    let graph_message: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h25eeeac696a4 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+    let host: Option<Option<String>> = connection
+        .prepare_cached("SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h967901d802cf owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [consumer], |row| row.get(0))
+        .optional()?;
+    if !graph_message || host.flatten().as_deref() != Some(origin) {
+        return Ok(false);
+    }
+    let probe: bool = connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index, json_each(claims.body,'$.fields.tags') tag
+             WHERE claims.subject=?1 AND claims.kind='message.sent' AND tag.value='delivery-probe')",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8f64d250e864 owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+    Ok(!probe)
+}
+
+/// The furthest-along mark of `message`, as its status ("staged", "delivered", "read" or "closed").
 pub fn status(connection: &Connection, message: &str) -> Result<Option<&'static str>> {
     let kinds: Vec<String> = connection
         .prepare_cached("SELECT kind FROM local_message_marks WHERE message=?1")?
         .query_map([message], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(MARKS
-        .iter()
-        .rev()
-        .find(|mark| kinds.iter().any(|kind| kind == *mark))
-        .map(|mark| mark.trim_start_matches("message.")))
+    if let Some(mark) = MARKS.iter().rev().find(|mark| kinds.iter().any(|kind| kind == *mark)) {
+        return Ok(Some(mark.trim_start_matches("message.")));
+    }
+    let staged: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h3962b6920e6b owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+    Ok(staged.then_some("staged"))
 }
 
 /// When `consumer` (any consumer, for `None`) recorded a mark of one of `kinds` for `message`: the
@@ -166,11 +353,13 @@ pub fn host_marks(
         let connection = store.readers.get();
         let held: bool = connection
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
-            .query_row(/* sqlite-large-value: allow-for-now lv-he19a16a9018a owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
+            .query_row(/* sqlite-large-value: allow-for-now lv-h80d0240fd28e owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
         if held {
             let marks = connection
                 .prepare_cached(
-                    "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1",
+                    "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1
+                     UNION ALL SELECT 'message.staged', consumer, recorded_at_unix_ms, receipt
+                     FROM local_message_staged WHERE message=?1",
                 )?
                 .query_map([message], |row| {
                     Ok(HostMark {
@@ -256,9 +445,25 @@ pub fn trim(store: &Store, now: u128, chunk: usize) -> Result<usize> {
                 LIMIT ?2)",
             params![cutoff, chunk],
         )?;
+        // A staging stands for nothing once any later lifecycle of the message is recorded.
+        let staged = connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hed71df032c6d owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_message_staged WHERE rowid IN (
+                SELECT staged.rowid FROM local_message_staged AS staged
+                WHERE NOT EXISTS(SELECT 1 FROM message_index WHERE subject=staged.message)
+                   OR (staged.recorded_at_unix_ms < ?1 AND (
+                        EXISTS(SELECT 1 FROM local_message_marks AS later WHERE later.message=staged.message)
+                        OR EXISTS(SELECT 1 FROM claims WHERE claims.subject=staged.message
+                               AND claims.kind IN ('message.delivered','message.read','message.closed'))))
+                LIMIT ?2)",
+            params![cutoff, chunk],
+        )?;
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h6faacb101bab owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_message_mark_events WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM local_message_mark_events) - ?1",
+            [EVENTS_KEPT],
+        )?;
         drop(connection);
-        removed += deleted;
-        if (deleted as i64) < chunk {
+        removed += deleted + staged;
+        if (deleted as i64) < chunk && (staged as i64) < chunk {
             return Ok(removed);
         }
     }

@@ -8,6 +8,9 @@ those started by one of the --actor accounts (all when none is given), and reads
 check of each run is counted once, as:
 
   skipped     the gate skipped the check (decision=skip)
+  not_relevant  no note covered the tree, but the check's own job passed with its `<check>-execution` job skipped: nothing the check
+              reads changed, so CI did not run it (fractal-web, whose fractal-web-changes job decides; st-test does not sign it then).
+              On a pull request run a refusal with relevant changes fails that job, so this never hides an unsigned push
   lane_edit   the pull request changes a file of the check's lane (definition_paths in .st/required-lanes.json at the run's base): a local
               run cannot sign such a tree, so CI runs it
   merge_tree  the gate asked about the merge tree instead of the head (tree_of=merge: a protected file changed since the branch point,
@@ -49,7 +52,8 @@ POLICY = '.st/evidence-skip-policy.json'
 _loader = importlib.machinery.SourceFileLoader('evidence_flip_ready', str(Path(__file__).resolve().parent / 'evidence-flip-ready'))
 flip = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
 _loader.exec_module(flip)
-CATEGORIES = ('skipped', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'protected', 'sampled', 'shadow', 'shadow_unsigned', 'other')
+CATEGORIES = ('skipped', 'not_relevant', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'protected', 'sampled', 'shadow', 'shadow_unsigned',
+              'other')
 
 
 def lanes_at(root, base, runner, cache):
@@ -131,6 +135,12 @@ def classify(fields, lane_edit):
     return 'other'
 
 
+def not_run(conclusions, check):
+    """Whether the run passed `check` without running it: its `<check>-execution` job was skipped and its own `<check>` job passed. Only a
+    check split that way (fractal-web) can say so; for any other check it is False."""
+    return conclusions.get(f'{check}-execution') == 'skipped' and conclusions.get(check) == 'success'
+
+
 def seats(receipts):
     """{branch: seat} from pre-push receipts (the last receipt for a branch wins)."""
     found = {}
@@ -181,6 +191,7 @@ def report(github, root, runner, since, until, actors, receipts):
     for run in runs:
         jobs = github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=latest', 'jobs')
         number, branch = None, run.get('head_branch')
+        conclusions = {job.get('name'): job.get('conclusion') for job in jobs}
         for job in jobs:
             check = (job.get('name') or '').removeprefix('evidence-gate-')
             if check == job.get('name') or job.get('status') != 'completed' or job.get('conclusion') == 'skipped':
@@ -196,6 +207,8 @@ def report(github, root, runner, since, until, actors, receipts):
                 lanes = lanes_at(root, fields.get('base'), runner, lane_cache)
                 lane_edit = bool(number) and check in lanes and touches(pr_files(github, number, file_cache), lanes[check])
             category = classify(fields, lane_edit)
+            if category in ('not_signed', 'merge_tree') and not_run(conclusions, check):
+                category = 'not_relevant'
             if category == 'not_signed' and not enforced_at(root, fields.get('base'), runner, policy_cache, check):
                 category = 'shadow_unsigned'
             counts[check][category] += 1
@@ -217,9 +230,9 @@ def report(github, root, runner, since, until, actors, receipts):
 def markdown(result):
     lines = [f"**Our pull request runs**, {result['window']['since']} .. {result['window']['until']}: {result['runs']} runs"
              + (f" (accounts: {', '.join(result['actors'])})" if result['actors'] else ''), '',
-             '| check | skipped | ran: lane edit | ran: merge tree | ran: not signed | ran: failed | ran: protected file | ran: sampled | ran: shadow '
-             '| ran: shadow, unsigned | ran: other |',
-             '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+             '| check | skipped | not run: not relevant | ran: lane edit | ran: merge tree | ran: not signed | ran: failed | ran: protected file '
+             '| ran: sampled | ran: shadow | ran: shadow, unsigned | ran: other |',
+             '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for check, row in result['checks'].items():
         lines.append(f"| {check} | " + ' | '.join(str(row[category]) for category in CATEGORIES) + ' |')
     if result['not_signed']:

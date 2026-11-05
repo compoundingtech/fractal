@@ -48,6 +48,8 @@ export const MERGE_ONLY = [
 ]
 export const BOTH_WIDTHS = [
   'fractal-app-composer-images--several-images',
+  'fractal-app-sidebar-alerts-tab--bounded-scroll',
+  'fractal-app-sidebar-alerts-tab--served',
   'fractal-app-transcript-images--loaded',
   'fractal-ui-composer--footer-width-budget-narrow',
   'fractal-ui-composer--footer-width-budget-medium',
@@ -55,6 +57,8 @@ export const BOTH_WIDTHS = [
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
   'fractal-ui-sidebar-agent-row--densities-and-children',
+  'fractal-ui-sidebar-tabs--all-states',
+  'fractal-ui-sidebar-tabs--keyboard',
   'fractal-ui-transcript-composer--host-width',
   'fractal-ui-transcript-composer--reading-column',
   'fractal-ui-workbench--all-states',

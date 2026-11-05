@@ -43,6 +43,7 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
+pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
 mod runtime_start_diagnostics;
@@ -117,6 +118,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(subject_definition),
         )
         .route("/v1/client/publication-definition", get(publication_definition))
+        .route("/v1/client/mission-declaration", get(mission_declaration::get))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -2034,7 +2036,15 @@ async fn collection_stream_socket(
         move |state, session, request, permit| {
             let windows = windows.clone();
             async move {
-                collection_items_with_windows(&state, &session, &request, permit, windows).await
+                let mut read =
+                    collection_items_with_windows(&state, &session, &request, permit, windows).await?;
+                // After the window cache: a seat's host's answer is never part of a revision.
+                if request.collection == "attention" {
+                    fractal_api_core::api::relay_attention_target_states(&state, &mut read.1)
+                        .await
+                        .map_err(ApiError::internal)?;
+                }
+                Ok(read)
             }
         },
     )
@@ -3225,6 +3235,11 @@ fn mission_resources_filtered(
             let latest_finished = runs.iter().rev().find(|run| {
                 matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
             });
+            let timing_runs = runs.iter().filter(|run|
+                !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
+                    || latest_finished.is_some_and(|latest| latest.subject == run.subject))
+                .map(|run| run.subject.clone()).collect::<Vec<_>>();
+            let timing = store.mission_step_timestamps_for_runs(&timing_runs, None)?;
             let run_details = runs
                 .iter()
                 .map(|header| {
@@ -3356,6 +3371,8 @@ fn mission_resources_filtered(
                                     "agentless": step.agentless,
                                     "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
+                                    "started_at": timing.get(step.subject.as_str()).and_then(|times| times.0),
+                                    "completed_at": timing.get(step.subject.as_str()).and_then(|times| times.1),
                                     "last_progress": step.progress_summary,
                                     "progress_at": step.progress_at_unix_ms.map(client_timestamp),
                                     "blocked_reason": step.blocked_reason.as_deref().or_else(|| run.scheduler_fault.as_deref().filter(|_| step.status == "pending")),
@@ -3385,6 +3402,8 @@ fn mission_resources_filtered(
                         "current_steps": current_steps,
                         "must_act": must_act,
                         "state_since": client_timestamp(state_since),
+                        "started_at": run.created_at_unix_ms,
+                        "completed_at": run_state.and_then(|state| state.completed_at_unix_ms),
                         "outcome": outcome,
                         "last_progress": last_progress,
                         "blocker": blocker,
@@ -4251,7 +4270,7 @@ pub async fn mission_detail(
     let store = state.store.clone();
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
-    let items = super::blocking_store(move || {
+    let mut items = super::blocking_store(move || {
         let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
         // The presentation the missions list publishes for this mission; a read computes none.
         if let Some(published) = store.published_missions_list().newest()
@@ -4265,6 +4284,10 @@ pub async fn mission_detail(
         Ok(items)
     })
     .await?;
+    // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    fractal_api_core::api::message_reads::relay_client_wakes(&state, &mut items)
+        .await
+        .map_err(ApiError::internal)?;
     client_detail(items, "mission", &id)
 }
 
@@ -16250,6 +16273,19 @@ mission "example/looped" state="ready" {
         assert_eq!(current_run["current_steps"].as_array().unwrap().len(), 0);
         assert!(current_run["state_since"].is_string());
         assert!(current_run["outcome"].is_null());
+        assert_eq!(current_run["started_at"], second.created_at_unix_ms as u64);
+        assert!(current_run["completed_at"].is_null());
+        let published = mission_list_cards_with(&state.store, &["mission/example/looped".into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        for run in looped["run_details"].as_array().unwrap() {
+            let card_run = published[0]["run_details"].as_array().unwrap().iter()
+                .find(|candidate| candidate["id"] == run["id"]).unwrap();
+            for key in ["started_at", "completed_at"] {
+                assert_eq!(card_run[key], run[key], "{key}");
+            }
+        }
+        let first_completed = looped["run_details"].as_array().unwrap().iter()
+            .find(|run| run["id"] == first.subject).unwrap()["completed_at"].clone();
+        assert!(first_completed.is_u64());
 
         state
             .store
@@ -16283,6 +16319,7 @@ mission "example/looped" state="ready" {
             "its work shipped before it was cancelled"
         );
         assert_eq!(finished["state_since"], finished["outcome"]["at"]);
+        assert_eq!(finished["completed_at"], first_completed);
 
         // Retired once no run is open, the mission leaves the current view at once, even with
         // a run that ended moments ago, and its history names it retired.
@@ -16317,8 +16354,9 @@ mission "example/looped" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "detail-node");
         for mission in ["example/detail", "example/neighbor"] {
+            let steps = (0..25).map(|index| format!("step \"do-{index:02}\" {{ agentless; }}\n")).collect::<String>();
             let source = format!(
-                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  step \"do\" {{ assigned-to \"agent/doer\" }}\n}}\n"
+                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  {steps}}}\n"
             );
             let intent = crate::graph::parse_intent(&source, "detail-node").unwrap();
             let preview = state
@@ -16340,7 +16378,7 @@ mission "example/looped" state="ready" {
                     Some("person/operator"),
                 )
                 .unwrap();
-            for run in 0..2 {
+            for run in 0..3 {
                 let view = state
                     .store
                     .create_mission_run(&crate::model::MissionRunRequest {
@@ -16353,7 +16391,11 @@ mission "example/looped" state="ready" {
                         idempotency_key: format!("{mission}-{run}"),
                     })
                     .unwrap();
-                if run == 0 {
+                for step in &view.steps {
+                    state.store.set_step_state(&step.subject, "working", None).unwrap();
+                }
+                if run < 2 {
+                    state.store.set_step_state(&view.steps[0].subject, "completed", None).unwrap();
                     for phase in ["cleanup-completed", "terminal"] {
                         state
                             .store
@@ -16370,6 +16412,26 @@ mission "example/looped" state="ready" {
             let detail = mission_resources(&state.store, index, true, Some(mission)).unwrap();
             assert_eq!(detail.len(), 1);
             let detail = &detail[0];
+            let finished = detail["run_details"].as_array().unwrap().iter()
+                .filter(|run| run["status"] == "completed").collect::<Vec<_>>();
+            assert_eq!(finished.len(), 2);
+            assert!(finished[0]["steps"][0]["started_at"].is_null());
+            assert!(finished[0]["steps"][0]["completed_at"].is_null());
+            assert!(finished[1]["steps"][0]["started_at"].is_u64());
+            assert!(finished[1]["steps"][0]["completed_at"].is_u64());
+            assert_eq!(finished[1]["steps"].as_array().unwrap().len(), 25);
+            assert!(finished[1]["steps"][24]["started_at"].is_u64(), "detail keeps full-step timing");
+            let before = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get);
+            let published = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let read = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get) - before;
+            assert_eq!(read, 40, "only 20 preview subjects from the open and latest finished runs");
+            for run in finished {
+                let card_run = published[0]["run_details"].as_array().unwrap().iter()
+                    .find(|candidate| candidate["id"] == run["id"]).unwrap();
+                for key in ["started_at", "completed_at"] {
+                    assert_eq!(card_run["steps"][0][key], run["steps"][0][key], "{key}");
+                }
+            }
             for field in [
                 "runs",
                 "state",

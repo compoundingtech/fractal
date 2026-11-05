@@ -209,8 +209,12 @@ export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled()
  * record up to the GC cap, and `fetch-depth: 0` fetches every tag: 5,000 of them added 81.5 MiB and 16 s to a full fetch
  * (measured 2026-10-19), mostly source objects of tested commits that no branch holds. So check out one commit, then fetch the
  * rest with a negative refspec (git 2.29 or later). Deepening the shallow clone (`--unshallow`) took 21 s against 11 s for a
- * full fetch (2026-10-20, from hetz2): the server cannot reuse its packs for it. So the shallow marker goes and the history is
+ * full fetch (2026-10-20, from a build host): the server cannot reuse its packs for it. So the shallow marker goes and the history is
  * fetched as a fresh clone would (`--refetch`, git 2.36 or later), then checked: the whole history is here or the step fails.
+ * The marker is only moved aside: a fetch that fails installs no pack and updates no ref, so putting the marker back leaves the
+ * one-commit checkout exactly as it was, never a checkout without the marker whose parents are missing (a 408 did that to a merge
+ * group on 2026-11-03). git does not retry a dropped transfer, and GitHub answers a slow pack negotiation with HTTP 408, so a
+ * transport failure, and only one, is tried once more; any other failure ends the step at once.
  * The job token is used only when checkout did not persist its own.
  */
 export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regexp '^http\\..*\\.extraheader$' || true)" ]; then
@@ -219,8 +223,21 @@ export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regex
   export GIT_CONFIG_VALUE_0
 fi
 head=$(git rev-parse HEAD)
-rm -f "$(git rev-parse --git-path shallow)"
-git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+shallow=$(git rev-parse --git-path shallow)
+errors=$(mktemp)
+fetch() {
+  status=0
+  git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+  cat "$errors" >&2
+  return "$status"
+}
+transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+[ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+  [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+  exit 1
+fi
+rm -f "$shallow.full-fetch"
 git fsck --connectivity-only --no-dangling --no-progress`
 
 /**
@@ -847,6 +864,7 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
   key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-',
 } as const
 
 /**
@@ -916,7 +934,8 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
   'fractal-web-changes': {
     name: 'fractal-web-changes',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the detection steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     outputs: {
       relevant: '${{ steps.detect.outputs.relevant }}',
@@ -1025,7 +1044,8 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
     // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the gate steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     steps: [
       fractalWebRunnerStep,

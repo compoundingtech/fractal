@@ -17,14 +17,17 @@ GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it eve
      than its bound, so a deleted or rewound log costs skips and never makes an old one count;
   5. with --publish, pushes the head to `refs/evidence-log/main` on the remote, only as a fast-forward of the published head
      this run fetched (then the preceding checkpoint), and leased on it: a host whose chain does not continue the published one
-     (a second publisher) refuses loudly and publishes nothing, so two publishers never overwrite each other's heads;
+     (a second publisher, or a copy not seeded from the remote) refuses loudly and publishes nothing, so two publishers never
+     overwrite each other's heads;
      with --restore, pushes back any logged record the remote no longer has (and reports it: `missing`).
 `gc` appends a GC line for every tree and input key of an evidence-gc plan (`--plan-out`) and drops their copies: run it BEFORE
 the plan's deletions (evidence-gc --before-delete), so a pull does not restore what GC removed. It also keeps the names of the
 plan's refs as PENDING DELETIONS: a pull that runs between the GC lines and the deletions does not log them again after the GC
-line, which would make their deletion "missing" and a restore push them back. A pending name is dropped once the remote no longer
-has it, or after TOMBSTONE_HOURS if GC never deleted it, and is then logged again like any record. With --publish it pushes the
-new head at once, so a verifier does not see the deletions as missing until the next pull.
+line, which would make their deletion "missing" and a restore push them back. Names absent remotely are dropped from pending at
+once. After TOMBSTONE_HOURS, at most TOMBSTONE_RELEASE_REFS names per pull are rechecked, oldest first, after fresh records have
+been checkpointed. Successful checks release their pending names only after the checkpoint; rejected names stay held and wait
+another TOMBSTONE_HOURS. Nothing uses a pending name as evidence of trust. With --publish it pushes the new head at once, so a
+verifier does not see the deletions as missing until the next pull.
 
 THE LOG is a chain of commits signed with the log key (`--signer` signs stdin to an SSH signature on stdout, for example
 ["ssh-keygen", "-Y", "sign", "-n", "git", "-f", KEY], or the same through `st sekrets`, so no seat reads the key). Its tree:
@@ -32,7 +35,8 @@ THE LOG is a chain of commits signed with the log key (`--signer` signs stdin to
   keys/<check>/<key[:2]>/<key>         record <record> <check> <exit_code> <signer> <observed_at>   one per input-index ref
                                        gc <time> <plan sha256>                                        GC removed what came before
 A verifier reads one file at the head and needs nothing else. Before extending the chain a pull checks that the current head is
-signed by a key in --log-keys (principal log/...), so a head that is not ours is never extended.
+signed by a key in --log-keys (principal log/...), so a head that is not ours is never extended. An unreadable local chain is
+repaired only from a readable, trusted published continuation of that same head. Empty copies require explicit seeding as before.
 
   exit 0  done    exit 1  a step failed    exit 2  usage    exit 4  logged records are missing on the remote (an alarm)
 """
@@ -43,6 +47,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -62,8 +67,9 @@ REMOTE_LOG = 'refs/evidence-log/remote'
 IDENTITY = 'evidence-log <evidence-log@invalid>'
 LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
 LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')
-PENDING = 'evidence-log.gc-pending.json'  # {ref name: unix time gc wrote its line}, in the repository directory
+PENDING = 'evidence-log.gc-pending.json'  # {ref name: unix time of GC mark or rejected expiry attempt}, in the repository directory
 TOMBSTONE_HOURS = 24
+TOMBSTONE_RELEASE_REFS = 500
 CHUNK_REFS = 500
 CHUNK_SECONDS = 120
 
@@ -76,7 +82,7 @@ class Usage(Refused):
     pass
 
 
-def git(repo, *args, stdin=None, check=True, env=None, config=()):
+def git(repo, *args, stdin=None, check=True, env=None, config=(), stdout=subprocess.PIPE):
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     clean.update(env or {})
     # No automatic maintenance: a detached `git maintenance run --auto` after one fetch rewrote the shallow file while the next
@@ -84,7 +90,7 @@ def git(repo, *args, stdin=None, check=True, env=None, config=()):
     command = ['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', '-c', 'gpg.format=ssh', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0']
     for item in config:
         command += ['-c', item]
-    done = subprocess.run([*command, *args], input=stdin, capture_output=True, timeout=1800,
+    done = subprocess.run([*command, *args], input=stdin, stdout=stdout, stderr=subprocess.PIPE, timeout=1800,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C'))
     if check and done.returncode != 0:
         raise Refused(f'git {args[0]}: {done.stderr.decode(errors="replace").strip()[-300:]}')
@@ -200,8 +206,19 @@ def commit(repo, tree, parent, message, signer, now):
     return git(repo, 'hash-object', '-t', 'commit', '-w', '--stdin', stdin=signed.encode()).stdout.decode().strip()
 
 
-def log_signed(repo, oid, log_keys):
-    shown = git(repo, 'show', '-s', '--format=%G?%x00%GS', oid, config=[f'gpg.ssh.allowedSignersFile={log_keys}'], check=False)
+def log_signed(repo, oid, log_keys, git_dir=None):
+    where = [f'--git-dir={git_dir}'] if git_dir else []
+    config = []
+    if git_dir:
+        # An isolated object store must retain the publisher's effective verification policy, including revocations.
+        settings = git(repo, 'config', '--null', '--get-regexp', r'^gpg\.').stdout.decode().split('\0')
+        for setting in filter(None, settings):
+            key, separator, value = setting.partition('\n')
+            if not separator:
+                raise Refused('cannot read the publisher\'s signature verification configuration')
+            config.append(f'{key}={value}')
+    shown = git(repo, *where, 'show', '-s', '--format=%G?%x00%GS', oid,
+                config=[*config, f'gpg.ssh.allowedSignersFile={log_keys}'], check=False)
     status, _, principal = shown.stdout.decode().strip('\n').partition('\0')
     return status == 'G' and principal.startswith('log/')
 
@@ -269,7 +286,14 @@ def write_pending(repo, value):
     path = os.path.join(repo, PENDING)
     with open(path + '.new', 'w') as handle:
         json.dump(value, handle, indent=0, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(path + '.new', path)
+    directory = os.open(repo, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def published_head(repo, remote):
@@ -301,10 +325,77 @@ def publish(repo, remote, summary, published):
     return done.returncode == 0
 
 
-def locked(repo):
+def locked(repo, no_wait=False):
     handle = open(os.path.join(repo, 'evidence-log.lock'), 'w')
-    fcntl.flock(handle, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | (fcntl.LOCK_NB if no_wait else 0))
+    except BlockingIOError:
+        handle.close()
+        raise Refused('the evidence log is busy: nothing was changed')
     return handle
+
+
+def readable_log(repo, head):
+    # Walk the chain and its trees too: a readable commit can still name an empty tree/blob after a hard reset.
+    walked = git(repo, 'rev-list', '--objects', '--missing=print', head, check=False)
+    if walked.returncode != 0 or any(line.startswith(b'?') for line in walked.stdout.splitlines()):
+        return False
+    objects = b''.join(line.split(b' ', 1)[0] + b'\n' for line in walked.stdout.splitlines())
+    checked = git(repo, 'cat-file', '--batch-check', stdin=objects, check=False)
+    if checked.returncode != 0 or any(line.endswith(b' missing') for line in checked.stdout.splitlines()):
+        return False
+    # Headers alone accept a truncated compressed blob. Read the current view too, streaming without retaining its contents.
+    # Historical blob bodies are not scanned on every heartbeat; rev-list above checks the chain's connectivity.
+    current = git(repo, 'ls-tree', '-r', '--format=%(objectname)', head, check=False)
+    if current.returncode != 0:
+        return False
+    bodies = b''.join(oid + b'\n' for oid in sorted(set(current.stdout.splitlines())))
+    return git(repo, 'cat-file', '--batch', stdin=bodies, check=False, stdout=subprocess.DEVNULL).returncode == 0
+
+
+def prepare_log(repo, remote, published, log_keys):
+    """Recover only from a trusted published continuation, never manufacture a new chain after damage."""
+    head = refs(repo, LOG).get(LOG)
+    if not head:
+        return
+    if readable_log(repo, head):
+        if not log_signed(repo, head, log_keys):
+            raise Refused(f'the local log head {head} is not signed by a key in --log-keys: refusing to extend it')
+        return
+    if not published:
+        raise Refused('the local log is unreadable and the remote has no published head: cannot repair it')
+    # Fetch in isolation: broken local refs must not enter negotiation or suppress objects we need to restore.
+    with tempfile.TemporaryDirectory() as fresh:
+        git(fresh, 'init', '-q', '--bare')
+        url = git(repo, 'remote', 'get-url', remote, check=False)
+        source = url.stdout.decode().strip() if url.returncode == 0 else remote
+        # Keep relative file remotes relative to the publisher, while isolating refs and objects in the fresh Git directory.
+        git(repo, f'--git-dir={fresh}', 'fetch', '--no-tags', '-q', source, f'{LOG}:{LOG}')
+        fetched = refs(fresh, LOG).get(LOG)
+        if fetched != published or not log_signed(repo, published, log_keys, git_dir=fresh) or not readable_log(fresh, published):
+            raise Refused('the published log is unreadable, changed, or not signed by a key in --log-keys: refusing repair')
+        if git(fresh, 'merge-base', '--is-ancestor', head, published, check=False).returncode != 0:
+            raise Refused('the published log does not continue the damaged local head: refusing repair')
+        # Preserve damaged loose objects for inspection. Healthy objects and the COPY refs stay in place.
+        objects = Path(repo) / 'objects'
+        quarantine = Path(repo) / 'evidence-log.broken-objects'
+        loose = {folder.name + path.name: path for folder in objects.iterdir() if len(folder.name) == 2 and folder.is_dir()
+                 for path in folder.iterdir() if OID.fullmatch(folder.name + path.name)}
+        checked = git(repo, 'cat-file', '--batch-check', stdin=''.join(f'{oid}\n' for oid in loose).encode(), check=False)
+        broken = {line.split()[0] for line in checked.stdout.decode().splitlines() if line.endswith(' missing')}
+        # A repair scans complete objects once so header-readable, truncated bodies are moved aside as well.
+        scanned = git(repo, 'fsck', '--no-dangling', '--no-reflogs', check=False)
+        broken.update(re.findall(r"(?m)^error: corrupt loose object '([0-9a-f]+)'$", scanned.stderr.decode(errors='replace')))
+        broken.update(re.findall(r'(?m)^error: ([0-9a-f]+): object corrupt or missing:', scanned.stderr.decode(errors='replace')))
+        for oid in sorted(broken & loose.keys()):
+            if git(repo, 'cat-file', '-p', oid, check=False, stdout=subprocess.DEVNULL).returncode == 0:
+                continue  # preserve readable loose objects even if a diagnostic mentions their names
+            quarantine.mkdir(exist_ok=True)
+            os.replace(loose[oid], quarantine / f'{oid}.{time.time_ns()}')
+        git(repo, 'fetch', '--refetch', '--no-tags', '-q', fresh, f'+{LOG}:{REMOTE_LOG}')
+        if not readable_log(repo, published) or not log_signed(repo, published, log_keys):
+            raise Refused('the published log could not repair the local object store')
+        git(repo, 'update-ref', LOG, published, *([head] if head else []))
 
 
 def pull(args):
@@ -315,6 +406,7 @@ def pull(args):
     there = {line.split()[1]: line.split()[0] for line in listed if len(line.split()) == 2 and OID.match(line.split()[0])}
     published = there.pop(LOG, None)
     main_tip = there.pop(f'refs/heads/{remote_main}', None)
+    prepare_log(repo, remote, published, args.log_keys)
     if main_tip != refs(repo, f'refs/remotes/{args.main}').get(f'refs/remotes/{args.main}'):
         git(repo, 'fetch', '--no-tags', '-q', remote, f'+refs/heads/{remote_main}:refs/remotes/{args.main}')
     keys_text = git(repo, 'show', f'{args.main}:{config_path(repo, args.main, "evidence-keys")}').stdout
@@ -339,9 +431,13 @@ def pull(args):
         git(repo, 'fetch', '--no-tags', '-q', remote, f'+{LOG}:{REMOTE_LOG}', check=False)
     seen = {original(ref, SEEN): oid for ref, oid in refs(repo, SEEN).items()}
     copied = {original(ref, COPY): oid for ref, oid in refs(repo, COPY).items()}
-    # GC's pending deletions: kept while the remote still has the ref and the deadline has not passed, and not logged meanwhile.
+    # Expiry is bounded work, after fresh records. Keep selected names held until their checkpoint completes: a kill must not
+    # leave an unverified batch outside pending and admit another batch on the next pull.
     held = pending(repo)
-    still = {name: at for name, at in held.items() if name in seen and args.now - at < TOMBSTONE_HOURS * 3600}
+    still = {name: at for name, at in held.items() if name in seen}
+    expired = sorted((name for name, at in still.items() if args.now - at >= TOMBSTONE_HOURS * 3600),
+                     key=lambda name: (still[name], name))[:TOMBSTONE_RELEASE_REFS]
+    expiring = set(expired)
     if still != held:
         write_pending(repo, still)
     summary['gc_pending'] = len(still)
@@ -351,11 +447,27 @@ def pull(args):
     local_head = refs(repo, LOG).get(LOG)
     if published_tip and local_head and published_tip != local_head:
         summary['published_head_differs'] = published_tip
-    additions, new_copies = {}, []
+    additions, new_copies, pending_changes = {}, [], {}
     processed, started = 0, time.monotonic()
+    active_records = {}
+
+    def already_logged(name, oid):
+        kind = parse(name)
+        if not kind or not local_head:
+            return False
+        path = path_of(kind)
+        if path not in active_records:
+            shown = git(repo, 'cat-file', 'blob', f'{local_head}:{path}', check=False)
+            lines = shown.stdout.decode().splitlines() if shown.returncode == 0 else []
+            active_records[path] = set()
+            for line in lines[lines_after_gc(lines):]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == 'record':
+                    active_records[path].add(parts[1])
+        return oid in active_records[path]
 
     def checkpoint():
-        nonlocal additions, new_copies, published, processed, started
+        nonlocal additions, new_copies, pending_changes, still, published, processed, started
         chunk = dict(summary, added=len(new_copies))
         extend(repo, additions, {}, args.signer_argv, args.log_keys, args.fixed_now, chunk)
         summary.update(head=chunk['head'], as_of=chunk['as_of'])
@@ -368,32 +480,63 @@ def pull(args):
                 return False
             published = summary['head']
             git(repo, 'update-ref', REMOTE_LOG, published)
+        if pending_changes:
+            updated = dict(still)
+            for name, at in pending_changes.items():
+                if at is None:
+                    updated.pop(name, None)
+                else:
+                    updated[name] = at
+            write_pending(repo, updated)
+            still = updated
+            summary['gc_pending'] = len(still)
         summary['chunks'] += 1
-        additions, new_copies = {}, []
+        additions, new_copies, pending_changes = {}, [], {}
         processed, started = 0, time.monotonic()
         return True
 
+    publish_failed = False
     with tempfile.NamedTemporaryFile() as keys, tempfile.NamedTemporaryFile() as revocations:
         keys.write(keys_text)
         keys.flush()
-        for name, oid in sorted(seen.items()):
-            if name is None or copied.get(name) == oid or name in still:
-                continue
-            lines, why = accept(repo, module, keys.name, revocations.name, name, oid)
-            if why:
-                summary['rejected'][why] = summary['rejected'].get(why, 0) + 1
-            else:
-                additions.setdefault(path_of(parse(name)), []).extend(lines)
-                new_copies.append((name, oid))
-            processed += 1
-            if processed >= CHUNK_REFS or time.monotonic() - started >= CHUNK_SECONDS:
+        for names in (sorted(name for name in seen if name and name not in expiring), expired):
+            for name in names:
+                oid = seen[name]
+                if copied.get(name) == oid:
+                    if name not in expiring:
+                        continue
+                    if already_logged(name, oid):
+                        pending_changes[name] = None  # replay after copying but before releasing the pending name
+                        continue
+                    # GC can die after publishing its line but before dropping copies. A retired copy must be checked and
+                    # logged after that line, rather than silently dropping its pending name and hiding it indefinitely.
+                if name in still and name not in expiring:
+                    continue
+                lines, why = accept(repo, module, keys.name, revocations.name, name, oid)
+                if why:
+                    summary['rejected'][why] = summary['rejected'].get(why, 0) + 1
+                else:
+                    additions.setdefault(path_of(parse(name)), []).extend(lines)
+                    new_copies.append((name, oid))
+                if name in expiring:
+                    # Rejected names remain held and become eligible again after 24 h; advancing their time lets the rest of
+                    # the old backlog proceed, without using pending state as evidence that a record is trusted.
+                    pending_changes[name] = args.now if why else None
+                processed += 1
+                if processed >= CHUNK_REFS or time.monotonic() - started >= CHUNK_SECONDS:
+                    if not checkpoint():
+                        publish_failed = True
+                        break
+            if publish_failed:
+                break
+            if processed or pending_changes:  # finish fresh records' checkpoint before any expiry work
                 if not checkpoint():
-                    return 1, summary
-    if processed or not summary['chunks']:
-        if not checkpoint():
-            return 1, summary
+                    publish_failed = True
+                    break
+    if not publish_failed and not summary['chunks']:
+        publish_failed = not checkpoint()
     git(repo, 'pack-refs', '--all')  # thousands of loose refs made one for-each-ref take 7 s
-    status = 0
+    status = 1 if publish_failed else 0
     if args.restore and summary['missing']:
         pushed = git(repo, 'push', '--porcelain', remote, *[f'{copied[name]}:{name}' for name in summary['missing']], check=False)
         summary['restored'] = pushed.returncode == 0
@@ -419,26 +562,49 @@ def gc(args):
         if CHECK.match(check) and OID.match(key):
             removals[path_of(('index', check, key))] = line
     summary = {'mode': 'gc', 'gc_paths': len(removals)}
+    if plan.get('resumed'):
+        head = refs(args.repo, LOG).get(LOG)
+        planned_records = {name.rsplit('/', 1)[-1] for name in plan['delete']}
+        for path in list(removals):
+            shown = git(args.repo, 'cat-file', 'blob', f'{head}:{path}', check=False) if head else None
+            lines = shown.stdout.decode().splitlines() if shown and shown.returncode == 0 else []
+            receipt = next((i for i, entry in enumerate(lines)
+                            if entry.startswith('gc ') and entry.split()[-1] == plan['plan_sha256']), None)
+            if receipt is not None:
+                if any(entry.startswith('record ') and entry.split()[1] in planned_records for entry in lines[receipt + 1:]):
+                    raise Refused('a record of the resumed plan was logged again: refusing its deletion')
+                del removals[path]  # a guarded publication below re-confirms the existing GC line, without appending it twice
+    summary['gc_lines_added'] = len(removals)
     published = published_head(args.repo, args.remote) if args.publish else None
-    # The pending names go first: if the log commit then fails, GC deletes nothing (its hook failed) and they expire unlogged-again
-    # at worst a day later; the other order would leave a window where a pull logs them after the GC line.
-    held = pending(args.repo)
+    # Hold names before extending the log, so a pull cannot log them after the GC line. Clean failure restores the previous hold
+    # and keeps copies. A local GC commit may remain after publication fails; the journal's next hook completes that operation.
+    previous = pending(args.repo)
+    held = dict(previous)
     held.update({name: args.now for name in plan['delete'] if parse(name)})
-    write_pending(args.repo, held)
-    summary['gc_pending'] = len(held)
-    extend(args.repo, {}, removals, args.signer_argv, args.log_keys, args.now, summary)
-    # Drop the copies of what GC removes, so a pull does not restore them and the copy stays as bounded as the remote.
-    doomed = []
-    for name in refs(args.repo, COPY):
-        kind = parse(original(name, COPY) or '')
-        if kind and path_of(kind) in removals:
-            doomed.append(name)
-    if doomed:
-        git(args.repo, 'update-ref', '--stdin', stdin=''.join(f'delete {ref}\n' for ref in doomed).encode())
-    summary['copies_dropped'] = len(doomed)
-    if args.publish and not publish(args.repo, args.remote, summary, published):
-        return 1, summary
-    return 0, summary
+    completed = False
+    try:
+        write_pending(args.repo, held)
+        summary['gc_pending'] = len(held)
+        extend(args.repo, {}, removals, args.signer_argv, args.log_keys, args.now, summary)
+        if args.publish and not publish(args.repo, args.remote, summary, published):
+            return 1, summary
+        # A resumed plan must retain copies of newer records logged after its existing GC line.
+        doomed = []
+        planned = set(plan['delete'])
+        for name in refs(args.repo, COPY):
+            source = original(name, COPY) or ''
+            kind = parse(source)
+            if kind and (path_of(kind) in removals or source in planned):
+                doomed.append(name)
+        if doomed:
+            git(args.repo, 'update-ref', '--stdin', stdin=''.join(f'delete {ref}\n' for ref in doomed).encode())
+        summary['copies_dropped'] = len(doomed)
+        completed = True
+        return 0, summary
+    finally:
+        if not completed:
+            write_pending(args.repo, previous)
+            summary['gc_pending'] = len(previous)
 
 
 def main(argv):
@@ -452,6 +618,7 @@ def main(argv):
     parser.add_argument('--publish', action='store_true')
     parser.add_argument('--restore', action='store_true')
     parser.add_argument('--plan', help='gc: the evidence-gc --plan-out file')
+    parser.add_argument('--no-wait', action='store_true', help='refuse instead of waiting for the evidence log lock')
     parser.add_argument('--now', type=int, default=None, help='unix time (tests)')
     try:
         args = parser.parse_args(argv)
@@ -473,7 +640,7 @@ def main(argv):
     # logged). Every fetch here is explicit, and nothing here makes the copy a partial clone.
     os.environ['GIT_NO_LAZY_FETCH'] = '1'
     try:
-        with locked(args.repo):
+        with locked(args.repo, args.no_wait):
             status, summary = (pull if args.mode == 'pull' else gc)(args)
         print(json.dumps(summary, indent=2))
         return status

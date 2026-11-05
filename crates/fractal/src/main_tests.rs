@@ -1496,6 +1496,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
         attachments: Vec::new(),
     };
     let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
@@ -1534,6 +1535,7 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
     };
     let queued = native_queued_message(&view, "body".into(), &[]);
     let rendered = fractal_drivers::ding::with_tag_notices("body".into(), &queued.tags);
@@ -1895,6 +1897,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
             sender_class: None,
             assistant_grant_id: None,
             created_index: 1,
+            status_from: None,
             attachments: Vec::new(),
         };
         let mut mailbox = NativeMailbox {
@@ -5830,6 +5833,7 @@ fn message_replies_route_to_the_other_participant() {
         sender_class: None,
         assistant_grant_id: None,
         created_index: 1,
+        status_from: None,
         attachments: Vec::new(),
     };
 
@@ -9408,4 +9412,16 @@ async fn the_work_fence_still_refuses_an_incarnation_that_is_not_live() {
     let seat = MovedSeat::new().await;
     seat.cedar_observes("running", Some("on-cedar-next"));
     assert!(!seat.refused("renew", MOVED_SEAT, "on-cedar-next", "other-lease").await.is_empty());
+}
+
+#[test]
+fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
+    const G: u64 = 1 << 30;
+    let line = |reserve: serde_json::Value| render_performance(&serde_json::json!({"lane_bursts": {"held": 0, "waiting": 1, "dropped_by_lease": 0, "reserve": reserve}}))
+        .lines().find(|line| line.starts_with("LANE BURSTS")).unwrap().to_owned();
+    assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 16 * G})),
+        "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (last judged for agent/elm)");
+    assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
+        "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
+    assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
 }

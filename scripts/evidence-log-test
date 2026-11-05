@@ -2,10 +2,13 @@
 """scripts/evidence-log against real repositories and signed records: a bare remote plays GitHub, a second bare repository is the
 host's copy. What is accepted and refused, the signed heartbeat, publishing, a deleted record reported and restored, GC lines
 before GC deletes, a head that is not ours, a second publisher's older chain refused, and a signer that fails."""
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -210,6 +213,121 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual(self.pull()[1]['added'], 1)
         self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 1)
 
+    def truncate(self, oid):
+        path = self.host / 'objects' / oid[:2] / oid[2:]
+        self.assertTrue(path.is_file(), path)
+        path.chmod(0o644)
+        path.write_bytes(b'')
+
+    def test_a_damaged_local_head_is_restored_from_a_trusted_published_continuation(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+        self.assertTrue(list((self.host / 'evidence-log.broken-objects').iterdir()))
+        # Damage in a tree or blob reachable from an otherwise readable head is repaired too.
+        blob = self.host_git('rev-parse', f'{result["head"]}:trees/{self.tree[:2]}/{self.tree}')
+        self.truncate(blob)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 1)
+
+    def test_repair_refuses_an_untrusted_or_missing_published_head_without_restarting_the_chain(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        other = self.f.key('other-publisher')
+        foreign = self.pull('--publish', signer=['ssh-keygen', '-q', '-Y', 'sign', '-n', 'git', '-f', str(other)])[1]['head']
+        self.truncate(foreign)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('not signed by a key in --log-keys', error)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), foreign)
+        self.assertEqual(self.remote_head(), foreign)
+        # No origin head is also an alarm, rather than permission to start from scratch.
+        self.host_git('update-ref', log.LOG, first)
+        subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', log.LOG], check=True)
+        self.truncate(first)
+        self.assertEqual(self.pull('--publish')[0], 1)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), first)
+
+    def test_repair_keeps_relative_file_remotes_relative_to_the_publisher(self):
+        self.record()
+        self.host_git('remote', 'set-url', 'origin', '../github.git')
+        first = self.pull('--publish')[1]['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+
+    def test_repair_uses_the_same_relative_log_key_file_as_normal_extension(self):
+        self.record()
+        (self.host / 'relative-log-keys').write_text(self.log_keys.read_text())
+        self.assertEqual(self.pull('--publish', '--log-keys', 'relative-log-keys')[0], 0)
+        code, result, error = self.pull('--publish', '--log-keys', 'relative-log-keys')
+        self.assertEqual(code, 0, error)
+        first = result['head']
+        self.truncate(first)
+        code, result, error = self.pull('--publish', '--log-keys', 'relative-log-keys')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+
+    def test_repair_honors_the_publishers_revocations_before_moving_any_objects(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        (self.host / 'revoked-log-key').write_text(self.log_key.with_suffix('.pub').read_text())
+        self.host_git('config', 'gpg.ssh.revocationFile', 'revoked-log-key')
+        self.assertEqual(self.pull('--publish')[0], 1, 'normal extension refuses the revoked key')
+        self.truncate(first)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('not signed by a key in --log-keys', error)
+        self.assertFalse((self.host / 'evidence-log.broken-objects').exists(), 'the isolated verifier must honor the same revocation')
+
+    def test_repair_restores_a_truncated_blob_whose_header_still_reads(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        expected = self.lines(path)
+        blob = self.host_git('rev-parse', f'{first}:{path}')
+        loose = self.host / 'objects' / blob[:2] / blob[2:]
+        compressed = loose.read_bytes()
+        self.assertGreater(len(compressed), 64)
+        loose.chmod(0o644)
+        loose.write_bytes(compressed[:64])
+        header = subprocess.run(['git', '-C', str(self.host), 'cat-file', '--batch-check'], input=f'{blob}\n',
+                                capture_output=True, text=True, check=True).stdout
+        self.assertIn(' blob ', header, 'a header-only probe misses this corruption')
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.host_git('rev-parse', f'{result["head"]}^'), first)
+        self.assertEqual(self.lines(path), expected)
+
+    def test_repair_refuses_a_trusted_published_head_from_an_unrelated_chain(self):
+        self.record()
+        first = self.pull('--publish')[1]['head']
+        tree = self.host_git('rev-parse', f'{first}^{{tree}}')
+        unrelated = log.commit(str(self.host), tree, None, 'unrelated signed head', self.signer, NOW + 600)
+        self.host_git('push', '-q', '--force', 'origin', f'{unrelated}:{log.LOG}')
+        self.truncate(first)
+        code, _, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('does not continue the damaged local head', error)
+        self.assertEqual(self.host_git('rev-parse', log.LOG), first)
+        self.assertEqual(self.remote_head(), unrelated)
+        self.assertFalse((self.host / 'evidence-log.broken-objects').exists(), 'trust is checked before changing local storage')
+
+    def test_empty_copies_still_require_explicit_seeding_from_the_published_chain(self):
+        self.record()
+        published = self.pull('--publish')[1]['head']
+        self.host = bare(self.f.root / 'empty-copy.git')
+        self.host_git('remote', 'add', 'origin', str(self.remote))
+        code, result, error = self.pull('--publish')
+        self.assertEqual(code, 1, error)
+        self.assertIn('is not an ancestor', result['publish_refused'])
+        self.assertEqual(self.remote_head(), published)
+
     def test_publish_puts_the_head_on_the_remote_and_a_moved_remote_head_is_reported_and_replaced_only_by_a_head_that_continues_it(self):
         self.record()
         code, result, _ = self.pull('--publish')
@@ -243,6 +361,29 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual((code, result['missing']), (0, []))
         self.assertEqual(len(self.lines(f'trees/{self.tree[:2]}/{self.tree}')), 2, 'restoring logs nothing twice')
         self.assertTrue(passed)
+
+    def test_a_refused_checkpoint_still_packs_refs_and_restores_missing_records(self):
+        old = self.record()
+        first = self.pull('--publish')[1]['head']
+        published = self.pull('--publish')[1]['head']
+        self.host_git('update-ref', log.LOG, first)  # this copy no longer continues the published head
+        self.record(seconds=10)
+        self.record(seconds=20)
+        ref = self.f.ref_of[old]
+        for count in (1, 500):  # failure during verification, then at the final checkpoint
+            with self.subTest(chunk_refs=count):
+                subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', ref], check=True)
+                output = io.StringIO()
+                with mock.patch.object(log, 'CHUNK_REFS', count), contextlib.redirect_stdout(output):
+                    code = log.main(['pull', '--repo', str(self.host), '--publish', '--restore',
+                                     '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys), '--now', str(NOW)])
+                result = json.loads(output.getvalue())
+                self.assertEqual(code, 4, result)
+                self.assertEqual((result['added'], result['published'], result['restored']), (1, False, True), result)
+                self.assertEqual(result['missing'], [ref])
+                self.assertIn(ref, self.remote_refs())
+                self.assertIn(f'{result["head"]} {log.LOG}', (self.host / 'packed-refs').read_text())
+                self.assertEqual(self.remote_head(), published, 'a refused publication still never overwrites the remote')
 
     def test_gc_lines_go_first_so_what_gc_deletes_is_not_missing_and_new_records_count_after_them(self):
         old = self.record()
@@ -301,6 +442,173 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, 0), result)
         self.assertEqual([line.split()[:2] for line in self.lines(path)][-1], ['record', passed], 'it counts again, after the gc line')
 
+    def pull_in_process(self, *extra):
+        self.now += 120
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = log.main(['pull', '--repo', str(self.host), '--publish', '--signer', json.dumps(self.signer),
+                             '--log-keys', str(self.log_keys), '--now', str(self.now), *extra])
+        return code, json.loads(out.getvalue()) if out.getvalue().strip() else None, err.getvalue()
+
+    def test_twenty_thousand_expired_names_bound_verification_and_keep_a_fresh_published_head(self):
+        record = self.record()
+        before = self.pull('--publish')[1]['head']
+        fresh = self.record(seconds=10)
+        fresh_ref = self.f.ref_of[fresh]
+        names = [f'refs/notes/evidence/{n:040x}/{record}' for n in range(20_000)]
+        # The scale fixture isolates expiry scheduling; the real-record tests below exercise acceptance. Rejection must not
+        # repeatedly occupy the front of the expiry queue or let the next pull accumulate more verification work.
+        for repo, prefix in ((self.remote, None), (self.host, log.SEEN)):
+            commands = ''.join(f'update {log.local(name, prefix) if prefix else name} {record}\n' for name in names)
+            log.git(str(repo), 'update-ref', '--stdin', stdin=commands.encode())
+        log.write_pending(str(self.host), {name: NOW - 25 * 3600 for name in names})
+        previous = set()
+        accept = log.accept
+        for added in (1, 0):
+            attempted, all_attempted = [], []
+
+            def reject(repo, module, keys, revocations, name, oid):
+                all_attempted.append(name)
+                if name == fresh_ref:
+                    return accept(repo, module, keys, revocations, name, oid)
+                attempted.append(name)
+                self.assertLessEqual(len(attempted), 500, 'mass expiry exceeded one pull\'s verification bound')
+                return [], 'untrusted'
+
+            with mock.patch.object(log, 'accept', side_effect=reject):
+                code, result, error = self.pull_in_process()
+            self.assertEqual(code, 0, error)
+            self.assertEqual((len(attempted), result['added'], result['gc_pending']), (500, added, 20_000))
+            commits = self.host_git('rev-list', '--reverse', f'{before}..{result["head"]}').splitlines()
+            self.assertEqual(len(commits), 2 if added else 1)
+            if added:
+                self.assertEqual(all_attempted[0], fresh_ref, 'new signing results must precede expired names')
+                self.assertEqual(self.lines(f'trees/{self.tree[:2]}/{self.tree}', at=commits[0])[-1].split()[1], fresh,
+                                 'the first checkpoint must already contain the fresh signing result')
+                self.assertIn(f'as_of={log.iso(self.now)} added=1', self.host_git('show', '-s', '--format=%s', commits[0]))
+            self.assertFalse(previous.intersection(attempted), 'rejected old names must not starve the remaining backlog')
+            previous.update(attempted)
+            self.assertEqual(self.remote_head(), result['head'])
+            shown = self.host_git('-c', f'gpg.ssh.allowedSignersFile={self.log_keys}', 'show', '-s', '--format=%G? %s', result['head'])
+            self.assertEqual(shown, f'G evidence-log v1 as_of={log.iso(self.now)} added=0 gc=0 missing=0')
+            before = result['head']
+
+    def test_expired_signed_records_drain_in_bounded_batches_without_another_gc(self):
+        records = {self.record(seconds=n) for n in (0, 10, 20)}
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        accepted = set()
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True):
+            for remaining in (2, 1, 0):
+                with mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+                    code, result, error = self.pull_in_process()
+                self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, remaining), error)
+                self.assertEqual(verify.call_count, 1)
+                accepted.add(verify.call_args.args[-1])
+                self.assertEqual(self.remote_head(), result['head'])
+                self.assertEqual(result['as_of'], log.iso(self.now))
+        self.assertEqual(accepted, records)
+        self.assertEqual(log.pending(str(self.host)), {})
+
+    def test_a_kill_before_the_expiry_checkpoint_does_not_release_another_batch(self):
+        records = {self.record(seconds=n) for n in (0, 10)}
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        held = (self.host / log.PENDING).read_bytes()
+        before = self.remote_head()
+        self.now += 25 * 3600
+        driver = self.f.root / 'killed-expiry.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, signal, sys
+loader = importlib.machinery.SourceFileLoader('log', {str(LOG)!r})
+log = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(log)
+log.TOMBSTONE_RELEASE_REFS = 1
+accept = log.accept
+def killed(*args):
+    accept(*args)
+    os.kill(os.getpid(), signal.SIGKILL)
+log.accept = killed
+sys.exit(log.main(sys.argv[1:]))
+''')
+        done = subprocess.run([sys.executable, str(driver), 'pull', '--repo', str(self.host), '--publish',
+                               '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys), '--now', str(self.now)],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, -signal.SIGKILL, done.stderr)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), held, 'uncheckpointed names must remain held')
+        self.assertEqual(self.remote_head(), before)
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True), mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual((code, result['added'], result['gc_pending'], verify.call_count), (0, 1, 1, 1), error)
+
+    def test_expiry_replay_after_copying_but_before_releasing_pending_does_not_verify_again(self):
+        records = {self.record(seconds=n) for n in (0, 10)}
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        write = log.write_pending
+
+        def interrupted(repo, value):
+            if len(value) == 1:
+                raise log.Refused('interrupted before releasing a checkpointed pending name')
+            return write(repo, value)
+
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True), mock.patch.object(log, 'write_pending', side_effect=interrupted):
+            code, _, error = self.pull_in_process()
+        self.assertEqual(code, 1, error)
+        self.assertEqual(len(log.pending(str(self.host))), 2)
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True), mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual((code, result['added'], result['gc_pending'], verify.call_count), (0, 0, 1, 0), error)
+
+    def test_expiry_rechecks_a_retired_copy_left_by_an_interrupted_gc(self):
+        record = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan([record])), mode='gc')[0], 0)
+        # A kill after GC publishes its line but before it drops copies leaves this state. The old marker does not mean
+        # the record is still active in the log; expiry must check it and append it after the GC line.
+        log.git(str(self.host), 'update-ref', log.local(self.f.ref_of[record], log.COPY), record)
+        self.now += 25 * 3600
+        with mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual((code, result['added'], result['gc_pending'], verify.call_count), (0, 1, 0, 1), error)
+        lines = self.lines(f'trees/{self.tree[:2]}/{self.tree}')
+        self.assertEqual([line.split()[0] for line in lines], ['record', 'gc', 'record'])
+
+    def test_expiry_prunes_absent_names_and_rechecks_the_oldest_before_unexpired_names(self):
+        records = [self.record(seconds=n) for n in (0, 10, 20, 30)]
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        names = [self.f.ref_of[record] for record in records]
+        log.write_pending(str(self.host), dict(zip(names, (self.now - 26 * 3600, self.now - 25 * 3600,
+                                                         self.now, self.now - 30 * 3600))))
+        log.git(str(self.remote), 'update-ref', '-d', names[-1])
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True):
+            for expected, remaining in zip(names[:2], (2, 1)):
+                with mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+                    code, result, error = self.pull_in_process('--restore')
+                self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, remaining), error)
+                self.assertEqual(verify.call_args.args[-2], expected)
+                self.assertEqual(verify.call_count, 1)
+                self.assertNotIn(names[-1], log.pending(str(self.host)))
+        self.assertEqual(set(log.pending(str(self.host))), {names[2]})
+        self.assertNotIn(names[-1], self.remote_refs(), 'expiry never restores a confirmed GC deletion')
+
+    def test_failed_fresh_publication_keeps_expiry_pending_and_never_starts_its_batch(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan([old])), mode='gc')[0], 0)
+        fresh = self.record(seconds=10)
+        self.now += 25 * 3600
+        held = (self.host / log.PENDING).read_bytes()
+        with mock.patch.object(log, 'publish', return_value=False), mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual(code, 1, error)
+        self.assertEqual([call.args[-1] for call in verify.call_args_list], [fresh])
+        self.assertEqual((self.host / log.PENDING).read_bytes(), held)
+        self.assertEqual(result['gc_pending'], 1)
+
     def test_gc_publishes_its_lines_at_once_and_a_plan_without_its_deletions_is_refused(self):
         passed = self.record()
         self.assertEqual(self.pull()[0], 0)
@@ -313,6 +621,239 @@ sys.exit(log.main(sys.argv[1:]))
         code, _, error = self.pull('--plan', str(plan), mode='gc')
         self.assertEqual(code, 2, error)
         self.assertIn('delete', error)
+
+    def test_a_remote_gc_killed_twice_finishes_its_published_plan_without_replanning(self):
+        records, trees = [], []
+        for n in (1, 2, 3):
+            commit, tree = self.f.commit(f'obsolete {n}\n')
+            records.append(self.record(tree=tree, commit=commit, seconds=n))
+            trees.append(tree)
+        self.commit, self.tree = self.f.commit('current main\n')
+        self.f.git('push', '-q', 'origin', 'main:main')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 3), error)
+        state, plan = self.f.root / 'pending-plan.json', self.f.root / 'plan.json'
+        retention = self.f.root / 'retention.json'
+        retention.write_text(json.dumps({'version': 1, 'main_days': 3, 'branch_days': 60, 'grace_hours': 0,
+                                         'soft_records': 3000, 'cap_records': 5000}))
+        pid_file, count = self.f.root / 'gc.pid', self.f.root / 'deletions'
+        count.write_text('0')
+        hook = self.remote / 'hooks/post-receive'
+        hook.write_text(f'''#!{sys.executable}
+import os, signal, sys
+from pathlib import Path
+for line in sys.stdin:
+    old, new, ref = line.split()
+    if ref.startswith('refs/tags/evidence/') and new == '0' * 40:
+        count = Path({str(count)!r})
+        n = int(count.read_text()) + 1
+        count.write_text(str(n))
+        if n <= 2:
+            os.kill(int(Path({str(pid_file)!r}).read_text()), signal.SIGKILL)
+''')
+        hook.chmod(0o755)
+        subprocess.run(['git', '-C', str(self.remote), 'config', 'core.hooksPath', str(hook.parent)], check=True)
+        driver = self.f.root / 'gc-driver.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader('gc', {str(ROOT / 'scripts/evidence-gc')!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+gc.BATCH = 1
+Path({str(pid_file)!r}).write_text(str(os.getpid()))
+if Path({str(state)!r}).exists():
+    def no_new_plan(*args, **kwargs):
+        raise AssertionError('resume restarted planning or record verification')
+    gc.read_refs = gc.protected_keys = gc.crate_keys = no_new_plan
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        before = [sys.executable, str(LOG), 'gc', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                  '--log-keys', str(self.log_keys), '--publish', '--no-wait', '--plan']
+        argv = [sys.executable, str(driver), '--repo', str(self.f.repo), '--remote', 'origin', '--main', 'main',
+                '--head', self.commit, '--as-of', str(NOW + 2 * 86400), '--retention', str(retention), '--apply',
+                '--resume-state', str(state), '--plan-out', str(plan), '--before-delete', json.dumps(before)]
+        for deleted in (1, 2):
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            self.assertEqual(done.returncode, -signal.SIGKILL, done.stderr)
+            self.assertTrue(state.exists(), 'the frozen plan survives the deadline')
+            self.assertEqual(len(self.remote_refs('refs/tags/evidence')), 3 - deleted)
+            pending = json.loads((self.host / log.PENDING).read_text())
+            for record, tree in zip(records, trees):
+                ref = f'refs/tags/evidence/{tree}/{record}'
+                self.assertTrue(ref not in self.remote_refs() or ref in pending)
+                lines = self.lines(f'trees/{tree[:2]}/{tree}', at='refs/evidence-log/main')
+                self.assertEqual(sum(entry.startswith('gc ') for entry in lines), 1)
+            # A resumed run must not need a new live set or retention policy.
+            if deleted == 1:
+                retention.unlink()
+                published = self.remote_head()
+                pending_before = (self.host / log.PENDING).read_bytes()
+                remote_before = self.remote_refs()
+                fork = log.commit(str(self.host), self.host_git('rev-parse', f'{published}^{{tree}}'), None,
+                                  'unpublished branch', self.signer, self.now)
+                self.host_git('update-ref', log.LOG, fork)
+                refused = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn('before-delete', json.loads(refused.stdout)['refused'])
+                self.assertEqual(self.remote_refs(), remote_before, 'a refused re-publication permits no deletion')
+                self.assertEqual((self.host / log.PENDING).read_bytes(), pending_before)
+                self.host_git('update-ref', log.LOG, published)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(json.loads(done.stdout)['resumed'])
+        self.assertFalse(state.exists())
+        self.assertFalse(self.remote_refs('refs/tags/evidence'))
+        self.assertEqual(self.pull('--publish', '--restore')[0], 0)
+        self.assertEqual(json.loads((self.host / log.PENDING).read_text()), {})
+
+    def test_a_resumed_gc_keeps_newer_records_and_publishes_without_duplicate_gc_lines(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        newer = self.record(seconds=50)
+        self.assertEqual(self.pull('--publish')[0], 0)
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        previous = self.lines(path)
+        contents = json.loads(plan.read_text())
+        plan.write_text(json.dumps({**contents, 'resumed': True}))
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.lines(path), previous)
+        self.assertEqual(result['gc_lines_added'], 0)
+        self.assertIn(newer, self.host_git('for-each-ref', '--format=%(objectname)', log.COPY))
+        self.assertEqual(self.remote_head(), result['head'])
+
+    def test_a_new_gc_of_identical_refs_resumes_after_a_kill_before_its_first_hook(self):
+        old_commit, old_tree = self.f.commit('obsolete record\n')
+        record = self.record(tree=old_tree, commit=old_commit)
+        self.commit, self.tree = self.f.commit('current main\n')
+        self.f.git('push', '-q', 'origin', 'main:main')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 1), error)
+        state, plan = self.f.root / 'resume.json', self.f.root / 'plan.json'
+        retention = self.f.root / 'retention.json'
+        retention.write_text(json.dumps({'version': 1, 'main_days': 3, 'branch_days': 60, 'grace_hours': 0,
+                                         'soft_records': 3000, 'cap_records': 5000}))
+        before = [sys.executable, str(LOG), 'gc', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                  '--log-keys', str(self.log_keys), '--publish', '--no-wait', '--plan']
+        args = ['--repo', str(self.f.repo), '--remote', 'origin', '--main', 'main', '--head', self.commit,
+                '--as-of', str(NOW + 2 * 86400), '--retention', str(retention), '--apply', '--resume-state', str(state),
+                '--plan-out', str(plan), '--before-delete', json.dumps(before)]
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/evidence-gc'), *args], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        first_plan = json.loads(plan.read_text())
+        self.assertEqual(self.pull('--publish')[0], 0)  # absence acknowledges the first operation
+        ref = f'refs/tags/evidence/{old_tree}/{record}'
+        self.f.git('update-ref', ref, record)
+        self.f.git('push', '-q', 'origin', f'{ref}:{ref}')  # the same record is later published again
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 1), error)
+        driver = self.f.root / 'before-hook.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, signal, sys
+loader = importlib.machinery.SourceFileLoader('gc', {str(ROOT / 'scripts/evidence-gc')!r})
+gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(gc)
+original = gc.write_journal
+def stop_before_hook(*args, **kwargs):
+    original(*args, **kwargs)
+    os.kill(os.getpid(), signal.SIGKILL)
+gc.write_journal = stop_before_hook
+sys.exit(gc.main(sys.argv[1:]))
+''')
+        stopped = subprocess.run([sys.executable, str(driver), *args], capture_output=True, text=True, timeout=30)
+        self.assertEqual(stopped.returncode, -signal.SIGKILL, stopped.stderr)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/evidence-gc'), *args], capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        second_plan = json.loads(plan.read_text())
+        self.assertEqual(first_plan['inputs_sha256'], second_plan['inputs_sha256'])
+        self.assertNotEqual(first_plan['plan_sha256'], second_plan['plan_sha256'])
+        self.assertFalse(state.exists())
+        self.assertFalse(self.remote_refs('refs/tags/evidence'))
+        self.assertEqual(sum(line.startswith('gc ') for line in self.lines(f'trees/{old_tree[:2]}/{old_tree}')), 2)
+
+    def test_a_resumed_gc_refuses_records_logged_again_and_failed_publication_preserves_pending(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        previous = (self.host / log.PENDING).read_bytes()
+        contents = json.loads(plan.read_text())
+        plan.write_text(json.dumps({**contents, 'resumed': True}))
+        # An unrelated published chain refuses the hook. Its original pending set remains byte-for-byte intact.
+        published = self.remote_head()
+        self.host_git('update-ref', log.LOG, self.host_git('rev-parse', f'{published}^'))
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('publish_refused', result)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+        # Expiration is handled separately: until then a resume refuses a target logged after its GC line.
+        self.host_git('update-ref', log.LOG, published)
+        self.now += 25 * 3600
+        self.assertEqual(self.pull('--publish')[0], 0)
+        previous = (self.host / log.PENDING).read_bytes()
+        published = self.remote_head()
+        code, _, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1)
+        self.assertIn('logged again', error)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+
+    def test_resume_checks_records_after_its_own_gc_even_when_another_gc_followed(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([old])
+        first = json.loads(plan.read_text())
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan.write_text(json.dumps({**first, 'plan_sha256': 'a' * 64}))
+        self.assertEqual(self.pull('--publish', '--plan', str(plan), mode='gc')[0], 0)
+        lines = self.lines(f'trees/{self.tree[:2]}/{self.tree}')
+        self.assertEqual([line.split()[0] for line in lines], ['record', 'gc', 'record', 'gc'])
+        previous = (self.host / log.PENDING).read_bytes()
+        published = self.remote_head()
+        plan.write_text(json.dumps({**first, 'resumed': True}))
+        code, _, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('logged again', error)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), previous)
+        self.assertEqual(self.remote_head(), published)
+
+    def test_gc_can_refuse_a_busy_pull_without_waiting_or_changing_pending(self):
+        record = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([record])
+        with log.locked(str(self.host)):
+            done = subprocess.run([sys.executable, str(LOG), 'gc', '--repo', str(self.host), '--signer', json.dumps(self.signer),
+                                   '--log-keys', str(self.log_keys), '--publish', '--no-wait', '--plan', str(plan)],
+                                  capture_output=True, text=True, timeout=5)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('busy', done.stderr)
+        self.assertFalse((self.host / log.PENDING).exists())
+
+    def test_a_failed_gc_publication_keeps_copies_so_an_intervening_pull_does_not_reverify(self):
+        record = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        plan = self.gc_plan([record])
+        published = self.remote_head()
+        copies = self.host_git('for-each-ref', '--format=%(objectname) %(refname)', log.COPY)
+        previous = log.pending(str(self.host))
+        fork = log.commit(str(self.host), self.host_git('rev-parse', f'{published}^{{tree}}'), None,
+                          'another published branch', self.signer, self.now)
+        self.host_git('push', '--force', 'origin', f'{fork}:{log.LOG}')  # fixture divergence, never an allowed publisher action
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual(code, 1, error)
+        self.assertIn('publish_refused', result)
+        self.assertEqual(log.pending(str(self.host)), previous)
+        self.assertEqual(self.host_git('for-each-ref', '--format=%(objectname) %(refname)', log.COPY), copies)
+        self.host_git('push', '--force', 'origin', f'{published}:{log.LOG}')
+        code, result, error = self.pull('--publish')
+        self.assertEqual((code, result['added']), (0, 0), error)
+        plan.write_text(json.dumps({**json.loads(plan.read_text()), 'resumed': True}))
+        code, result, error = self.pull('--publish', '--plan', str(plan), mode='gc')
+        self.assertEqual((code, result['gc_lines_added'], result['copies_dropped']), (0, 0, 1), error)
 
     def test_an_input_index_ref_is_logged_under_its_key_only_when_the_record_carries_that_key(self):
         key = 'e' * 40
@@ -408,11 +949,20 @@ sys.exit(log.main(sys.argv[1:]))
         (config / 'signer.json').write_text(json.dumps(self.signer))
         (config / 'log-keys').write_text(self.log_keys.read_text())
         env = dict({k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, EVIDENCE_LOG_STATE=str(self.f.root / 'state'),
-                   EVIDENCE_LOG_REMOTE=str(self.remote), EVIDENCE_LOG_CONFIG=str(config), EVIDENCE_LOG_FLAGS='--publish')
+                   EVIDENCE_LOG_REMOTE='../../github.git', EVIDENCE_LOG_CONFIG=str(config), EVIDENCE_LOG_FLAGS='--publish')
         done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         result = json.loads(done.stdout)
         self.assertEqual((result['added'], result['published']), (1, True), result)
+        timer_repo = self.f.root / 'state/repo.git'
+        self.assertEqual(subprocess.check_output(['git', '-C', str(timer_repo), 'config', 'core.fsync'], text=True).strip(), 'objects,reference')
+        # The timer must reach repair even when its bootstrap fetch sees a corrupt local log ref.
+        head = result['head']
+        damaged = timer_repo / 'objects' / head[:2] / head[2:]
+        damaged.chmod(0o644)
+        damaged.write_bytes(b'')
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
         published = subprocess.run(['git', '-C', str(self.remote), 'show', f'refs/evidence-log/main:trees/{self.tree[:2]}/{self.tree}'],
                                    capture_output=True, text=True).stdout
         self.assertIn(f'record {record} unit 0 ', published)

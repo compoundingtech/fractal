@@ -6,7 +6,8 @@ fn point(connection: &Connection, subject: &str) -> Result<Version> {
         "SELECT (SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1),
                 (SELECT claim_id FROM desired WHERE subject=?1),
                 (SELECT COALESCE(SUM(DISTINCT CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2
-                 WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=?1)",
+                 WHEN 'message.closed' THEN 4 ELSE 0 END), 0) FROM local_message_marks WHERE message=?1)
+                + 8 * EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)",
         [subject],
         |row| {
             Ok(Version {
@@ -23,10 +24,11 @@ fn fixture() -> Connection {
     smallclaims::sqlite::observe(&mut connection);
     connection
         .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h3505ec1ca327 owner=fractal_store::store::message_versions::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject TEXT,kind TEXT);
+            /* sqlite-large-value: allow-for-now lv-hd73001c86492 owner=fractal_store::store::message_versions::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject TEXT,kind TEXT);
          CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
          CREATE TABLE desired(subject TEXT PRIMARY KEY,claim_id TEXT NOT NULL);
          CREATE TABLE local_message_marks(message TEXT,kind TEXT,consumer TEXT,PRIMARY KEY(message,kind,consumer));
+         CREATE TABLE local_message_staged(message TEXT,consumer TEXT,PRIMARY KEY(message,consumer));
          INSERT INTO claims VALUES(4,'message/a','message.sent'),(9,'message/a','message.closed'),
              (7,'message/b','message.sent');
          INSERT INTO desired VALUES('message/a','desired/first');",

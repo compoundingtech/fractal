@@ -214,6 +214,23 @@ fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<(), St3Err
     record_admitted_lifecycle(store, note, "message.read", Some(actor), &read).map(drop)
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HandoffDisposition {
+    Withdrawn,
+    Declined,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HandoffReturnRequest {
+    pub actor: String,
+    pub message: String,
+    pub attempt: u32,
+    pub disposition: HandoffDisposition,
+    pub reason: String,
+    pub idempotency_key: String,
+}
+
 pub trait AdhocWorkStore {
     fn handoff_retry(
             &self,
@@ -221,6 +238,7 @@ pub trait AdhocWorkStore {
             input: &WorkHandoffRequest,
         ) -> Result<Option<StepRunView>, St3Error>;
     fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, St3Error>;
+    fn return_handoff(&self, subject: &str, input: &HandoffReturnRequest) -> Result<ClaimRecord, St3Error>;
     fn acknowledge_work(
             &self,
             subject: &str,
@@ -242,6 +260,49 @@ impl AdhocWorkStore for Store {
             validate_retry(&self.readers.get(), subject, input)?;
         }
         Ok(response)
+    }
+
+    fn return_handoff(&self, subject: &str, input: &HandoffReturnRequest) -> Result<ClaimRecord, St3Error> {
+        let subject = normalize_step_run(subject);
+        if input.reason.trim().is_empty() || input.idempotency_key.trim().is_empty() {
+            return Err(St3Error::new("invalid-handoff-return", "a reason and idempotency key are required"));
+        }
+        self.connection.batched(|tx| {
+            let existing = tx.query_row(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='work.handoff-returned' AND json_extract(body,'$.fields.return_request.idempotency_key')=?1",
+                [&input.idempotency_key], claim_from_row).optional().map_err(internal)?;
+            if let Some(existing) = existing {
+                if existing.subject != subject || existing.body["fields"]["return_request"] != json!(input) {
+                    return Err(St3Error::new("idempotency-conflict", "this key names another return"));
+                }
+                return Ok(existing);
+            }
+            let view = person_work::step(tx, &subject).map_err(internal)?
+                .ok_or_else(|| St3Error::new("missing-step-run", "the handed-off step is missing"))?;
+            let handoff = latest_handoff(tx, &view, now_ms())?
+                .ok_or_else(|| St3Error::new("stale-handoff", "this attempt has no unresolved handoff"))?;
+            let from = handoff.actor.as_deref().unwrap_or_default();
+            let to = handoff.body["fields"]["handoff_to"].as_str().unwrap_or_default();
+            let authorized = match input.disposition {
+                HandoffDisposition::Withdrawn => input.actor == from,
+                HandoffDisposition::Declined => input.actor == to,
+            };
+            if step_owner_is_terminal_tx(tx, &subject)? || view.status != "ready"
+                || view.claimant.is_some() || view.attempt != input.attempt
+                || view.claim_incarnation.is_some() || view.claim_expires_at_unix_ms.is_some()
+                || handoff.body["fields"]["handoff_message"] != input.message
+                || !from.starts_with("agent/") || !to.starts_with("person/")
+                || view.assigned_to.as_deref() != Some(to) || !authorized {
+                return Err(St3Error::new("stale-handoff", "only the handing agent or assigned person can return the exact unclaimed live handoff"));
+            }
+            let claim = append_claim_tx(tx, &self.origin, &subject, "work.handoff-returned", Some(&input.actor),
+                &json!({"fields": {"attempt": view.attempt, "status": "ready", "handoff_claim": handoff.id,
+                    "handoff_message": input.message, "handoff_to": from, "disposition": input.disposition,
+                    "reason": input.reason, "readiness_epoch": view.readiness_epoch + 1, "return_request": input}}),
+                &[handoff.id], None).map_err(claim_append_error)?;
+            project_mission_run_update(tx, &claim)?;
+            Ok(claim)
+        }).map_err(internal)?
     }
 
     fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, St3Error> {
@@ -341,6 +402,11 @@ impl AdhocWorkStore for Store {
                 match (seen, marked) {
                     (Some(receipt), _) => (receipt.clone(), vec![receipt, handoff.id]),
                     (None, Some(marked)) => (marked, vec![handoff.id]),
+                    // A reader this member hosts records its read as a mark once marks are on.
+                    (None, None) if crate::store::message_marks::local_consumer(tx, &self.origin, &input.message, &input.actor).map_err(internal)? => {
+                        let (receipt, _) = crate::store::message_marks::record_tx(tx, &self.origin, &input.message, "message.read", &input.actor)?;
+                        (receipt.id, vec![handoff.id])
+                    }
                     (None, None) => {
                         let receipt = append_claim_tx(tx, &self.origin, &input.message, "message.read", Some(&input.actor), &json!({"fields": {"status": "read"}}), &[], None).map_err(claim_append_error)?.id;
                         (receipt.clone(), vec![receipt, handoff.id])

@@ -52,7 +52,7 @@ use serde_json::{Map, Value, json};
 use fractal_daemon::model::{ClaimInput, ClaimRecord};
 use fractal_daemon::store::{
     CheckpointAction, CheckpointContext, CheckpointExcuseRequest, Store, TrimFault, certificates,
-    checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
+    checkpoint, checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
 };
 use fractal_schema::{FieldSpec, Retention, ValueType};
 
@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v13.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v14.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -147,23 +147,64 @@ fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
     }
 }
 
-/// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
+/// Kinds a checkpoint rule may drop. Every other kind is kept on every node. The oracle keeps
+/// its own list, so a retention rule that starts or stops dropping a kind fails
+/// `the_oracle_drops_the_kinds_the_retention_policy_drops` until this list is updated on purpose.
 const RULE_KINDS: &[&str] = &[
+    "daemon.diagnostic",
     "harness-question.observed",
+    "harness.diagnostic",
+    "harness.limits",
     "harness.observed",
     "harness.timeline",
+    "harness.todo.observed",
+    "harness.usage",
     "loop.state",
-    "subscription.mission-deferred",
     "observer.observed",
-    "daemon.diagnostic",
-    "transport.observed",
+    "render.applied",
+    "resource.observed",
+    "runtime.action.deadline-reached",
+    "runtime.action.failed",
     "runtime.action.requested",
     "runtime.action.succeeded",
-    "runtime.action.failed",
-    "runtime.action.deadline-reached",
-    "render.applied",
+    "runtime.observed",
     "runtime.readiness-deadline-reached",
+    "runtime.reconcile-decision",
+    "sekret.called",
+    "sekret.changed",
+    "sekret.exited",
+    "sekret.refused",
+    "slo.breach-transition",
+    "subscription.mission-deferred",
+    "transport.observed",
 ];
+
+/// The kinds the retention policy lets a checkpoint drop: each kind a slotted rule names, and a
+/// seat's status sources, which the status history rule trims.
+fn policy_rule_kinds() -> BTreeSet<String> {
+    let mut kinds = BTreeSet::new();
+    for rule in &fractal_schema::retention::policy().rules {
+        if rule.kind == "seat.status-history" {
+            kinds.extend(checkpoint::STATUS_SOURCE_KINDS.map(str::to_owned));
+        } else if rule.slot.is_some() {
+            kinds.insert(rule.kind.clone());
+        }
+    }
+    kinds
+}
+
+#[test]
+fn the_oracle_drops_the_kinds_the_retention_policy_drops() {
+    let oracle = RULE_KINDS.iter().map(|kind| kind.to_string()).collect::<BTreeSet<_>>();
+    let policy = policy_rule_kinds();
+    let unlisted = policy.difference(&oracle).collect::<Vec<_>>();
+    let stale = oracle.difference(&policy).collect::<Vec<_>>();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "retention.toml changed which kinds a checkpoint drops: add {unlisted:?} to and remove \
+         {stale:?} from RULE_KINDS in this file, after checking that the oracle should accept it"
+    );
+}
 
 /// A small, fast, seeded generator (SplitMix64).
 struct Rng(u64);
@@ -1737,16 +1778,15 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v13, every fixed
-/// seed converges, and all but seed 1597 trim a checkpoint: v13 adds
-/// `member.admission-override`, which shifts the draws. Keep the exact per-seed equality: claim
-/// generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[1597];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v14, every fixed
+/// seed converges, and all but seeds 21 and 74 trim a checkpoint: adding `work.handoff-returned`
+/// shifts the draws. Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
+const NEVER_TRIMS: &[u64] = &[21, 74];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v12 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v14 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1975,7 +2015,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v13.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v14.json"
         }))
         .unwrap(),
     )

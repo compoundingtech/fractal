@@ -278,7 +278,10 @@ pub async fn cleanup(
                             idempotency_key: Some(archive_key(&message.subject, lifecycle)),
                         })
                         .map_err(ApiError::bad)?;
-                    head = Some(record);
+                    // A mark is no claim: the message's head, and so the next step's fence, stays.
+                    if !crate::store::message_marks::is_receipt(&record.id) {
+                        head = Some(record);
+                    }
                     current.status = lifecycle.into();
                 }
             }

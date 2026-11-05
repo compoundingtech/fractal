@@ -1,5 +1,6 @@
 #[path = "agents_publication_tests.rs"]
 mod agents_publication_tests;
+mod exec_only;
 mod roster_fresh;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -990,11 +991,14 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     // The former zero-reader cache hit missed same-index local activity. Correct warm
     // reads now perform one indexed frontier seek, but never reduce cards again.
     let builds = state.store.agent_resources_builds_for_test();
-    let work = smallclaims::sqlite::work::total();
+    // Count this thread's statements only: the read runs on it, and the process-wide total also
+    // takes in other tests' SQL when they share the process.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     let rows = client_agent_resources(&state.store, false, "second", index).unwrap();
+    let work = work.finish();
     assert!(rows.is_empty());
     assert_eq!(state.store.agent_resources_builds_for_test(), builds);
-    assert!((smallclaims::sqlite::work::total() - work).vm_steps < 100);
+    assert!(work.vm_steps < 100, "{work:?}");
 }
 
 #[tokio::test]
@@ -1180,9 +1184,10 @@ fn agent_page_refs_reuse_warm_metadata_and_rebuild_for_new_membership() {
     let index = state.store.index().unwrap();
     let refs = client_agent_page_refs(&state.store, false, index).unwrap();
     assert_eq!(refs, client_agent_page_refs_uncached(&state.store, false, index).unwrap());
-    let work = smallclaims::sqlite::work::total();
+    // This thread's statements only, as above.
+    let work = smallclaims::sqlite::work::SqliteWorkScope::start();
     assert_eq!(client_agent_page_refs(&state.store, false, index).unwrap(), refs);
-    assert_eq!((smallclaims::sqlite::work::total() - work).statements, 0);
+    assert_eq!(work.finish().statements, 0);
     // A repeated live status has the same result; runtime changes still rebuild shallow refs.
     append("agent/refs-first");
     let index = state.store.index().unwrap();
@@ -1878,6 +1883,29 @@ async fn channel_history_queries_do_not_renew_delivery() {
             );
         }
     }
+}
+
+/// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
+/// what holds them off: here a configured peer whose start has not reached it.
+#[test]
+fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    let marks = |state: &AppState| {
+        doctor_report(state).unwrap().0.checks.into_iter().find(|check| check.name == "message-marks").unwrap()
+    };
+    let undecided = marks(&state);
+    assert!(undecided.message.starts_with("off: every member is ready"), "{undecided:?}");
+    assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+    let on = marks(&state);
+    assert_eq!(on.status, "pass");
+    assert!(on.message.starts_with("on:"), "{on:?}");
+    state.configured_peers = vec!["birch".into()];
+    assert!(!state.store.refresh_marks_switch(&state.configured_peers).unwrap().0);
+    let held = marks(&state);
+    assert_eq!(held.status, "pass");
+    assert!(held.message.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{held:?}");
+    assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
 }
 
 #[test]
@@ -6824,11 +6852,13 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     ).unwrap();
     let after = store.index().unwrap();
     for cut in [before, after] {
-        let work = smallclaims::sqlite::work::total();
+        // This thread's statements only: the read runs on it, and the process-wide total also
+        // takes in other tests' SQL when they share the process.
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         let terminal = crate::store::retirements::retired_subjects_at(
             &store.readers.get(), &[retired.into(), stopped.into()], cut,
         ).unwrap();
-        assert_eq!((smallclaims::sqlite::work::total() - work).statements, 1);
+        assert_eq!(work.finish().statements, 1);
         assert_eq!(terminal.contains(retired), cut == after);
         assert!(!terminal.contains(stopped));
         let cards = client_agent_resources_uncached(&store, true, cut).unwrap();
@@ -9939,6 +9969,8 @@ async fn roster_resilience_fresh_idle_and_new_attempt_after_failure_wait_for_wri
 
 
 async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
+    // The unpolled seat's delivery reason reads the daemon's uptime; both pages read the same one.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
     state.store = Arc::new(roster_followup_store());
@@ -11072,6 +11104,8 @@ mission "agent-human" state="ready" {
 
 #[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
+    // This unpolled seat is assessed during the daemon's startup grace.
+    let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();

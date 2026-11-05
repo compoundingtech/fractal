@@ -131,7 +131,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
 
   // Fold: children start one text column (22) in, beside a 1px rail on the header chevron's centre (7.5).
-  const fold = canvas.getByRole('region', { name: 'Release work' })
+  const fold = canvas.getByRole('group', { name: 'Release work' })
   const lane = fold.getBoundingClientRect()
   const children = within(fold).getByTestId('work-log-children')
   const rail = getComputedStyle(children, '::before')

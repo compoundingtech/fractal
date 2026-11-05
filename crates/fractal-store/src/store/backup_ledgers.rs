@@ -150,6 +150,33 @@ const LEDGERS: &[Ledger] = &[
 /// The ledgers only an archive of [`super::backup_format::VERSION_WITH_MARKS`] carries.
 pub const MARK_LEDGERS: &[&str] = &["local_message_marks"];
 
+/// The member-local tables of the messages shard an archive of
+/// [`super::backup_format::VERSION_WITH_SHARDS`] carries, paged, digested and restored by union as
+/// the graph's ledgers are. `stream_lifecycle` is this member's staging, delivery, read and close
+/// of each stream item: nothing replicates it, so without it a restore would redeliver them, and
+/// a union keeps every step, so a restored item is never behind where the archive had it.
+///
+/// `stream_arrivals` is not carried. Its graph index is a position in this member's own graph
+/// order, which a restore does not reproduce, since it admits the graph's log afresh in writer
+/// order. `record_arrivals` records each restored item again on the first read that needs it,
+/// at the restored graph's index, with the shown time its accepted time gives.
+const SHARD_LOCAL: &[Ledger] = &[Ledger {
+    table: "stream_lifecycle",
+    columns: &[
+        ("subject", Text),
+        ("kind", Text),
+        ("actor", Text),
+        ("fields", Text),
+        ("recorded_at_unix_ms", Integer),
+    ],
+    key: 3,
+    implied: None,
+    // A step is recorded once per actor; the item stands at its furthest step, so adding one
+    // never moves it back.
+    union: /* sqlite-large-value: allow-for-now lv-h26499c07fb74 owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_lifecycle(subject, kind, actor, fields, recorded_at_unix_ms) \
+            VALUES ({0}, {1}, {2}, {3}, {4})",
+}];
+
 /// One page of one ledger's rows, each row in the ledger's column order. An identity is its
 /// 64 lowercase hex digits when stored as 32 bytes, and its original text otherwise.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -158,8 +185,8 @@ pub struct LedgerPage {
     pub rows: Vec<Vec<serde_json::Value>>,
 }
 
-fn ledger(table: &str) -> Result<&'static Ledger> {
-    LEDGERS
+fn ledger(ledgers: &'static [Ledger], table: &str) -> Result<&'static Ledger> {
+    ledgers
         .iter()
         .find(|ledger| ledger.table == table)
         .with_context(|| format!("backup carries an unknown ledger {table:?}"))
@@ -262,8 +289,20 @@ fn digest_of(hash: Sha256) -> String {
 
 /// Each nonempty ledger's row count and digest, in the archive's row order and encoding.
 pub fn digests(connection: &rusqlite::Connection) -> Result<BTreeMap<String, TableDigest>> {
+    digests_of(LEDGERS, connection)
+}
+
+/// Each nonempty local table's row count and digest, read from a messages shard.
+pub fn shard_local_digests(connection: &rusqlite::Connection) -> Result<BTreeMap<String, TableDigest>> {
+    digests_of(SHARD_LOCAL, connection)
+}
+
+fn digests_of(
+    ledgers: &'static [Ledger],
+    connection: &rusqlite::Connection,
+) -> Result<BTreeMap<String, TableDigest>> {
     let mut digests = BTreeMap::new();
-    for ledger in LEDGERS {
+    for ledger in ledgers {
         let mut hash = Sha256::new();
         hash.update(DIGEST_DOMAIN);
         hash.update(ledger.table.as_bytes());
@@ -291,9 +330,25 @@ pub fn digests(connection: &rusqlite::Connection) -> Result<BTreeMap<String, Tab
 /// Every ledger row, in pages, as the archive records them.
 pub fn write_pages(
     connection: &rusqlite::Connection,
+    write: impl FnMut(LedgerPage) -> Result<()>,
+) -> Result<()> {
+    write_pages_of(LEDGERS, connection, write)
+}
+
+/// Every local row of a messages shard, in pages, as the archive records them.
+pub fn write_shard_local_pages(
+    connection: &rusqlite::Connection,
+    write: impl FnMut(LedgerPage) -> Result<()>,
+) -> Result<()> {
+    write_pages_of(SHARD_LOCAL, connection, write)
+}
+
+fn write_pages_of(
+    ledgers: &'static [Ledger],
+    connection: &rusqlite::Connection,
     mut write: impl FnMut(LedgerPage) -> Result<()>,
 ) -> Result<()> {
-    for ledger in LEDGERS {
+    for ledger in ledgers {
         for_each_page(connection, ledger, |rows| {
             write(LedgerPage {
                 table: ledger.table.to_owned(),
@@ -338,7 +393,20 @@ fn stored(ledger: &Ledger, row: &[serde_json::Value]) -> Result<Vec<Value>> {
 
 /// Add one page to the ledgers by union. Nothing here removes a row or lowers a writer head.
 pub fn union_page(transaction: &rusqlite::Transaction<'_>, page: &LedgerPage) -> Result<()> {
-    let ledger = ledger(&page.table)?;
+    union_page_of(LEDGERS, transaction, page)
+}
+
+/// Add one page to a messages shard's local tables by union. Restore refuses any other table.
+pub fn union_shard_local_page(transaction: &rusqlite::Transaction<'_>, page: &LedgerPage) -> Result<()> {
+    union_page_of(SHARD_LOCAL, transaction, page)
+}
+
+fn union_page_of(
+    ledgers: &'static [Ledger],
+    transaction: &rusqlite::Transaction<'_>,
+    page: &LedgerPage,
+) -> Result<()> {
+    let ledger = ledger(ledgers, &page.table)?;
     let marks = ledger
         .columns
         .iter()
@@ -370,8 +438,19 @@ mod tests {
     #[test]
     fn every_ledger_names_a_table_the_store_creates_with_exactly_these_columns() {
         let store = Store::open_memory("alder").unwrap();
-        let connection = store.readers.get();
-        for ledger in LEDGERS {
+        same_columns(&store.readers.get(), LEDGERS);
+    }
+
+    #[test]
+    fn every_shard_local_table_names_a_table_the_shard_creates_with_exactly_these_columns() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = super::super::messages_shard::open(&graph, root.path()).unwrap();
+        same_columns(&shard.readers.get(), SHARD_LOCAL);
+    }
+
+    fn same_columns(connection: &rusqlite::Connection, ledgers: &[Ledger]) {
+        for ledger in ledgers {
             let columns = connection
                 .prepare(&format!(
                     "SELECT name, pk FROM pragma_table_info('{}') ORDER BY cid",
