@@ -4,8 +4,8 @@
 // Regenerate: cargo run -p fractal-client-codegen; verify: cargo run -p fractal-client-codegen -- --check
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 import { DateTime, Duration, Schema, SchemaTransformation } from "effect"
-import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
-import type { Brand, Redacted } from "effect"
+import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+import type { Brand, Option, Redacted } from "effect"
 import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
 export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"
 export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.generated.ts"
@@ -1459,6 +1459,16 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "Attention" }))()
 export type Attention = typeof Attention.Type
 export type AttentionEncoded = typeof Attention.Encoded
+
+export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
+  /** Base64 of up to 512 KiB starting at offset. */
+  "data": Schema.String.annotate({ description: "Base64 of up to 512 KiB starting at offset." }),
+  "offset": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "sha256": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "size": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "BlobChunk" }))()
+export type BlobChunk = typeof BlobChunk.Type
+export type BlobChunkEncoded = typeof BlobChunk.Encoded
 
 export type CanonicalNode = { readonly "arguments"?: ReadonlyArray<string | number | boolean | null>; readonly "children"?: ReadonlyArray<CanonicalNode>; readonly "name": string; readonly "properties"?: {  } & { readonly [key: string]: string | number | boolean | null } }
 export type CanonicalNodeEncoded = { readonly "arguments"?: (ReadonlyArray<string | number | boolean | null>) | null; readonly "children"?: (ReadonlyArray<CanonicalNodeEncoded>) | null; readonly "name": string; readonly "properties"?: ({  } & { readonly [key: string]: string | number | boolean | null }) | null }
