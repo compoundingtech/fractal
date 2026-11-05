@@ -152,6 +152,7 @@ afterEach(async () => {
   container.remove()
   vi.doUnmock('./ConversationPane.tsx')
   vi.doUnmock('../terminal/TerminalDetail.tsx')
+  vi.doUnmock('../monitor/UsagePane.tsx')
   vi.doUnmock('./AlertsTab.tsx')
   vi.unstubAllGlobals()
   window.history.replaceState(null, '', '/')
@@ -315,6 +316,44 @@ describe('terminal import intent', () => {
       await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')?.click())
       await act(async () => { await vi.waitFor(() => expect(terminalRequested).toHaveBeenCalledTimes(2)) })
       await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-terminal-loaded]')?.textContent).toBe('Recovered')) })
+    } finally { errors.mockRestore() }
+  })
+})
+
+describe('usage import boundary', () => {
+  it('keeps the workspace mounted after a rejected chunk and retries with a fresh lazy identity', async () => {
+    const usageRequested = vi.fn()
+    let rejectUsage!: (reason: Error) => void
+    const pending = new Promise<void>((_resolve, reject) => { rejectUsage = reject })
+    vi.doMock('../monitor/UsagePane.tsx', async () => {
+      usageRequested()
+      await pending
+      return { default: () => <div>Unused usage pane</div> }
+    })
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await renderShell()
+      const shell = container.querySelector('section[aria-label="Agent workspace"]')
+      expect(shell).not.toBeNull()
+      await act(async () => {
+        window.history.pushState(null, '', '/w/agent/example?open=monitor%2Fquota%3Adetail')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+      await act(async () => rejectUsage(new Error('Chunk unavailable')))
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('This usage view could not load.')
+      expect(container.querySelector('section[aria-label="Agent workspace"]')).toBe(shell)
+      vi.resetModules()
+      vi.doMock('../monitor/UsagePane.tsx', () => {
+        usageRequested()
+        return { default: () => <div data-usage-loaded="">Recovered usage</div> }
+      })
+      const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Try again')
+      expect(retry).toBeDefined()
+      await act(async () => retry!.click())
+      await act(async () => { await vi.waitFor(() => expect(usageRequested).toHaveBeenCalledTimes(2)) })
+      await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-usage-loaded]')?.textContent).toBe('Recovered usage')) })
+      expect(container.querySelector('section[aria-label="Agent workspace"]')).toBe(shell)
+      expect(container.querySelector('[role="alert"]')).toBeNull()
     } finally { errors.mockRestore() }
   })
 })
