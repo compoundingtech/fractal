@@ -1,4 +1,4 @@
-//! Incremental observation only: control paths must use a fresh keyed lookup.
+//! Incremental inventory only: control observations remain uncached.
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -63,6 +63,7 @@ impl From<Projection> for SessionMetadata {
 
 impl RegistrySnapshot {
     pub(super) fn sessions(&mut self, root: &Path) -> Result<Vec<SessionInfo>> {
+        use DaemonIdentityCheck::{Match, Unknown};
         let entries = match std::fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -73,7 +74,7 @@ impl RegistrySnapshot {
                 return Err(error).with_context(|| format!("list PTYs in {}", root.display()));
             }
         };
-        let mut names = BTreeSet::new();
+        let mut names = BTreeMap::new();
         let mut sockets = BTreeSet::new();
         for entry in entries {
             let entry = entry.context("read PTY registry entry")?;
@@ -88,21 +89,21 @@ impl RegistrySnapshot {
                 .or_else(|| filename.strip_suffix(".pid"))
                 .filter(|name| !name.starts_with('@'))
             {
-                names.insert(name.to_owned());
+                *names.entry(name.to_owned()).or_insert(false) |= filename.ends_with(".pid");
             } else if let Some(name) = filename.strip_suffix(".sock") {
                 sockets.insert(filename.clone());
                 if !name.starts_with('@') && registry::socket_path_in(root, name) == entry.path() {
-                    names.insert(name.to_owned());
+                    names.entry(name.to_owned()).or_insert(false);
                 }
             }
         }
         self.metadata.retain(|path, _| {
             path.file_stem()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| names.contains(name))
+                .is_some_and(|name| names.contains_key(name))
         });
         let mut sessions = Vec::with_capacity(names.len());
-        for name in names {
+        for (name, has_sidecar) in names {
             let path = root.join(format!("{name}.json"));
             let metadata = match std::fs::metadata(&path) {
                 Ok(stat) => {
@@ -152,28 +153,20 @@ impl RegistrySnapshot {
             let exited = metadata
                 .as_ref()
                 .is_some_and(|row| row.has_exited() || row.exit_code.is_some());
-            // Exit publication can precede daemon shutdown: retain its live PID
-            // for teardown fencing, without reopening metadata or PID sidecars.
-            let sidecar = (!exited)
+            // Exit publication can precede daemon shutdown; legacy records may
+            // identify the still-live daemon only through their PID companion.
+            let recorded = metadata.as_ref().and_then(|row| row.daemon_pid);
+            let sidecar = (!exited || recorded.is_none() && has_sidecar)
                 .then(|| registry::with_root(root, || registry::read_session_pid(&name)))
                 .flatten();
-            let named_pid = sidecar.or_else(|| metadata.as_ref().and_then(|row| row.daemon_pid));
-            let identity = if exited && named_pid.is_none() {
-                DaemonIdentityCheck::Gone
-            } else {
-                registry::check_record_identity_in(root, &name, sidecar, metadata.as_ref())
-            };
-            let retained = matches!(
-                identity,
-                DaemonIdentityCheck::Match | DaemonIdentityCheck::Unknown
-            );
+            let named_pid = sidecar.or(recorded);
+            let identity =
+                registry::check_record_identity_in(root, &name, sidecar, metadata.as_ref());
+            let retained = matches!(identity, Match | Unknown);
             let pid = retained.then_some(named_pid).flatten();
             let status = if exited {
                 SessionStatus::Exited
-            } else if matches!(
-                identity,
-                DaemonIdentityCheck::Match | DaemonIdentityCheck::Unknown
-            ) {
+            } else if retained {
                 SessionStatus::Running
             } else {
                 SessionStatus::Vanished
@@ -209,7 +202,7 @@ mod tests {
             write(
                 root.path(),
                 &format!("session-{index}.json"),
-                r#"{"exitCode":0,"createdAt":"one"}"#,
+                r#"{"exitCode":0}"#,
             );
         }
         assert_eq!(
@@ -222,11 +215,7 @@ mod tests {
         snapshot.reads = 0;
         assert_eq!(snapshot.sessions(root.path()).unwrap().len(), 885);
         assert_eq!(snapshot.reads, 0);
-        write(
-            root.path(),
-            "replacement",
-            r#"{"exitCode":2,"createdAt":"two"}"#,
-        );
+        write(root.path(), "replacement", r#"{"exitCode":2}"#);
         std::fs::rename(
             root.path().join("replacement"),
             root.path().join("session-0.json"),
@@ -256,27 +245,38 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let runtime = super::super::PtyRuntime::new(root.path().to_owned());
         let pid = i32::try_from(std::process::id()).unwrap();
-        let record = serde_json::json!({
-            "exitCode": 0, "daemonPid": pid,
-            "daemonStartToken": registry::read_process_start_token(pid).unwrap(),
-            "daemonBootId": registry::read_boot_id().unwrap(),
-            "tags": {"st3.start-operation": "op", "st3.scope-unit": "work.scope"}
-        });
-        std::fs::write(root.path().join("live.json"), record.to_string()).unwrap();
+        write(root.path(), "live.pid", &pid.to_string());
         let owner = runtime
             .spawn_state_path("live", "producers")
             .join(format!("{:x}", super::super::Sha256::digest(b"op")));
         std::fs::create_dir_all(&owner).unwrap();
         std::fs::write(owner.join("owner.json"), b"invalid ownership").unwrap();
-        for _ in 0..2 {
-            let rows = runtime.snapshot().unwrap();
-            assert_eq!(rows[0].status, "exited");
-            assert_eq!(rows[0].pid, Some(std::process::id()));
-            assert!(
-                runtime
-                    .server_apart("live", "work.scope", Some(&rows[0]))
-                    .is_err()
-            );
+        for legacy in [false, true] {
+            let mut record = serde_json::json!({
+                "exitCode": 0, "daemonPid": pid,
+                "daemonStartToken": registry::read_process_start_token(pid).unwrap(),
+                "daemonBootId": registry::read_boot_id().unwrap(),
+                "tags": {"st3.start-operation": "op", "st3.scope-unit": "work.scope"}
+            });
+            if legacy {
+                record["daemonPid"] = serde_json::Value::Null;
+                record["daemonStartToken"] = serde_json::Value::Null;
+            }
+            write(root.path(), "live.json", &record.to_string());
+            for _ in 0..2 {
+                let rows = runtime.snapshot().unwrap();
+                assert_eq!(rows[0].status, "exited");
+                assert_eq!(rows[0].pid, Some(std::process::id()));
+                assert!(
+                    runtime
+                        .server_apart("live", "work.scope", Some(&rows[0]))
+                        .is_err()
+                );
+            }
+            record["createdAt"] = "fresh".into();
+            write(root.path(), "live.json", &record.to_string());
+            let fresh = runtime.session("live").unwrap().metadata.unwrap();
+            assert_eq!(fresh.created_at, "fresh");
         }
     }
 }
