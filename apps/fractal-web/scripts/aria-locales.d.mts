@@ -1,3 +1,3 @@
 import type { Plugin } from 'vite'
 
-export const englishAriaLocales: () => Plugin
+export const englishAriaLocales: () => Plugin[]

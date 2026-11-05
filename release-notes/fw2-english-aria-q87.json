@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal web, embedded workspaces and Storybook ship only English React Aria strings rather than every locale; roster, focus, collection, virtualizer and drag-and-drop code remain synchronous.",
+  "summary": "Fractal web, embedded workspaces and Storybook ship only English React Aria strings rather than every locale; their production builds reject retained unsupported Aria locales. Roster, focus, collection, virtualizer and drag-and-drop code remain synchronous.",
   "replay": { "status": "none", "detail": "No graph or storage change." },
   "schema": { "status": "none", "detail": "No schema change." },
   "rules": { "status": "none", "detail": "No rule change." },
