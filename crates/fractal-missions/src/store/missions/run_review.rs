@@ -22,21 +22,33 @@ pub fn validate_run_reviewer(
         if !visited.insert(subject.clone()) {
             return Err(unresolved(&subject));
         }
-        let id = subject.strip_prefix("mission-run/").ok_or_else(|| unresolved(&subject))?;
+        let id = subject
+            .strip_prefix("mission-run/")
+            .ok_or_else(|| unresolved(&subject))?;
         let header = mission_run_header_tx(connection, id).map_err(internal)?;
         if let Some(parent) = &header.parent_step_run {
             let step = step_run_row_tx(connection, parent)
-                .map_err(internal)?.ok_or_else(|| unresolved(parent))?;
-            excluded.extend(validate_step_reviewer(scope, connection, &step, requester, reviewer)?);
+                .map_err(internal)?
+                .ok_or_else(|| unresolved(parent))?;
+            excluded.extend(validate_step_reviewer(
+                scope, connection, &step, requester, reviewer,
+            )?);
         }
         let generations = run_generation_ids_tx(connection, id)?;
-        if generations.is_empty() || !generations.contains(generation_id_from_subject(&header.generation)) {
+        if generations.is_empty()
+            || !generations.contains(generation_id_from_subject(&header.generation))
+        {
             return Err(unresolved(&subject));
         }
         for generation in generations {
             let definition = pinned_generation_mission_tx(connection, &generation)
-                .map_err(internal)?.ok_or_else(|| unresolved(&generation))?;
-            if definition.steps.values().any(|step| step.loop_spec.is_some()) {
+                .map_err(internal)?
+                .ok_or_else(|| unresolved(&generation))?;
+            if definition
+                .steps
+                .values()
+                .any(|step| step.loop_spec.is_some())
+            {
                 return Err(St3Error::new("reviewer-history-unsupported", &subject));
             }
             let view = run_generation_view_tx(connection, &generation).map_err(internal)?;
@@ -44,10 +56,11 @@ pub fn validate_run_reviewer(
                 return Err(unresolved(&generation));
             }
             for step in &view.steps {
-                excluded.extend(validate_step_reviewer(scope, connection, step, requester, reviewer)?);
+                excluded.extend(validate_step_reviewer(
+                    scope, connection, step, requester, reviewer,
+                )?);
             }
-            // Include creation-history links as well as projections: missing child rows must
-            // not disappear from the responsibility boundary. Prefixes cover missing parents.
+            // Creation history and generation prefixes also expose missing child/parent rows.
             let start = format!("step-run/{generation}/");
             let end = format!("step-run/{generation}0");
             const CHILDREN_SQL: &str =
@@ -56,10 +69,15 @@ pub fn validate_run_reviewer(
                  AND COALESCE(json_extract(body, '$.fields.parent_step_run'), json_extract(body, '$.parent_step_run'))>=?1
                  AND COALESCE(json_extract(body, '$.fields.parent_step_run'), json_extract(body, '$.parent_step_run'))<?2";
             let mut children = connection.prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h84adec0f28b1 owner=fractal_missions::store::missions::run_review TODO=trace-statement-and-value-representation */ CHILDREN_SQL,
+                /* sqlite-large-value: allow-for-now lv-hed575cdba946 owner=fractal_missions::store::missions::run_review TODO=trace-statement-and-value-representation */ CHILDREN_SQL,
             ).map_err(internal)?;
-            pending.extend(children.query_map(params![start, end], |row| row.get::<_, String>(0))
-                .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?);
+            pending.extend(
+                children
+                    .query_map(params![start, end], |row| row.get::<_, String>(0))
+                    .map_err(internal)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(internal)?,
+            );
         }
     }
     Ok(excluded)
