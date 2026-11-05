@@ -450,19 +450,15 @@ pub async fn hold_lane_burst(
     };
     let now = u64::try_from(crate::gate_check::now_ms() / 1000).unwrap_or(u64::MAX);
     let reason = request.reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty()).unwrap_or("a command");
-    // Bursts live in the daemon's memory, and the slice outlives a restart: a renewal of a grant
-    // this daemon has no record of is restored while the slice still holds it, so the holder's
+    // A renewal of a grant the daemon before this one gave is restored (burst_ask), so the holder's
     // run goes on in the lane it was granted (2026-11-05, on a build host: a daemon roll forgot a
     // granted burst, set the seat's lane back to its own and the run's compiles were OOM-killed).
-    let restored = (request.held && live.cores >= capacity.cores && live.memory >= capacity.memory)
-        .then(|| state.seat_admission.burst_restore(&subject, capacity, reason, now))
-        .flatten();
-    if restored.is_some() {
+    let (burst, restored) = state.seat_admission.burst_ask(&subject, capacity, reason, now, request.held, live);
+    if restored {
         eprintln!("st3: {subject}'s lane burst cores={},memory={} is restored: the daemon before this one granted it, and its lane still holds it",
             capacity.cores, capacity.memory);
         super::signal_changed(&state);
     }
-    let burst = restored.unwrap_or_else(|| state.seat_admission.burst_hold(&subject, capacity, reason, now));
     let lane = json!({"cores": capacity.cores, "memory": capacity.memory});
     if let Some(why) = burst.refused {
         state.seat_admission.burst_release(&subject);

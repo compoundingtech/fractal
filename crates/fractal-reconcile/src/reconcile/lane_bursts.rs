@@ -68,7 +68,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// granted, while their slices stay raised and their holders' runs go on in them. Such a raise
     /// counts as held at once (`held_lanes`, the burst reserve), so no start or other burst is given
     /// its room, and the lane stays raised until the holder's renewal restores the grant
-    /// (`burst_restore`) or one burst lease after this daemon started.
+    /// (`burst_ask`) or one burst lease after this daemon started.
     pub(super) fn find_raised_lanes(&self) -> Result<()> {
         if self.seat_admission.lanes.is_none() || self.seat_admission.status.state().lanes_found {
             return Ok(());
@@ -81,6 +81,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .filter(|live| live.cores > base.cores || live.memory > base.memory)
             else { continue };
             let mut state = self.seat_admission.status.state();
+            // A renewal served before this pass already restored it (burst_ask).
+            if state.lane_bursts.iter().any(|burst| burst.subject == desired.subject) {
+                continue;
+            }
             state.lane_found.insert(desired.subject.clone(), live);
             let raised = state.lane_raised.get(&desired.subject).copied().unwrap_or(base);
             state.lane_raised.insert(desired.subject.clone(), Capacity {

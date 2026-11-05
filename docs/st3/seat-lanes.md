@@ -326,10 +326,12 @@ waiting burst's reason starts `burst lane`. While held, admission counts the sea
 lane. Released, its cores come back at once and its memory once the lane holds less than it
 will allow, as a step's lowering does. Bursts live in the daemon's memory, and a slice outlives a
 daemon restart. Before it judges any room, a new daemon reads each laned seat's slice once: one raised
-above the seat's own counts as held at once (in other lanes' room and the burst reserve, so no start
-or other burst gets that room) and stays raised for one burst lease (90 s) after the daemon started. The
-holder renews at a third of the lease the daemon names and says it holds the burst; a daemon with no
-record of it restores the grant while the slice still holds the burst lane. A raise no holder renews
+above the seat's own (a burst's, or a step's the daemon has not judged yet) counts as held at once
+(in other lanes' room and the burst reserve, so no start or other burst gets that room) and stays
+raised for one burst lease (90 s) after the daemon started. The holder renews at a third of the lease
+the daemon names and says it holds the burst; a daemon with no record of it restores the grant when it
+is such a found raise (or the daemon has not read the slices yet) and the slice still holds the burst
+lane. A burst that lapsed while the daemon ran is asked anew. A raise no holder renews
 within that lease goes back to what the seat's steps hold. Once granted, a holder answered anything but
 `granted` (a renewal that reached a daemon that could not restore it, or a lease that lapsed) prints
 `lost` and why, gives the burst back and exits non-zero, rather than letting its run go on in a lane

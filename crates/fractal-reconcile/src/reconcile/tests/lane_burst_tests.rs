@@ -178,15 +178,15 @@ fn a_burst_granted_before_a_daemon_restart_keeps_its_lane_and_its_holder_s_renew
     assert!(runtime.lanes_resized.lock().unwrap().is_empty(), "the found raise stays until its holder renews");
     assert_eq!(status.state().lane_raised.get(builder), Some(&burst));
     // The holder's renewal says it holds the burst, and the slice still holds it: restored as granted, not asked again.
-    assert!(status.burst_restore(builder, burst, "st-test", now()).is_some());
+    assert!(status.burst_ask(builder, burst, "st-test", now(), true, burst).1);
     assert!(status.state().lane_found.is_empty());
     reconciler.reconcile_lane_bursts().unwrap();
     assert_eq!(status.burst_granted(builder), Some(burst));
     hold(&reconciler, &store, builder, &member);
     assert!(runtime.lanes_resized.lock().unwrap().is_empty());
     // Restored once: later renewals renew it.
-    assert!(status.burst_restore(builder, burst, "st-test", now()).is_none());
-    assert!(status.burst_hold(builder, burst, "st-test", now()).granted);
+    let (renewed, restored) = status.burst_ask(builder, burst, "st-test", now(), true, burst);
+    assert!(renewed.granted && !restored);
 }
 
 #[test]

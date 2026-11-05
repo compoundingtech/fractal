@@ -236,29 +236,37 @@ impl Status {
         burst
     }
 
-    /// Restores a burst to `capacity` that `subject`'s holder says the daemon before this one
-    /// granted, when this daemon has no record of it: the caller has read that the seat's slice
-    /// still holds the burst lane, which shows the grant was given and not taken back. It counts at
-    /// once, as a grant does. None when this daemon already has a record of `subject`'s burst: it
-    /// is renewed as any other.
-    pub fn burst_restore(&self, subject: &str, capacity: crate::Capacity, reason: &str, now: u64) -> Option<LaneBurst> {
-        let mut state = self.state();
-        if state.lane_bursts.iter().any(|burst| burst.subject == subject) {
-            return None;
+    /// A holder's ask or renewal of `subject`'s burst to `capacity` (`hold_lane_burst`), and whether
+    /// it was restored. `held` says its holder was granted it; `live` is the seat's slice as the
+    /// kernel has it now. Bursts live in the daemon's memory and a slice outlives a restart, so a
+    /// held burst this daemon has no record of is restored as granted, not asked again at the back
+    /// of the line, when it is a raise this daemon found at start (or has not read for yet) and the
+    /// slice still holds it: that shows the daemon before this one granted it and nothing took it
+    /// back. It counts at once, as a grant does. Anything else is [`Self::burst_hold`].
+    pub fn burst_ask(&self, subject: &str, capacity: crate::Capacity, reason: &str, now: u64, held: bool, live: crate::Capacity)
+        -> (LaneBurst, bool) {
+        {
+            let mut state = self.state();
+            let restores = held && live.cores >= capacity.cores && live.memory >= capacity.memory
+                && (state.lane_found.contains_key(subject) || !state.lanes_found)
+                && !state.lane_bursts.iter().any(|burst| burst.subject == subject);
+            if restores {
+                let burst = LaneBurst {
+                    subject: subject.into(), capacity, reason: reason.into(), since: now, expires: now + BURST_LEASE_SECS,
+                    granted: true, wait: None, refused: None,
+                };
+                state.lane_bursts.push_back(burst.clone());
+                state.lane_found.remove(subject);
+                let raised = state.lane_raised.get(subject).copied().unwrap_or(capacity);
+                state.lane_raised.insert(subject.into(), crate::Capacity {
+                    cores: raised.cores.max(capacity.cores),
+                    memory: raised.memory.max(capacity.memory),
+                });
+                state.burst_touched.insert(subject.into());
+                return (burst, true);
+            }
         }
-        let burst = LaneBurst {
-            subject: subject.into(), capacity, reason: reason.into(), since: now, expires: now + BURST_LEASE_SECS,
-            granted: true, wait: None, refused: None,
-        };
-        state.lane_bursts.push_back(burst.clone());
-        state.lane_found.remove(subject);
-        let raised = state.lane_raised.get(subject).copied().unwrap_or(capacity);
-        state.lane_raised.insert(subject.into(), crate::Capacity {
-            cores: raised.cores.max(capacity.cores),
-            memory: raised.memory.max(capacity.memory),
-        });
-        state.burst_touched.insert(subject.into());
-        Some(burst)
+        (self.burst_hold(subject, capacity, reason, now), false)
     }
 
     /// Gives `subject`'s burst back: true when it held or asked for one.
@@ -319,6 +327,42 @@ fn pending_value(p: &Pending, index: usize, reason: &str, now: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_burst_is_restored_only_for_a_raise_found_at_start_that_the_slice_still_holds() {
+        const G: u64 = 1 << 30;
+        let burst = crate::Capacity { cores: 8, memory: 24 * G };
+        let smaller = crate::Capacity { cores: 2, memory: 24 * G };
+        let fresh = || {
+            let status = Status::default();
+            let mut state = status.state();
+            state.lanes_found = true;
+            state.lane_found.insert("builder".into(), burst);
+            drop(state);
+            status
+        };
+        // A holder that was never granted, or a slice brought down since: asked anew, at the back of the line.
+        for (held, live) in [(false, burst), (true, smaller)] {
+            let status = fresh();
+            let (asked, restored) = status.burst_ask("builder", burst, "st-test", 10, held, live);
+            assert!(!restored && !asked.granted, "held {held}, live {live:?}");
+        }
+        // A burst that lapsed while this daemon ran is no raise it found at start: asked anew.
+        let status = Status::default();
+        status.state().lanes_found = true;
+        assert!(!status.burst_ask("builder", burst, "st-test", 10, true, burst).1);
+        // The raise found at start, still held: restored as granted, and only once.
+        let status = fresh();
+        let (restored, yes) = status.burst_ask("builder", burst, "st-test", 10, true, burst);
+        assert!(yes && restored.granted);
+        assert!(status.state().lane_found.is_empty());
+        assert_eq!(status.state().lane_raised.get("builder"), Some(&burst));
+        let (renewed, again) = status.burst_ask("builder", burst, "st-test", 20, true, burst);
+        assert!(!again && renewed.granted);
+        // A renewal served before the daemon's first pass read the slices is restored too.
+        let status = Status::default();
+        assert!(status.burst_ask("builder", burst, "st-test", 10, true, burst).1);
+    }
 
     #[test]
     fn pending_snapshot_is_fifo_and_ages_without_persistence() {
