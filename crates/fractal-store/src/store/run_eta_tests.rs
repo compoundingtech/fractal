@@ -216,6 +216,188 @@ fn eta_nonterminal_changes_do_not_dirty_or_refold_samples() {
     }
 }
 
+#[test]
+fn eta_rebuild_candidates_search_terminal_order_index_before_loading_claims() {
+    let mut c = fixture(1000);
+    let tx = c.transaction().unwrap();
+    super::run_eta::open(&tx).unwrap();
+    let sql = format!("EXPLAIN QUERY PLAN {}", super::run_eta::CANDIDATES_SQL);
+    let plan = tx.prepare(/* sqlite-large-value: allow-for-now lv-h2cecf29641ee owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ &sql).unwrap()
+        .query_map(rusqlite::params!["hash","build",64,true], |row| row.get::<_,String>(3)).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
+    assert!(
+        plan.contains(
+            "SEARCH local_run_eta_terminal USING COVERING INDEX local_run_eta_terminal_order"
+        ),
+        "{plan}"
+    );
+    assert!(!plan.contains("SCAN mission_runs"), "{plan}");
+    let query = format!(
+        "EXPLAIN QUERY PLAN {}",
+        super::run_eta::INVALIDATE_MISSIONS_SQL
+    );
+    let plan = tx.prepare(/* sqlite-large-value: allow-for-now lv-hbd1d816360bf owner=fractal_store::store::run_eta_tests TODO=trace-statement-and-value-representation */ &query).unwrap()
+        .query_map(["hash","build"], |row| row.get::<_,String>(3)).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
+    assert!(
+        plan.contains("SEARCH s USING INDEX step_runs_eta_remaining"),
+        "{plan}"
+    );
+    super::run_eta::BODY_ROWS.with(|count| count.set(0));
+    claim(&tx, "s-999", "work.claimed", json!({"attempt":1}), 2);
+    super::run_eta::flush(&tx).unwrap();
+    super::run_eta::BODY_ROWS.with(|count| assert_eq!(count.get(), 129));
+}
+
+#[test]
+fn eta_new_terminal_transition_folds_only_its_run_at_large_history() {
+    for history in [1000, 10000] {
+        let mut c = fixture(history);
+        seed(&c, history, history + 10);
+        let run = format!("r-{history}");
+        c.execute(/* sqlite-large-value: allow-for-now lv-h265fd785cf17 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='working',status='running' WHERE id=?1", [&run]).unwrap();
+        let tx = c.transaction().unwrap();
+        super::run_eta::open(&tx).unwrap();
+        super::run_eta::BODY_ROWS.with(|count| count.set(0));
+        // Exercise working -> terminal, not just insertion of an already-terminal run.
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1e30d65a948a owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='terminal',status='completed' WHERE id=?1", [&run]).unwrap();
+        super::run_eta::flush(&tx).unwrap();
+        super::run_eta::BODY_ROWS.with(|count| assert_eq!(count.get(), 2, "history={history}"));
+        assert_eq!(retained(&tx), (64, history - 53));
+        super::run_eta::BODY_ROWS.with(|count| count.set(0));
+        tx.execute(/* sqlite-large-value: allow-for-now lv-ha9356a96ddd9 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&run]).unwrap();
+        super::run_eta::flush(&tx).unwrap();
+        super::run_eta::BODY_ROWS.with(|count| assert_eq!(count.get(), 128));
+        assert_eq!(retained(&tx), (64, history - 54));
+    }
+}
+
+#[test]
+fn eta_v3_trigger_layout_upgrades_once_and_reopen_preserves_schema_cookie() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("eta-upgrade.db");
+    drop(super::Store::open(&path, "node").unwrap());
+    let triggers = |c: &Connection| {
+        c.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'run_eta_%' ORDER BY name").unwrap()
+            .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let c = Connection::open(&path).unwrap();
+    let current = triggers(&c);
+    c.execute_batch(/* sqlite-large-value: allow-for-now lv-hd414c559eb6c owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN('run_eta_triggers_v4','run_eta_samples_v4');
+        INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');
+        DROP TABLE local_run_eta_terminal;
+        DROP TRIGGER run_eta_run_insert;
+        CREATE TRIGGER run_eta_run_insert AFTER INSERT ON mission_runs BEGIN
+        INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;").unwrap();
+    assert_ne!(triggers(&c), current);
+    drop(c);
+    drop(super::Store::open(&path, "node").unwrap());
+    let c = Connection::open(&path).unwrap();
+    assert_eq!(triggers(&c), current);
+    let cookie: i64 = c
+        .query_row("PRAGMA schema_version", [], |row| row.get(0))
+        .unwrap();
+    let marker: String = c
+        .query_row(
+            "SELECT value FROM meta WHERE key='run_eta_triggers_v4'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker, "1");
+    drop(c);
+    drop(super::Store::open(&path, "node").unwrap());
+    let c = Connection::open(&path).unwrap();
+    assert_eq!(
+        c.query_row::<i64, _, _>("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap(),
+        cookie
+    );
+    assert_eq!(triggers(&c), current);
+}
+
+#[test]
+fn eta_fresh_v4_rollback_and_reupgrade_preserve_v4_triggers() {
+    let mut c = fixture(1);
+    let tx = c.transaction().unwrap();
+    super::run_eta::open(&tx).unwrap();
+    let trigger = |tx: &rusqlite::Transaction<'_>| {
+        tx.query_row::<String, _, _>(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='run_eta_run_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let current = trigger(&tx);
+    // The parent's installer runs only when its own initialization marker is absent.
+    let initialized: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    if !initialized {
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-ha4a9dd3c5d26 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER run_eta_run_update;
+            CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs
+            WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN
+            INSERT OR IGNORE INTO local_run_eta_dirty
+            SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
+            INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;
+            INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');").unwrap();
+    }
+    super::run_eta::open(&tx).unwrap();
+    assert_eq!(trigger(&tx), current);
+}
+
+#[test]
+fn eta_terminal_metadata_survives_v3_writer_draining_shared_queues() {
+    let mut c = fixture(70);
+    let tx = c.transaction().unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hd14808d55e0c owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta VALUES('run_eta_samples_v3','1')", [])
+        .unwrap();
+    super::run_eta::open(&tx).unwrap();
+    seed(&tx, 70, 80);
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hc3dfb33e117b owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id='r-69'", [])
+        .unwrap();
+    // The rolled-back v3 writer updates duration samples but never terminal metadata.
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h189746109b84 owner=fractal_store::store::run_eta_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE run_id IN(SELECT run_id FROM local_run_eta_pending);
+        INSERT INTO local_run_eta_samples VALUES('s-70','r-70','hash','build',80,79);
+        DELETE FROM local_run_eta_pending; DELETE FROM local_run_eta_dirty;").unwrap();
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM local_run_eta_terminal_pending",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    super::run_eta::open(&tx).unwrap();
+    assert_eq!(retained(&tx), (64, 16));
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM local_run_eta_terminal WHERE run_id='r-70'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        tx.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM local_run_eta_terminal WHERE run_id='r-69'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    seed(&tx, 71, 81);
+    super::run_eta::flush(&tx).unwrap();
+    assert_eq!(retained(&tx), (64, 17));
+}
+
 /// The window's candidates as #5154 read them: every terminal run, then whether it ran the
 /// definition. Kept only to prove the indexed read answers the same.
 fn candidates_by_scanning_every_run() -> String {
@@ -299,14 +481,17 @@ fn rows(c: &Connection, sql: &str, params: impl rusqlite::Params) -> Vec<(String
 
 #[test]
 fn eta_indexed_candidates_and_asks_answer_as_the_scanning_reads_for_every_definition() {
-    let c = history(1500);
+    let mut c = history(1500);
+    let tx = c.transaction().unwrap();
+    super::run_eta::open(&tx).unwrap();
+    tx.commit().unwrap();
     let keys = rows(&c, "SELECT DISTINCT definition_hash,step_path,'' FROM step_runs", []);
     assert!(keys.len() > 600, "{}", keys.len());
     let (mut candidates, mut full) = (0, 0);
     for (hash, path, _) in &keys {
         let args = rusqlite::params![hash, path, super::run_eta::SAMPLE_LIMIT];
         let expected = rows(&c, &candidates_by_scanning_every_run(), args);
-        assert_eq!(rows(&c, &super::run_eta::candidates_sql(), args), expected, "{hash} {path}");
+        assert_eq!(rows(&c, super::run_eta::CANDIDATES_SQL, rusqlite::params![hash,path,super::run_eta::SAMPLE_LIMIT,true]), expected, "{hash} {path}");
         candidates += expected.len();
         full += usize::from(expected.len() >= 40);
     }
@@ -337,9 +522,9 @@ fn eta_backfill_seeks_each_definitions_runs_and_each_steps_asks() {
             .unwrap()
             .join("; ")
     };
-    let candidates = plan(&super::run_eta::candidates_sql());
+    let candidates = plan(super::run_eta::CANDIDATES_SQL);
     assert!(
-        candidates.contains("SEARCH step_runs USING COVERING INDEX step_runs_definition_index (definition_hash=?)")
+        candidates.contains("SEARCH local_run_eta_terminal USING COVERING INDEX local_run_eta_terminal_order (definition_hash=?)")
             && candidates.contains("SEARCH r USING INDEX sqlite_autoindex_mission_runs_1 (id=?)"),
         "{candidates}"
     );

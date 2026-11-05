@@ -1917,6 +1917,7 @@
             ${pkgs.nodejs}/bin/node hooks/typecheck/omp-smoke.mjs ./smoke-out/st-omp-channel.mjs
             ${pkgs.nodejs}/bin/node hooks/typecheck/omp-refresh-smoke.mjs ./smoke-out/st-omp-channel.mjs ${self}/crates/fractal-drivers/tests/fixtures/harness-admission/omp-18.1.22.json
             ${pkgs.nodejs}/bin/node hooks/typecheck/omp-refresh-smoke.mjs ./smoke-out/st-omp-channel.mjs --native-user
+            ${pkgs.nodejs}/bin/node hooks/typecheck/omp-refresh-smoke.mjs ./smoke-out/st-omp-channel.mjs --restoring-ask
             ${pkgs.nodejs}/bin/node hooks/typecheck/environment-smoke.mjs
             touch $out
           '';
