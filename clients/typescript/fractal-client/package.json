@@ -15,6 +15,7 @@
   "exports": {
     ".": "./index.ts",
     "./schema": "./Schema.generated.ts",
+    "./schema/read": "./ReadSchema.generated.ts",
     "./fabric": "./fabric.mjs"
   },
   "peerDependencies": {

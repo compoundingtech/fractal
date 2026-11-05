@@ -1,5 +1,5 @@
 import { FractalClient } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import { Context, DateTime, Duration, Effect, Layer, Option, Schema } from 'effect'
 
 import {
