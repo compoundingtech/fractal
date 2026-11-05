@@ -10,8 +10,8 @@
     "detail": "No binding/checkpoint schema, stored-state reader, wire format or historical data cleanup changes."
   },
   "rules": {
-    "status": "none",
-    "detail": "Exact native session, runtime incarnation, ownership and authored session-selection checks remain."
+    "status": "changed",
+    "detail": "The measured Clippy too_many_arguments ceiling for fractal-drivers decreases from 8 to 7, and the workspace total from 99 to 98, with no ceiling raised. Native session, runtime incarnation, ownership and authored session-selection checks remain unchanged."
   },
   "compatibility": {
     "status": "changed",
