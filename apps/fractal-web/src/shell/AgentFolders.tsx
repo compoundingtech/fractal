@@ -3,7 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
-import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, openAgentRowMenu, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@fractal/ui/assistant-ui/shell'
+import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTree.tsx'
+import { openAgentRowMenu } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/MilestoneAgentRow.tsx'
 import {
   Button as AriaButton,
   useDragAndDrop,

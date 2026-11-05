@@ -558,7 +558,7 @@ describe('workspace overlays', () => {
       // RAC reserves vertical arrows for row navigation, even from a row control.
       trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
     })
-    const menu = document.querySelector('[role="menu"]')
+    const menu = await within(document.body).findByRole('menu')
     expect(menu).not.toBeNull()
     expect(host.querySelector('[data-testid="live-agent-workspace"]')!.contains(menu)).toBe(true)
   })

@@ -7,7 +7,9 @@ import type { SidebarAgentRowData } from '@fractal/ui/assistant-ui'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 import { sidebarRow } from '../web/sidebarRow.ts'
-import { AgentRowDetails, sidebarRowAccessibleName, sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { AgentRowDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx'
+import { sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { createProjections, fleetFromAgents, terminalSubjectForAgent } from './projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))

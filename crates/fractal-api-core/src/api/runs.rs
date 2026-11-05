@@ -326,13 +326,15 @@ pub async fn outcome_history(
 pub async fn performance_report(State(state): State<AppState>) -> Json<Value> {
     let mut report = crate::performance::snapshot();
     // Lane bursts held and asked now, and those dropped since start because their holder stopped
-    // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here.
-    let (held, waiting, lapsed) = {
+    // renewing (docs/st3/seat-lanes.md, "Bursts"): a holder that crashes shows here. With them, the
+    // room admission keeps from starts for a burst, as it last judged a seat's start.
+    let (held, waiting, lapsed, reserve) = {
         let admission = state.seat_admission.state();
         let held = admission.lane_bursts.iter().filter(|burst| burst.granted).count();
-        (held, admission.lane_bursts.len() - held, admission.bursts_lapsed)
+        (held, admission.lane_bursts.len() - held, admission.bursts_lapsed, admission.burst_reserve.clone())
     };
-    report["lane_bursts"] = json!({"held": held, "waiting": waiting, "dropped_by_lease": lapsed});
+    report["lane_bursts"] = json!({"held": held, "waiting": waiting, "dropped_by_lease": lapsed,
+        "reserve": reserve.map(|(subject, full, kept)| json!({"subject": subject, "full": full, "kept": kept}))});
     Json(report)
 }
 

@@ -497,8 +497,8 @@ mod tests {
         let endpoint = crate::environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
             .unwrap()
             .map(PathBuf::from);
-        let socket = fractal_client::discover_unix_endpoint(endpoint).unwrap();
-        let client = Client::unix_as(&socket, person);
+        let identity = fractal_client::discover_unix_identity(endpoint).unwrap();
+        let client = Client::discovered_unix_as(identity, person);
         let started = Instant::now();
         // Fractal TUI's own feed already holds an agent's incarnation and host, so a real attach reads
         // no runtime. With STUI_PROBE_INCARNATION and STUI_PROBE_OWNER (from `st agents show
