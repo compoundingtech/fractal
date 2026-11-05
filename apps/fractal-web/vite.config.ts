@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import { createBuildIdentityPlugin } from '@overeng/utils/node/vite-build-identity'
 import react from '@vitejs/plugin-react'
+import { englishAriaLocales } from './scripts/aria-locales.mjs'
 import { createStylexVitePlugins, deferBuiltStylesheets } from './scripts/stylex.mjs'
 import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
@@ -13,6 +14,7 @@ import { fractalLazyChunks } from './scripts/vite-lazy-chunks.mjs'
 export default defineConfig({
   root: 'src/web',
   plugins: [
+    englishAriaLocales(),
     pierreLanguagesPlugin(),
     fractalContentSecurityPolicy(),
     fractalDevReplay(),
@@ -56,6 +58,9 @@ export default defineConfig({
           includeDependenciesRecursively: false,
           groups: [
             { name: 'react', test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/, entriesAware: true },
+            // New lazy roots must not fragment the already-eager Effect payload.
+            // Lazy-only Effect modules remain in the entries-aware group below.
+            { name: 'effect-eager', test: /node_modules[\\/](?:effect[\\/]|@effect[\\/])/, tags: ['$initial'], priority: 1, entriesAware: false },
             { name: 'effect', test: /node_modules[\\/](?:effect|@effect[\\/]atom-react)[\\/]/, entriesAware: true },
             { name: 'aria', test: /node_modules[\\/](?:react-aria|react-aria-components|react-stately|@react-aria|@react-stately|@internationalized)[\\/]/, entriesAware: true },
           ],
