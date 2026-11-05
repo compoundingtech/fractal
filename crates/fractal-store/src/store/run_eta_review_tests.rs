@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn eta_sql_person_holds_and_nonuniform_samples_use_nearest_rank_quartiles() {
-    let mut connection = fixture();
+    let mut connection = fixture(0);
     for (index, end) in [101, 11, 21, 81].into_iter().enumerate() {
         seed(&connection, index as i64, end);
     }
@@ -47,4 +47,29 @@ fn eta_sql_person_holds_and_nonuniform_samples_use_nearest_rank_quartiles() {
     assert_eq!(eta["remaining_low_ms"], 10);
     assert_eq!(eta["remaining_high_ms"], 40);
     assert_eq!(eta["basis"]["samples"], 4);
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='run_eta_claim_insert'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let insert = trigger
+        .split_once("BEGIN")
+        .unwrap()
+        .1
+        .trim()
+        .trim_end_matches(';')
+        .trim_end_matches("END")
+        .replace("NEW.subject", "'open-step'");
+    let mut explain = connection
+        .prepare(/* sqlite-large-value: allow-for-now lv-h5136197a0d75 owner=fractal_store::store::run_eta_review_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {insert}"))
+        .unwrap();
+    let plan = explain
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(plan.iter().any(|row| row.contains("SEARCH mission_runs")));
+    assert!(plan.iter().all(|row| !row.contains("SCAN mission_runs")));
 }
