@@ -10,9 +10,9 @@ pub(super) const CANDIDATES_SQL: &str = "WITH recent AS MATERIALIZED (
     WHERE s.definition_hash=?1 AND s.step_path=?2 AND r.status='completed' AND s.status='completed'
     AND (?4 OR r.id IN(SELECT run_id FROM local_run_eta_pending))";
 pub(super) const INVALIDATE_MISSIONS_SQL: &str =
-    /* sqlite-large-value: allow-for-now lv-h0ee5bcd62dec owner=fractal_store::store::run_eta TODO=prepare-body-and-predecessor-values */
+    /* sqlite-large-value: allow-for-now lv-hab33c59006bf owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */
     "INSERT INTO local_run_eta_mission_changes
-    SELECT DISTINCT r.mission_id,(SELECT COALESCE(MAX(store_index),0) FROM claims)
+    SELECT DISTINCT r.mission_id,(SELECT COALESCE(MAX(changed_index),0)+1 FROM local_run_eta_mission_changes)
     FROM step_runs s INDEXED BY step_runs_eta_remaining JOIN mission_runs r ON r.id=s.run_id
     WHERE s.definition_hash=?1 AND s.step_path=?2
     AND s.status NOT IN('completed','failed','cancelled','skipped')
@@ -25,8 +25,12 @@ fn window(tx: &Transaction<'_>, hash: &str, path: &str) -> rusqlite::Result<Vec<
 }
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h23ff30a52917 owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ "
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hfb40761381a8 owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_run_eta_mission_changes (mission_id TEXT PRIMARY KEY,changed_index INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_run_eta_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_run_eta_terminal_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS run_eta_terminal_pending AFTER INSERT ON local_run_eta_pending BEGIN
+ INSERT OR IGNORE INTO local_run_eta_terminal_pending VALUES(NEW.run_id); END;
 CREATE INDEX IF NOT EXISTS local_run_eta_mission_changed ON local_run_eta_mission_changes(changed_index);
 CREATE INDEX IF NOT EXISTS step_runs_eta_remaining ON step_runs(definition_hash,step_path,run_id,generation_id) WHERE status NOT IN('completed','failed','cancelled','skipped');
 ")?;
@@ -102,6 +106,8 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    // The v3 writer drains pending, but cannot clear this trigger-maintained metadata backlog.
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h6303ef3fa163 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_run_eta_pending SELECT run_id FROM local_run_eta_terminal_pending", [])?;
     let pending: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_run_eta_pending) OR EXISTS(SELECT 1 FROM local_run_eta_dirty)",
         [],
@@ -112,6 +118,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     }
     let rebuild: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_run_eta_terminal WHERE run_id IN(SELECT run_id FROM local_run_eta_pending))
+         OR EXISTS(SELECT 1 FROM local_run_eta_samples WHERE run_id IN(SELECT run_id FROM local_run_eta_pending))
          OR EXISTS(SELECT 1 FROM local_run_eta_dirty)", [], |row| row.get(0))?;
     let keys = tx
         .prepare_cached(
@@ -207,6 +214,7 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     }
     tx.execute(/* sqlite-large-value: allow-for-now lv-h57ee6fe04659 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_pending", [])?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7dd9271f11ac owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_dirty", [])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7c290b785c03 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_terminal_pending", [])?;
     Ok(())
 }
 

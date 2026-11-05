@@ -1671,4 +1671,18 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
                 .unwrap()
         );
     }
+    let (before, _) = fold(&store);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h336cf3012340 owner=fractal_api_core::api::published_lists_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(CAST(accepted_at_unix_ms AS INTEGER)+400 AS TEXT) WHERE kind='step-run.state' AND json_extract(body,'$.fields.status')='completed'", []).unwrap();
+        tx.commit().unwrap();
+    }
+    let (corrected, changed) = fold(&store);
+    assert!(changed);
+    assert_eq!(corrected.cut, before.cut, "correction appended no claim");
+    let eta = &corrected.rows.cards["mission/eta/b"]["run_details"][0]["eta"];
+    assert_eq!(eta["basis"]["samples"], 2);
+    assert_eq!(eta["remaining_low_ms"], 500);
+    assert_eq!(eta["remaining_high_ms"], 700);
 }
