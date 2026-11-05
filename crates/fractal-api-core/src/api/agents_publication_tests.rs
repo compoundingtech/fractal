@@ -431,3 +431,198 @@ async fn successor_delivery_does_not_report_a_predecessor_bind_refusal_on_messag
     assert_eq!(status, StatusCode::OK, "{view}");
     assert!(!view.to_string().contains("mailbox-runtime-indeterminate"), "{view}");
 }
+
+/// A message sent through `store`: a claim that node writes.
+fn roster_pause_note(store: &Store, subject: &str) {
+    store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "message.sent".into(), actor: Some("person/example".into()),
+        fields: serde_json::from_value(json!({"from": "person/example", "to": "agent/example",
+            "status": "sent", "content": "a write someone waits to see"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+const ROSTER_PAUSE_FLEET: &str = "5b4b1a8e-7c3d-4e2f-9a1b-0c6d5e4f3a2b";
+
+/// Two members of one fleet: a writer, and a reader that receives its claims.
+fn roster_pause_fleet(root: &Path) -> (Arc<Store>, Arc<Store>) {
+    let open = |name: &str| {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("graph.db"), name).unwrap();
+        store.bind_fleet(ROSTER_PAUSE_FLEET).unwrap();
+        Arc::new(store)
+    };
+    (open("writer"), open("reader"))
+}
+
+/// Everything `from` holds, admitted by `to` the way a peer exchange does it.
+fn roster_pause_replicate(from: &Store, to: &Store) {
+    let exchange = from
+        .export_replication_exchange(ROSTER_PAUSE_FLEET, &to.replication_inventory().unwrap())
+        .unwrap();
+    to.receive_replication_exchange(from.origin(), ROSTER_PAUSE_FLEET, &exchange).unwrap();
+    to.validate_replication_backlog().unwrap();
+    to.apply_replication_repairs().unwrap();
+    assert!(to.project_replication_backlog().unwrap());
+}
+
+/// The refresher's own wake: every commit notifies, nothing reads on the writer.
+fn roster_pause_commits(store: &Store) -> (Arc<tokio::sync::Notify>, smallclaims::sqlite::CommitObserver) {
+    let commits = Arc::new(tokio::sync::Notify::new());
+    let wake = Arc::clone(&commits);
+    let observer = store.observe_commits(move |_| wake.notify_one());
+    (commits, observer)
+}
+
+/// A claim this node commits mid-pause ends the pause at its floor, not the full second, so its
+/// writer sees it in the roster after one fold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_this_node_commits_cuts_the_agents_roster_pause_to_its_floor() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let (commits, _observer) = roster_pause_commits(&store);
+    let through = store.index().unwrap();
+    let started = Instant::now();
+    let pause = tokio::spawn({
+        let store = Arc::clone(&store);
+        async move { agent_roster_pause(&store, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through).await }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    roster_pause_note(&store, "message/roster-pause-local");
+    assert_eq!(pause.await.unwrap(), AgentRosterPauseEnd::LocalClaim);
+    let paused = started.elapsed();
+    assert!(paused >= Duration::from_millis(150), "{paused:?}");
+    assert!(paused < Duration::from_millis(150) + Duration::from_millis(200), "{paused:?}");
+}
+
+/// Claims another node wrote move the cut all the time on a busy fleet: they keep the full pause,
+/// so replication does not fold the roster more often than before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cut_of_only_replicated_claims_keeps_the_full_agents_roster_pause() {
+    let root = tempfile::tempdir().unwrap();
+    let (writer, reader) = roster_pause_fleet(root.path());
+    let (commits, _observer) = roster_pause_commits(&reader);
+    let through = reader.index().unwrap();
+    let started = Instant::now();
+    let pause = tokio::spawn({
+        let reader = Arc::clone(&reader);
+        async move { agent_roster_pause(&reader, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through).await }
+    });
+    for round in 0..3 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        roster_pause_note(&writer, &format!("message/roster-pause-replicated-{round}"));
+        roster_pause_replicate(&writer, &reader);
+    }
+    assert!(reader.index().unwrap() > through, "the writer's claims reached the reader");
+    assert_eq!(reader.first_local_commit_after(through, reader.index().unwrap()).unwrap(), None);
+    assert_eq!(pause.await.unwrap(), AgentRosterPauseEnd::Full);
+    assert!(started.elapsed() >= AGENT_ROSTER_REFRESH_PAUSE, "{:?}", started.elapsed());
+}
+
+/// However fast this node writes, the refresher pauses at least its floor, and at least as long
+/// as the last fold took, so a burst of local writes stays within the half-core bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_floor() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let (commits, _observer) = roster_pause_commits(&store);
+    let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let burst = std::thread::spawn({
+        let (store, writing) = (Arc::clone(&store), Arc::clone(&writing));
+        move || {
+            let mut written = 0;
+            while writing.load(std::sync::atomic::Ordering::Acquire) {
+                roster_pause_note(&store, &format!("message/roster-pause-burst-{written}"));
+                written += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            written
+        }
+    });
+    let mut look = AgentRosterLook::default();
+    for folded in [Duration::ZERO, Duration::ZERO, Duration::from_millis(250), Duration::ZERO] {
+        let through = store.index().unwrap();
+        let started = Instant::now();
+        assert_eq!(agent_roster_pause(&store, &commits, &mut look, folded, through).await, AgentRosterPauseEnd::LocalClaim);
+        let paused = started.elapsed();
+        assert!(paused >= folded.max(AGENT_ROSTER_FRESH_PAUSE), "{folded:?}: {paused:?}");
+        assert!(paused < folded.max(AGENT_ROSTER_FRESH_PAUSE) + Duration::from_millis(200), "{folded:?}: {paused:?}");
+    }
+    writing.store(false, std::sync::atomic::Ordering::Release);
+    assert!(burst.join().unwrap() > 20, "the burst kept writing");
+}
+
+/// A local write behind a run of replicated claims longer than one look still ends the pause
+/// early: the run is read a look at a time, none of it skipped, from one coalesced wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_claim_behind_a_long_replicated_run_still_cuts_the_agents_roster_pause() {
+    let root = tempfile::tempdir().unwrap();
+    let (writer, reader) = roster_pause_fleet(root.path());
+    let through = reader.index().unwrap();
+    for claim in 0..5 {
+        roster_pause_note(&writer, &format!("message/roster-pause-run-{claim}"));
+    }
+    roster_pause_replicate(&writer, &reader);
+    let replicated = reader.index().unwrap();
+    assert!(replicated - through > 2, "the run is longer than one look of 2 claims");
+    roster_pause_note(&reader, "message/roster-pause-after-the-run");
+    // Every commit above has already notified: one permit stands for all of them.
+    let commits = tokio::sync::Notify::new();
+    commits.notify_one();
+    let started = Instant::now();
+    let end = agent_roster_pause_scanning(&reader, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through, 2).await;
+    assert_eq!(end, AgentRosterPauseEnd::LocalClaim);
+    assert!(started.elapsed() < AGENT_ROSTER_REFRESH_PAUSE, "{:?}", started.elapsed());
+}
+
+/// The look runs on the blocking pool, but the pause never waits on it: with every blocking
+/// thread taken, a commit's wake still lets a fresh read, or the timer, end the pause on time.
+/// Pause after pause, the one queued look is kept, never joined by another; once the pool frees,
+/// it is the one that reads the claim and ends the pause.
+#[test]
+fn a_busy_blocking_pool_never_holds_the_agents_roster_pause_past_its_end() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2).max_blocking_threads(1).enable_all().build().unwrap();
+    runtime.block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let store = state(root.path()).store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        let commits = tokio::sync::Notify::new();
+        let mut look = AgentRosterLook::default();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let occupied = tokio::task::spawn_blocking(move || held.recv().unwrap());
+        let through = store.index().unwrap();
+        roster_pause_note(&store, "message/roster-pause-busy-pool");
+        for _ in 0..2 {
+            commits.notify_one();
+            let started = Instant::now();
+            let full = agent_roster_pause(&store, &commits, &mut look, Duration::ZERO, through).await;
+            assert_eq!(full, AgentRosterPauseEnd::Full, "the look could not run");
+            let paused = started.elapsed();
+            assert!(paused >= AGENT_ROSTER_REFRESH_PAUSE, "{paused:?}");
+            assert!(paused < AGENT_ROSTER_REFRESH_PAUSE + Duration::from_millis(300), "{paused:?}");
+        }
+        commits.notify_one();
+        let started = Instant::now();
+        let fresh = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                store.request_fresh_agent_roster(false);
+            })
+        };
+        let pause = agent_roster_pause(&store, &commits, &mut look, Duration::ZERO, through).await;
+        assert_eq!(pause, AgentRosterPauseEnd::FreshRead);
+        assert!(started.elapsed() < Duration::from_millis(300) + Duration::from_millis(300), "{:?}", started.elapsed());
+        fresh.await.unwrap();
+        assert_eq!(look.started, 1, "three pauses kept the one queued look");
+        assert!(look.running.is_some(), "the queued look is kept for the next pause");
+        release.send(()).unwrap();
+        occupied.await.unwrap();
+        commits.notify_one();
+        let freed = agent_roster_pause(&store, &commits, &mut look, Duration::ZERO, through).await;
+        assert_eq!(freed, AgentRosterPauseEnd::LocalClaim);
+        assert_eq!(look.started, 1, "the kept look read the claim");
+    });
+}
