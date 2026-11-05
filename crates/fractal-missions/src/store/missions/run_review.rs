@@ -5,8 +5,7 @@ use fractal_store::store::{
     step_run_row_tx,
 };
 
-/// Internal hierarchy policy over one caller-owned connection snapshot.
-/// Includes every generation, descendant and enclosing parent step, not sibling runs.
+/// Caller-owned snapshot of every generation, descendant and starting parent step, not siblings.
 /// Loops fail closed; start/reassignment is unavailable and public parsers still reject agent-review.
 /// Pooled steps in terminal or superseded generations over-exclude until the raw-row follow-on.
 #[doc(hidden)]
@@ -33,9 +32,14 @@ pub fn validate_run_reviewer(
             let step = step_run_row_tx(connection, parent)
                 .map_err(internal)?
                 .ok_or_else(|| unresolved(parent))?;
-            excluded.extend(validate_step_reviewer(
-                scope, connection, &step, requester, reviewer,
-            )?);
+            let owner =
+                mission_run_header_tx(connection, step.run.trim_start_matches("mission-run/"))
+                    .map_err(internal)?;
+            for requester in [requester, owner.requester.as_str()] {
+                excluded.extend(validate_step_reviewer(
+                    scope, connection, &step, requester, reviewer,
+                )?);
+            }
         }
         let generations = run_generation_ids_tx(connection, id)?;
         if generations.is_empty()
@@ -65,7 +69,6 @@ pub fn validate_run_reviewer(
                     )?);
                 }
             }
-            // Creation history and generation prefixes also expose missing child/parent rows.
             let start = format!("step-run/{generation}/");
             let end = format!("step-run/{generation}0");
             const CHILDREN_SQL: &str =

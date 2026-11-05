@@ -8,6 +8,7 @@ const UNKNOWN: &str = "reviewer-owner-unresolved";
 const CHILD: &str = "agent/example/child";
 const PARENT: &str = "agent/example/parent";
 const REQUESTER: &str = "agent/example/requester";
+const ORIGINATOR: &str = "agent/example/originator";
 
 fn request(mission: &str) -> MissionRunRequest {
     MissionRunRequest {
@@ -34,17 +35,13 @@ agent "example/free" { command "true"; workspace "/tmp" }
 agent "example/parent" { command "true"; workspace "/tmp" }
 agent "example/child" { command "true"; workspace "/tmp" }
 agent "example/requester" { command "true"; workspace "/tmp" }
-mission "parent" state="ready" {
-  goal "Check the complete run boundary."
-  step "start" { assigned-to "agent/example/parent" }
-  step "other" { agentless }
-}
+agent "example/originator" { command "true"; workspace "/tmp" }
+mission "parent" state="ready" { goal "Check the complete run boundary."
+  step "start" { assigned-to "agent/example/parent" }; step "other" { agentless } }
 mission "child" state="ready" { goal "Check child responsibility."
   step "work" { assigned-to "agent/example/child" } }
-mission "looping" state="ready" {
-  goal "Do not silently accept unsupported history."
-  loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } }
-}
+mission "looping" state="ready" { goal "Do not silently accept unsupported history."
+  loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } } }
 mission "nested-loop" state="ready" { goal "Reject nested loop history."
   step "outer" { agentless; mission "nested" { goal "Loop inline."
     loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } }
@@ -53,7 +50,9 @@ mission "nested-loop" state="ready" { goal "Reject nested loop history."
 "#,
         "declare",
     );
-    let parent = store.create_mission_run(&request("parent")).unwrap();
+    let mut parent_request = request("parent");
+    parent_request.requester = Some(ORIGINATOR.into());
+    let parent = store.create_mission_run(&parent_request).unwrap();
     let step = &step(&parent, "start").subject;
     let mut request = request("child");
     request.requester = Some(REQUESTER.into());
@@ -91,6 +90,7 @@ fn agent_review_run_excludes_child_requester() {
     let (store, parent, child) = fixture();
     assert_eq!(check(&store, &parent.subject, REQUESTER), CONFLICT);
     assert_eq!(check(&store, &child.subject, REQUESTER), CONFLICT);
+    assert_eq!(check(&store, &child.subject, ORIGINATOR), CONFLICT);
 }
 
 #[test]
