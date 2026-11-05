@@ -311,7 +311,7 @@ describe('follow freshness', () => {
             },
             lines: [], next_sequence: 0, truncated: false,
           },
-        } as const
+        } satisfies CollectionFrame
         gateway.send(frame)
         yield* settle
         expect(mounted.events.at(-1)).toMatchObject({ _tag: 'Observed', value: { rows: 24 } })
