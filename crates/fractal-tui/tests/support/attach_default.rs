@@ -59,8 +59,8 @@ fn ask(agent: &str) -> Attention {
 #[test]
 #[ignore = "worker for attach_default_probe; needs harness-owned PTYs"]
 fn attach_default_probe_worker() -> Result<()> {
-    let root = PathBuf::from(std::env::var_os("STUI_PROBE_ROOT").expect("probe root"));
-    let socket = PathBuf::from(std::env::var_os("STUI_PROBE_SOCKET").expect("probe socket"));
+    let root = PathBuf::from(std::env::var_os("FRACTAL_TUI_PROBE_ROOT").expect("probe root"));
+    let socket = PathBuf::from(std::env::var_os("FRACTAL_TUI_PROBE_SOCKET").expect("probe socket"));
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut ui = Ui::new(demo::test_world());
@@ -193,7 +193,7 @@ fn attach_default_probe_worker() -> Result<()> {
 }
 
 /// What a key costs from press to drawn frame with an agent's terminal attached in a space,
-/// with an alert on top when `STUI_BENCH_ALERT` is set: `cargo test -p fractal-tui --lib --release
+/// with an alert on top when `FRACTAL_TUI_BENCH_ALERT` is set: `cargo test -p fractal-tui --lib --release
 /// attach_redraw_cost -- --ignored --nocapture`. Run it on two trees to compare them.
 #[test]
 #[ignore = "a measurement, not a check"]
@@ -213,7 +213,7 @@ fn attach_redraw_cost() {
         ended: None,
         native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120)),
     });
-    if std::env::var_os("STUI_BENCH_ALERT").is_some() {
+    if std::env::var_os("FRACTAL_TUI_BENCH_ALERT").is_some() {
         ui.world.attention = Load::Ready(vec![ask(AGENT)]);
     }
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();

@@ -22,21 +22,25 @@ one.
 
 The session JSONL is stored in Fractal's driver state for the seat. The `model_change` entry and each
 assistant turn identify the selected provider and model. omp's Python `eval` tool has a filtered
-environment; run st commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
+environment; run Fractal commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
 available.
 
 ## Driver launch and native binding
 
 The managed seat enters the shared `omp_session::run_native` launcher in process.
 The in-process OMP extension starts `driver omp-channel` on the executable named by
-`ST_OMP_CHANNEL_BIN`. The shared wrapper uses
-`ST_OMP_CHANNEL_{BIN,CATALOG,IDENTITY,RUNTIME_ID,SESSION,SEQ}` for its channel
-configuration; `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
-`ST_OMP_CHANNEL_RESUME_GENERATION` fence a cold residency resume.
+`ST_OMP_CHANNEL_BIN`. The shared wrapper supplies
+`ST_OMP_CHANNEL_{BIN,IDENTITY,RUNTIME_ID,SESSION,SEQ}` and the explicit native
+`ST_DRIVER_{ROOT,AGENT_DIR,SESSION_DIR,IDENTITY}` contract. Native launch omits
+`ST_OMP_CHANNEL_CATALOG` and removes inherited catalog environment values. Ordinary
+native launches also clear inherited `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
+`ST_OMP_CHANNEL_RESUME_GENERATION`; channel readers retain these two fields as a
+paired native-session and residency-generation fence when explicitly supplied.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
-The provider wrapper also sets matching `FRACTAL_OMP_CHANNEL_*` names. Shared Rust
-channel readers prefer those names, retain the `ST_*` fallback, and reject conflicting
+For supplied channel fields, the provider wrapper also sets matching
+`FRACTAL_OMP_CHANNEL_*` names. Shared Rust channel readers prefer those names, retain
+the `ST_*` fallback, and reject conflicting
 ownership values. The existing `ST_*` names remain available to hooks and agent policy.
 Daemon-launched seats also receive matching `FRACTAL_*` aliases for the launch
 environment, including `FRACTAL_AGENT` and `FRACTAL_SUBJECT`. CLI identity defaults
@@ -44,19 +48,21 @@ accept either spelling; shell and TypeScript hooks can continue to use the old n
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 
 `session_start` sends the native OMP session ID before accepting Rust's hello.
-A matching ready frame completes the two-way exchange. A cold resume must prove the
-expected native ID, wrapper incarnation and residency generation before its candidate
-binding becomes authoritative. A later in-process session switch replaces the named
-predecessor and binds the new session. When OMP exposes its session-file getter, the
-session and ready frames also carry that exact JSONL path for transcript readers.
+A matching ready frame completes the two-way exchange. When the cold-resume fence
+pair is supplied, the channel must prove the expected native ID, wrapper incarnation
+and residency generation before its candidate binding becomes authoritative. A later
+in-process session switch replaces the named predecessor and binds the new session.
+When OMP exposes its session-file getter, the session and ready frames also carry that exact JSONL path for transcript readers.
 
 ## Exact-build admission
 
 An ordinary launch parses OMP's own unambiguous `MAJOR.MINOR.PATCH` release and measures
 its exact executable, interpreter, installation metadata and shipped extension identity.
-A residency resume validates its native checkpoint before even starting the version child;
-a missing, stale, foreign or changed binding refuses the launch. There is no minor-version
-allowlist. A prerelease or build-metadata banner is not admitted as its base release.
+Native launch performs admission before claiming live session ownership. Admission
+measures the producer and extension; it does not run residency-checkpoint validation.
+The retained checkpoint and binding readers separately validate resume evidence,
+including its identity and generation. There is no minor-version allowlist. A prerelease
+or build-metadata banner is not admitted as its base release.
 
 Every unseen identity must pass five checks in a disposable RPC session:
 
@@ -91,7 +97,7 @@ A person whose machine cannot run the isolated probe can allow its exact install
 from their own terminal, outside an agent seat:
 
 ```sh
-st admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
+fractal admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
 ```
 
 Use the executable the affected seat actually launches. Omitting `--binary` uses that
@@ -106,7 +112,7 @@ exception. The exception persists across Fractal updates with the same producer 
 To restore normal admission at the next launch:
 
 ```sh
-st admission revoke omp --binary /path/to/omp
+fractal admission revoke omp --binary /path/to/omp
 ```
 
 The exception cannot supply a missing interpreter or repair an incompatible producer or
@@ -149,8 +155,8 @@ The declared `name` is the human label; the desired-state declaration and normal
 `display_name` retain the same value and the original declaring actor. Change that label with:
 
 ```sh
-st agents rename agent/worker 'Build worker'
-st agents rename agent/worker --clear
+fractal agents rename agent/worker 'Build worker'
+fractal agents rename agent/worker --clear
 ```
 
 In free mode any person or agent can rename a seat; a bound harness acts as itself.
@@ -174,7 +180,7 @@ Fractal ends a subagent that has not reported for five minutes; see
 ## Authored resume, transcripts and delivery
 
 An authored `args "--resume" "/absolute/path/<time>_<uuid>.jsonl"` (or `--resume=…`) keeps its
-original argv and transcript. On a fresh native omp/pi driver start, st links an absent or empty
+original argv and transcript. On a fresh native omp/pi driver start, Fractal links an absent or empty
 managed `provider-sessions` directory to the transcript's parent after checking the filename UUID
 against the session header in the first two lines. It never copies the transcript: omp continues
 appending to the authored path, and the channel must see those same bytes to publish its native
@@ -202,7 +208,7 @@ The matching ask result (including cancellation or timeout), approval resolution
 run cancellation releases the hold. Mail reaches OMP at the next safe tool-batch boundary, in
 arrival order as one steering message. Session restart clears the old modal; the successor
 channel re-sends unacknowledged mail. A channel reconnect alone does not clear a live modal.
-Read the exact graph message with `st conversations read` before acting on it, and archive it
+Read the exact graph message with `fractal conversations read` before acting on it, and archive it
 after the related action completes.
 
 The channel reports idle only after `ctx.isIdle()` proves that the native turn has settled.

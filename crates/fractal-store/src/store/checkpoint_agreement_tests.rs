@@ -33,7 +33,8 @@ fn checkpoint_verification_accounts_phases_and_adds_status_metadata() {
             assert!(value[counter].is_null());
         }
     }
-    assert_eq!(attempt.phases[2].copy_method.as_deref(), Some("vacuum_into"));
+    let expected_copy_method = if cfg!(target_os = "macos") { "clone" } else { "vacuum_into" };
+    assert_eq!(attempt.phases[2].copy_method.as_deref(), Some(expected_copy_method));
     assert!(attempt.phases[5].count.is_some());
     assert!(attempt.phases[8].count.is_some());
     let mut json = serde_json::to_value(&status).unwrap();

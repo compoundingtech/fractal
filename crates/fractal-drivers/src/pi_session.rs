@@ -167,8 +167,6 @@ pub fn run_native(
         &PI_KIND,
         &environment,
         &[],
-        None,
-        false,
     )
 }
 
