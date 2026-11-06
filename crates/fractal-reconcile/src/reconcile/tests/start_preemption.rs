@@ -1971,8 +1971,7 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
             .expect("native late PTY publication test requires python3 on the test process PATH");
         let python3 = python3
             .to_str()
-            .expect("python3 executable path must be UTF-8")
-            .replace('\'', "'\\''");
+            .expect("python3 executable path must be UTF-8");
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1987,14 +1986,25 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
             .open(&gate_path)
             .unwrap();
         let ready = tokio::net::UnixListener::bind(pty.with_extension("event")).unwrap();
-        std::fs::write(&pty, format!(r#"#!/bin/sh
-(
-  IFS= read -r permitted < "$0.gate" || exit 1
-  "$(cat "$0.real")" "$@"
-  outcome=$?
-  '{python3}' -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(bytes([int(sys.argv[2])]))' "$0.event" "$outcome"
-) </dev/null >"$0.output" 2>&1 &
-exit 1
+        // A system /bin/sh wrapper strips DYLD_* on macOS before pty can read the
+        // name-only --env arguments. Run the helper directly, preserving the launch environment.
+        std::fs::write(&pty, format!(r#"#!{python3}
+import os, socket, subprocess, sys
+
+if os.fork() != 0:
+    os._exit(1)
+with open(os.devnull, "rb") as source, open(sys.argv[0] + ".output", "wb") as output:
+    os.dup2(source.fileno(), 0)
+    os.dup2(output.fileno(), 1)
+    os.dup2(output.fileno(), 2)
+    with open(sys.argv[0] + ".gate") as gate:
+        gate.readline()
+    with open(sys.argv[0] + ".real") as executable:
+        outcome = subprocess.call([executable.read(), *sys.argv[1:]])
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as acknowledgment:
+        acknowledgment.connect(sys.argv[0] + ".event")
+        acknowledgment.sendall(bytes([outcome]))
+os._exit(0)
 "#)).unwrap();
         std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = root.path().join("state");
@@ -2038,6 +2048,12 @@ exit 1
         launch_member.environment.insert(
             "PATH".into(),
             format!("{}:${{PATH}}", self.root.path().join("bin").display()),
+        );
+        // Exercise name-only forwarding even when the test runner did not supply a loader path.
+        launch_member.environment.insert(
+            "DYLD_FALLBACK_LIBRARY_PATH".into(),
+            std::env::var("DYLD_FALLBACK_LIBRARY_PATH")
+                .unwrap_or_else(|_| self.root.path().display().to_string()),
         );
         self.reconciler.dispatch_start(start_jobs::PreparedStart {
             subject: self.desired.clone(),
