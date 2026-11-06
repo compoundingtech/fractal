@@ -21,19 +21,19 @@ pub struct ReplyRequest {
 }
 
 pub trait CustomStore {
-    fn reply_custom_subject(&self, request: &ReplyRequest) -> Result<ClaimRecord, St3Error>;
+    fn reply_custom_subject(&self, request: &ReplyRequest) -> Result<ClaimRecord, FractalError>;
     fn reply_custom_subject_authorized(&self, request: &ReplyRequest,
-            authorization: Option<&super::assistant_write::AssistantWriteAuthorization>) -> Result<ClaimRecord, St3Error>;
+            authorization: Option<&super::assistant_write::AssistantWriteAuthorization>) -> Result<ClaimRecord, FractalError>;
 }
 
 impl CustomStore for Store {
 
-    fn reply_custom_subject(&self, request: &ReplyRequest) -> Result<ClaimRecord, St3Error> {
+    fn reply_custom_subject(&self, request: &ReplyRequest) -> Result<ClaimRecord, FractalError> {
         self.reply_custom_subject_authorized(request, None)
     }
 
     fn reply_custom_subject_authorized(&self, request: &ReplyRequest,
-            authorization: Option<&super::assistant_write::AssistantWriteAuthorization>) -> Result<ClaimRecord, St3Error> {
+            authorization: Option<&super::assistant_write::AssistantWriteAuthorization>) -> Result<ClaimRecord, FractalError> {
         validate_actor(&request.actor)?;
         if request.idempotency_key.is_empty() || request.idempotency_key.len() > 256 {
             return Err(fail("reply needs a bounded idempotency key"));
@@ -41,19 +41,19 @@ impl CustomStore for Store {
         let digest = canonical_hash(request).map_err(internal)?;
         let key = canonical_hash(&("custom.reply", &request.actor, &request.idempotency_key))
             .map_err(internal)?;
-        self.connection.batched(|tx|->Result<ClaimRecord,St3Error>{
+        self.connection.batched(|tx|->Result<ClaimRecord,FractalError>{
             if let Some(authorization) = authorization {
                 super::assistant_write::authorize(tx, &self.origin, authorization)?;
             }
             let prior=claims(tx,&request.subject).map_err(internal)?.into_iter().filter(|c|c.body.pointer("/_custom_reply/key")==Some(&json!(key))).collect::<Vec<_>>();
             if let Some(c)=prior.first() {
-                if prior.iter().any(|c|c.body.pointer("/_custom_reply/digest")!=Some(&json!(digest))) { return Err(St3Error::new("idempotency-conflict","reply key identifies competing requests")); }
+                if prior.iter().any(|c|c.body.pointer("/_custom_reply/digest")!=Some(&json!(digest))) { return Err(FractalError::new("idempotency-conflict","reply key identifies competing requests")); }
                 return Ok(c.clone());
             }
             flush(tx).map_err(internal)?;
             let view=source(tx,&request.subject).map_err(internal)?.ok_or_else(||fail("custom source is unavailable"))?;
-            if view["registration"]!=request.registration||view["revision"]!=request.revision||view["state"]!="ready"||view["attention"]["active"]!=true||view["attention"]["episode"]!=request.episode {return Err(St3Error::new("stale-fence","custom source revision/episode changed"));}
-            if view["attention"]["recipient"]!=request.actor {return Err(St3Error::new("forbidden","only the addressed person may reply"));}
+            if view["registration"]!=request.registration||view["revision"]!=request.revision||view["state"]!="ready"||view["attention"]["active"]!=true||view["attention"]["episode"]!=request.episode {return Err(FractalError::new("stale-fence","custom source revision/episode changed"));}
+            if view["attention"]["recipient"]!=request.actor {return Err(FractalError::new("forbidden","only the addressed person may reply"));}
             let (_,m,_)=registration(tx,&request.subject).map_err(internal)?.ok_or_else(||fail("registration disappeared"))?;
             let reply=&m.attention.as_ref().ok_or_else(||fail("no reply action"))?.reply;
             if request.fields.keys().any(|name|!reply.fields.contains_key(name)) { return Err(fail("reply contains undeclared or reserved input fields")); }

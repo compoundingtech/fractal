@@ -83,7 +83,7 @@ pub async fn pulls(
         Some("closed") => Some("closed".to_owned()),
         Some("all") => None,
         Some(other) => {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "validation-failed",
                 format!("state is open, closed or all, not {other}"),
             )));
@@ -125,7 +125,7 @@ fn limit(query: &PluginQuery) -> Result<usize, ApiError> {
     match query.limit {
         None => Ok(DEFAULT_LIMIT),
         Some(limit) if (1..=github_plugin_store::MAX_READ_ROWS).contains(&limit) => Ok(limit),
-        Some(_) => Err(ApiError::bad(St3Error::new(
+        Some(_) => Err(ApiError::bad(FractalError::new(
             "validation-failed",
             format!("limit is 1 to {}", github_plugin_store::MAX_READ_ROWS),
         ))),
@@ -175,7 +175,7 @@ async fn answer(
     query: &PluginQuery,
 ) -> Result<Json<Value>, ApiError> {
     if !github_name(&owner) || !github_name(&repository) {
-        return Err(ApiError::bad(St3Error::new("validation-failed", "a repository is OWNER/REPO")));
+        return Err(ApiError::bad(FractalError::new("validation-failed", "a repository is OWNER/REPO")));
     }
     let locator = format!("{owner}/{repository}");
     let local_only = query.local.is_some();
@@ -321,8 +321,8 @@ async fn answer(
     }
 }
 
-fn internal_error(error: impl std::fmt::Display) -> St3Error {
-    St3Error::new("internal", error.to_string())
+fn internal_error(error: impl std::fmt::Display) -> FractalError {
+    FractalError::new("internal", error.to_string())
 }
 
 fn merge(envelope: &mut Value, body: Value) {

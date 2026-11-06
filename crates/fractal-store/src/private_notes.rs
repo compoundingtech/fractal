@@ -1,6 +1,6 @@
 //! Owner-local private notes: catalog-derived identity, filesystem byte authority,
 //! and private durable mutation receipts. Nothing in this module enters fleet replication.
-use crate::model::St3Error;
+use crate::model::FractalError;
 use crate::private_notes_fs as fs;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
@@ -60,25 +60,25 @@ struct Resolved {
     generation: String,
 }
 
-fn refusal(code: &'static str, message: &str) -> St3Error { St3Error::new(code, message) }
-fn io(error: std::io::Error) -> St3Error {
+fn refusal(code: &'static str, message: &str) -> FractalError { FractalError::new(code, message) }
+fn io(error: std::io::Error) -> FractalError {
     let code = if error.kind() == std::io::ErrorKind::PermissionDenied { "forbidden" } else { "private-notes-unreachable" };
     // Filesystem error strings can reveal private realization paths; report only the class.
     refusal(code, "the owner-local notes source or carrier could not be accessed safely")
 }
-fn database_error(_: rusqlite::Error) -> St3Error {
+fn database_error(_: rusqlite::Error) -> FractalError {
     refusal("private-notes-unreachable", "the private notes recovery ledger is unavailable")
 }
 fn digest(bytes: &[u8]) -> String { hex::encode(Sha256::digest(bytes)) }
 
-pub fn operation_key(actor: &str, key: &str) -> Result<String, St3Error> {
+pub fn operation_key(actor: &str, key: &str) -> Result<String, FractalError> {
     let encoded = serde_json::to_string(&(actor, key))
         .map_err(|_| refusal("internal", "notes key could not be encoded"))?;
     Ok(digest(encoded.as_bytes()))
 }
 
 impl Authority {
-    fn resolve(&self, node: &str, uri: &PrivateNotesUri) -> Result<Resolved, St3Error> {
+    fn resolve(&self, node: &str, uri: &PrivateNotesUri) -> Result<Resolved, FractalError> {
         if uri.host() != node {
             return Err(refusal("forbidden", "private notes belong to a different owner node"));
         }
@@ -135,7 +135,7 @@ impl Authority {
         resolved.ok_or_else(|| refusal("not-found", "no declared owner-local notes binding exists"))
     }
 
-    pub fn read(&self, node: &str, uri: &str) -> Result<Notes, St3Error> {
+    pub fn read(&self, node: &str, uri: &str) -> Result<Notes, FractalError> {
         let uri = PrivateNotesUri::parse(uri).map_err(|error| refusal("validation-failed", &error.message))?;
         let resolved = self.resolve(node, &uri)?;
         let snapshot = fs::read_carrier(&resolved.directory, MAX_BYTES).map_err(io)?;
@@ -147,7 +147,7 @@ impl Authority {
         Ok(Notes { uri: uri.to_string(), markdown, fence })
     }
 
-    pub fn write(&self, node: &str, state_dir: &Path, actor: &str, key: &str, write: &NotesWrite) -> Result<serde_json::Value, St3Error> {
+    pub fn write(&self, node: &str, state_dir: &Path, actor: &str, key: &str, write: &NotesWrite) -> Result<serde_json::Value, FractalError> {
         self.write_with_audit(WriteContext { node, state_dir, actor, key }, write, || Ok(()), || Ok(()))
     }
 
@@ -155,9 +155,9 @@ impl Authority {
     /// A failed completion leaves this URI blocked until the original key recovers.
     pub fn write_with_audit(
         &self, context: WriteContext<'_>, write: &NotesWrite,
-        requested: impl FnOnce() -> Result<(), St3Error>,
-        completed: impl FnOnce() -> Result<(), St3Error>,
-    ) -> Result<serde_json::Value, St3Error> {
+        requested: impl FnOnce() -> Result<(), FractalError>,
+        completed: impl FnOnce() -> Result<(), FractalError>,
+    ) -> Result<serde_json::Value, FractalError> {
         let WriteContext { node, state_dir, actor, key } = context;
         if !fits_client_response(&write.markdown) { return Err(refusal("validation-failed", "notes exceed the encoded client response limit")); }
         let uri = PrivateNotesUri::parse(&write.uri).map_err(|error| refusal("validation-failed", &error.message))?;
@@ -235,8 +235,8 @@ impl Authority {
 
 fn finish_audit(
     connection: &Connection, operation: &str,
-    completed: impl FnOnce() -> Result<(), St3Error>,
-) -> Result<(), St3Error> {
+    completed: impl FnOnce() -> Result<(), FractalError>,
+) -> Result<(), FractalError> {
     completed().map_err(|_| refusal("private-notes-indeterminate", "notes completion audit requires exact-key recovery"))?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h963c14fc286a owner=fractal_store::private_notes TODO=bound-or-reference-values-and-reclamation */ "UPDATE notes_operations SET audit_completed=1 WHERE operation=?1", [operation])
         .map_err(|_| refusal("private-notes-indeterminate", "notes completion receipt requires exact-key recovery"))?;
@@ -244,7 +244,7 @@ fn finish_audit(
 }
 
 
-fn ledger(state_dir: &Path) -> Result<Connection, St3Error> {
+fn ledger(state_dir: &Path) -> Result<Connection, FractalError> {
     let path = state_dir.join("private-notes.sqlite");
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
         .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path).map_err(io)?;

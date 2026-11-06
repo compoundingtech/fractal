@@ -923,7 +923,7 @@ async fn agent_start_declaration(
                 && matches!(suspension.phase.as_str(),
                     "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
             {
-                return Err(fractal_daemon::St3Error::new(
+                return Err(fractal_daemon::FractalError::new(
                     "start-suspended",
                     format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
                         suspension.phase),
