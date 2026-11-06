@@ -4,3 +4,5 @@
 pub mod model;
 pub mod plan;
 pub mod projection;
+#[cfg(feature = "ratatui")]
+pub mod widget;
