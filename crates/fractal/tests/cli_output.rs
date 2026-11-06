@@ -98,6 +98,63 @@ async fn shared_cli_output_reports_errors_other_than_a_closed_pipe() {
     assert!(!diagnostic.contains("panicked"), "{diagnostic}");
 }
 
+#[tokio::test]
+async fn json_repair_refusal_preserves_structured_details_and_failure_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("repair.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = axum::Router::new().route("/v1/repair", axum::routing::get(|| async {
+        (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({
+            "api_version": "st3.v1",
+            "request_id": "request/repair-refusal",
+            "snapshot_host": "test-node",
+            "store_index": 1,
+            "code": "legacy-start-proof-unavailable",
+            "message": "could not prove the legacy runtime start is closed",
+            "details": {"stage": "proc-environ", "pid": 123, "errno": 13},
+            "private_debug": "credential-must-not-appear"
+        })))
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let output = run(Some(&socket), &["repair", "dry-run", "--json"], false).await;
+    server.abort();
+    let _ = server.await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value, json!({
+        "status": 422,
+        "code": "legacy-start-proof-unavailable",
+        "message": "could not prove the legacy runtime start is closed",
+        "details": {"stage": "proc-environ", "pid": 123, "errno": 13}
+    }));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("credential-must-not-appear"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("credential-must-not-appear"));
+}
+
+#[tokio::test]
+async fn json_errors_do_not_copy_unstructured_response_bodies() {
+    for body in [
+        "private upstream failure: bearer-secret",
+        r#"{"message":"private upstream failure: bearer-secret"}"#,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("repair.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let app = axum::Router::new().fallback(move || async move {
+            (axum::http::StatusCode::UNPROCESSABLE_ENTITY, body)
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let output = run(Some(&socket), &["repair", "dry-run", "--json"], false).await;
+        server.abort();
+        let _ = server.await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["code"], "command-failed");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("bearer-secret"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("bearer-secret"));
+    }
+}
+
 /// Fleet leave prints the replicated claim before its local membership cleanup and final
 /// leave-cancel request. A truncated receipt must not skip either effect or mask its failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

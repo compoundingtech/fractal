@@ -5541,6 +5541,7 @@ fn record_daemon_commands(args: &UpArgs) {
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     let native_driver = matches!(&cli.command, Command::Driver(_));
+    let json_output = cli.json;
     if native_driver {
         fractal_daemon::telemetry::local_only();
     }
@@ -5574,8 +5575,12 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             if let Some(exit) = error.downcast_ref::<CommandExit>() {
                 return ExitCode::from(exit.0);
             }
-            let message = cli_error_message(&error, native_driver);
-            stderr_message("st", format_args!("{message}"));
+            if json_output {
+                let _ = print_value(&cli_error_json(&error), true);
+            } else {
+                let message = cli_error_message(&error, native_driver);
+                stderr_message("st", format_args!("{message}"));
+            }
             if refused_command(&error) {
                 fractal_daemon::gate_report::note_refusal(&plain_error(&error));
             }
@@ -5675,6 +5680,28 @@ fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
     } else {
         render_client_error(error, mode)
     }
+}
+
+/// Only decoded API fields cross the machine-readable error boundary. Never serialize
+/// arbitrary error chains: transport failures may include credentials or private bodies.
+fn cli_error_json(error: &anyhow::Error) -> Value {
+    if let Some((status, code, message, details)) =
+        fractal_daemon::client::api_error_parts(error)
+    {
+        return json!({"status": status, "code": code, "message": message, "details": details});
+    }
+    if let Some(GeneratedClientError::Api(_, _, envelope)) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GeneratedClientError>())
+    {
+        return json!(envelope);
+    }
+    json!({
+        "code": "command-failed",
+        "message": "the command failed; rerun without --json for diagnostics",
+        "details": {},
+        "status": fractal_daemon::client::http_status(error),
+    })
 }
 
 /// Stable words and codes for scripts, gate output and refusal reports.

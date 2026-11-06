@@ -714,6 +714,13 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
         "start the terminal: Fractal changed while this was on its way, so it was not applied (stale-fence)"
     );
     assert_eq!(cli_error_message(&error, true), plain_error(&error));
+    let structured = cli_error_json(&error);
+    assert_eq!(structured["api_version"], "st3.client.v0");
+    assert_eq!(structured["error_version"], "st3.client.error.v0");
+    assert_eq!(structured["request_id"], "request/test");
+    assert_eq!(structured["code"], "stale-fence");
+    assert_eq!(structured["details"], json!({}));
+    assert!(!structured.to_string().contains("start the terminal"));
 }
 
 #[test]

@@ -107,6 +107,14 @@ fractal repair dry-run
 
 Apply only the exact reviewed token with the procedure in [operational repair](st3/operational-state/README.md#doctor-and-operational-repair). A changed plan needs a new review; repair appends transitions instead of deleting history.
 
+For automation, `fractal repair dry-run --json` also prints structured API failures to
+stdout and exits nonzero. Legacy API failures include `status`, `code`, `message`,
+and `details`; for a 422 `legacy-start-proof-unavailable` refusal, inspect
+`details.stage`, `details.pid`, and `details.errno` when present. Client-v0 failures
+retain their typed error envelope. Unstructured failures emit a generic JSON
+diagnostic rather than copying potentially private response bodies or error chains;
+rerun without `--json` when human diagnostics are needed.
+
 ## What the watchdog does
 
 The runtime watches process liveness, readiness, claim leases, and message delivery; `doctor` reports those facts. A fleet may also run an **operations watchdog mission** that inspects health, groups faults, and routes repairs to an operations agent. That mission is an operating policy, not something every new installation receives automatically. Look for it under Missions, and read its run when it reports a fault; Now should show only what needs your action.
