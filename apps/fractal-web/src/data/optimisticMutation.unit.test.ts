@@ -130,6 +130,7 @@ it.effect('interrupted delivery remains recoverable with the same key', () => Ef
   yield* Fiber.interrupt(sending)
   expect((yield* mutations.view).value).toBe(1)
   expect((yield* SubscriptionRef.get(mutations.state)).pending.get('first')?.phase).toBe('failed')
+  expect(yield* mutations.discardFailed('first')).toBe(false)
   yield* mutations.retry('first')
   expect(attempts).toBe(2)
   expect((yield* SubscriptionRef.get(mutations.state)).pending.get('first')).toMatchObject({ key: 'first', phase: 'accepted' })
@@ -161,7 +162,9 @@ it.effect('explicit abandonment removes only a failed intent before fresh stagin
   const requests: string[] = []
   const mutations = yield* make(({ key }) => Effect.suspend(() => {
     requests.push(key)
-    return key === 'first' ? Effect.fail(new MutationRefused({ message: 'Not applied' })) : Effect.void
+    return key === 'first' ? Effect.fail(new MutationRefused({
+      message: 'Not applied', nonApplication: { _tag: 'Refused', code: 'stale-fence' },
+    })) : Effect.void
   }))
   yield* mutations.submit(command)
   expect(yield* mutations.discardFailed('first')).toBe(true)
@@ -173,4 +176,18 @@ it.effect('explicit abandonment removes only a failed intent before fresh stagin
   expect(yield* mutations.discardFailed('restaged')).toBe(false)
   yield* mutations.accept({ value: 1, applied: ['restaged'] })
   expect(yield* mutations.discardFailed('restaged')).toBe(false)
+}))
+
+it.effect('only explicit non-application proof permits discarding a failed entry', () => Effect.gen(function* () {
+  const failures = [
+    new MutationRefused({ message: 'Never entered transport', nonApplication: { _tag: 'NeverSent' } }),
+    new MutationRefused({ message: 'Admission refused', nonApplication: { _tag: 'Refused', code: 'forbidden' } }),
+    ...['Unknown outcome', 'Network failed', 'Timed out'].map((message) => new MutationRefused({ message })),
+  ]
+  for (const failure of failures) {
+    const mutations = yield* make(() => Effect.fail(failure))
+    yield* mutations.submit(command)
+    expect(yield* mutations.discardFailed('first')).toBe(failure.nonApplication !== undefined)
+    expect((yield* SubscriptionRef.get(mutations.state)).pending.has('first')).toBe(failure.nonApplication === undefined)
+  }
 }))
