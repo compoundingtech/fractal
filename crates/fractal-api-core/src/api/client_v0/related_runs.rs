@@ -4,6 +4,7 @@ use crate::api::waiting_on::{self, DEFAULT_QUIET_AFTER_MS};
 use crate::waiting_on::{RunVerdict, RunWaitingOn};
 
 const DAY_MS: u128 = 86_400_000;
+const MAX_ROWS: usize = 100;
 
 // A pool offer is not a personal relationship.
 const RELATED: &str = r#"
@@ -29,7 +30,7 @@ ORDER BY r.id
 
 fn candidates(store: &Store, agent: &str, now: u128) -> anyhow::Result<Vec<(String, Option<u128>)>> {
     let connection = store.readers.get();
-    let mut query = connection.prepare_cached(RELATED)?;
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h314a3080bc73 owner=fractal_api_core::api::client_v0::related_runs TODO=trace-statement-and-value-representation */ RELATED)?;
     let rows = query.query_map(rusqlite::params![agent, i64::try_from(now.saturating_sub(DAY_MS))?], |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?)))?
         .collect::<Result<Vec<(String, Option<String>)>, _>>()?;
     rows.into_iter().map(|(id, at)| Ok((id, at.map(|at| at.parse()).transpose()?))).collect()
@@ -58,12 +59,15 @@ fn row(wait: &RunWaitingOn, eta: Option<Value>, deadline: Option<u128>, ended: O
     }))
 }
 
-fn sort(rows: &mut [Value]) {
+fn sort(rows: &mut Vec<Value>) -> usize {
     rows.sort_by(|a,b| a["urgency_rank"].as_u64().cmp(&b["urgency_rank"].as_u64())
         .then_with(|| if a["folded"] == true {
             b["completed_at"].as_u64().cmp(&a["completed_at"].as_u64())
         } else { a["deadline_at"].as_u64().unwrap_or(u64::MAX).cmp(&b["deadline_at"].as_u64().unwrap_or(u64::MAX)) })
         .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+    let total = rows.len();
+    rows.truncate(MAX_ROWS);
+    total
 }
 
 pub async fn get(
@@ -91,9 +95,10 @@ pub async fn get(
             let eta = if wait.verdict == RunVerdict::Finished {None} else {store.mission_run_eta(&id, now)?};
             if let Some(value) = row(&wait, eta, deadline, ended, person.as_deref(), now) { rows.push(value); }
         }
-        sort(&mut rows);
+        let total_rows = sort(&mut rows);
         Ok(Json(json!({"kind":"agent-related-runs", "agent_id":agent, "as_of":now,
-            "work_cut":sources.work.cut, "missions_cut":sources.missions.cut, "rows":rows})))
+            "work_cut":sources.work.cut, "missions_cut":sources.missions.cut,
+            "total_rows":total_rows, "truncated":total_rows>rows.len(), "rows":rows})))
     }).await
 }
 
@@ -132,6 +137,57 @@ mod tests {
 
     use super::*;
     use crate::waiting_on::{StepWait, WaitKind};
+
+    #[test]
+    fn individual_offers_seek_the_recipient_index() {
+        let store = Store::open_memory("example").unwrap();
+        let db = store.readers.get();
+        let mut plan = db.prepare(&format!("EXPLAIN QUERY PLAN {RELATED}")).unwrap();
+        let details = plan.query_map(rusqlite::params!["agent/example",0], |r| r.get::<_,String>(3)).unwrap()
+            .collect::<Result<Vec<_>,_>>().unwrap().join("\n");
+        assert!(details.contains("SEARCH step_runs USING COVERING INDEX step_runs_individual_offer_index"), "{details}");
+        assert!(!details.contains("SCAN step_runs"), "{details}");
+    }
+
+    #[test]
+    fn response_bound_keeps_the_most_urgent_rows_and_reports_total() {
+        let mut rows = (0..=MAX_ROWS).rev().map(|n| json!({"id":format!("run/{n:03}"),"urgency_rank":3,"folded":false})).collect();
+        assert_eq!(sort(&mut rows), MAX_ROWS+1);
+        assert_eq!(rows.len(), MAX_ROWS);
+        assert_eq!(rows[0]["id"], "run/000");
+    }
+
+    #[tokio::test]
+    async fn authenticated_session_only_marks_its_own_person_holds() {
+        use crate::{PublishedViewsStore, WorkListStore};
+        use crate::api::published_lists::tests_shared_client_v0_tests::{fold, publish};
+        use tower::ServiceExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        publish(&state.store, r#"version 2
+mission "example" state="ready" report-to="agent/example" {
+ goal "Review."
+ step "check" { assigned-to "person/reviewer" }
+}"#, "publish");
+        state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission:"example".into(), revision:None, workspace:root.path().display().to_string(),
+            requester:Some("person/operator".into()), mode:None, inputs:BTreeMap::new(), idempotency_key:"run".into(),
+        }).unwrap();
+        fold(&state.store);
+        state.store.published_work_list().start();
+        crate::api::published_lists::refresh_work_once(&state.store);
+        for (person, expected) in [("person/reviewer",true),("person/observer",false)] {
+            let app = Router::new().route("/related/{*id}", axum::routing::get(super::get))
+                .layer(Extension(ClientSession::local(Some(person)).unwrap())).with_state(state.clone());
+            let response = app.oneshot(axum::http::Request::builder().uri("/related/agent/example")
+                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+            assert_eq!(value["rows"][0]["waiting_on_you"], expected);
+        }
+    }
 
     fn wait(verdict: RunVerdict) -> RunWaitingOn {
         RunWaitingOn { run:"mission-run/example".into(), mission:"mission/example".into(),
