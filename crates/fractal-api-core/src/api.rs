@@ -1937,6 +1937,9 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-membership-member" | "invalid-membership-bucket"
         | "invalid-membership-key" | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor" | "membership-collection-changed"
+        | "membership-frontier-reset" | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
     )) { return false; }
     matches!(
         code,
@@ -2013,6 +2016,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-membership-key"
         | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor"
+        | "membership-collection-changed"
+        | "membership-frontier-reset"
+        | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
@@ -6811,7 +6819,7 @@ async fn refresh_agent_roster_admitted(
         let submitted = crate::otel::export_enabled().then(Instant::now);
         match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
             roster_worker(true, submitted, None, || {
-                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                let result = crate::task_cpu::profiled_blocking("startup.warmup", || warm_agent_roster(&reader));
                 (result, crate::otel::take_roster_attributes())
             })
         })).await {

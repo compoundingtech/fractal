@@ -384,7 +384,8 @@
    "extra": [
     "clients/typescript/fractal-views/tests/fixtures/prompt-forms.json",
     "fixtures/clients/documents-v1.json",
-    "fixtures/clients/sidebar-v2.json",
+    "fixtures/clients/sidebar/behavior-v1.json",
+    "fixtures/clients/sidebar/behavior.schema.json",
     "fixtures/clients/words.json",
     "fixtures/scenarios",
     "scripts/ci-test-paths.rs"
