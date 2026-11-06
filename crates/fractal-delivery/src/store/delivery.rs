@@ -288,6 +288,10 @@ pub trait DeliveryStore {
     /// work wake (the reconciler reads no other message). Other projection changes must
     /// still run the reconciler, including a recovered stale projection.
     fn claims_since_only_quiet_notifications(&self, after_index: u64) -> Result<bool>;
+    /// The kind of most of the claims since `after_index` that are not quiet notifications, by
+    /// the rule of [`Self::claims_since_only_quiet_notifications`], to name a reconciler wake by
+    /// what woke it. `None` when every new claim is quiet.
+    fn waking_kind_since(&self, after_index: u64) -> Result<Option<String>>;
 }
 
 impl DeliveryStore for Store {
@@ -1245,6 +1249,33 @@ impl DeliveryStore for Store {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok(total != 0 && other == 0)
+    }
+
+    fn waking_kind_since(&self, after_index: u64) -> Result<Option<String>> {
+        let connection = self.readers.get();
+        Ok(connection.query_row(
+            "SELECT kind FROM claims
+             WHERE store_index > ?1
+               AND kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
+                                'sekret.called', 'sekret.exited', 'sekret.refused',
+                                'sekret.changed')
+               AND NOT (
+                 kind IN ('message.sent', 'message.staged', 'message.delivered',
+                          'message.read', 'message.closed')
+                 AND EXISTS (
+                   SELECT 1 FROM claims sent
+                   WHERE sent.subject=claims.subject AND sent.kind='message.sent'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM claims sent
+                   WHERE sent.subject=claims.subject AND sent.kind='message.sent'
+                     AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
+                 )
+               )
+             GROUP BY kind ORDER BY COUNT(*) DESC, kind LIMIT 1",
+            [after_index],
+            |row| row.get(0),
+        ).optional()?)
     }
 }
 

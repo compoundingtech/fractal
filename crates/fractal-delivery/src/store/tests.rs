@@ -155,6 +155,7 @@ fn quiet_claim_detection_requires_only_usage_or_renewal_since_cursor() {
     let store = Store::open_memory("node").unwrap();
     let before = store.index().unwrap();
     assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
+    assert_eq!(store.waking_kind_since(before).unwrap(), None);
     let append = |kind| {
         let mut connection = store.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
@@ -190,6 +191,7 @@ fn quiet_claim_detection_requires_only_usage_or_renewal_since_cursor() {
     append("harness.usage");
     append("work.renewed");
     assert!(store.claims_since_only_quiet_notifications(before).unwrap());
+    assert_eq!(store.waking_kind_since(before).unwrap(), None);
     let after_quiet = store.index().unwrap();
     append("harness.observed");
     assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
@@ -198,6 +200,9 @@ fn quiet_claim_detection_requires_only_usage_or_renewal_since_cursor() {
             .claims_since_only_quiet_notifications(after_quiet)
             .unwrap()
     );
+    // The wake is named by the one claim that is not quiet, though the quiet ones outnumber it.
+    assert_eq!(store.waking_kind_since(before).unwrap().as_deref(), Some("harness.observed"));
+    assert_eq!(store.waking_kind_since(after_quiet).unwrap().as_deref(), Some("harness.observed"));
 }
 
 #[test]
@@ -234,6 +239,7 @@ fn only_work_wake_messages_count_as_reconciler_changes() {
         );
     }
     assert!(store.claims_since_only_quiet_notifications(before).unwrap());
+    assert_eq!(store.waking_kind_since(before).unwrap(), None);
     // A work wake does, and so does the lifecycle of a message this store has not seen sent.
     let before = store.index().unwrap();
     append(
@@ -242,12 +248,15 @@ fn only_work_wake_messages_count_as_reconciler_changes() {
         sent(json!(["st3-work:step-run/test/work"])),
     );
     assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
+    assert_eq!(store.waking_kind_since(before).unwrap().as_deref(), Some("message.sent"));
     let before = store.index().unwrap();
     append("message/wake", "message.read", json!({"status": "read"}));
     assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
+    assert_eq!(store.waking_kind_since(before).unwrap().as_deref(), Some("message.read"));
     let before = store.index().unwrap();
     append("message/unseen", "message.read", json!({"status": "read"}));
     assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
+    assert_eq!(store.waking_kind_since(before).unwrap().as_deref(), Some("message.read"));
 }
 
 #[test]

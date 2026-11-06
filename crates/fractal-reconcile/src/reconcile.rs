@@ -19006,6 +19006,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Wake reconciliation when a background identity measurement completes, counted as a
+    /// launch identity wake.
+    fn launch_input_wake(&self) -> &Arc<dyn Fn() + Send + Sync> {
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::LaunchIdentity, None);
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        })
+    }
+
     fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
         let item = format!("launch-inputs:{}", subject.subject);
         if !self.incremental.needs(&item, now_ms()) {
@@ -19014,18 +19032,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
-        self.launch_input_wake.get_or_init(|| {
-            let incremental = self.incremental.clone();
-            let notify = self.notify.clone();
-            let revision = self.file_watch_revision.clone();
-            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                incremental.touch("launch-identity");
-                notify.notify_one();
-            });
-            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
-            wake
-        });
+        self.launch_input_wake();
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
         let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
         let (result, reads) = smallclaims::touched::record(|| {
@@ -26992,6 +26999,29 @@ agent "import/omp/fixture" {{
             assert!(reconciler.incremental.needs("probe", now_ms()));
             fractal_drivers::harness_admission::identity_measurements_settled();
         }
+    }
+
+    #[tokio::test]
+    async fn a_completed_identity_measurement_is_counted_as_a_launch_identity_wake() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let wakes = || smallclaims::performance::snapshot()["reconciler_wakes"].as_array().unwrap().iter()
+            .find(|row| row["cause"] == "launch identity").map_or(0, |row| row["count"].as_u64().unwrap());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        reconciler.launch_input_wake();
+        let root = tempfile::tempdir().unwrap();
+        let provider = root.path().join("provider");
+        std::fs::write(&provider, "provider bytes").unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = wakes();
+        // An unmeasured executable is measured in the background, and its completion is the wake.
+        assert!(fractal_drivers::harness_admission::executable_identity_ready_with(&provider, &|_| unreachable!())
+            .unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await
+            .expect("a completed measurement must wake reconciliation");
+        fractal_drivers::harness_admission::identity_measurements_settled();
+        assert!(wakes() > before, "the measurement's wake was not counted as a launch identity wake");
     }
 
     #[tokio::test]
