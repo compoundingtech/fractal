@@ -109,7 +109,7 @@ pub fn ready(connection: &Connection) -> Result<bool> {
 }
 
 pub fn advance(readers: &ReadPool, writer: &WriterConnection) -> Result<Page> {
-    advance_with_budget(readers, writer, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET)
+    advance_with_budget(readers, writer, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {})
 }
 
 fn advance_with_budget(
@@ -117,6 +117,8 @@ fn advance_with_budget(
     writer: &WriterConnection,
     read_budget: Duration,
     write_budget: Duration,
+    // Runs between a page's read and its write, where other writers may change its claims.
+    between: &mut dyn FnMut(),
 ) -> Result<Page> {
     let installed: bool = readers.get().query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='operation_claim_digests_backfill')",
@@ -170,6 +172,7 @@ fn advance_with_budget(
             }
         }
     }
+    between();
     // An empty read after both seeks is the end: every claim before the triggers is copied.
     let done = rows.is_empty();
     let mut writer = writer.write_background();
@@ -178,13 +181,17 @@ fn advance_with_budget(
     let mut copied = 0;
     let mut written = 0;
     {
-        // The claim must still be stored: one deleted since the read is gone from the table by
-        // its trigger, and must not come back. One rewritten since is already there by its
-        // trigger, at the same store index, and the copy is ignored.
+        // The claim must still hold the keys the page read: one deleted since is gone from the
+        // table by its trigger, and one rewritten since was copied or dropped by its trigger,
+        // so neither may come back. The page's bodies are the ones its reader just read.
         let mut insert = transaction.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h718ec4f4e28c owner=smallclaims::store::operation_claim_digests TODO=prepare-body-and-predecessor-values */
+            /* sqlite-large-value: allow-for-now lv-h22a91f01cbf8 owner=smallclaims::store::operation_claim_digests TODO=prepare-body-and-predecessor-values */
             "INSERT OR IGNORE INTO operation_claim_digests
-             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM claims WHERE store_index=?1 AND id=?2)",
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS(SELECT 1 FROM claims WHERE store_index=?1 AND id=?2
+               AND json_type(body,'$._operation.id')='text'
+               AND json_type(body,'$._operation.request_digest')='text'
+               AND json_extract(body,'$._operation.id')=?3
+               AND json_extract(body,'$._operation.request_digest')=?4)",
         )?;
         for (store_index, claim_id, operation_id, request_digest) in &rows {
             copied += insert.execute(/* sqlite-large-value: allow-for-now lv-h23892eda4b7e owner=smallclaims::store::operation_claim_digests TODO=trace-statement-and-value-representation */ params![store_index, claim_id, operation_id, request_digest])?;
@@ -239,12 +246,12 @@ mod tests {
                 ).unwrap();
             }
         }
-        let install = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO).unwrap();
+        let install = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
         assert!(!install.ready);
         assert_eq!(install.copied, 0);
         // The audit's order: by operation, then by store index; one claim per page.
         for cursor in [("op/a", 6), ("op/a", 15), ("op/b", 3), ("op/b", 18)] {
-            let page = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO).unwrap();
+            let page = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
             assert_eq!((page.ready, page.copied), (false, 1));
             let stored: (String, i64) = store.readers.get().query_row(
                 "SELECT operation, claim_rowid FROM operation_claim_digests_backfill", [],
@@ -253,7 +260,7 @@ mod tests {
             assert_eq!(stored, (cursor.0.to_owned(), cursor.1));
             assert!(!ready(&store.readers.get()).unwrap());
         }
-        let last = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO).unwrap();
+        let last = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
         assert_eq!((last.ready, last.copied), (true, 0));
         assert!(ready(&store.readers.get()).unwrap());
         let copied = store.readers.get()
@@ -268,5 +275,52 @@ mod tests {
                 (store_index, format!("invented-claim/{store_index}"), operation.to_owned(), digest.to_owned())
             });
         assert_eq!(copied, expected);
+    }
+
+    #[test]
+    fn a_claim_rewritten_between_a_pages_read_and_write_keeps_the_keys_its_trigger_left() {
+        let store = Store::open_memory("invented-origin", Arc::new(Plain)).unwrap();
+        {
+            let connection = store.connection.write();
+            for (store_index, body) in [
+                (3, r#"{"_operation":{"id":"op/a","request_digest":"d/1"}}"#),
+                (6, r#"{"_operation":{"id":"op/a","request_digest":"d/2"}}"#),
+                (9, r#"{"_operation":{"id":"op/a","request_digest":"d/3"}}"#),
+                (12, r#"{"_operation":{"id":"op/a","request_digest":"d/4"}}"#),
+            ] {
+                connection.execute(
+                    "INSERT INTO batches(id, origin, replica_sequence, hash, accepted_at_unix_ms)
+                     VALUES (?1, 'local', ?2, ?1, '1')",
+                    params![format!("invented-batch/{store_index}"), store_index],
+                ).unwrap();
+                connection.execute(
+                    "INSERT INTO claims(id, batch_id, subject, kind, origin, body,
+                     predecessors, accepted_at_unix_ms, store_index)
+                     VALUES (?1, ?2, 'invented/subject', 'invented.kind', 'local', ?3, '[]', '1', ?4)",
+                    params![format!("invented-claim/{store_index}"), format!("invented-batch/{store_index}"),
+                        body, store_index],
+                ).unwrap();
+            }
+        }
+        advance(&store.readers, &store.connection).unwrap();
+        // The page reads all four, then each is rewritten or deleted before its copy.
+        let page = advance_with_budget(&store.readers, &store.connection, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {
+            store.connection.write().execute_batch(
+                "UPDATE claims SET body='{\"note\":\"no operation\"}' WHERE store_index=3;
+                 UPDATE claims SET body=json_set(body, '$._operation.request_digest', 'd/8') WHERE store_index=6;
+                 UPDATE claims SET body=json_set(body, '$._operation.id', 'op/b') WHERE store_index=9;
+                 DELETE FROM claims WHERE store_index=12;",
+            ).unwrap();
+        }).unwrap();
+        assert_eq!(page.copied, 0, "every claim the page read changed before its copy");
+        while !advance(&store.readers, &store.connection).unwrap().ready {}
+        let copied = store.readers.get()
+            .prepare("SELECT store_index, operation_id, request_digest FROM operation_claim_digests ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(copied, [(6, "op/a".to_owned(), "d/8".to_owned()), (9, "op/b".to_owned(), "d/3".to_owned())]);
     }
 }
