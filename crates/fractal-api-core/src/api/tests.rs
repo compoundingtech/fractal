@@ -5072,6 +5072,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     .await
     .unwrap()
     .0;
+    let appended: smallclaims::claim::ClaimRecord = serde_json::from_value(appended).unwrap();
     let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
         .await
         .expect("a stream item did not wake the waiter")
