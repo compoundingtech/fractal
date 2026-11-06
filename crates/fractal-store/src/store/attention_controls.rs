@@ -14,6 +14,13 @@ static CURRENT: LazyLock<String> = LazyLock::new(|| canonical_sql(
      ORDER BY CANONICAL_DESC(claims) LIMIT 1",
 ));
 
+pub fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h0b9ffff66424 owner=fractal_store::store::attention_controls TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_attention_control_index
+        ON claims(subject, json_extract(body, '$.fields.attention_id'), json_extract(body, '$.fields.operation'))
+        WHERE kind='attention.control';")?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct AttentionControlState {
     pub dismissed: bool,
@@ -47,9 +54,9 @@ pub struct AttentionControlRequest<'a> {
 /// A newer source revision invalidates suppression without reviving older register values.
 pub fn current(connection: &Connection, person: &str, attention: &str, source_revision: &str) -> Result<AttentionControlState> {
     smallclaims::touched::note_read(|| person.to_owned());
-    let mut statement = connection.prepare_cached(&CURRENT)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h406b27c6ee25 owner=fractal_store::store::attention_controls TODO=trace-statement-and-value-representation */ &CURRENT)?;
     let mut head = |first, second| statement.query_row(
-        params![person, attention, first, second, source_revision],
+        /* sqlite-large-value: allow-for-now lv-h241dc216bf20 owner=fractal_store::store::attention_controls TODO=trace-statement-and-value-representation */ params![person, attention, first, second, source_revision],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<i64>>(3)?)),
     ).optional();
     let dismissed = head("dismiss", "restore")?;
