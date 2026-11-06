@@ -81,8 +81,10 @@ pub fn validate_run_reviewer(
                 .map_err(internal)?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()
                 .map_err(internal)?;
-            for spec in specs.iter().filter_map(|step| step.loop_spec.as_deref()) {
-                validate_loop_history(connection, &generation, spec, &children)?;
+            for step in &specs {
+                if let Some(spec) = step.loop_spec.as_deref() {
+                    validate_loop_history(connection, &generation, &step.path, spec, &children)?;
+                }
             }
             pending.extend(children);
         }
@@ -93,11 +95,13 @@ pub fn validate_run_reviewer(
 fn validate_loop_history(
     connection: &Connection,
     generation: &str,
+    step_path: &str,
     spec: &LoopSpec,
     children: &BTreeSet<String>,
 ) -> Result<(), St3Error> {
     let subject = format!("loop-run/{generation}/{}", spec.path);
-    let parent = format!("step-run/{generation}/{}", spec.path);
+    // Inline nesting rewrites the owning step path, not the loop history path.
+    let parent = format!("step-run/{generation}/{step_path}");
     let unresolved = || St3Error::new("reviewer-owner-unresolved", &subject);
     let mut rounds = BTreeSet::new();
     let mut linked = BTreeMap::new();

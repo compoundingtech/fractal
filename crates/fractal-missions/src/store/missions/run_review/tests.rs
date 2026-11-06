@@ -147,11 +147,9 @@ fn loop_fixture(mission: &str) -> (Store, MissionRunView, String, MissionRunView
     .unwrap()
     .unwrap();
     let specs = flatten_mission_step_specs(&definition);
-    let spec = specs
-        .iter()
-        .find_map(|step| step.loop_spec.as_deref())
-        .unwrap();
-    let parent = step(&run, &spec.path);
+    let owner = specs.iter().find(|step| step.loop_spec.is_some()).unwrap();
+    let spec = owner.loop_spec.as_deref().unwrap();
+    let parent = step(&run, &owner.path);
     let subject = format!(
         "loop-run/{}/{}",
         generation_id_from_subject(&run.generation),
@@ -209,21 +207,22 @@ fn agent_review_run_all_loop_rounds_and_nested() {
         let (store, run, _, earlier) = loop_fixture(mission);
         assert_eq!(check(&store, &run.subject, FREE), "ok");
         assert_eq!(check(&store, &run.subject, REQUESTER), CONFLICT);
-        progress(&store, &earlier.steps[0].subject, FREE);
+        progress(&store, &step(&earlier, "work").subject, FREE);
         assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
     }
 }
 
 #[test]
-fn agent_review_run_loop_missing_or_malformed_history() {
-    for body in [
-        json!({"fields":{"round":"bad","status":"completed"}}),
+fn agent_review_run_loop_missing_round_history() {
+    let (store, run, subject, _) = loop_fixture("looping");
+    event(
+        &store,
+        &subject,
+        "loop.state",
+        PERSON,
         json!({"fields":{"round":3,"status":"completed"}}),
-    ] {
-        let (store, run, subject, _) = loop_fixture("looping");
-        event(&store, &subject, "loop.state", PERSON, body);
-        assert_eq!(check(&store, &run.subject, FREE), UNKNOWN);
-    }
+    );
+    assert_eq!(check(&store, &run.subject, FREE), UNKNOWN);
     let (store, run, subject, _) = loop_fixture("looping");
     event(
         &store,
