@@ -17,21 +17,23 @@ pub(super) async fn read(
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
-    let person = session.authority_actor.as_str();
+    let person = session.authority_actor;
     if !person.starts_with("person/") {
         return Err(forbidden("attention presentation controls require an authenticated person"));
     }
-    let expected = crate::client_values::client_attention_id(&query.source_id, person, &query.episode)
+    let expected = crate::client_values::client_attention_id(&query.source_id, &person, &query.episode)
         .map_err(ApiError::internal)?;
     if expected != id {
         return Err(validation("Attention locator does not match the native item identity"));
     }
-    let source = AttentionControlSource {
-        source_id: &query.source_id, kind: &query.attention_kind, episode: &query.episode,
-    };
-    let controls = state.store.read_attention_control(
-        &source, person, &id, &query.source_revision, client_now_ms(),
-    ).map_err(|error| if error.code == "stale-fence" {
+    let (id, source_revision, controls) = blocking_store(move || {
+        let source = AttentionControlSource {
+            source_id: &query.source_id, kind: &query.attention_kind, episode: &query.episode,
+        };
+        Ok(state.store.read_attention_control(
+            &source, &person, &id, &query.source_revision, client_now_ms(),
+        ).map(|controls| (id, query.source_revision, controls)))
+    }).await?.map_err(|error| if error.code == "stale-fence" {
         ApiError::not_found("attention source is not available for this person")
     } else { ApiError::bad(error) })?;
     let until = controls.snoozed_until_unix_ms.map(|until| {
@@ -40,7 +42,7 @@ pub(super) async fn read(
             .ok_or_else(|| ApiError::internal("stored attention snooze exceeds timestamp range"))
     }).transpose()?;
     Ok(Json(json!({
-        "id": id, "source_revision": query.source_revision, "revision": controls.revision,
+        "id": id, "source_revision": source_revision, "revision": controls.revision,
         "dismissed": controls.dismissed, "snoozed_until": until,
     })))
 }
