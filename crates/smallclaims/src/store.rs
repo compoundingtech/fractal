@@ -8308,6 +8308,20 @@ impl Store {
                         }
                         (AdmissionAuthority::Source, _) => None,
                     };
+                    // Source authority may bypass ordinary membership, never assistant authority.
+                    let hold = if prepared.requires_keyed_writer {
+                        let window = if self.fleet_authority.get().is_some() {
+                            prepared_membership.shard_window(&envelope.writer)
+                        } else {
+                            prepared_membership.window(&envelope.writer, envelope.sequence)
+                        };
+                        hold.or(match window {
+                            crate::fleet::Window::Legacy => Some("unsigned"),
+                            window => window_admission_hold(&pass, window, envelope)?,
+                        })
+                    } else {
+                        hold
+                    };
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Require verified keyed issuers for replicated assistant authority lifecycle claims (R1)",
+  "replay": {"status":"none","detail":"No automatic replay or retroactive removal of already-admitted authority. This changes admission of pending and newly received envelopes only; previously admitted grants require operator review."},
+  "schema": {"status":"none","detail":"No database, claim shape, or schema version changes."},
+  "rules": {"status":"changed","detail":"Replicated assistant begun, granted, policy and revoked claims require a keyed writer window and its verified member signature. Unsigned legacy authority envelopes remain held. Normal keyed signature and writer-fence checks are unchanged; no checkpoint rules version changes."},
+  "compatibility": {"status":"changed","detail":"Update receiving servers first, then other peers before relying on assistant grants. Older peers still apply their old generic custom-claim admission and may accept unsigned lifecycle claims; relaying through them does not bypass an updated receiver's check. Legacy non-assistant replication and trusted-local issuance remain supported. A legacy or no-anchor deployment cannot replicate assistant authority until its issuing writer is admitted and signed under a pinned fleet anchor. Mixed binary versions were not exercised; isolated stores cover keyed and legacy writer windows."},
+  "downtime": {"status":"unknown","detail":"Servers require the normal binary restart; restart duration has not been measured for this change."},
+  "manual": {"status":"changed","detail":"Legacy deployments must complete the documented fleet migration in docs/fleet-join.md (anchor migration, migrate invites/redemption, verification and finish) before using replicated assistant grants. Preserve store identity and keys; do not reset stores or disable verification to bypass held envelopes. Review existing grants because this is not a retroactive cleanup."},
+  "recovery": {"status":"changed","detail":"Roll forward to updated servers and keyed membership. Downgrading restores the unsigned assistant-authority admission vulnerability and does not remove previously admitted claims; it is not a security recovery."}
+}

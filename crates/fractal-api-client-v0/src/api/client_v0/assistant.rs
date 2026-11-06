@@ -249,6 +249,7 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
 
 #[cfg(test)]
 mod tests {
+    mod replication_tests;
     use super::*;
 
     const ISSUER: &str = "person/operator";
