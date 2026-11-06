@@ -72,11 +72,15 @@ pub fn stopping(seat: &str) -> FractalError {
 }
 
 /// Refuse `actor`'s claim of `step` while its declaration is a stop, unless the step is work the
-/// stop found it holding in another run.
+/// stop found it holding in another run. A rollout that holds the seat's intake already decided
+/// which work it may finish (`rollouts::intake_held`), so its stop is not this one to judge.
 pub fn admit_claim(tx: &Connection, actor: &str, step: &str) -> Result<(), FractalError> {
     let Some((owner_run, cut)) = stop_cut(tx, actor).map_err(internal)? else {
         return Ok(());
     };
+    if rollouts::operation(tx, actor)?.is_some_and(|operation| operation.holds_intake()) {
+        return Ok(());
+    }
     let held = match owner_run {
         Some(owner) => !held_work(tx, actor, &owner, Some(cut), Some(step))
             .map_err(internal)?
