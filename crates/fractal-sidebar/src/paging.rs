@@ -3,14 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::MembershipInput;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Scope { pub owner: String, pub container: String, pub endpoint: String, pub host: String, pub projection: String }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token { pub scope: Scope, pub generation: u64, pub attempt: u64 }
 /// Epoch changes (including maintenance) are incomparable, not numerically ordered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frontier { pub epoch: String, pub changed_index: u64, pub live_count: u64 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot { pub id: String, pub host_id: String, pub store_index: u64, pub projection_version: String, pub created_at: String, pub expires_at: String }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Complete { pub scope: Scope, pub frontier: Frontier, pub snapshots: Vec<Snapshot>, pub members: Vec<MembershipInput> }

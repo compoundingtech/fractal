@@ -4,18 +4,19 @@
 //! A compound plan retains only the dependent identity: memberships must be replanned after folders.
 use crate::{paging::{Scope, Snapshot}, plan::{MoveIntent, V2Plan}};
 use fractal_schema::{arrangements, ordered_membership};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity { pub actor: String, pub action_id: String, pub idempotency_key: String }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Base { pub scope: Scope, pub snapshot: Snapshot, pub revision: String, pub ready: bool }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operations { Folders(Vec<arrangements::Operation>), Memberships(Vec<ordered_membership::Operation>) }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request { pub identity: Identity, pub fence: Base, pub operations: Operations }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status { Intent, AwaitingPersistence, Sending, UnknownDelivery, AwaitingObservation, AwaitingCompletionPersistence, AwaitingFreshBase, Observed, Refused, PartiallyApplied }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal { InvalidPlan, StaleFence, Unauthorized, DestinationMissing, Conflict, Storage }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect { PersistPending, Send, ReadBase, PersistCompletion, PersistRemoval, Replan }
@@ -27,6 +28,21 @@ pub enum Event {
     /// Replan memberships against this complete post-folder base; deleted destinations refuse.
     Fresh(Base, Result<Vec<ordered_membership::Operation>, Refusal>),
 }
+/// Version failures are distinct from corrupt records and records belonging to another scope.
+#[derive(Debug)]
+pub enum RestoreError { Version(u32), InvalidRecord(serde_json::Error), ScopeMismatch }
+pub const JOURNAL_VERSION: u32 = 1;
+#[derive(Serialize)]
+struct Journal<'a> { version: u32, state: &'a Edits }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredJournal<'a> {
+    version: u32,
+    #[serde(borrow)]
+    state: &'a serde_json::value::RawValue,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Edits {
     scope: Scope,
     intent: MoveIntent,
@@ -44,6 +60,33 @@ impl Edits {
     pub fn intent(&self) -> Option<&MoveIntent> { (self.status != Status::Observed).then_some(&self.intent) }
     /// Send/replay effects always borrow this immutable request; never regenerate its identity/fence.
     pub fn request(&self) -> Option<&Request> { self.request.as_ref() }
+    /// Capture immediately for each persistence effect, before processing another event.
+    /// The host atomically replaces the scoped record and acknowledges only that write.
+    /// This contains identities and fences, never connection credentials or transport objects.
+    pub fn journal(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&Journal { version: JOURNAL_VERSION, state: self })
+    }
+    /// Restore only host-owned durable bytes. New plans still require a fresh complete base.
+    /// Sending is ambiguous after a crash: re-persist, then replay the immutable request.
+    /// Observation/completion markers never replay an already completed step.
+    pub fn restore(bytes: &[u8], scope: &Scope) -> Result<(Self, Vec<Effect>), RestoreError> {
+        let journal: StoredJournal<'_> = serde_json::from_slice(bytes).map_err(RestoreError::InvalidRecord)?;
+        if journal.version != JOURNAL_VERSION { return Err(RestoreError::Version(journal.version)); }
+        let mut state: Self = serde_json::from_str(journal.state.get()).map_err(RestoreError::InvalidRecord)?;
+        if state.scope != *scope || state.request.as_ref().is_some_and(|request| request.fence.scope != *scope) {
+            return Err(RestoreError::ScopeMismatch);
+        }
+        let effects = match state.status {
+            Status::AwaitingPersistence | Status::Sending | Status::UnknownDelivery => {
+                state.status = Status::AwaitingPersistence; vec![Effect::PersistPending]
+            }
+            Status::AwaitingCompletionPersistence => vec![Effect::PersistCompletion],
+            Status::Observed => vec![Effect::PersistRemoval],
+            Status::Intent => vec![Effect::ReadBase, Effect::Replan],
+            Status::AwaitingObservation | Status::AwaitingFreshBase | Status::Refused | Status::PartiallyApplied => vec![Effect::ReadBase],
+        };
+        Ok((state, effects))
+    }
     fn valid_base(&self, base: &Base) -> bool {
         base.ready && base.scope == self.scope && base.snapshot.host_id == self.scope.host && base.snapshot.projection_version == self.scope.projection
     }
@@ -265,5 +308,84 @@ mod tests {
             }
             assert!(state.reduce(Event::Replay).is_empty());
         }
+    }
+    #[test]
+    fn journal_crash_replay_requires_matching_persistence_and_keeps_exact_request() {
+        for phase in 0..4 {
+            let mut original = state(); stage(&mut original, false, true);
+            if phase > 0 { original.reduce(Event::Persisted(id(2))); }
+            if phase == 2 { original.reduce(Event::Unknown(id(2))); }
+            if phase == 3 { original.reduce(Event::Ack(id(2))); }
+            let bytes = original.journal().unwrap();
+            let (mut restored, effects) = Edits::restore(&bytes, &scope()).unwrap();
+            assert_eq!(restored.request(), original.request()); assert_eq!(restored.intent(), original.intent());
+            assert!(restored.reduce(Event::Replay).is_empty());
+            if phase == 3 {
+                assert_eq!(effects, vec![Effect::ReadBase]);
+                assert_eq!(restored.status, Status::AwaitingObservation);
+                assert!(restored.reduce(Event::Persisted(id(2))).is_empty());
+            } else {
+                assert_eq!(effects, vec![Effect::PersistPending]);
+                for event in [Event::Persisted(id(99)), Event::Ack(id(2)), Event::Observed(id(2)), Event::CompletionPersisted(id(2))] {
+                    assert!(restored.reduce(event).is_empty());
+                }
+                assert_eq!(restored.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
+                assert_eq!(restored.request(), original.request());
+                assert!(restored.reduce(Event::Persisted(id(2))).is_empty());
+            }
+        }
+    }
+    #[test]
+    fn journal_partial_completion_survives_every_dependent_step_boundary() {
+        let mut original = state(); stage(&mut original, true, true);
+        original.reduce(Event::Persisted(id(1))); original.reduce(Event::Observed(id(1)));
+        let (mut restored, effects) = Edits::restore(&original.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistCompletion]); assert!(restored.folder_completed);
+        assert!(restored.reduce(Event::Replay).is_empty());
+        assert!(restored.reduce(Event::Fresh(base(2), Ok(members()))).is_empty());
+        assert_eq!(restored.reduce(Event::CompletionPersisted(id(1))), vec![Effect::ReadBase]);
+        let (mut restored, effects) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::ReadBase]); assert_eq!(restored.status, Status::AwaitingFreshBase);
+        assert!(restored.reduce(Event::CompletionPersisted(id(1))).is_empty());
+        assert_eq!(restored.reduce(Event::Fresh(base(1), Ok(members()))), vec![Effect::ReadBase]);
+        assert_eq!(restored.reduce(Event::Fresh(base(2), Ok(members()))), vec![Effect::PersistPending]);
+        let exact = restored.request().cloned().unwrap();
+        let (mut restored, effects) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistPending]); assert!(restored.folder_completed);
+        assert_eq!(restored.request(), Some(&exact)); assert_eq!(exact.identity, id(2));
+        assert_eq!(exact.fence, base(2)); assert!(matches!(exact.operations, Operations::Memberships(_)));
+        assert!(restored.reduce(Event::Persisted(id(1))).is_empty());
+        restored.reduce(Event::Persisted(id(2))); restored.reduce(Event::Refused(id(2), Refusal::Unauthorized));
+        let (mut restored, _) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(restored.status, Status::PartiallyApplied); assert_eq!(restored.refusal, Some(Refusal::Unauthorized));
+        assert!(restored.intent().is_some()); assert!(restored.reduce(Event::Replay).is_empty());
+    }
+    #[test]
+    fn journal_observed_steps_never_reapply_even_if_removal_was_not_persisted() {
+        let mut original = state(); stage(&mut original, false, true);
+        original.reduce(Event::Persisted(id(2))); original.reduce(Event::Observed(id(2)));
+        let (mut restored, effects) = Edits::restore(&original.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistCompletion]); assert!(restored.reduce(Event::Replay).is_empty());
+        assert_eq!(restored.reduce(Event::CompletionPersisted(id(2))), vec![Effect::PersistRemoval]);
+        let (mut restored, effects) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistRemoval]); assert!(restored.intent().is_none());
+        for event in [Event::Replay, Event::Persisted(id(2)), Event::Observed(id(2)), Event::CompletionPersisted(id(2))] {
+            assert!(restored.reduce(event).is_empty());
+        }
+    }
+    #[test]
+    fn journal_refuses_versions_before_decoding_state_and_rejects_wrong_scope() {
+        for version in [0, JOURNAL_VERSION + 1, u32::MAX] {
+            let bytes = format!(r#"{{"version":{version},"state":{{"future":"unknown shape"}}}}"#);
+            assert!(matches!(Edits::restore(bytes.as_bytes(), &scope()), Err(RestoreError::Version(found)) if found == version));
+        }
+        let mut original = state(); stage(&mut original, false, true);
+        for field in 0..5 {
+            let mut other = scope();
+            match field { 0 => other.owner.push('b'), 1 => other.container.push('b'), 2 => other.endpoint.push('b'), 3 => other.host.push('b'), _ => other.projection.push('b') }
+            assert!(matches!(Edits::restore(&original.journal().unwrap(), &other), Err(RestoreError::ScopeMismatch)));
+        }
+        assert!(matches!(Edits::restore(br#"{"version":1,"state":{}}"#, &scope()), Err(RestoreError::InvalidRecord(_))));
+        assert!(matches!(Edits::restore(b"not json", &scope()), Err(RestoreError::InvalidRecord(_))));
     }
 }
