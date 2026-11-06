@@ -107,4 +107,73 @@ describe('native attention controls', () => {
     const result = await sending
     expect(result._tag === 'Sent' && result.undo).toBeTypeOf('function')
   })
+
+  it.each<AlertAction>([{ type: 'attention.dismiss' }, { type: 'attention.snooze', until: '2026-11-06T11:00:00Z' }])(
+    'reads exact hidden control after ACK for $type, not from the ACK itself', async (action) => {
+      const ack = Promise.withResolvers<{ value: { status: string; control_revision: string } }>()
+      const proof = Promise.withResolvers<{ value: {
+        id: string; source_revision: string; revision: string; dismissed: boolean; snoozed_until: string | null
+      } }>()
+      const reading = Promise.withResolvers<void>()
+      const attentionControlsGet = vi.fn((_id: string, _query: unknown) => { reading.resolve(); return proof.promise })
+      const send = vi.fn(() => ack.promise)
+      const inbox = optimisticAlertActions(gatewayAlertActions({
+        capabilities, attentionDismiss: send, attentionSnooze: send, attentionControlsGet,
+      } as unknown as FractalClient))
+      await Effect.runPromise(inbox.accept([alert]))
+      const sending = inbox.port.act({ alert, action })
+      expect(attentionControlsGet).not.toHaveBeenCalled()
+      ack.resolve({ value: { status: 'completed', control_revision: 'control/r1' } })
+      await reading.promise
+      await Effect.runPromise(inbox.accept([]))
+      expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(1)
+      expect(attentionControlsGet).toHaveBeenCalledExactlyOnceWith(alert.id, {
+        source_id: alert.source_id, attention_kind: alert.attention_kind, episode: alert.episode, source_revision: 'semantic/r1',
+      })
+      proof.resolve({ value: { id: alert.id, source_revision: 'semantic/r1', revision: 'control/r1',
+        dismissed: action.type === 'attention.dismiss', snoozed_until: action.type === 'attention.snooze' ? action.until : null } })
+      const result = await sending
+      expect(result._tag === 'Sent' && result.undo).toBeTypeOf('function')
+      const state = Effect.runSync(SubscriptionRef.get(inbox.state))
+      expect(state.pending.size).toBe(0)
+      expect(state.frame).toEqual([])
+    },
+  )
+
+  it.each(['reconnect', 'retry'])('retains accepted state on proof read failure and reads again on %s without resending', async (trigger) => {
+    const act = vi.fn(async () => ({ _tag: 'Sent', controlRevision: 'control/r1' } as const))
+    const readControl = vi.fn(async () => {
+      if (readControl.mock.calls.length === 1) throw new TypeError('network')
+      return { id: alert.id, ...alert.presentation_control!, revision: Option.some('control/r1'), dismissed: true }
+    })
+    const inbox = optimisticAlertActions({ act, readControl })
+    await Effect.runPromise(inbox.accept([alert]))
+    await inbox.port.act({ alert, action: { type: 'attention.dismiss' } })
+    await Effect.runPromise(inbox.accept([]))
+    const pending = Effect.runSync(SubscriptionRef.get(inbox.state)).pending
+    expect([...pending.values()][0]?.phase).toBe('accepted')
+    expect(readControl).toHaveBeenCalledTimes(1)
+    if (trigger === 'reconnect') await Effect.runPromise(inbox.refreshControls)
+    else await inbox.port.act({ alert, action: { type: 'attention.dismiss' } })
+    expect(readControl).toHaveBeenCalledTimes(2)
+    expect(act).toHaveBeenCalledTimes(1)
+    expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
+    await Effect.runPromise(inbox.refreshControls)
+    expect(readControl).toHaveBeenCalledTimes(2)
+  })
+
+  it('matches native id, source revision, receipt and concrete state without settling source answers', async () => {
+    const inbox = optimisticAlertActions({ act: async () => ({ _tag: 'Sent', controlRevision: 'control/r1' }) })
+    await inbox.port.act({ alert, action: { type: 'attention.dismiss' } })
+    await inbox.port.act({ alert: { ...alert, id: 'attention/source-answer' }, action: { type: 'work.done', summary: 'Done' } })
+    const proof = { id: alert.id, ...alert.presentation_control!, revision: Option.some('control/r1'), dismissed: true }
+    for (const invalid of [{ ...proof, id: 'attention/other' }, { ...proof, source_revision: 'semantic/other' },
+      { ...proof, revision: Option.some('control/other') }, { ...proof, dismissed: false }]) {
+      await Effect.runPromise(inbox.acceptControl(invalid))
+      expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(2)
+    }
+    await Effect.runPromise(inbox.acceptControl(proof))
+    const pending = Effect.runSync(SubscriptionRef.get(inbox.state)).pending
+    expect([...pending.values()].map((entry) => entry.action.action.type)).toEqual(['work.done'])
+  })
 })

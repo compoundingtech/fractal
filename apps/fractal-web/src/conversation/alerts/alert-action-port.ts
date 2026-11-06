@@ -1,6 +1,6 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
-import type * as Native from '@fractal/client/schema'
-import { Option } from 'effect'
+import * as Native from '@fractal/client/schema'
+import { Option, Schema } from 'effect'
 import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
@@ -39,6 +39,7 @@ export type AlertAction =
 export type AlertActionRequest = { readonly alert: AlertAnswered; readonly action: AlertAction; readonly key?: string }
 export interface AlertActionPort {
   readonly act: (request: AlertActionRequest) => Promise<AlertActionResult>
+  readonly readControl?: (alert: AlertAnswered) => Promise<Native.AttentionControl>
   readonly forget?: (key: string) => void
 }
 
@@ -224,5 +225,16 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
       )
     }
   }
-  return { act, forget: (key) => { attempts.delete(key); prompts.forget?.(key) } }
+  return {
+    act, forget: (key) => { attempts.delete(key); prompts.forget?.(key) },
+    readControl: async (alert) => {
+      if (alert.presentation_control === undefined || alert.attention_kind === undefined)
+        return Promise.reject(new TypeError('This alert lacks native control metadata.'))
+      const response = await client.attentionControlsGet(alert.id, {
+        source_id: alert.source_id, attention_kind: alert.attention_kind, episode: alert.episode,
+        source_revision: alert.presentation_control.source_revision,
+      })
+      return Schema.decodeUnknownSync(Native.AttentionControl)(response.value)
+    },
+  }
 }

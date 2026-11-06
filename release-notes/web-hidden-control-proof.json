@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reconcile hidden inbox dismiss and snooze overlays using an authenticated exact control read after ACK and once on transport reconnect. Bounded feed omission and mutation receipts alone never prove application.",
+  "replay": {"status": "none", "detail": "Proof read failures preserve accepted shared pending state for explicit retry or reconnect without resending the mutation. Undo retains fresh action keys and receipt-fenced revisions."},
+  "schema": {"status": "none", "detail": "Consumes the generated attentionControlsGet endpoint and decoded AttentionControl schema; no local storage changes."},
+  "rules": {"status": "none", "detail": "Control proofs match native id, semantic source revision, receipt revision and concrete state. Proofs do not settle source answers or insert hidden rows into the attention feed."},
+  "compatibility": {"status": "none", "detail": "Custom action ports may omit proof reads; authoritative attention frames continue to reconcile their controls."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "Deploy with the authenticated attention-control read endpoint and generated clients."},
+  "recovery": {"status": "none", "detail": "Revert the consumer change; native control state remains server-owned."}
+}

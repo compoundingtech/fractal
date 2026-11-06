@@ -20,6 +20,21 @@ const project = (frame: readonly OptimisticAttention[], entry: PendingMutation<A
 export const optimisticAlertActions = (transport: AlertActionPort) => {
   const noticeTargets = new Map<string, AlertAnswered>()
   const receipts = new Map<string, Extract<AlertActionResult, { _tag: 'Sent' }> & { readonly supersedes?: string }>()
+  const reconcileControl = (control: Native.Attention['presentation_control'], mutation: { readonly key: string; readonly action: Answer }) => {
+    const { alert, action } = mutation.action
+    if (action.type !== 'attention.dismiss' && action.type !== 'attention.restore' && action.type !== 'attention.snooze') return 'pending'
+    // An inverse's authoritative frame also proves its predecessor was applied.
+    if (control?.source_revision === alert.presentation_control?.source_revision && control !== undefined &&
+      [...receipts.values()].some((receipt) => receipt.supersedes === mutation.key &&
+        receipt.controlRevision === Option.getOrNull(control.revision))) return 'applied'
+    const revision = receipts.get(mutation.key)?.controlRevision
+    if (control === undefined || revision === undefined || Option.getOrNull(control.revision) !== revision ||
+      control.source_revision !== alert.presentation_control?.source_revision) return 'pending'
+    return (action.type === 'attention.snooze'
+      ? Option.getOrNull(control.snoozed_until) === action.until && control.dismissed === alert.presentation_control?.dismissed
+      : control.dismissed === (action.type === 'attention.dismiss') &&
+        Option.getOrNull(control.snoozed_until) === Option.getOrNull(alert.presentation_control!.snoozed_until)) ? 'applied' : 'pending'
+  }
   const mutations = Effect.runSync(makeOptimisticMutations<readonly Native.Attention[], Answer>({
     initial: [], nextKey: () => `action/${crypto.randomUUID()}`,
     send: ({ key, action }) => Effect.tryPromise({
@@ -33,21 +48,7 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
     project,
     reconcile: (frame, mutation) => {
       const row = frame.find((alert) => alert.id === mutation.action.alert.id)
-      const { alert, action } = mutation.action
-      if (action.type === 'attention.dismiss' || action.type === 'attention.restore' || action.type === 'attention.snooze') {
-        const control = row?.presentation_control
-        // An inverse's authoritative receipt also proves its predecessor was applied.
-        if (control?.source_revision === alert.presentation_control?.source_revision && control !== undefined &&
-          [...receipts.values()].some((receipt) => receipt.supersedes === mutation.key &&
-            receipt.controlRevision === Option.getOrNull(control.revision))) return 'applied'
-        const revision = receipts.get(mutation.key)?.controlRevision
-        if (control === undefined || revision === undefined || Option.getOrNull(control.revision) !== revision ||
-          control.source_revision !== alert.presentation_control?.source_revision) return 'pending'
-        return (action.type === 'attention.snooze'
-          ? Option.getOrNull(control.snoozed_until) === action.until && control.dismissed === alert.presentation_control?.dismissed
-          : control.dismissed === (action.type === 'attention.dismiss') &&
-            Option.getOrNull(control.snoozed_until) === Option.getOrNull(alert.presentation_control!.snoozed_until)) ? 'applied' : 'pending'
-      }
+      if (mutation.action.action.type.startsWith('attention.')) return reconcileControl(row?.presentation_control, mutation)
       return row === undefined || row.state === 'resolved' || row.revision !== mutation.action.alert.revision ? 'applied' : 'pending'
     },
   }))
@@ -65,6 +66,35 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
       yield* mutations.dismissNotice(notice.key)
       noticeTargets.delete(notice.key)
     }
+  })
+  const acceptControl = Effect.fn('OptimisticAlertActions.acceptControl')((control: Native.AttentionControl) =>
+    SubscriptionRef.update(mutations.state, (current) => {
+      const applied = [...current.pending.values()].filter((entry) => entry.action.alert.id === control.id &&
+        reconcileControl(control, entry) === 'applied')
+      const pending = new Map(current.pending)
+      for (const entry of applied) {
+        pending.delete(entry.key)
+        receipts.delete(entry.key)
+        noticeTargets.delete(entry.key)
+        transport.forget?.(entry.key)
+      }
+      // A proof settles only controls; it neither inserts hidden rows nor settles source answers.
+      return { ...current, pending }
+    }),
+  )
+  const readControl = Effect.fn('OptimisticAlertActions.readControl')(function* (alert: AlertAnswered) {
+    const read = transport.readControl
+    if (read === undefined || alert.presentation_control === undefined) return
+    const proof = yield* Effect.tryPromise(() => read(alert)).pipe(Effect.option)
+    // Read failure is not mutation refusal: keep the accepted overlay for explicit retry/reconnect.
+    if (Option.isSome(proof)) yield* acceptControl(proof.value)
+  })
+  const refreshControls = Effect.gen(function* () {
+    const current = yield* SubscriptionRef.get(mutations.state)
+    const alerts = new Map<string, AlertAnswered>()
+    for (const entry of current.pending.values()) if (entry.phase === 'accepted' &&
+      entry.action.action.type.startsWith('attention.')) alerts.set(entry.action.alert.id, entry.action.alert)
+    yield* Effect.forEach(alerts.values(), readControl, { discard: true })
   })
   const port: { readonly act: (request: Answer & { readonly key?: string }) => Promise<AlertActionResult> } = {
     act: (request) => Effect.runPromise(Effect.gen(function* () {
@@ -89,6 +119,8 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
       const receipt = receipts.get(key)
       const control = request.alert.presentation_control
       const action = request.action
+      if (state.pending.get(key)?.phase === 'accepted' && action.type.startsWith('attention.'))
+        yield* readControl(request.alert)
       if (!state.pending.has(key)) { transport.forget?.(key); receipts.delete(key) }
       if (result._tag === 'Sent' && receipt?.controlRevision !== undefined && control !== undefined &&
         (action.type === 'attention.dismiss' || action.type === 'attention.restore' || action.type === 'attention.snooze')) {
@@ -109,7 +141,7 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
     })),
   }
   return {
-    port, state: mutations.state, accept,
+    port, state: mutations.state, accept, acceptControl, refreshControls,
     project: (frame: readonly Native.Attention[], pending: ReadonlyMap<string, PendingMutation<Answer>>, notices: readonly MutationNotice[] = []) => {
       let projected: readonly OptimisticAttention[] = frame
       const superseded = new Set([...pending.values()].map((entry) => entry.action.supersedes))
