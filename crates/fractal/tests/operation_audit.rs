@@ -388,27 +388,23 @@ fn the_fixture_covers_each_edge_by_the_reference() {
     assert!(old_drift(&store).is_empty());
 }
 
-#[test]
-fn the_bounded_audit_matches_the_hydrated_audit_on_every_edge() {
-    let directory = tempfile::tempdir().unwrap();
-    let EdgeStore { store, duplicate } = edge_store(&directory.path().join("state.sqlite3"));
-    assert_eq!(store.operation_projection_drift().unwrap(), Vec::<String>::new());
-
-    let existing = operation_row(&store, "op/active").unwrap().1;
-    let duplicate_canonical = operation_row(&store, "op/duplicate").unwrap().1;
+/// Drift every kind of row the audit compares, and return the operations drifted, sorted.
+fn tamper_every_edge(store: &Store, duplicate: &[String]) -> Vec<&'static str> {
+    let existing = operation_row(store, "op/active").unwrap().1;
+    let duplicate_canonical = operation_row(store, "op/duplicate").unwrap().1;
     let noncanonical_duplicate = duplicate.iter().find(|id| *id != &duplicate_canonical).unwrap();
-    execute(&store, "UPDATE operations SET state='active' WHERE id='op/conflict'", []);
-    execute(&store, "UPDATE operations SET request_digest='d/1' WHERE id='op/empty-digest'", []);
+    execute(store, "UPDATE operations SET state='active' WHERE id='op/conflict'", []);
+    execute(store, "UPDATE operations SET request_digest='d/1' WHERE id='op/empty-digest'", []);
     execute(
-        &store,
+        store,
         "UPDATE operations SET canonical_claim_id=?1 WHERE id='op/duplicate'",
         [noncanonical_duplicate],
     );
-    execute(&store, "DELETE FROM operations WHERE id='op/huge'", []);
-    execute(&store, "DELETE FROM operations WHERE id=''", []);
+    execute(store, "DELETE FROM operations WHERE id='op/huge'", []);
+    execute(store, "DELETE FROM operations WHERE id=''", []);
     for stray in ["op/dropped-only", "op/repaired-only", "op/malformed", "op/zz-stray"] {
         execute(
-            &store,
+            store,
             "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
              VALUES (?1, 'd/1', ?2, 'active')",
             params![stray, existing],
@@ -426,6 +422,16 @@ fn the_bounded_audit_matches_the_hydrated_audit_on_every_edge() {
         "op/zz-stray",
     ];
     changed.sort_unstable();
+    changed
+}
+
+#[test]
+fn the_bounded_audit_matches_the_hydrated_audit_on_every_edge() {
+    let directory = tempfile::tempdir().unwrap();
+    let EdgeStore { store, duplicate } = edge_store(&directory.path().join("state.sqlite3"));
+    assert_eq!(store.operation_projection_drift().unwrap(), Vec::<String>::new());
+
+    let changed = tamper_every_edge(&store, &duplicate);
     let old = old_drift(&store);
     assert_eq!(old, changed);
     assert_eq!(store.operation_projection_drift().unwrap(), old);
@@ -434,6 +440,102 @@ fn the_bounded_audit_matches_the_hydrated_audit_on_every_edge() {
     assert!(old_drift(&store).is_empty());
     assert!(store.operation_projection_drift().unwrap().is_empty());
     assert!(!store.repair_operation_projection_drift().unwrap());
+}
+
+/// Rows where `operation_claim_digests` and the claims' own bodies disagree, both ways.
+const DIGEST_DIFFERENCES: &str =
+    "WITH bodies AS (
+         SELECT store_index, id, json_extract(body, '$._operation.id') AS operation_id,
+                json_extract(body, '$._operation.request_digest') AS request_digest
+         FROM claims WHERE json_type(body, '$._operation.id')='text'
+           AND json_type(body, '$._operation.request_digest')='text'),
+     copies AS (SELECT store_index, claim_id, operation_id, request_digest FROM operation_claim_digests)
+     SELECT (SELECT COUNT(*) FROM (SELECT * FROM bodies EXCEPT SELECT * FROM copies))
+          + (SELECT COUNT(*) FROM (SELECT * FROM copies EXCEPT SELECT * FROM bodies))";
+
+fn digest_differences(store: &Store) -> i64 {
+    store.readers.get().query_row(DIGEST_DIFFERENCES, [], |row| row.get(0)).unwrap()
+}
+
+/// Copy every stored operation claim's keys, as the daemon does after it starts serving.
+fn backfill_digests(store: &Store, between_pages: &mut dyn FnMut(usize)) -> usize {
+    use smallclaims::store::operation_claim_digests as digests;
+    let mut pages = 0;
+    while !digests::advance(&store.readers, &store.connection).unwrap().ready {
+        pages += 1;
+        between_pages(pages);
+    }
+    assert!(digests::ready(&store.readers.get()).unwrap());
+    pages
+}
+
+#[test]
+fn the_audit_from_copied_digests_matches_the_hydrated_audit_on_every_edge() {
+    let directory = tempfile::tempdir().unwrap();
+    let EdgeStore { store, duplicate } = edge_store(&directory.path().join("state.sqlite3"));
+    assert!(backfill_digests(&store, &mut |_| {}) > 1, "the edges span several pages");
+    assert_eq!(digest_differences(&store), 0);
+    assert_eq!(store.operation_projection_drift().unwrap(), Vec::<String>::new());
+
+    let mut changed = tamper_every_edge(&store, &duplicate);
+    // Claims rewritten in place: one digest tampered, and one claim moved to a new operation.
+    execute(
+        &store,
+        "UPDATE claims SET body=json_set(body, '$._operation.request_digest', 'd/9')
+         WHERE subject='custom/audit/active'",
+        [],
+    );
+    execute(
+        &store,
+        "UPDATE claims SET body=json_set(body, '$._operation.id', 'op/moved')
+         WHERE subject='custom/audit/many-0005'",
+        [],
+    );
+    changed.extend(["op/active", "op/many/0005", "op/moved"]);
+    changed.sort_unstable();
+    assert_eq!(digest_differences(&store), 0, "the triggers copy each rewrite");
+    let old = old_drift(&store);
+    assert_eq!(old, changed);
+    assert_eq!(store.operation_projection_drift().unwrap(), old);
+
+    assert!(store.repair_operation_projection_drift().unwrap());
+    assert!(old_drift(&store).is_empty());
+    assert!(store.operation_projection_drift().unwrap().is_empty());
+}
+
+#[test]
+fn the_digest_backfill_copies_every_claim_while_claims_come_and_go_between_its_pages() {
+    let directory = tempfile::tempdir().unwrap();
+    let EdgeStore { store, .. } = edge_store(&directory.path().join("state.sqlite3"));
+    let pages = backfill_digests(&store, &mut |page| {
+        // New operations on both sides of the backfill's cursor, one claim deleted and one
+        // rewritten, each between two of the first pages.
+        if page > 8 {
+            return;
+        }
+        write_claims(
+            &store,
+            vec![
+                claim(format!("a/early/{page:04}"), "d/1", &format!("early-{page:04}")),
+                claim(format!("zz/late/{page:04}"), "d/1", &format!("late-{page:04}")),
+            ],
+            64,
+        );
+        execute(
+            &store,
+            "DELETE FROM claims WHERE subject=?1
+             AND id NOT IN (SELECT canonical_claim_id FROM operations)",
+            [format!("custom/audit/huge-{:04}", page * 3)],
+        );
+        execute(
+            &store,
+            "UPDATE claims SET body=json_set(body, '$._operation.request_digest', 'd/8')
+             WHERE subject=?1",
+            [format!("custom/audit/many-{:04}", page * 5)],
+        );
+    });
+    assert!(pages > 2, "{pages}");
+    assert_eq!(digest_differences(&store), 0);
 }
 
 /// Each observation is one read transaction that has already ended. A pass over more than one

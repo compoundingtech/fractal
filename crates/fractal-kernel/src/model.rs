@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use smallclaims::Error as St3Error;
+pub use smallclaims::Error as FractalError;
 pub use smallclaims::claim::{
     ClaimInput, ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
     ReplicaEnvelopeId, ReplicaEnvelopeSignature,
@@ -106,15 +106,15 @@ pub struct FleetEndpointsRequest {
 /// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 
-/// What a refused send or reply says. The order matters: print in the chat first; an attention
-/// item (`work ask`, `work update`) only when the person asked for one.
-pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. To reach a person, print in the chat; only if the person asked for it, use `work ask` for a decision or `work update` for information";
+/// What a refused send or reply says: factual replies stay in the conversation,
+/// while every new question or decision uses a native work ask.
+pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. Any new question or decision for the person goes through a native `work ask`, even when the person is present. Use `work update` only for information the person asked for";
 
 /// Refuse a message addressed to a person. `recipient` is the canonical recipient subject.
 /// Messages to agents are unchanged.
-pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
+pub fn refuse_person_recipient(recipient: &str) -> Result<(), FractalError> {
     if recipient.starts_with("person/") {
-        return Err(St3Error::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
+        return Err(FractalError::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
     }
     Ok(())
 }
@@ -236,6 +236,140 @@ impl Default for RestartIntensity {
     }
 }
 
+/// Declaration metadata only: these values do not change process priority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeclaredPriority {
+    Background,
+    Normal,
+    Unknown(String),
+}
+
+impl DeclaredPriority {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Background => "background",
+            Self::Normal => "normal",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for DeclaredPriority {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeclaredPriority {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "background" => Self::Background,
+            "normal" => Self::Normal,
+            _ => Self::Unknown(raw),
+        })
+    }
+}
+
+/// A declared label, independent of the enforced capacity lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeclaredLane {
+    Check,
+    Build,
+    Unknown(String),
+}
+
+impl DeclaredLane {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Check => "check",
+            Self::Build => "build",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for DeclaredLane {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeclaredLane {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "check" => Self::Check,
+            "build" => Self::Build,
+            _ => Self::Unknown(raw),
+        })
+    }
+}
+
+/// Declared, not enforced; absence does not mean zero or unlimited.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredBudgets {
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub cpu_seconds: Option<u64>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<String>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub disk_max: Option<String>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+}
+
+impl DeclaredBudgets {
+    pub fn is_empty(&self) -> bool {
+        self.cpu_seconds.is_none()
+            && self.memory_max.is_none()
+            && self.disk_max.is_none()
+            && self.token_budget.is_none()
+    }
+}
+
+/// Read projection of declaration-local metadata, with no inherited values.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeclaredAdmission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<DeclaredPriority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<DeclaredLane>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<DeclaredBudgets>,
+}
+
+impl DeclaredAdmission {
+    pub fn from_declaration(
+        priority: Option<&DeclaredPriority>,
+        lane: Option<&DeclaredLane>,
+        budgets: Option<&DeclaredBudgets>,
+    ) -> Option<Self> {
+        let budgets = budgets.filter(|budgets| !budgets.is_empty());
+        if priority.is_none() && lane.is_none() && budgets.is_none() {
+            return None;
+        }
+        Some(Self {
+            priority: priority.cloned(),
+            lane: lane.cloned(),
+            budgets: budgets.cloned(),
+        })
+    }
+}
+
+fn declared_budgets_absent(budgets: &Option<DeclaredBudgets>) -> bool {
+    budgets.as_ref().is_none_or(DeclaredBudgets::is_empty)
+}
+
+fn declared_nonnull<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemberSpec {
     pub kind: MemberKind,
@@ -268,6 +402,12 @@ pub struct MemberSpec {
     /// (docs/st3/seat-lanes.md). Absent, the seat runs without one. Read at each launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Capacity>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_priority: Option<DeclaredPriority>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_lane: Option<DeclaredLane>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "declared_budgets_absent")]
+    pub declared_budgets: Option<DeclaredBudgets>,
 }
 
 impl MemberSpec {
@@ -414,14 +554,14 @@ impl Serialize for DesiredSubject {
 
 impl DesiredSubject {
     /// Keep the authored KDL name and its normalized member projection identical.
-    pub fn set_display_name(&mut self, name: Option<&str>) -> Result<(), St3Error> {
+    pub fn set_display_name(&mut self, name: Option<&str>) -> Result<(), FractalError> {
         let body = self.desired.as_object_mut()
-            .ok_or_else(|| St3Error::new("invalid-agent-declaration", "agent has no canonical body"))?;
+            .ok_or_else(|| FractalError::new("invalid-agent-declaration", "agent has no canonical body"))?;
         if !body.contains_key("children") {
             body.insert("children".into(), serde_json::json!([]));
         }
         let children = body.get_mut("children").and_then(Value::as_array_mut)
-            .ok_or_else(|| St3Error::new("invalid-agent-declaration", "agent body must be an array"))?;
+            .ok_or_else(|| FractalError::new("invalid-agent-declaration", "agent body must be an array"))?;
         if let Some(name) = name {
             if let Some(child) = children.iter_mut()
                 .find(|child| child.get("name").and_then(Value::as_str) == Some("name"))
@@ -791,6 +931,12 @@ pub struct MissionSpec {
     pub capacity: Option<fractal_runtime::Capacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_selector: Option<WorkSelector>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_priority: Option<DeclaredPriority>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_lane: Option<DeclaredLane>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "declared_budgets_absent")]
+    pub declared_budgets: Option<DeclaredBudgets>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<CompletionSpec>,
     pub goals: Vec<String>,
@@ -2384,14 +2530,14 @@ pub enum LifecycleUnavailableReason {
 }
 
 impl MessageSendRefusal {
-    pub fn into_error(self) -> St3Error {
+    pub fn into_error(self) -> FractalError {
         let (code, variant, recipient) = match &self {
             Self::Retired { recipient, .. } => ("recipient-retired", "Retired", recipient),
             Self::LifecycleUnavailable { recipient, .. } => {
                 ("lifecycle-unavailable", "LifecycleUnavailable", recipient)
             }
         };
-        St3Error::new(
+        FractalError::new(
             code,
             format!("{variant}: recipient `{recipient}` refuses this first send"),
         )
@@ -2698,8 +2844,58 @@ pub struct MissionRunRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionDefinitionView {
+    #[serde(
+        serialize_with = "serialize_mission_definition",
+        deserialize_with = "deserialize_mission_definition"
+    )]
     pub mission: MissionSpec,
     pub updated_at_unix_ms: u128,
+}
+
+fn serialize_mission_definition<S: serde::Serializer>(
+    mission: &MissionSpec,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(mission).map_err(serde::ser::Error::custom)?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| serde::ser::Error::custom("mission definition must be an object"))?;
+    fields.remove("declared_priority");
+    fields.remove("declared_lane");
+    fields.remove("declared_budgets");
+    if let Some(admission) = DeclaredAdmission::from_declaration(
+        mission.declared_priority.as_ref(),
+        mission.declared_lane.as_ref(),
+        mission.declared_budgets.as_ref(),
+    ) {
+        fields.insert(
+            "declared_admission".into(),
+            serde_json::to_value(admission).map_err(serde::ser::Error::custom)?,
+        );
+    }
+    value.serialize(serializer)
+}
+
+fn deserialize_mission_definition<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<MissionSpec, D::Error> {
+    let mut value = Value::deserialize(deserializer)?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| serde::de::Error::custom("mission definition must be an object"))?;
+    let admission = fields
+        .remove("declared_admission")
+        .map(serde_json::from_value::<DeclaredAdmission>)
+        .transpose()
+        .map_err(serde::de::Error::custom)?;
+    let mut mission: MissionSpec =
+        serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+    if let Some(admission) = admission {
+        mission.declared_priority = admission.priority;
+        mission.declared_lane = admission.lane;
+        mission.declared_budgets = admission.budgets.filter(|budgets| !budgets.is_empty());
+    }
+    Ok(mission)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3484,10 +3680,11 @@ mod person_inbox_tests {
             assert_eq!(error.code, PERSON_HAS_NO_INBOX_CODE);
             assert_eq!(error.message, PERSON_HAS_NO_INBOX);
         }
-        let chat = PERSON_HAS_NO_INBOX.find("print in the chat").unwrap();
+        let chat = PERSON_HAS_NO_INBOX.find("print your answer in the chat").unwrap();
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work ask`").unwrap());
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work update`").unwrap());
-        assert!(PERSON_HAS_NO_INBOX.contains("only if the person asked for it"));
+        assert!(PERSON_HAS_NO_INBOX.contains("Any new question or decision for the person"));
+        assert!(PERSON_HAS_NO_INBOX.contains("even when the person is present"));
         assert!(!PERSON_HAS_NO_INBOX.contains("NO REPLY"));
     }
 }
@@ -3506,3 +3703,7 @@ pub fn local_observation_position(record: &ClaimRecord) -> Option<u64> {
         .parse()
         .ok()
 }
+
+#[cfg(test)]
+#[path = "declared_admission_tests.rs"]
+mod declared_admission_tests;

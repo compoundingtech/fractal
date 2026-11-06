@@ -75,7 +75,7 @@ fn ensure_source(row: &Resolution) -> anyhow::Result<()> {
     if row.original.is_none()
         && episode.is_some_and(|episode| row.claim.predecessors.iter().any(|id| id == episode))
     {
-        return Err(anyhow::Error::new(St3Error::new(
+        return Err(anyhow::Error::new(FractalError::new(
             "attention-history-not-ready",
             "the retained resolution's original source is unavailable at this cut; refresh history after replication catches up",
         )));
@@ -186,7 +186,7 @@ pub(super) async fn detail(
                 return Ok((snapshot, None));
             }
             if row.as_ref().is_some_and(|row| row.omitted) {
-                anyhow::bail!(St3Error::new(
+                anyhow::bail!(FractalError::new(
                     "attention-history-not-ready",
                     "this history item exceeds its read bounds or cannot be decoded"
                 ));
@@ -234,7 +234,7 @@ pub(super) async fn page(
             .as_deref()
             .is_some_and(|state| state != "resolved")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "attention history supports person and resolved-state filters",
         )));

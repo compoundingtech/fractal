@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Agents can ask a person independently while continuing claimed work. Omitting --step creates an agent-owned ask; --new-run optionally names it, and --step still explicitly blocks the named work. Independent asks survive idle turns and the end of the requester's owning work. Answered asks cannot subsequently be cancelled by owner-ended cleanup.",
+  "replay": {"status": "none", "detail": "No graph replay is required. Existing independent asks also stop depending on owner-run liveness."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Independent asks consume no agent work capacity. Unnamed asks retain their identity across requester re-declarations; named asks preserve their pre-upgrade identity tuple. Stopping or retiring a requester permanently fences its old asks, including after re-declaration. Older daemons still require --new-run and may cancel managed requesters' asks when their owning work ends. Step-bound refusals now name the step, claim state and corrective action."},
+  "downtime": {"status": "none", "detail": "No startup work."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Withdrawal, answers and configured deadline defaults retain their existing commands and behavior."}
+}

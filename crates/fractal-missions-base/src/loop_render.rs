@@ -1,7 +1,7 @@
 //! Render loop policy, including the last accepted syntax of published legacy loop shapes.
 use kdl::KdlNode;
 use crate::gate_render::{block, duration, node, property, render_gate_node, text};
-use crate::model::{DependencySpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MetricSource, MissionSpec, St3Error};
+use crate::model::{DependencySpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MetricSource, MissionSpec, FractalError};
 
 pub(crate) fn comment(node: &mut KdlNode, message: &str) {
     let mut format = node.format().cloned().unwrap_or_default();
@@ -9,7 +9,7 @@ pub(crate) fn comment(node: &mut KdlNode, message: &str) {
     node.set_format(format);
 }
 
-pub(crate) fn dependencies(values: &[DependencySpec]) -> Result<Vec<KdlNode>, St3Error> {
+pub(crate) fn dependencies(values: &[DependencySpec]) -> Result<Vec<KdlNode>, FractalError> {
     values.iter().map(|dependency| Ok(match dependency {
         DependencySpec::Step { step, state } => node("step", [step.as_str().into(), state.as_str().into()]),
         DependencySpec::Predicate { gate } => render_gate_node(gate)?.children().unwrap().nodes()[0].clone(),
@@ -21,8 +21,8 @@ pub(crate) fn dependencies(values: &[DependencySpec]) -> Result<Vec<KdlNode>, St
 pub fn render_loop_node(
     spec: &LoopSpec,
     after: &[DependencySpec],
-    mission: &impl Fn(&MissionSpec) -> Result<Vec<KdlNode>, St3Error>,
-) -> Result<KdlNode, St3Error> {
+    mission: &impl Fn(&MissionSpec) -> Result<Vec<KdlNode>, FractalError>,
+) -> Result<KdlNode, FractalError> {
     let LoopSpec { id, path: _, max_rounds, timeout_ms, for_each, candidates, metrics, stop,
         until, round, keep_metric, on_keep, on_discard, on_exhausted, exhaustion_attention } = spec;
     let mut root = text("loop", id);
@@ -57,10 +57,10 @@ pub fn render_loop_node(
         let mut plateau = node("plateau", []);
         property(&mut plateau, "metric", metric.as_str());
         property(&mut plateau, "rounds", i128::from(stop.plateau_rounds.ok_or_else(||
-            St3Error::new("unrenderable-mission", "plateau metric has no round count"))?));
+            FractalError::new("unrenderable-mission", "plateau metric has no round count"))?));
         stops.push(plateau);
     } else if stop.plateau_rounds.is_some() {
-        return Err(St3Error::new("unrenderable-mission", "plateau rounds have no metric"));
+        return Err(FractalError::new("unrenderable-mission", "plateau rounds have no metric"));
     }
     for (name, value) in [("repeated-failure", stop.repeated_failure.map(u64::from)),
         ("no-progress", stop.no_progress.map(u64::from)), ("token-budget", stop.token_budget)] {
@@ -141,7 +141,7 @@ mod tests {
         crate::mission::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("test").unwrap()
     }
 
-    fn body(mission: &MissionSpec) -> Result<Vec<KdlNode>, St3Error> {
+    fn body(mission: &MissionSpec) -> Result<Vec<KdlNode>, FractalError> {
         Ok(vec![text("goal", &mission.goals[1]), block(node("completion", []),
             vec![text("when", "all-steps-exhausted")])])
     }

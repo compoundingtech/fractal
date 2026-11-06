@@ -7784,9 +7784,10 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
         assert_eq!(body["code"], "person-has-no-inbox", "{key}");
         let text = body["message"].as_str().unwrap();
         assert!(text.starts_with("people do not have inboxes: print your answer in the chat"), "{text}");
-        let chat = text.find("print in the chat").unwrap();
+        let chat = text.find("print your answer in the chat").unwrap();
         assert!(chat < text.find("work ask").unwrap() && chat < text.find("work update").unwrap());
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     assert_eq!(
         state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
@@ -13286,13 +13287,13 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
 #[test]
 fn identity_rename_refusals_keep_typed_http_statuses() {
     for code in ["identity-cycle", "identity-occupied", "identity-retired-source", "lifecycle-unavailable"] {
-        let error = ApiError::bad(St3Error::new(code, "rename refused"));
+        let error = ApiError::bad(FractalError::new(code, "rename refused"));
         assert_eq!(error.status, StatusCode::CONFLICT, "{code}");
         assert_eq!(error.code, code);
     }
-    assert_eq!(ApiError::bad(St3Error::new("identity-cross-kind", "wrong kind")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-cross-kind", "wrong kind")).status,
         StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(ApiError::bad(St3Error::new("identity-unknown", "missing")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-unknown", "missing")).status,
         StatusCode::NOT_FOUND);
 }
 

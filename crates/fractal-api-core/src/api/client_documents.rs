@@ -14,7 +14,7 @@ pub(super) struct ClientDocumentQuery {
 }
 
 fn invalid_reference() -> ApiError {
-    ApiError::bad(St3Error::new(
+    ApiError::bad(FractalError::new(
         "invalid-document-reference",
         "a document is named `doc/NAME@HASH`, or `doc/NAME` for its latest version",
     ))
@@ -216,7 +216,7 @@ pub(super) async fn document_references(
             found.ok_or_else(|| ApiError::not_found(format!("`{subject}` does not exist")))?;
         step_references(&mission, step.as_deref(), &mut references);
     } else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "document references are read for a message/, mission/, mission-run/ or step-run/ subject",
         )));
