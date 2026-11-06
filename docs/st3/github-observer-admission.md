@@ -321,6 +321,10 @@ legacy-status merging. The same-origin redirect fixture verifies installation
 authorization and separate admission for each hop. No live migration is required.
 
 Response accounting runs once at the one-send transport boundary, including each
-initial installation401, reload401 and final PAT response; resource wrappers do
-not recount the final response. Artifact URL invalidation clears every stable
-principal-qualified cache entry for that exact URL, retaining unrelated URLs.
+initial installation401, reload401, final PAT response and redirect hop. Resource
+configuration registers its accounting observer with the transport before requests
+can be sent; the transport owns the hook, while resource keeps the usage state and
+metrics. A missing observer refuses the request rather than silently dropping
+accounting. Resource wrappers do not recount the final response. Artifact URL
+invalidation clears every stable principal-qualified cache entry for that exact
+URL, retaining unrelated URLs.
