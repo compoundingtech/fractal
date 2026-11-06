@@ -527,13 +527,28 @@ impl Runtime for FractalRuntime {
         holds::stage("lease-renewals", || reapply_local_work_lease_renewals_tx(transaction))
     }
 
+    fn delete_trimmed_claims_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        claims: &[ClaimTombstone],
+        delete: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        resources::delete_trimmed_tx(transaction, claims, delete)
+    }
+
     fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
-        resources::flush_deferred_preparation(transaction, budget)
+        // The subjects a trim's steps left pending first, then the preparation its deletes deferred.
+        let started = std::time::Instant::now();
+        if resources::flush_pending(transaction, budget)? {
+            return Ok(true);
+        }
+        resources::flush_deferred_preparation(transaction, budget.saturating_sub(started.elapsed()))
     }
 
     fn deferred_pending(&self, connection: &Connection) -> Result<bool> {
         Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)
+                OR EXISTS(SELECT 1 FROM local_resource_projection_pending)",
             [],
             |row| row.get(0),
         )?)
