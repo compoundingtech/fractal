@@ -13,11 +13,12 @@ import { MissionEtaLabel } from '../MissionEta'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { AgentRelatedRun, AgentRelatedRuns, RelatedRunWait } from '../../../../../clients/typescript/fractal-client/Models.generated.ts'
 
-export type SidebarRelatedRun = AgentRelatedRun
+export type SidebarRelatedRun = Omit<AgentRelatedRun, 'waits_on'> & { readonly waits_on: readonly RelatedRunWait[] }
+export type SidebarRelatedRunsValue = Omit<AgentRelatedRuns, 'rows'> & { readonly rows: readonly SidebarRelatedRun[] }
 export type SidebarRelatedRunsState =
   | { readonly _tag: 'Loading' }
   | { readonly _tag: 'Failed'; readonly message: string }
-  | { readonly _tag: 'Loaded'; readonly value: AgentRelatedRuns }
+  | { readonly _tag: 'Loaded'; readonly value: SidebarRelatedRunsValue }
 export interface SidebarRelatedRunsProps {
   readonly state: SidebarRelatedRunsState
   /** Accessible name of the section. */
@@ -83,7 +84,7 @@ export function SidebarRelatedRuns({ state, label = 'Related missions', onOpenRu
   return <section aria-label={label} aria-busy={state._tag === 'Loading' || undefined} {...stylex.props(styles.root)}>{body}</section>
 }
 
-function Loaded({ value, label, onOpenRun, now }: { readonly value: AgentRelatedRuns; readonly label: string; readonly onOpenRun: SidebarRelatedRunsProps['onOpenRun']; readonly now: number | undefined }) {
+function Loaded({ value, label, onOpenRun, now }: { readonly value: SidebarRelatedRunsValue; readonly label: string; readonly onOpenRun: SidebarRelatedRunsProps['onOpenRun']; readonly now: number | undefined }) {
   // Server order is kept: filtering partitions without reordering.
   const active = value.rows.filter(run => !run.folded)
   const finished = value.rows.filter(run => run.folded)

@@ -16,15 +16,15 @@ const run = (slug: string, rest: Partial<SidebarRelatedRun>): SidebarRelatedRun 
   deadline_at: null, completed_at: null, current_step: null, waits_on: [], urgency_rank: 3, folded: false, ...rest,
 })
 // Served order: person hold, late, stalled, active, then finished.
-const rows: readonly SidebarRelatedRun[] = [
-  run('release-notes', { status_chip: 'waiting-on-you', waiting_on_you: true, urgency_rank: 0, progress: { done: 2, total: 5 }, current_step: wait('outline', { title: 'Approve the page outline' }), waits_on: [wait('outline', { who: 'person/owner', kind: 'ask' })] }),
+const rows: SidebarRelatedRun[] = [
+  run('release-notes', { status_chip: 'waiting-on-you', waiting_on_you: true, urgency_rank: 0, progress: { done: 2, total: 5 }, current_step: wait('outline', { title: 'Approve the page outline' }), waits_on: [wait('outline', { who: 'person/reviewer', kind: 'ask' })] }),
   run('billing-migration', { late: true, urgency_rank: 1, deadline_at: storyNow - 3_600_000, eta: eta(40, 75), progress: { done: 4, total: 9 }, current_step: wait('backfill', { title: 'Backfill the invoice ledger for every archived account' }) }),
   run('flaky-test-hunt', { status_chip: 'stalled', urgency_rank: 2, progress: { done: 1, total: 4 }, current_step: wait('bisect', { title: 'Bisect the failing run' }), waits_on: [wait('ci', { who: 'agent/ci-runner', kind: 'agent' })] }),
   run('sidebar-polish', { eta: eta(12, 18), current_step: wait('review', { title: 'Review hover scopes' }) }),
   run('docs-refresh', { status: 'completed', status_chip: 'completed', folded: true, urgency_rank: 4, progress: { done: 4, total: 4 }, completed_at: storyNow - 7_200_000 }),
   run('search-index', { status: 'failed', status_chip: 'failed', folded: true, urgency_rank: 4, progress: { done: 2, total: 6 }, completed_at: storyNow - 18_000_000 }),
 ]
-const loaded = (value: readonly SidebarRelatedRun[], total = value.length): SidebarRelatedRunsState => ({ _tag: 'Loaded', value: { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: storyNow, work_cut: 1, missions_cut: 1, total_rows: total, truncated: total > value.length, rows: value } })
+const loaded = (value: SidebarRelatedRun[], total = value.length): SidebarRelatedRunsState => ({ _tag: 'Loaded', value: { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: storyNow, work_cut: 1, missions_cut: 1, total_rows: total, truncated: total > value.length, rows: value } })
 const states: readonly (readonly [string, SidebarRelatedRunsState])[] = [
   ['loaded', loaded(rows)], ['truncated', loaded(rows.slice(2, 4), 140)], ['empty', loaded([])],
   ['loading', { _tag: 'Loading' }], ['failed', { _tag: 'Failed', message: 'the daemon did not answer' }],

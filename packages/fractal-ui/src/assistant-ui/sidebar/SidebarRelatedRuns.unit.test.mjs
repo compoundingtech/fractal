@@ -36,5 +36,5 @@ test('loading, failure and empty states and the row text', () => {
   assert.match(render({ _tag: 'Loading' }), /role="status"[^>]*>Loading related missions/)
   assert.match(render({ _tag: 'Failed', message: 'offline' }), /Related missions unavailable: <!-- -->offline|unavailable: offline/)
   assert.match(render(loaded([])), /No related missions/)
-  assert.equal(relatedRunText(run('x', { late: true, current_step: { step: 's', path: 'p', state: 'open', kind: 'step', title: 'Ship' }, waits_on: [{ step: 's', path: 'p', state: 'open', kind: 'ask', who: 'person/owner' }] })), 'Running, x, 1 of 4 steps, late, Ship, waits on owner')
+  assert.equal(relatedRunText(run('x', { late: true, current_step: { step: 's', path: 'p', state: 'open', kind: 'step', title: 'Ship' }, waits_on: [{ step: 's', path: 'p', state: 'open', kind: 'ask', who: 'person/reviewer' }] })), 'Running, x, 1 of 4 steps, late, Ship, waits on reviewer')
 })
