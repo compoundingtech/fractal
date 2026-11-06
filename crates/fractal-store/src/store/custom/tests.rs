@@ -29,11 +29,10 @@ fn notice_upgrade_revalidates_quiet_legacy_registration_like_replay() {
     let hash = hex::encode(Sha256::digest(&bytes));
     let name = format!("doc/custom-kinds/{hash}");
     store.put_document_as(&name, &bytes, &None, "legacy-manifest", Some("person/example")).unwrap();
-    let claim = store.append_claim(&ClaimInput {
-        subject: substitute.subject(), kind: schema::REGISTERED.into(), actor: Some("person/example".into()),
-        fields: BTreeMap::from([("document".into(), json!(format!("{name}@{hash}")))]),
-        ..empty_input()
-    }).unwrap();
+    let claim = store.connection.batched(|tx| append_claim_tx(
+        tx, store.origin(), &substitute.subject(), schema::REGISTERED, Some("person/example"),
+        &json!({"fields":{"document":format!("{name}@{hash}")}}), &[], None,
+    )).unwrap().unwrap();
     // Emulate a quiet pre-reservation projection, including its old version marker.
     store.connection.batched(|tx| -> Result<()> {
         tx.execute(/* sqlite-large-value: allow-for-now lv-hb426ee0c141e owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO custom_registrations VALUES(?1,?2,?3,?4,?5,?6,?7,'ready',NULL)",
