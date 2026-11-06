@@ -8255,6 +8255,127 @@ fn shard_file_claims(node: &Node, subject: &str) -> u64 {
     .unwrap()
 }
 
+/// An agent's message to `to`, keyed by `key`, written straight into `node`'s messages shard.
+/// Answers whether the shard wrote it, or replayed the send the key already made.
+async fn append_keyed_stream_item(node: &Node, subject: &str, to: &str, key: &str) -> bool {
+    let receipt: Value = node
+        .client()
+        .post(
+            "/v1/internal/test/messages-shard",
+            &ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/fleet-sender".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "agent/fleet-sender", "to": to, "content": format!("stream mail {key}"), "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .unwrap();
+    receipt["appended"].as_bool().expect("a shard append says whether it wrote")
+}
+
+/// The agent-to-agent mail `node` counted in the last day (`GET /v1/usage/messages`).
+async fn agent_mail_counted(node: &Node) -> u64 {
+    let counts: Value = node.client().get("/v1/usage/messages").await.unwrap();
+    counts["agent_to_agent"].as_u64().unwrap()
+}
+
+/// Stream mail counts alike on every member of this build that holds it, beside a member of the
+/// previous release. Each mirrors every stream item its shard holds into its own mail indexes,
+/// whoever the recipient is, so two members with different recipients' mail agree. A keyed
+/// send replays on its writer and reaches the release byte for byte as an unkeyed one, so the
+/// release admits it with no invalid record. A release that does not mirror (v0.3.28 and
+/// earlier: no `messages_stream_mirror`) counts only graph mail; upgraded in place it counts
+/// the stream mail it already held, and rolled back it keeps those counts, then counts what
+/// arrived meanwhile once it upgrades again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_members_that_count_stream_mail_alike() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "a").await;
+    let b = joined(root.path(), &a, "b", &[]).await;
+    b.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    wait_for_stream_peers(&a, &["b", "o"], 90).await;
+    let release_mirrors = newest_start_advertises(&a, "o", "messages_stream_mirror").await;
+    assert!(!release_mirrors || newest_start_advertises(&a, "o", "messages_stream").await);
+
+    // Mail for two recipients, each written on a different member.
+    let items = [
+        ("message/0000000000000c01", &a, "agent/fleet-reader"),
+        ("message/0000000000000c02", &a, "agent/fleet-reader"),
+        ("message/0000000000000c03", &b, "agent/fleet-other"),
+    ];
+    for (subject, writer, to) in items {
+        assert!(append_keyed_stream_item(writer, subject, to, subject).await);
+    }
+    // A retried send replays on its writer: no second item anywhere.
+    assert!(!append_keyed_stream_item(&a, items[0].0, items[0].2, items[0].0).await);
+    for (subject, _, _) in items {
+        for node in [&a, &b] {
+            wait_for_stream_item(node, subject, 90).await;
+        }
+        wait_until("the release holds the stream item", 90, || async { shard_file_claims(&o, subject) == 1 }).await;
+    }
+    for node in [&a, &b] {
+        wait_until("each member of this build counts all three", 60, || async { agent_mail_counted(node).await == 3 }).await;
+    }
+    assert_eq!(shard_file_claims(&a, items[0].0), 1, "the replayed send wrote nothing");
+    let release_counts = agent_mail_counted(&o).await;
+    assert_eq!(release_counts, if release_mirrors { 3 } else { 0 }, "the release counts only what it mirrors");
+    for node in [&a, &b, &o] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // Upgraded in place, the release's member counts the stream mail it already held.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member mirrors what its shard held", 60, || async { agent_mail_counted(&o).await == 3 }).await;
+
+    // Rolled back, it keeps those counts and counts nothing new; upgraded again it catches up.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let late = "message/0000000000000c04";
+    assert!(append_keyed_stream_item(&b, late, "agent/fleet-other", late).await);
+    wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    for node in [&a, &b] {
+        wait_until("each member of this build counts the late item", 60, || async { agent_mail_counted(node).await == 4 }).await;
+    }
+    assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the member catches up on what arrived while it ran the release", 60, || async {
+        agent_mail_counted(&o).await == 4
+    })
+    .await;
+    let status = o.st_json(&["replication", "status"]);
+    assert_eq!(status["invalid_records"], 0, "{status}");
+}
+
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.
 async fn held_claim_kinds(node: &Node) -> Vec<String> {
     let records: Vec<Value> = node.client().get("/v1/replication/records?unresolved=true").await.unwrap();

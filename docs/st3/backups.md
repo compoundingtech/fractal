@@ -297,7 +297,11 @@ then fails to publish, only a shard this restore created is removed. An empty sh
 is not put back, and the restored shard left in its place holds stream items, so move that shard
 aside before restoring again. `stream_arrivals`, where each item fell in this member's graph
 order, is not carried: the restored graph's order is new, and readers record each item again at
-its first read.
+its first read. Nor is `stream_operations`, the idempotency keys this member's own stream sends
+used: a send retried after a restore writes its message again. The graph's mirror of the shard
+(`local_stream_sent` and `local_stream_lifecycle`, which the graph's idle, unread, held and usage
+indexes read) is not carried either; the restored member's daemon rebuilds it from the restored
+shard when it starts.
 
 ### Message marks
 
