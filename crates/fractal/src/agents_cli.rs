@@ -727,7 +727,19 @@ pub(super) async fn run_agents(
                 args.actor,
             )
             .await?;
-            print_value(&response, json_output)
+            print_value(&response, json_output)?;
+            // The same stop was already declared: say why the seat still runs, if it does.
+            if !json_output && !response.changed
+                && let Ok(found) = generated_client(endpoint, None)?.agents_get(&subject).await
+                && let ClientResource::Agent(agent) = found.value
+                && let Some(stopping) = agent.stopping
+            {
+                match stopping.held {
+                    Some(held) => println!("{subject} is already stopping; it is held: {held}"),
+                    None => println!("{subject} is already stopping"),
+                }
+            }
+            Ok(())
         }
         command => run_agent_inspection(endpoint, command, json_output).await,
     }
