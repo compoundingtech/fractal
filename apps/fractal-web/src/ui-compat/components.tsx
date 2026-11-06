@@ -5,7 +5,7 @@ import * as Kit from '@fractal/ui'
 import * as stylex from '@stylexjs/stylex'
 
 export { CheckIcon, CopyIcon, XCircleIcon } from '@fractal/ui'
-export { Tabs, TabList, Tab, TabPanel, MenuTrigger, TooltipTrigger } from 'react-aria-components'
+export { MenuTrigger, TooltipTrigger } from 'react-aria-components'
 export type Language = string
 export type PillVariant = 'gray' | 'blue' | 'green' | 'amber' | 'red' | 'purple'
 export type BadgeVariant = PillVariant | `${PillVariant}-subtle`
