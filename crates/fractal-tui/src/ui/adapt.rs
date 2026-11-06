@@ -1478,6 +1478,7 @@ mod tests {
     fn both_delivery_sentences_are_sts_notes_not_the_persons_words() {
         for note in [
             "The person reads replies in st, not in the agent's session.",
+            "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.",
             "Answer the person in this conversation; people have no inbox, so do not reply with st.",
         ] {
             let delivery = format!("<smalltalk-message id=\"e6\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/e6\">\nis this a watcher?\n</smalltalk-message>\n{note}");
