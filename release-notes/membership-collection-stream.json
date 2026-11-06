@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Join opted-in membership streams to authoritative page metadata and refresh on projection epoch changes",
+  "replay": {"status": "none", "detail": "No replay or projection rebuild is required."},
+  "schema": {"status": "none", "detail": "Existing local membership State is unchanged; the stream adds API-only epoch metadata when explicitly selected."},
+  "rules": {"status": "none", "detail": "Existing collection authorization and row visibility remain in force."},
+  "compatibility": {"status": "none", "detail": "Opted-in snapshot and changes frames carry collection-v1 and authoritative epoch/count/frontier metadata. Legacy frames retain their shapes. Unsupported collection selectors use existing error frames with the exact refusal code. No capability is advertised before typed clients and full acceptance."},
+  "downtime": {"status": "none", "detail": "Normal daemon rollout only."},
+  "manual": {"status": "none", "detail": "No manual steps are required."},
+  "recovery": {"status": "none", "detail": "Scoped windows use fresh atomic store pages instead of retaining pre-maintenance cached rows. Repair and rebuild at an unchanged claim index advance the pinned generation and emit a metadata-only frame. Unrelated writes may still suppress unchanged frames."}
+}

@@ -1302,6 +1302,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collection_stream_joins_pages_and_refreshes_epoch_at_unchanged_index() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-stream-epoch");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "stream-initial", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a1"}
+        ]))).await.unwrap();
+        let route_state = state.clone();
+        let app = axum::Router::new().route("/stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let state = route_state.clone();
+            async move { upgrade.on_upgrade(move |socket| {
+                let windows = collection_windows::Windows::attach(&state.store);
+                collection_stream_socket_with_reader(socket, state,
+                    ClientSession::local(Some("person/ada")).unwrap(), None,
+                    move |state, session, request, permit| {
+                        let windows = windows.clone();
+                        async move { collection_items_with_windows(&state, &session, &request, permit, windows).await }
+                    })
+            }) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+        let command = json!({"kind":"subscribe","id":"scoped","collection":"ordered-memberships",
+            "person":"person/ada","subject":SUBJECT,"limit":1,"paging_contract":"collection-v1"});
+        socket.send(Message::Text(command.to_string().into())).await.unwrap();
+        let initial = membership_frame(&mut socket).await;
+        assert_eq!(initial["kind"], "snapshot");
+        assert_eq!(initial["paging_contract"], "collection-v1");
+        assert_eq!(initial["membership"]["live_count"], 2);
+        declare_resource_member(&state, "resource/unreferenced"); // Commit barrier after metadata.
+        state.event_notify.send_replace(state.store.index().unwrap());
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=200&paging_contract=collection-v1";
+        let (status, page) = membership_json(&state, path, "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["value"]["membership"], initial["membership"]);
+        assert_eq!(page["value"]["items"].as_array().unwrap().len(), 2);
+        assert_eq!(page["value"]["page"]["has_more"], false);
+        assert!(page["snapshot"]["store_index"].as_u64().unwrap() > initial["snapshot"]["store_index"].as_u64().unwrap());
+        // No stream frame at the page's newer whole-host index is needed to finish.
+        edit_memberships(&state, &session, &membership_request(&state, "outside-reorder", json!([
+            {"op":"place","member":"resource/b","bucket":null,"key":"a2"}
+        ]))).await.unwrap();
+        state.event_notify.send_replace(state.store.index().unwrap());
+        let mut previous = membership_frame(&mut socket).await;
+        assert_eq!(previous["kind"], "changes");
+        assert_eq!(previous["upserts"], json!([]));
+        assert_eq!(previous["membership"]["live_count"], 2);
+        assert!(previous["membership"]["changed_index"].as_u64().unwrap() > initial["membership"]["changed_index"].as_u64().unwrap());
+        for rebuild in [false, true] {
+            let index = state.store.index().unwrap();
+            if rebuild { state.store.rebuild_claim_projections().unwrap(); }
+            else {
+                let mut connection = state.store.connection.write();
+                let transaction = connection.transaction().unwrap();
+                crate::store::ordered_membership::repair_frontier(&transaction, SUBJECT).unwrap();
+                transaction.commit().unwrap();
+            }
+            assert_eq!(state.store.index().unwrap(), index);
+            state.event_notify.send_replace(index);
+            let frame = membership_frame(&mut socket).await;
+            assert_eq!(frame["kind"], "changes");
+            assert_eq!(frame["membership"]["changed_index"], previous["membership"]["changed_index"]);
+            assert_eq!(frame["membership"]["live_count"], previous["membership"]["live_count"]);
+            assert_ne!(frame["membership"]["epoch"], previous["membership"]["epoch"]);
+            previous = frame;
+        }
+        let mut legacy = command.clone();
+        legacy["id"] = json!("legacy");
+        legacy.as_object_mut().unwrap().remove("paging_contract");
+        socket.send(Message::Text(legacy.to_string().into())).await.unwrap();
+        let frame = membership_frame(&mut socket).await;
+        assert_eq!(frame["id"], "legacy");
+        assert!(frame.get("paging_contract").is_none());
+        assert!(frame["membership"].get("epoch").is_none());
+        for collection in ["agents", "terminal"] {
+            let mut invalid = command.clone();
+            invalid["id"] = json!("invalid");
+            invalid["collection"] = json!(collection);
+            socket.send(Message::Text(invalid.to_string().into())).await.unwrap();
+            let frame = membership_frame(&mut socket).await;
+            assert_eq!(frame["kind"], "error");
+            assert_eq!(frame["code"], membership_paging::UNSUPPORTED);
+            assert_eq!(frame["retryable"], false);
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn membership_stream_signals_outside_window_edits_and_same_count_reorders() {
         use futures_util::SinkExt as _;
         use tokio_tungstenite::tungstenite::Message;

@@ -66,6 +66,8 @@ pub struct CollectionSubscribe {
     #[serde(default, deserialize_with = "collection_name")]
     pub collection: String,
     pub limit: Option<usize>,
+    /// Explicit ordered-membership paging/stream contract; unknown values are refused.
+    pub paging_contract: Option<String>,
     /// Opt in to complete revision-fenced agents publications, independently of legacy windows.
     #[serde(default, deserialize_with = "deserialize_agents_publication_version")]
     pub agents_publication_version: Option<u8>,
@@ -194,6 +196,7 @@ fn collection_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
 pub enum CollectionRevision {
     Owner(u64),
     Membership(fractal_schema::ordered_membership::State),
+    ScopedMembership(fractal_schema::ordered_membership::State, u64),
 }
 
 pub struct CollectionSubscription {

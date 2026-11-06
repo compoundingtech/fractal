@@ -528,6 +528,11 @@ async fn collection_items_with_windows(
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
+    let collection_contract = membership_paging::selected(
+        request.paging_contract.as_deref(), request.collection == "ordered-memberships",
+    )?;
+    // Scoped windows use the atomic page read, never a cached pre-maintenance row/state pair.
+    let windows = windows.filter(|_| !collection_contract);
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
@@ -854,6 +859,14 @@ async fn collection_items_with_windows(
                     Some(at) => super::roster_snapshot(&state, published.unwrap_or(index), at),
                     None => client_snapshot_at(&state, index),
                 };
+                if collection_contract {
+                    let page = store.ordered_membership_page(
+                        subject.as_deref().expect("selected arrangement subject"), None, limit + 1,
+                    )?;
+                    let has_more = page.items.len() > limit;
+                    return Ok(Ok(Some((snapshot, page.items, has_more,
+                        Some(CollectionRevision::ScopedMembership(page.state, page.generation))))));
+                }
                 let at = snapshot.created_at.clone();
                 // Inventory invalidation is owner-scoped, independent of truncation and
                 // cached prefix equality. Read its projection counter under this same fence.
@@ -1276,8 +1289,15 @@ async fn deliver_collection(
 
 /// The container state an ordered-membership frame carries beside its rows.
 fn add_membership(frame: &mut Value, request: &CollectionSubscribe, pinned: Option<CollectionRevision>) {
-    if let Some(CollectionRevision::Membership(membership)) = pinned {
-        frame["membership"] = json!({"container":request.subject, "live_count":membership.live_count, "changed_index":membership.changed_index});
+    let (membership, generation) = match pinned {
+        Some(CollectionRevision::Membership(state)) => (state, None),
+        Some(CollectionRevision::ScopedMembership(state, generation)) => (state, Some(generation)),
+        _ => return,
+    };
+    frame["membership"] = json!({"container":request.subject, "live_count":membership.live_count, "changed_index":membership.changed_index});
+    if let Some(generation) = generation {
+        frame["paging_contract"] = json!(membership_paging::CONTRACT);
+        frame["membership"]["epoch"] = json!(membership_paging::epoch(generation));
     }
 }
 
@@ -2184,6 +2204,13 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id, "message":"invalid subscription or subscription limit exceeded"})).await { return; }
                             break 'command;
                         }
+                        if let Err(error) = membership_paging::selected(
+                            request.paging_contract.as_deref(), request.collection == "ordered-memberships",
+                        ) {
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":request.id,
+                                "code":error.code, "message":error.message, "retryable":false})).await { return; }
+                            break 'command;
+                        }
                         if let Err(error) = agents_publication_stream::validate_command(&request, &payload) {
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id,
                                 "collection":request.collection, "code":error.code, "message":error.message,
@@ -2470,6 +2497,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                     )).map(|(id, _)| id.clone()));
                     weighed = index;
+                }
+                else {
+                    // Repair/rebuild can commit changed rows at the same claim index.
+                    affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)
+                        && s.request.collection == "ordered-memberships" && s.request.paging_contract.is_some())
+                        .map(|(id, _)| id.clone()));
                 }
                 // Reading the roster before its refresher publishes would serve the one already
                 // held, and read it again once the newer one arrives.
