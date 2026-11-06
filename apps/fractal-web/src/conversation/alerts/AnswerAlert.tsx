@@ -10,6 +10,7 @@ import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/co
 import { AlertButton } from './AlertButton.tsx'
 import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
+import type { OptimisticAttention } from './optimistic-alert-actions.ts'
 
 // Asks, review gates and launch approvals in an agent's conversation, answered in place with the
 // answers the Fractal terminal UI and the phone give: a structured request's named answers, Yes and No for a
@@ -274,7 +275,7 @@ export const AnswerAlert = ({
   onAct,
   now = Date.now(),
 }: {
-  readonly alert: Native.Attention
+  readonly alert: OptimisticAttention
   readonly onAct?: Act
   readonly now?: number
 }): React.ReactNode => {
@@ -284,6 +285,10 @@ export const AnswerAlert = ({
   const [confirming, setConfirming] = React.useState<AlertChoice>()
   const [sending, setSending] = React.useState(false)
   const [status, setStatus] = React.useState<string>()
+  const optimistic = alert.optimisticAnswer
+  const held = sending || optimistic !== undefined
+  const note = optimistic?.phase === 'sending' ? 'Sending answer…' : optimistic?.phase === 'accepted'
+    ? 'Answered. The alert clears once Fractal records it.' : status
   // A new revision may carry a new question under the same id: a pending confirmation or an
   // earlier answer's status belongs to the revision the person read. Their words stay theirs.
   const [read, setRead] = React.useState(alert.revision)
@@ -294,12 +299,12 @@ export const AnswerAlert = ({
   }
   const wordsId = React.useId()
   const takesWords = choices?.some((choice) => choice.words !== 'none') === true
-  const send = (choice: AlertChoice) => {
+  const sendAction = (action: AlertAction, label: string) => {
     if (onAct === undefined) return
     setConfirming(undefined)
     setSending(true)
-    setStatus(`Sending “${choice.label}”…`)
-    void onAct(alert, choice.action(words)).then((result) => {
+    setStatus(`Sending “${label}”…`)
+    void onAct(alert, action).then((result) => {
       setSending(false)
       setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once Fractal records it.' : result.detail)
     })
@@ -339,7 +344,7 @@ export const AnswerAlert = ({
               aria-label={`Your answer to ${from}`}
               placeholder={choices.some((choice) => choice.words === 'required') ? 'Your words, for an answer that needs them' : 'Notes (optional)'}
               value={words}
-              disabled={sending}
+              disabled={held}
               onChange={(event) => setWords(event.target.value)}
               {...stylex.props(styles.words)}
             />
@@ -350,7 +355,7 @@ export const AnswerAlert = ({
                 <AlertButton
                   key={choice.key}
                   tone={choice.tone}
-                  isDisabled={sending || (choice.words === 'required' && words.trim() === '')}
+                  isDisabled={held || (choice.words === 'required' && words.trim() === '')}
                   aria-describedby={choice.consequence ? `${wordsId}-${choice.key}` : undefined}
                   onPress={() => setConfirming(choice)}
                 >
@@ -361,7 +366,7 @@ export const AnswerAlert = ({
           ) : (
             <div {...stylex.props(styles.answers)} role="group" aria-label="Confirm your answer">
               <span>Send “{confirming.label}” to {from}?</span>
-              <AlertButton tone="primary" onPress={() => send(confirming)}>Send</AlertButton>
+              <AlertButton tone="primary" isDisabled={held} onPress={() => sendAction(confirming.action(words), confirming.label)}>Send</AlertButton>
               <AlertButton tone="secondary" onPress={() => setConfirming(undefined)}>Cancel</AlertButton>
             </div>
           )}
@@ -374,7 +379,11 @@ export const AnswerAlert = ({
           ) : null}
         </>
       )}
-      {status ? <div role="status" {...stylex.props(styles.note)}>{status}</div> : null}
+      {optimistic?.phase === 'failed' ? (
+        <div role="status" {...stylex.props(styles.note)}>
+          {optimistic.detail} <AlertButton tone="secondary" isDisabled={sending} onPress={() => sendAction(optimistic.action, 'Retry')}>Retry</AlertButton>
+        </div>
+      ) : note ? <div role="status" {...stylex.props(styles.note)}>{note}</div> : null}
     </section>
   )
 }

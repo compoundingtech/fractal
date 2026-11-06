@@ -29,8 +29,10 @@ export type AlertAction =
   | { readonly type: 'launch.approve' | 'launch.cancel' }
   | { readonly type: 'launch.revise'; readonly feedback: string }
 
+export type AlertActionRequest = { readonly alert: AlertAnswered; readonly action: AlertAction; readonly key?: string }
 export interface AlertActionPort {
-  readonly act: (request: { readonly alert: AlertAnswered; readonly action: AlertAction }) => Promise<AlertActionResult>
+  readonly act: (request: AlertActionRequest) => Promise<AlertActionResult>
+  readonly forget?: (key: string) => void
 }
 
 const refused = (detail: string): AlertActionResult => ({ _tag: 'Refused', detail })
@@ -73,11 +75,21 @@ const shownVariant = (items: readonly unknown[], item: AttentionRead): VariantRe
 /**
  * Reads the alert again, then submits once, fenced on the revision the person read. An alert Fractal
  * no longer holds open, or that no longer offers this answer, is not answered; neither is one
- * that changed since it was read. A failure is never retried: the person sees why.
+ * that changed since it was read. Explicit same-key retries replay the prepared request unchanged.
  */
-export const gatewayAlertActions = (client: FractalClient): AlertActionPort => ({
-  act: async ({ alert, action }) => {
+export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
+  const attempts = new Map<string, () => Promise<{ readonly value: unknown }>>()
+  const outcome = (response: { readonly value: unknown }): AlertActionResult =>
+    (typeof response.value === 'object' && response.value !== null && 'status' in response.value && response.value.status === 'rejected')
+      ? refused('Fractal did not take this answer.') : { _tag: 'Sent' }
+  const act: AlertActionPort['act'] = async ({ alert, action, key }) => {
+    const remember = (send: () => Promise<{ readonly value: unknown }>) => {
+      if (key !== undefined) attempts.set(key, send)
+      return send()
+    }
     try {
+      const retry = key === undefined ? undefined : attempts.get(key)
+      if (retry !== undefined) return outcome(await retry())
       let current
       try {
         current = await client.attentionGet(alert.id)
@@ -93,12 +105,12 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
       const offers = action.type === 'launch.revise' ? 'launch.approve' : action.type
       if (!(item.actions ?? []).includes(offers)) return refused('Fractal no longer offers this answer here.')
       if (item.revision !== alert.revision) return refused('This changed since you read it. Read it again before answering.')
-      const id = `action/${crypto.randomUUID()}`
+      const id = key ?? `action/${crypto.randomUUID()}`
       const seen = { [alert.id]: alert.revision }
       const response = await (async () => {
         switch (action.type) {
           case 'work.done':
-            return client.workDone({
+            return remember(() => client.workDone({
               id,
               idempotency_key: id,
               fence: { snapshot_id: current.snapshot.id, subject_revisions: seen },
@@ -108,16 +120,16 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
                 summary: action.summary,
                 ...(action.answer === undefined ? {} : { answer: action.answer }),
               },
-            })
+            }))
           case 'review.approve':
           case 'review.reject':
           case 'review.request-changes':
-            return REVIEW[action.type](client)({
+            return remember(() => REVIEW[action.type](client)({
               id,
               idempotency_key: id,
               fence: { snapshot_id: current.snapshot.id, subject_revisions: seen },
               parameters: { target_id: alert.source_id, ...(action.reason ? { reason: action.reason } : {}) },
-            })
+            }))
           case 'launch.approve':
           case 'launch.cancel':
           case 'launch.revise': {
@@ -126,41 +138,42 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
             const launch = await client.launchesGet(launchId)
             const read = launch.value as Read
             if (read.kind !== 'launch' || typeof read.revision !== 'string') return 'gone' as const
+            const launchRevision = read.revision
             const fence = { snapshot_id: launch.snapshot.id, subject_revisions: { ...seen, [launchId]: read.revision } }
             if (action.type === 'launch.cancel') {
-              return client.launchCancel({ id, idempotency_key: id, fence, parameters: { target_id: launchId } })
+              return remember(() => client.launchCancel({ id, idempotency_key: id, fence, parameters: { target_id: launchId } }))
             }
             if (action.type === 'launch.revise') {
-              return client.launchRevise({
+              return remember(() => client.launchRevise({
                 id,
                 idempotency_key: id,
-                fence: { snapshot_id: launch.snapshot.id, subject_revisions: { [launchId]: read.revision } },
+                fence: { snapshot_id: launch.snapshot.id, subject_revisions: { [launchId]: launchRevision } },
                 parameters: { launch_id: launchId, feedback: action.feedback },
-              })
+              }))
             }
             const variants = await client.launchVariantsList(launchId, { limit: 50 })
             const variant = shownVariant((variants.value as { items?: readonly unknown[] }).items ?? [], item)
             if (variant === 'unnamed') return 'unnamed' as const
             if (variant === 'changed' || typeof variant.id !== 'string' || typeof variant.revision !== 'string') return 'changed' as const
-            return client.launchApprove({
+            const variantId = variant.id
+            const variantRevision = variant.revision
+            return remember(() => client.launchApprove({
               id,
               idempotency_key: id,
               fence: {
                 ...fence,
-                subject_revisions: { ...fence.subject_revisions, [variant.id]: variant.revision },
+                subject_revisions: { ...fence.subject_revisions, [variantId]: variantRevision },
                 preview_token: variant.preview_token as string,
               },
               parameters: { launch_id: launchId, variant_id: variant.id },
-            } as Parameters<FractalClient['launchApprove']>[0])
+            } as Parameters<FractalClient['launchApprove']>[0]))
           }
         }
       })()
       if (response === 'gone') return refused('This launch is gone.')
       if (response === 'unnamed') return refused('This alert does not say which preview it shows, so it cannot be approved here. Review it in Fractal.')
       if (response === 'changed') return refused('The preview this alert shows has changed. Read it again before approving.')
-      return (response.value as { status?: unknown }).status === 'rejected'
-        ? refused('Fractal did not take this answer.')
-        : { _tag: 'Sent' }
+      return outcome(response)
     } catch (error) {
       return refused(
         error instanceof ClientError
@@ -168,5 +181,6 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
           : 'The answer could not be confirmed; check the alert before answering again. It was not sent again.',
       )
     }
-  },
-})
+  }
+  return { act, forget: (key) => { attempts.delete(key) } }
+}

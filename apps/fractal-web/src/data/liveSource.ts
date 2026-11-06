@@ -38,6 +38,7 @@ import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
 import { gatewayAgentControls } from '../agents/agent-control-port.ts'
 import { gatewayPromptAnswers } from '../conversation/alerts/prompt-answer-port.ts'
 import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts'
+import { optimisticAlertActions } from '../conversation/alerts/optimistic-alert-actions.ts'
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
@@ -755,6 +756,8 @@ export const liveSource = ({
       ),
   })
   const missions = missionsRetained.atom
+  const inboxActions = optimisticAlertActions(gatewayAlertActions(client))
+  const inboxState = Atom.subscriptionRef(inboxActions.state)
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
     follow: ({ fractal, spec }) =>
@@ -769,9 +772,14 @@ export const liveSource = ({
               }
             : event,
         ),
+        Stream.tap((event) => event._tag === 'Observed' ? inboxActions.accept(event.value) : Effect.void),
       ),
   })
-  const attention = attentionRetained.atom
+  const attention = Atom.make((get) => {
+    const feed = get(attentionRetained.atom)
+    const state = get(inboxState)
+    return feed._tag === 'Observed' ? { ...feed, value: inboxActions.project(feed.value, state.pending) } : feed
+  })
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
@@ -1249,7 +1257,7 @@ export const liveSource = ({
       terminalResize: gatewayTerminalResize(client),
       agentControls: gatewayAgentControls(client),
       prompts: gatewayPromptAnswers(client),
-      alertActions: gatewayAlertActions(client),
+      alertActions: inboxActions.port,
       documents: gatewayDocuments(client),
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.

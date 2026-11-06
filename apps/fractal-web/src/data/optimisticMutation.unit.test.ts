@@ -101,6 +101,7 @@ it.effect('Undo immediately sends the inverse under a fresh key', () => Effect.g
   const requests: Mutation<number>[] = []
   const mutations = yield* make((mutation) => Effect.sync(() => { requests.push(mutation) }))
   yield* mutations.submit(command)
+  if (mutations.undo === undefined) return yield* Effect.die('Expected an inverse action')
   yield* mutations.undo(command)
   expect(requests.map(({ key, action }) => ({ key, action }))).toEqual([
     { key: 'first', action: 1 }, { key: 'inverse', action: -1 },

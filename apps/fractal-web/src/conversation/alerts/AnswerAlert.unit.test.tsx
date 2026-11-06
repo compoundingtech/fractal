@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { ClientError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
-import { DateTime, Option } from 'effect'
+import { DateTime, Effect, Option, SubscriptionRef } from 'effect'
 
 // Node rendering exercises the real composition, not the CSS compiler.
 vi.mock('@stylexjs/stylex', () => ({
@@ -16,7 +16,8 @@ vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: v
 
 import { AgentAlerts, conversationAlerts } from './AgentAlerts.tsx'
 import { AnswerAlert, alertChoices, webLink } from './AnswerAlert.tsx'
-import { gatewayAlertActions } from './alert-action-port.ts'
+import { gatewayAlertActions, type AlertActionRequest } from './alert-action-port.ts'
+import { optimisticAlertActions } from './optimistic-alert-actions.ts'
 
 const seat = 'agent/example/atlas'
 const at = '2026-10-14T10:00:00Z'
@@ -369,4 +370,77 @@ describe('served sidebar prompts', () => {
     expect(html).not.toContain('>Allow</button>')
     expect(html).toContain('>Deny</button>')
   })
+})
+
+describe('shared optimistic answers', () => {
+  it('projects failures into every view and retries the same answer identity', async () => {
+    const requests: AlertActionRequest[] = []
+    const act = vi.fn(async (request: AlertActionRequest) => {
+      requests.push(request)
+      return requests.length === 1 ? { _tag: 'Refused' as const, detail: 'Try again' } : { _tag: 'Sent' as const }
+    })
+    const forget = vi.fn()
+    const inbox = optimisticAlertActions({ act, forget })
+    const alert = item({})
+    await Effect.runPromise(inbox.accept([alert]))
+    const action = { type: 'work.done', summary: 'Yes' } as const
+    expect(await inbox.port.act({ alert, action })).toEqual({ _tag: 'Refused', detail: 'Try again' })
+    const state = Effect.runSync(SubscriptionRef.get(inbox.state))
+    const projected = inbox.project([alert], state.pending)[0]!
+    expect(projected.optimisticAnswer).toMatchObject({ phase: 'failed', detail: 'Try again', action })
+    const html = renderToStaticMarkup(<AnswerAlert alert={projected} onAct={async () => ({ _tag: 'Sent' })} />)
+    expect(html).toContain('Retry')
+    expect(html).toContain('Try again')
+    expect(await inbox.port.act({ alert, action })).toEqual({ _tag: 'Sent' })
+    expect(requests[1]?.key).toBe(requests[0]?.key)
+    expect(requests[1]?.action).toEqual(action)
+    expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(1)
+    await Effect.runPromise(inbox.accept([]))
+    expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
+    expect(forget).toHaveBeenCalledWith(requests[0]?.key)
+  })
+
+  it('rolls back structured Dismiss refusals rather than retaining a failed draft', async () => {
+    const inbox = optimisticAlertActions({ act: async () => ({ _tag: 'Refused', detail: 'Not permitted' }) })
+    const alert = item({})
+    await Effect.runPromise(inbox.accept([alert]))
+    expect(await inbox.port.act({ alert, action: { type: 'work.done', summary: 'Dismissed', answer: { id: 'dismiss' } } }))
+      .toEqual({ _tag: 'Refused', detail: 'Not permitted' })
+    expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
+  })
+
+  it('replays the prepared request without changing its fence or idempotency key', async () => {
+    const workDone = vi.fn(async (_request: unknown) => {
+      if (workDone.mock.calls.length === 1) throw new TypeError('network')
+      return { value: { status: 'completed' } }
+    })
+    const attentionGet = vi.fn(async () => ({ snapshot: { id: 'snapshot/original' }, value: {
+      kind: 'attention', state: 'open', revision: 'r1', actions: ['work.done'],
+    } }))
+    const transport = gatewayAlertActions({ attentionGet, workDone } as unknown as FractalClient)
+    const inbox = optimisticAlertActions(transport)
+    const request = { alert: item({}), action: { type: 'work.done', summary: 'Yes' } as const }
+    expect((await inbox.port.act(request))._tag).toBe('Refused')
+    expect((await inbox.port.act(request))._tag).toBe('Sent')
+    expect(attentionGet).toHaveBeenCalledTimes(1)
+    expect(workDone.mock.calls[1]?.[0]).toEqual(workDone.mock.calls[0]?.[0])
+  })
+})
+
+it('shows the pending answer in another view before the transport responds', async () => {
+  const response = Promise.withResolvers<{ readonly _tag: 'Sent' }>()
+  const act = vi.fn(() => response.promise)
+  const inbox = optimisticAlertActions({ act })
+  const alert = item({})
+  await Effect.runPromise(inbox.accept([alert]))
+  const sending = inbox.port.act({ alert, action: { type: 'review.approve' } })
+  await vi.waitFor(() => expect(act).toHaveBeenCalledTimes(1))
+  const projected = inbox.project([alert], Effect.runSync(SubscriptionRef.get(inbox.state)).pending)[0]!
+  expect(projected.optimisticAnswer?.phase).toBe('sending')
+  const html = renderToStaticMarkup(<AnswerAlert alert={projected} onAct={async () => ({ _tag: 'Sent' })} />)
+  expect(html).toContain('Sending answer')
+  expect(html).toContain('disabled')
+  response.resolve({ _tag: 'Sent' })
+  await sending
+  expect(inbox.project([alert], Effect.runSync(SubscriptionRef.get(inbox.state)).pending)[0]?.optimisticAnswer?.phase).toBe('accepted')
 })

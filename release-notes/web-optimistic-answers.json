@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share optimistic answer state across web inbox and conversations",
+  "replay": {"status": "none", "detail": "Answer overlays are connection-local and do not change claim replay."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "Server admission and authoritative revisions remain the source of truth."},
+  "compatibility": {"status": "none", "detail": "Web ask, review and launch answers use the shared mutation lifecycle. Failed answers expose Retry with the original prepared request and idempotency key. All views share pending state until an authoritative attention frame settles it. Structured-ask dismissal refusals roll back with a note."},
+  "downtime": {"status": "none", "detail": "No deployment interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reload discards client-only overlays without changing authoritative answers."}
+}

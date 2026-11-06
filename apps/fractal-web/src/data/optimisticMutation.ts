@@ -36,7 +36,7 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
   readonly send: (mutation: Mutation<TAction>) => Effect.Effect<void, MutationFailure, TRequirements>
   readonly project: (frame: TFrame, mutation: PendingMutation<TAction>) => TFrame
   readonly reconcile: (frame: TFrame, mutation: Mutation<TAction>) => Reconciliation
-  readonly inverse: (action: TAction) => TAction
+  readonly inverse?: (action: TAction) => TAction
   readonly nextKey: () => string
 }) => Effect.gen(function* () {
   const state = yield* SubscriptionRef.make<MutationState<TFrame, TAction>>({
@@ -103,8 +103,9 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
     }),
   )
   // Undo is a new, immediately submitted command, never a delayed/cancelled send.
-  const undo = Effect.fn('OptimisticMutation.undo')((mutation: Mutation<TAction>) => submit({
-    key: options.nextKey(), action: options.inverse(mutation.action), refusal: mutation.refusal,
+  const inverse = options.inverse
+  const undo = inverse === undefined ? undefined : Effect.fn('OptimisticMutation.undo')((mutation: Mutation<TAction>) => submit({
+    key: options.nextKey(), action: inverse(mutation.action), refusal: mutation.refusal,
   }))
   const view = SubscriptionRef.get(state).pipe(Effect.map(({ frame, pending }) => {
     for (const entry of pending.values()) frame = options.project(frame, entry)
