@@ -12,7 +12,9 @@
 //! The mirror is local: it never replicates, is outside every digest and is rebuilt from the
 //! shard. Two cursors in `meta` (the shard store index and the lifecycle rowid it has passed)
 //! commit with the rows they cover, so [`mirror`] resumes where it stopped: after a crash
-//! between a shard write and the mirror, the daemon's start catches up. A subject the graph also
+//! between a shard write and the mirror, the daemon's start catches up. Both only rise: the
+//! shard never removes an item or a lifecycle row, so neither a store index nor a rowid is
+//! reused. A restore writes no cursor, so a restored member mirrors its restored shard anew. A subject the graph also
 //! holds is the graph's: the indexes read the graph's claim first.
 
 use super::*;

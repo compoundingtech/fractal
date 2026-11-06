@@ -20883,12 +20883,6 @@ fn spawn_publication_evidence(store: Arc<Store>) {
     }));
 }
 
-/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
-/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
-/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
-/// is in this build, a commit costs no more than that. A message a drain could not write (the
-/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
-/// commit, so it never holds up new mail.
 /// Mirror the messages shard into the graph's mail indexes (store/stream_mirror.rs): once at
 /// start, which catches up on what a crash left unmirrored, then after each shard commit. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
@@ -20933,6 +20927,12 @@ fn spawn_stream_mirror(store: Arc<Store>) {
     }));
 }
 
+/// Drain the message outbox (message_outbox.rs) once at startup and again after each commit
+/// that leaves a new message in it. The callback performs no SQL and never takes the writer; the
+/// probe is one read of the table on a pooled reader, so while the outbox is empty, as it always
+/// is in this build, a commit costs no more than that. A message a drain could not write (the
+/// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
+/// commit, so it never holds up new mail.
 fn spawn_message_outbox(store: Arc<Store>) {
     const RETRY: Duration = Duration::from_secs(30);
     let (changed, mut receiver) = tokio::sync::watch::channel(());
