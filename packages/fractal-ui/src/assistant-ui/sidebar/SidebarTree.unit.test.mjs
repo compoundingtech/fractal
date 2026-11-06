@@ -2,9 +2,10 @@ import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { createServer } from 'vite'
 import stylex from '@stylexjs/unplugin'
+import { JSDOM } from 'jsdom'
 
 const server = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], server: { middlewareMode: true } })
-const { SidebarTreeLayout } = await server.ssrLoadModule('/src/assistant-ui/sidebar/SidebarTree.tsx')
+const { SidebarTreeLayout, sidebarTreeOwnsRow } = await server.ssrLoadModule('/src/assistant-ui/sidebar/SidebarTree.tsx')
 const { sidebarRowSize } = await server.ssrLoadModule('/src/assistant-ui/composition-tokens.stylex.ts')
 const { Rect, Size } = await server.ssrLoadModule('react-aria-components')
 after(() => server.close())
@@ -31,4 +32,11 @@ test('exact rows skip initial measurement while variable rows and touch variants
   assert.equal(layout.getLayoutInfo('agent').estimatedSize, true, 'touch mission rows are content-measured')
   assert.equal(layout.getLayoutInfo('child').estimatedSize, false)
   assert.equal(layout.getLayoutInfo('folder').estimatedSize, true, 'compact measurements cannot leak into touch layout')
+})
+
+test('nested mission-grid rows do not operate the enclosing tree', () => {
+  const { document } = new JSDOM('<div role="treegrid"><div role="row" id="agent"><div role="grid"><div role="row" id="run"></div></div></div></div>').window
+  const tree = document.querySelector('[role="treegrid"]')
+  assert.equal(sidebarTreeOwnsRow(document.getElementById('agent'), tree), true)
+  assert.equal(sidebarTreeOwnsRow(document.getElementById('run'), tree), false)
 })
