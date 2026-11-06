@@ -28,6 +28,7 @@ fn notice_legacy_cached_attention_does_not_hide_unrelated_items() {
         Ok(())
     }).unwrap().unwrap();
     let views = Views::new(definitions()).unwrap();
+    views.create_schema(&store.connection.write()).unwrap();
     install(&store, &views);
     store.connection.batched(|tx| -> Result<()> {
         tx.execute("INSERT INTO local_attention_open SELECT family,?1,'attention/legacy',person,
