@@ -230,7 +230,7 @@ mod tests {
             fields: BTreeMap::from([
                 ("credential_hash".into(), json!(client_v0::credential_digest(credential))),
                 ("session_actor".into(), json!("client/notice-history")),
-                ("person_id".into(), json!("person/reader")),
+                ("person_id".into(), json!("person/example")),
                 ("scopes".into(), json!(["read.projections"])),
                 ("expires_at_unix_ms".into(), json!(u64::MAX)),
             ]),
