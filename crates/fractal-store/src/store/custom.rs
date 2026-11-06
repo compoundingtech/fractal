@@ -100,11 +100,11 @@ pub struct RegistrationRequest {
     pub manifest: Manifest,
     pub actor: String,
 }
-pub fn typed(e: fractal_schema::ValidationError) -> St3Error {
-    St3Error::new(e.code, e.message)
+pub fn typed(e: fractal_schema::ValidationError) -> FractalError {
+    FractalError::new(e.code, e.message)
 }
-pub fn fail(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-custom-claim", message)
+pub fn fail(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-custom-claim", message)
 }
 pub fn fields(claim: &ClaimRecord) -> BTreeMap<String, Value> {
     claim
@@ -326,9 +326,9 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
 pub fn prepare(
     tx: &Transaction<'_>,
     input: &ClaimInput,
-) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
+) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if input.subject.starts_with(schema::REGISTRY_PREFIX) || input.kind == schema::REGISTERED {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "custom-registration-only",
             "use schema register to publish a registration",
         ));
@@ -751,7 +751,7 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
 }
 
 impl Store {
-    pub fn register_custom_kind(&self, request: &RegistrationRequest) -> Result<Value, St3Error> {
+    pub fn register_custom_kind(&self, request: &RegistrationRequest) -> Result<Value, FractalError> {
         request.manifest.validate().map_err(typed)?;
         validate_actor(&request.actor)?;
         if !request.actor.starts_with("agent/") && !request.actor.starts_with("person/") {
@@ -768,7 +768,7 @@ impl Store {
             &format!("custom-manifest:{hash}"),
             Some(&request.actor),
         )?;
-        self.connection.batched(|tx|->Result<Value,St3Error>{
+        self.connection.batched(|tx|->Result<Value,FractalError>{
             flush(tx).map_err(internal)?;
             let existing:Option<(String,String)>=tx.query_row("SELECT hash,state FROM custom_registrations WHERE subject=?1",[m.subject()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(internal)?;
             if let Some((prior,state))=existing {

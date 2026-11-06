@@ -43,12 +43,12 @@ fn desired_reads_fence_pending_lifecycle_without_a_naming_head() {
             ).unwrap();
             let expected = if state == "invalid" { "conflict" } else { "pending-replication" };
             let error = current_desired_row(&connection, ORIGINAL).err().unwrap();
-            let error = error.downcast_ref::<St3Error>().unwrap();
+            let error = error.downcast_ref::<FractalError>().unwrap();
             assert_eq!(error.code, "lifecycle-unavailable");
             assert_eq!(error.details["reason"], expected);
             drop(connection);
             let error = store.selected_desired_tokens(&[ORIGINAL]).unwrap_err();
-            let error = error.downcast_ref::<St3Error>().unwrap();
+            let error = error.downcast_ref::<FractalError>().unwrap();
             assert_eq!(error.code, "lifecycle-unavailable");
             assert_eq!(error.details["reason"], expected);
             }
