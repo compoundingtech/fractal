@@ -22,6 +22,16 @@ pub struct ResolvedInput {
     pub folders: BTreeMap<String, Option<String>>,
 }
 
+/// One live server membership. Position is already lifted to its effective live bucket;
+/// retired/removed members must be absent from the complete host-supplied set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipInput {
+    pub container: String,
+    pub member: String,
+    pub revision: String,
+    pub position: fractal_schema::ordered_membership::Position,
+}
+
 /// A stable folder or subject identity; prefixes keep their key domains disjoint.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "_tag")]
@@ -50,7 +60,7 @@ pub enum Source {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectedNode {
     pub node: NodeRef,
-    /// The raw register parent, even when resolved placement lifts it elsewhere.
+    /// The raw v1 register parent or the v2 live membership's effective bucket.
     pub parent: Parent,
     /// The authoritative resolved parent used for display and ancestry.
     pub shown_under: Parent,

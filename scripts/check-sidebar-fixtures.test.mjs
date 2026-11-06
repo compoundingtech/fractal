@@ -11,11 +11,26 @@ const mutate = change => { const value = structuredClone(fixtures); change(value
 const folder = '00000000-0000-7000-8000-00000000000a';
 
 test('real sidebar fixtures pass the CLI and the shared schema/public policy', () => {
-  assert.equal(checkFixtures(), 2);
+  assert.equal(checkFixtures(), 3);
   const result = spawnSync(process.execPath, [new URL('./check-sidebar-fixtures.mjs', import.meta.url).pathname], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Sidebar fixture gate passed/);
   assert.doesNotThrow(() => checkFixture(fixtures));
+});
+
+test('v2 live memberships enforce their body/event variant and public identities', () => {
+  const v2 = JSON.parse(readFileSync(new URL('../fixtures/clients/sidebar/behavior-v2.json', import.meta.url), 'utf8'));
+  assert.doesNotThrow(() => checkFixture(v2));
+  for (const change of [
+    value => { value.cases[0].events[0].type = 'ProjectAndPlanV1'; },
+    value => { value.cases[0].initial.memberships[0].position.bucket = 'private-folder'; },
+    value => { value.cases[0].initial.memberships[0].member = 'person/private'; },
+    value => { value.cases[0].initial.memberships[0].unknown = true; },
+    value => { value.cases[0].initial.memberships[0].position.unknown = true; },
+  ]) {
+    const value = structuredClone(v2); change(value);
+    assert.throws(() => checkFixture(value));
+  }
 });
 
 test('generated sidebar buffers and stable hit identities are scrubbed', () => {

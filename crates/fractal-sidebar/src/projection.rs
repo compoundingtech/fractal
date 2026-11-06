@@ -1,4 +1,4 @@
-//! Folder-only sidebar projection and intent validation, without rendering or wire writes.
+//! Sidebar projection and intent validation, without rendering or wire writes.
 //!
 //! Resolved maps are authoritative; inventory adds known subjects but never hides placements.
 //! Revisions remain opaque. Ordering is ordinal, with separate folder/placed/unplaced domains.
@@ -22,17 +22,32 @@ pub fn build(
     arrangement: &ArrangementInput,
     inventory: &[String],
 ) -> Result<SidebarTree, ProjectionError> {
+    build_input(arrangement, inventory, None)
+}
+
+/// Project a complete live v2 membership set, never catalog-only remembered resources.
+/// As in the server's live view, member positions are effective, not raw LWW registers.
+pub fn build_v2(
+    arrangement: &ArrangementInput,
+    memberships: &[MembershipInput],
+) -> Result<SidebarTree, ProjectionError> {
+    build_input(arrangement, &[], Some(memberships))
+}
+
+fn build_input(
+    arrangement: &ArrangementInput,
+    inventory: &[String],
+    memberships: Option<&[MembershipInput]>,
+) -> Result<SidebarTree, ProjectionError> {
     if arrangement.deleted {
         return Err(ProjectionError::ArrangementUnavailable);
     }
-    let body = match &arrangement.body {
-        fractal_schema::arrangements::VersionedBody::V1(body) => body,
-        other => {
-            return Err(ProjectionError::Unsupported {
-                required: 1,
-                advertised: other.version(),
-            });
-        }
+    use fractal_schema::arrangements::VersionedBody;
+    let (folders, placements) = match (&arrangement.body, memberships) {
+        (VersionedBody::V1(body), None) => (&body.folders, Some(&body.placements)),
+        (VersionedBody::V2(body), Some(_)) => (&body.folders, None),
+        (VersionedBody::V1(_), Some(_)) => return Err(ProjectionError::Unsupported { required: 2, advertised: 1 }),
+        (VersionedBody::V2(_), None) => return Err(ProjectionError::Unsupported { required: 1, advertised: 2 }),
     };
     let resolved = arrangement
         .resolved
@@ -44,7 +59,7 @@ pub fn build(
         arrangement_revision: arrangement.revision.clone(),
         deleted_folders: Vec::new(),
     };
-    for (id, folder) in &body.folders {
+    for (id, folder) in folders {
         if folder.tombstone.is_some() {
             tree.deleted_folders.push(id.clone());
             continue;
@@ -64,7 +79,7 @@ pub fn build(
             },
         );
     }
-    for (subject, register) in &body.placements {
+    for (subject, register) in placements.into_iter().flatten() {
         let shown_under = resolved
             .folders
             .get(subject)
@@ -84,6 +99,21 @@ pub fn build(
                 children: Vec::new(),
             },
         );
+    }
+    for membership in memberships.into_iter().flatten() {
+        let node = NodeRef::Subject { subject: membership.member.clone() };
+        if membership.container != arrangement.subject || tree.nodes.contains_key(&node_key(&node)) {
+            return Err(ProjectionError::InvalidResolution);
+        }
+        tree.nodes.insert(node_key(&node), ProjectedNode {
+            node,
+            parent: folder_parent(&membership.position.bucket),
+            shown_under: folder_parent(&membership.position.bucket),
+            key: Some(membership.position.key.clone()),
+            revision: Some(membership.revision.clone()),
+            source: Source::Person,
+            children: Vec::new(),
+        });
     }
     for subject in inventory {
         tree.nodes
