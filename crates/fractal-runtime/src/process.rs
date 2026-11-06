@@ -326,7 +326,7 @@ impl ExecRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let generation: ExecGeneration = match serde_json::from_slice(&bytes) {
+        let mut generation: ExecGeneration = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(error) => return Ok(Some(ExecObservation::Indeterminate(error.to_string()))),
         };
@@ -345,8 +345,12 @@ impl ExecRuntime {
         if generation.exit_code.is_some() || generation.exit_signal.is_some() {
             return self.observe_exited_group(id, generation).map(Some);
         }
-        if let Some(status) = self.take_owned_exit(generation.pid)? {
-            return self.observe_owned_exit(id, generation, status).map(Some);
+        let running = self.reap_owned(id, &mut generation)?;
+        if generation.group_exited {
+            return Ok(Some(ExecObservation::Exited(generation)));
+        }
+        if !running && (generation.exit_code.is_some() || generation.exit_signal.is_some()) {
+            return self.observe_exited_group(id, generation).map(Some);
         }
         #[cfg(test)]
         BEFORE_IDENTITY.with(|hook| {
@@ -361,10 +365,7 @@ impl ExecRuntime {
             // An owned child that exited after the look above is a zombie until it is reaped,
             // so its status is still there to take.
             Ok((_state, token)) if token == generation.start_token => {
-                match self.take_owned_exit(generation.pid)? {
-                    Some(status) => self.observe_owned_exit(id, generation, status).map(Some),
-                    None => self.observe_exited_group(id, generation).map(Some),
-                }
+                self.observe_exited_group(id, generation).map(Some)
             }
             Ok(_) => Ok(Some(ExecObservation::Exited(generation))),
             Err(error) if process_is_absent(&error) => {
@@ -375,33 +376,38 @@ impl ExecRuntime {
         }
     }
 
-    /// Reaps `pid` if it is a child this runtime started and it has exited.
-    fn take_owned_exit(&self, pid: u32) -> Result<Option<std::process::ExitStatus>> {
-        let mut children = self
-            .owned_children
-            .lock()
-            .expect("exec child mutex poisoned");
-        let status = children
-            .get_mut(&pid)
-            .map(Child::try_wait)
-            .transpose()?
-            .flatten();
-        if status.is_some() {
-            children.remove(&pid);
+    /// Reaps `generation`'s leader if this runtime started it and it has exited, and returns
+    /// whether it is a child of this runtime that is still running. The gate poll and a
+    /// reconcile pass can observe one exec at once: whichever reaps the child records its exit
+    /// before it lets the child go, under the child map's lock, and an observer that finds no
+    /// child reads the record again. Otherwise an observer that read the record before the exit
+    /// would find the process gone and record the exit without its code.
+    fn reap_owned(&self, id: &str, generation: &mut ExecGeneration) -> Result<bool> {
+        {
+            let mut children = self
+                .owned_children
+                .lock()
+                .expect("exec child mutex poisoned");
+            if let Some(child) = children.get_mut(&generation.pid) {
+                let Some(status) = child.try_wait()? else {
+                    return Ok(true);
+                };
+                generation.exit_code = status.code();
+                generation.exit_signal = exit_signal(&status);
+                self.write_generation(id, generation)?;
+                children.remove(&generation.pid);
+                return Ok(false);
+            }
         }
-        Ok(status)
-    }
-
-    fn observe_owned_exit(
-        &self,
-        id: &str,
-        mut generation: ExecGeneration,
-        status: std::process::ExitStatus,
-    ) -> Result<ExecObservation> {
-        generation.exit_code = status.code();
-        generation.exit_signal = exit_signal(&status);
-        self.write_generation(id, &generation)?;
-        self.observe_exited_group(id, generation)
+        // Any reaper wrote before it let the child go, so this read, after the lock, sees it.
+        // A record that no longer reads keeps the copy this observer has.
+        if let Ok(Some(current)) = self.read_generation_path(&self.record_path(id))
+            && current.schema == SCHEMA
+            && current.generation_id == generation.generation_id
+        {
+            *generation = current;
+        }
+        Ok(false)
     }
 
     fn observe_exited_group(
@@ -413,30 +419,14 @@ impl ExecRuntime {
         // child before persisting group completion, including while descendants live.
         // A zombie leader thread can still have live sibling threads: never block
         // waiting for the whole process to exit while holding the child-map mutex.
-        if generation.exit_code.is_none() && generation.exit_signal.is_none() {
-            let owned_exit = {
-                let mut children = self
-                    .owned_children
-                    .lock()
-                    .expect("exec child mutex poisoned");
-                let status = children
-                    .get_mut(&generation.pid)
-                    .map(Child::try_wait)
-                    .transpose()?;
-                if matches!(status, Some(Some(_))) {
-                    children.remove(&generation.pid);
-                }
-                status
-            };
-            match owned_exit {
-                Some(Some(status)) => {
-                    generation.exit_code = status.code();
-                    generation.exit_signal = exit_signal(&status);
-                    self.write_generation(id, &generation)?;
-                }
-                Some(None) => return Ok(ExecObservation::Running(generation)),
-                None => {}
-            }
+        if generation.exit_code.is_none()
+            && generation.exit_signal.is_none()
+            && self.reap_owned(id, &mut generation)?
+        {
+            return Ok(ExecObservation::Running(generation));
+        }
+        if generation.group_exited {
+            return Ok(ExecObservation::Exited(generation));
         }
         match observe_exited_group(generation)? {
             ExecObservation::Exited(mut generation) => {
@@ -679,7 +669,10 @@ impl ExecRuntime {
 
     fn write_generation(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
         let path = self.record_path(id);
-        let temporary = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        // Two observers in this process can write one record at once.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = path.with_extension(format!("json.tmp.{}.{write}", std::process::id()));
         let mut file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -1256,6 +1249,56 @@ mod tests {
                     thread::sleep(Duration::from_millis(10));
                 }
                 panic!("the exec never exited");
+            }))
+        });
+        let observed = runtime.observe("work").unwrap();
+        BEFORE_IDENTITY.with(|hook| *hook.borrow_mut() = None);
+        let Some(ExecObservation::Exited(generation)) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(generation.exit_code, Some(3));
+        assert_eq!(wait_for_exit(&runtime, "work").exit_code, Some(3));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exit_reaped_by_a_concurrent_observer_keeps_its_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let go = root.path().join("go");
+        runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "while [ ! -e go ]; do sleep 0.01; done; exit 3".into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        // The daemon's gate poll and its reconcile pass observe one exec at once. This observer
+        // read the record and found its child still running; another reaps it before this one
+        // reads its process, which is then gone.
+        let other = runtime.clone();
+        BEFORE_IDENTITY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |pid| {
+                fs::write(&go, "").unwrap();
+                for _ in 0..3000 {
+                    if process_identity(pid).unwrap().0 == 'Z' {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let other = other.clone();
+                let reaped = thread::spawn(move || other.observe("work").unwrap())
+                    .join()
+                    .unwrap();
+                assert!(
+                    matches!(&reaped, Some(ExecObservation::Exited(generation)) if generation.exit_code == Some(3)),
+                    "{reaped:?}"
+                );
             }))
         });
         let observed = runtime.observe("work").unwrap();
