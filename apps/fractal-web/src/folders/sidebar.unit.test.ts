@@ -112,7 +112,7 @@ it('binds a granted live Sidebar atom to optimistic generated edits and exactly 
     collectionStream: async (next) => {
       options = next
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribeOrderedMembershipsCollection: async () => undefined, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
     },
     actions: {
       snapshot: Effect.succeed(testSnapshot.id),
@@ -167,7 +167,7 @@ it.each([false, true])('propagates adoption metadata and a removed reserved Side
       options = next
       subscriptions++
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribeOrderedMembershipsCollection: async () => undefined, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
     },
     actions: {
       snapshot: Effect.succeed(testSnapshot.id),
