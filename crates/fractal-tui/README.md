@@ -170,8 +170,8 @@ without compiling every workspace test target.
 The TUI uses `fractal-sidebar` for authoritative v1 projection and `widget::render`
 for drawing and stable-ID hit/context regions. The host retains sanitized labels,
 flat v1 presentation groups, catalog/fold/filter state and input/navigation.
-Projection requires complete server-resolved maps; missing or invalid resolution is
-shown as an unavailable layout rather than reconstructed from raw registers.
+Missing or invalid server resolution produces an inline notice identifying each unavailable
+entry; unrelated valid entries remain visible. Invalid ancestry is never reconstructed from raw registers.
 `cargo test -p fractal-sidebar --features ratatui --test widget` compares all eleven
 states against the original immutable capture. Default features remain empty; enabling
 the widget does not enable a client adapter or introduce client dependencies.
