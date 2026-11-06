@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "New local tables local_gate_runners (one row per exec, loop-metric or model gate request with no stop observed on its subject, with a subject index) and local_gate_runners_backfill (the ceiling and cursor of a one-time copy), and three triggers on claims (insert, delete, and update of id, subject, kind, origin or body) that keep the first. No schema-version change. The triggers and the ceiling, the newest claim they did not see, commit together in the store open; the gate requests at or below the ceiling are copied after the API serves, 256 per background writer loan with a 50 ms pause, each re-checked for a stop under the writer. Until the copy completes the reconciler lists gate runners from the claims, as before."
+    "detail": "New local tables local_gate_runners (one row per exec, loop-metric or model gate request with no stop observed on its subject, with a subject index) and local_gate_runners_backfill (the ceiling and cursor of a one-time copy), and four triggers on claims that keep the first: one on a mechanical gate request's insert, one on a stop's insert, one on the delete of a gate request or a stop, and one on an update of id, subject, kind, origin or body. Other claims, the other runtime observations included, pass through them without a query. No schema-version change. The triggers and the ceiling, the newest claim they did not see, commit together in the store open; the gate requests at or below the ceiling are copied from 2 minutes after start, past the reconnect wave, 256 per background writer loan with a 50 ms pause, each re-checked for a stop under the writer. Until the copy completes the reconciler lists gate runners from the claims, as before."
   },
   "rules": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "No added startup work: the one-time copy runs after the API serves. Once it completes (the first minutes of the first start of this build), the reconciler's first pass after every start, and its full pass every 5 minutes, list gate runners from the table instead of a query that took 9.2 s on a busy member's store in the minute after a restart."
+    "detail": "No added startup work: the one-time copy starts 2 minutes after the daemon does. Once it completes (minutes after the first start of this build), the reconciler's first pass after every start, and its full pass every 5 minutes, list gate runners from the table instead of a query that took 9.2 s on a busy member's store in the minute after a restart."
   },
   "manual": {
     "status": "none",

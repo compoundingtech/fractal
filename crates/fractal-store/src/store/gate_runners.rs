@@ -6,13 +6,20 @@
 //! busy host's restart. This table holds the same rows, one per request claim, so the list reads
 //! only it. The triggers are in the database and keep it for every binary that writes claims.
 //!
+//! The triggers act only on mechanical gate requests and on stops, so the many other runtime
+//! observations, appended and trimmed, pass through them without a query.
+//!
 //! The triggers commit with a ceiling, the newest claim they did not see. The requests at or
-//! below it are copied after the API serves, a page at a time (`advance_gate_runner_backfill`);
+//! below it are copied after the reconnect wave, a page at a time (`advance_gate_runner_backfill`);
 //! until the copy completes the list reads the claims as it did before.
 use super::*;
 
 /// Gate requests one backfill page copies.
 pub const BACKFILL_PAGE: i64 = 256;
+
+/// How long after the daemon starts the copy begins: past the reconnect wave, whose writes queue
+/// for the same writer.
+pub const BACKFILL_DELAY: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// A gate request that needs a runner: an exec or loop-metric gate, or a model gate.
 macro_rules! mechanical {
@@ -24,12 +31,19 @@ macro_rules! mechanical {
     };
 }
 
+/// A runtime observation that the runtime stopped.
+macro_rules! stop {
+    ($claim:literal) => {
+        concat!($claim, ".kind='runtime.observed' AND json_extract(", $claim, ".body, '$.fields.status')='stopped'")
+    };
+}
+
 /// A stop observed on `subject`.
 macro_rules! stopped {
     ($subject:literal) => {
         concat!(
-            "EXISTS (SELECT 1 FROM claims stopped WHERE stopped.subject=", $subject,
-            " AND stopped.kind='runtime.observed' AND json_extract(stopped.body, '$.fields.status')='stopped')"
+            "EXISTS (SELECT 1 FROM claims stopped INDEXED BY claims_subject_kind_index WHERE stopped.subject=", $subject,
+            " AND ", stop!("stopped"), ")"
         )
     };
 }
@@ -45,7 +59,7 @@ macro_rules! owner {
 }
 
 const SCHEMA: &str = concat!(
-    /* sqlite-large-value: allow-for-now lv-he84552ef936f owner=fractal_store::store::gate_runners TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_gate_runners (
+    /* sqlite-large-value: allow-for-now lv-h08f0f6be5a85 owner=fractal_store::store::gate_runners TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_gate_runners (
         claim_id TEXT PRIMARY KEY,
         subject TEXT NOT NULL,
         origin TEXT NOT NULL,
@@ -62,20 +76,23 @@ const SCHEMA: &str = concat!(
         SELECT 1, COALESCE(MAX(store_index), 0), 0,
             NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_kind_index WHERE kind='gate.requested')
         FROM claims;
-    CREATE TRIGGER IF NOT EXISTS gate_runners_claim_insert AFTER INSERT ON claims
-    WHEN NEW.kind IN ('gate.requested','runtime.observed') BEGIN
+    CREATE TRIGGER IF NOT EXISTS gate_runners_request_insert AFTER INSERT ON claims
+    WHEN ", mechanical!("NEW"), /* sqlite-large-value: allow-for-now lv-h542f0da74953 owner=fractal_store::store::gate_runners TODO=bound-or-reference-values-and-reclamation */ " BEGIN
         INSERT OR IGNORE INTO local_gate_runners
-        SELECT NEW.id, NEW.subject, NEW.origin, ", owner!("NEW"), "
-        WHERE ", mechanical!("NEW"), " AND NOT ", stopped!("NEW.subject"), /* sqlite-large-value: allow-for-now lv-h9883abd7e889 owner=fractal_store::store::gate_runners TODO=bound-or-reference-values-and-reclamation */ ";
-        DELETE FROM local_gate_runners WHERE subject=NEW.subject AND ", stopped!("NEW.subject"), /* sqlite-large-value: allow-for-now lv-h497202e5487f owner=fractal_store::store::gate_runners TODO=prepare-body-and-predecessor-values */ ";
+        SELECT NEW.id, NEW.subject, NEW.origin, ", owner!("NEW"), " WHERE NOT ", stopped!("NEW.subject"), /* sqlite-large-value: allow-for-now lv-h65b57ea9cc03 owner=fractal_store::store::gate_runners TODO=prepare-body-and-predecessor-values */ ";
+    END;
+    CREATE TRIGGER IF NOT EXISTS gate_runners_stop_insert AFTER INSERT ON claims
+    WHEN ", stop!("NEW"), /* sqlite-large-value: allow-for-now lv-h37c63cda84b7 owner=fractal_store::store::gate_runners TODO=prepare-body-and-predecessor-values */ " BEGIN
+        DELETE FROM local_gate_runners WHERE subject=NEW.subject;
     END;
     CREATE TRIGGER IF NOT EXISTS gate_runners_claim_delete AFTER DELETE ON claims
-    WHEN OLD.kind IN ('gate.requested','runtime.observed') BEGIN
+    WHEN OLD.kind='gate.requested' OR ", stop!("OLD"), /* sqlite-large-value: allow-for-now lv-hd4ba7299a574 owner=fractal_store::store::gate_runners TODO=bound-or-reference-values-and-reclamation */ " BEGIN
         DELETE FROM local_gate_runners WHERE claim_id=OLD.id;
         INSERT OR IGNORE INTO local_gate_runners
         SELECT request.id, request.subject, request.origin, ", owner!("request"), "
-        FROM claims request WHERE OLD.kind='runtime.observed' AND request.subject=OLD.subject
-            AND ", mechanical!("request"), " AND NOT ", stopped!("OLD.subject"), /* sqlite-large-value: allow-for-now lv-h7b6d9491384e owner=fractal_store::store::gate_runners TODO=prepare-body-and-predecessor-values */ ";
+        FROM claims request INDEXED BY claims_subject_kind_index
+        WHERE ", stop!("OLD"), " AND request.subject=OLD.subject AND ", mechanical!("request"), "
+            AND NOT ", stopped!("OLD.subject"), /* sqlite-large-value: allow-for-now lv-h7b6d9491384e owner=fractal_store::store::gate_runners TODO=prepare-body-and-predecessor-values */ ";
     END;
     CREATE TRIGGER IF NOT EXISTS gate_runners_claim_update
     AFTER UPDATE OF id, subject, kind, origin, body ON claims
@@ -84,8 +101,9 @@ const SCHEMA: &str = concat!(
         DELETE FROM local_gate_runners WHERE subject=NEW.subject AND ", stopped!("NEW.subject"), /* sqlite-large-value: allow-for-now lv-hb85f5f8cc048 owner=fractal_store::store::gate_runners TODO=bound-or-reference-values-and-reclamation */ ";
         INSERT OR IGNORE INTO local_gate_runners
         SELECT request.id, request.subject, request.origin, ", owner!("request"), "
-        FROM claims request WHERE request.subject IN (OLD.subject, NEW.subject)
-            AND ", mechanical!("request"), " AND NOT ", stopped!("request.subject"), ";
+        FROM claims request INDEXED BY claims_subject_kind_index
+        WHERE request.subject IN (OLD.subject, NEW.subject) AND ", mechanical!("request"), "
+            AND NOT ", stopped!("request.subject"), ";
     END;"
 );
 

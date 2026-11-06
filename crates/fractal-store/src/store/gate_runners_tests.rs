@@ -107,8 +107,8 @@ fn a_store_without_the_table_is_copied_after_it_opens() {
         let connection = store.connection.write();
         connection
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h893637d9d412 owner=fractal_store::store::gate_runners_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER gate_runners_claim_insert; DROP TRIGGER gate_runners_claim_delete;
-                 DROP TRIGGER gate_runners_claim_update; DROP TABLE local_gate_runners;
+                /* sqlite-large-value: allow-for-now lv-h66ea9662b56e owner=fractal_store::store::gate_runners_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER gate_runners_request_insert; DROP TRIGGER gate_runners_stop_insert;
+                 DROP TRIGGER gate_runners_claim_delete; DROP TRIGGER gate_runners_claim_update; DROP TABLE local_gate_runners;
                  DROP TABLE local_gate_runners_backfill;",
             )
             .unwrap();

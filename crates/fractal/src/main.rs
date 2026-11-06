@@ -20816,6 +20816,7 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
 /// a pause between, after the API serves. Until it completes, the reconciler lists gate runners
 /// from the claims.
 async fn copy_gate_runner_history(store: Arc<Store>) {
+    tokio::time::sleep(fractal_daemon::store::gate_runners::BACKFILL_DELAY).await;
     loop {
         let page_store = store.clone();
         let result = store.connection.write_workers().spawn_blocking(move || {
