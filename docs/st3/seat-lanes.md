@@ -338,7 +338,10 @@ daemon restart. Before it judges any room, a new daemon reads each laned seat's 
 above the seat's own (a burst's, or a step's the daemon has not judged yet) counts as held at once
 (in other lanes' room and the burst reserve, so no start or other burst gets that room) and stays
 raised for one burst lease (90 s) after the daemon started. The holder renews at a third of the lease
-the daemon names and says it holds the burst; a daemon with no record of it restores the grant when it
+the daemon names and says it holds the burst. A renewal that meets a missing socket waits for the
+daemon to come back (up to the client's daemon wait, 30 s by default), and one that fails is tried
+again after 5 s rather than a whole renewal later, so a restarted daemon hears it well inside the
+lease. A daemon with no record of it restores the grant when it
 is such a found raise (or the daemon has not read the slices yet) and the slice still holds the burst
 lane. A burst that lapsed while the daemon ran is asked anew. A raise no holder renews
 within that lease goes back to what the seat's steps hold. Once granted, a holder answered anything but

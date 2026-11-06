@@ -759,6 +759,8 @@ pub(super) fn admission_start_message(subject: &str, admission: &Value) -> Strin
 /// without bursts answers with an empty 404, which is `none`. A renewal says the burst is held, so
 /// a daemon that restarted restores it; once granted, any other answer means the lane no longer
 /// holds it: the holder says `lost` and why, gives it back and fails, and never goes on as if it held.
+/// A held renewal that fails is tried again after `WAITING_POLL`, not a whole renewal later, so a
+/// daemon that restarted hears it well inside the lease it keeps a raise found at start for.
 async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
     const WAITING_POLL: std::time::Duration = std::time::Duration::from_secs(5);
     let subject = normalize_agent_subject(&args.subject);
@@ -781,6 +783,7 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
     // Renewed at a third of the lease the daemon names, so a renewal or two may fail and it still holds.
     let mut renew = std::time::Duration::from_secs(30);
     loop {
+        let mut failed = false;
         match client.post::<_, Value>("/v1/agents/lane/burst", &body).await {
             Ok(answer) => {
                 let why = answer["why"].as_str().unwrap_or_default().to_owned();
@@ -827,14 +830,21 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
             }
             // Held, a renewal that fails (a daemon restarting) is tried again: the lease outlasts a
             // few, and the raised slice still counts meanwhile.
-            Err(error) if granted => eprintln!("fractal: WARN renewing the lane burst: {error:#}"),
+            Err(error) if granted => {
+                eprintln!("fractal: WARN renewing the lane burst: {error:#}");
+                failed = true;
+            }
             Err(error) => return Err(error),
         }
         tokio::select! {
             _ = &mut closed => break,
             _ = terminate.recv() => break,
             _ = tokio::signal::ctrl_c() => break,
-            () = tokio::time::sleep(if granted { renew } else { WAITING_POLL }) => {}
+            () = tokio::time::sleep(match (granted, failed) {
+                (false, _) => WAITING_POLL,
+                (true, false) => renew,
+                (true, true) => renew.min(WAITING_POLL),
+            }) => {}
         }
     }
     let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
