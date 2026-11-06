@@ -71,6 +71,9 @@ fn spool_event_needs_scan(event: &notify::Event, directory: &Path) -> bool {
     // FSEvents can deliver the directory's creation after watch registration,
     // and directory metadata is not evidence that its receipt entries changed.
     // In particular, a scan's access-time update must not schedule another scan.
+    // Root xattrs describe the directory itself, not receipt bytes, names, identity,
+    // or retry mtimes. FSEvents reports these separately as Metadata(Extended).
+    // Child xattrs, root ownership/permissions, unknown events and rescans stay actionable.
     // Keep child metadata events: retry deadlines live in receipt mtimes.
     let root_only = !event.paths.is_empty() && event.paths.iter().all(|path| path == directory);
     !(root_only
@@ -79,6 +82,7 @@ fn spool_event_needs_scan(event: &notify::Event, directory: &Path) -> bool {
             notify::EventKind::Create(notify::event::CreateKind::Folder)
                 | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
                     notify::event::MetadataKind::Any | notify::event::MetadataKind::AccessTime
+                        | notify::event::MetadataKind::Extended
                 ))
         ))
 }
@@ -308,9 +312,11 @@ mod tests {
             .add_path(directory.to_owned());
         let root_metadata = Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
             .add_path(directory.to_owned());
+        let root_xattr = Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)))
+            .add_path(directory.to_owned());
         let read = Event::new(EventKind::Access(AccessKind::Any))
             .add_path(directory.join("receipt.json"));
-        for event in [&root_created, &root_metadata, &read] {
+        for event in [&root_created, &root_metadata, &root_xattr, &read] {
             assert!(!spool_event_needs_scan(event, directory), "{event:?}");
             assert!(spool_event_needs_scan(&event.clone().set_flag(Flag::Rescan), directory));
         }
@@ -319,6 +325,12 @@ mod tests {
                 .add_path(directory.join("receipt.json")),
             Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)))
                 .add_path(directory.join("receipt.attempt-1.json")),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)))
+                .add_path(directory.join("receipt.json")),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Ownership)))
+                .add_path(directory.to_owned()),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)))
+                .add_path(directory.to_owned()),
             Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
                 .add_path(directory.join("receipt.tmp"))
                 .add_path(directory.join("receipt.json")),
@@ -331,6 +343,7 @@ mod tests {
             Event::new(EventKind::Modify(ModifyKind::Any)).add_path(directory.to_owned()),
             Event::new(EventKind::Other).add_path(directory.to_owned()),
             root_metadata.clone().add_path(directory.join("receipt.json")),
+            root_xattr.clone().add_path(directory.join("receipt.json")),
             Event::new(EventKind::Any),
         ] {
             assert!(spool_event_needs_scan(&event, directory), "{event:?}");
