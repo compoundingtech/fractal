@@ -16,6 +16,7 @@ export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from
 export { AgentRowActions, type AgentRowActionsProps } from './sidebar/DeferredRowActions.tsx'
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { PinsSection, type PinsSectionProps } from './sidebar/PinsSection.tsx'
+export { SidebarRelatedRuns, relatedRunText, type SidebarRelatedRun, type SidebarRelatedRunsProps, type SidebarRelatedRunsState } from './sidebar/SidebarRelatedRuns.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export { MissionEtaLabel, formatMissionEta, type MissionEta } from './MissionEta.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'

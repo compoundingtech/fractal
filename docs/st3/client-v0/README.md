@@ -1204,6 +1204,8 @@ person and replaces `eta`; finished rows have no ETA. `late` means the run deadl
 `urgency_rank` orders person holds (0), late runs (1), stalled runs (2), other active runs (3),
 then finished runs (4); deadline and run ID break active ties. `as_of`, `work_cut`, and
 `missions_cut` identify the clock and published inputs. Clients draw these facts without joins.
+`@fractal/ui/assistant-ui/shell` exports `SidebarRelatedRuns`: an accessible React Aria row list
+with two-line mission rows, visible loading/failure states and a collapsed finished-runs section.
 Responses contain at most 100 rows after urgency sorting; `total_rows` and `truncated` make the
 bound explicit. Individual offers seek the recipient's indexed singleton offer, not fleet history.
 

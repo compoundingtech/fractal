@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add accessible shared web mission rows for the agent sidebar",
+  "replay": {"status": "none", "detail": "Presentation only; no claim changes."},
+  "schema": {"status": "none", "detail": "Uses the semantic agent-related-runs contract."},
+  "rules": {"status": "none", "detail": "Server status, urgency, progress, ETA and folding remain authoritative."},
+  "compatibility": {"status": "changed", "detail": "The shared UI kit provides React Aria two-line mission lists with visible unavailable states, person holds, late ETA and folded finished runs."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Reverting changes no stored state."}
+}
