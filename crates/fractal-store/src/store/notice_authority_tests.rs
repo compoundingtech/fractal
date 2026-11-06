@@ -198,13 +198,12 @@ fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
         let store = linked_store();
         let token = store.selected_desired_token(RUNTIME).unwrap().unwrap();
         if mutation == "retire" {
-            store.connection.batched(|tx| -> Result<()> {
-                append_claim_tx(tx, &store.origin, RUNTIME, retirements::KIND, Some("person/example"),
-                    &json!({"fields":{"reason":"Finished","retired_by":"person/example","declaration":token,"owner_host":store.origin}}), &[], None)?;
-                // Exercise the core retirement projector without depending on the seats command crate.
-                retirements::project_subject(tx, RUNTIME)?;
-                Ok(())
-            }).unwrap().unwrap();
+            let retirement = input(RUNTIME, retirements::KIND, "person/example",
+                json!({"reason":"Finished","retired_by":"person/example","declaration":token,"owner_host":store.origin}));
+            append_claim_with_commit_context(
+                &store.graph, &retirement, None, None, None, None,
+                ClaimCommitContext { retirement_writer: true, ..Default::default() },
+            ).unwrap();
         } else {
             let source = if mutation == "stop" { "version 2\nstop \"agent/example/runtime\"" }
                 else { "version 2\nagent \"example/runtime\" { command \"true\"; }" };
