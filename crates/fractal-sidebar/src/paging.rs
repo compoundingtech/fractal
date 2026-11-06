@@ -85,10 +85,12 @@ impl Paging {
         if page.snapshot.host_id != token.scope.host || page.snapshot.projection_version != token.scope.projection {
             self.newest = None; return self.start(token);
         }
+        // A fresh subscription must rejoin an incomparable epoch; do not pin the discarded cut.
+        if self.newest.as_ref().is_some_and(|held| held.epoch != page.frontier.epoch) { self.newest = None; return self.start(token); }
         if self.staged.frontier.as_ref().is_some_and(|held| held.epoch == page.frontier.epoch && held.changed_index == page.frontier.changed_index && held.live_count != page.frontier.live_count) { return self.stop(Status::Refused); }
         if self.staged.frontier.as_ref().is_some_and(|held| held != &page.frontier) { return self.start(token); }
         if let Some(newest) = &self.newest {
-            if newest.epoch != page.frontier.epoch || newest.changed_index > page.frontier.changed_index { return self.start(token); }
+            if newest.changed_index > page.frontier.changed_index { return self.start(token); }
             if newest.changed_index == page.frontier.changed_index && newest.live_count != page.frontier.live_count { return self.stop(Status::Refused); }
         }
         if page.has_more && page.members.is_empty() { return self.stop(Status::Refused); }
@@ -253,5 +255,16 @@ mod tests {
         assert!(state.reduce(Event::Metadata(token.clone(), frontier(2, 1))).is_empty());
         assert_eq!(state.reduce(Event::Page(token, page(3, 2, &["b"], None))), vec![Effect::PersistBase]);
         assert_eq!(state.complete().unwrap().snapshots.len(), 2);
+    }
+    #[test]
+    fn incomparable_page_epoch_can_complete_after_a_fresh_subscription() {
+        let mut state = Paging::new(None); let token = refresh(&mut state);
+        state.reduce(Event::Page(token.clone(), page(2, 2, &["a"], Some("cursor"))));
+        let mut changed = page(1, 0, &[], None); changed.frontier.epoch = "epoch-b".into();
+        let effects = state.reduce(Event::Page(token, changed));
+        let [Effect::SubscribeAndRead(next)] = effects.as_slice() else { panic!("restart") };
+        let mut fresh = page(1, 0, &[], None); fresh.frontier.epoch = "epoch-b".into();
+        assert_eq!(state.reduce(Event::Page(next.clone(), fresh)), vec![Effect::PersistBase]);
+        assert_eq!(state.complete().unwrap().frontier.epoch, "epoch-b");
     }
 }
