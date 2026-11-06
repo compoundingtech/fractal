@@ -2482,7 +2482,9 @@ name = "fractal-sidebar"
 version = "0.1.0"
 dependencies = [
  "fractal-schema",
+ "fractal-sidebar",
  "jsonschema",
+ "ratatui",
  "serde",
  "serde_json",
 ]
