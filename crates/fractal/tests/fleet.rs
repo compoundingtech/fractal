@@ -8067,8 +8067,11 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.start().await;
     let mut rolled_back = before.clone();
     if release_drains_outbox {
+        // The drain appends to the shard before it deletes the row. Alone, the release seals that
+        // batch only when something asks (a checkpoint, a peer, a leave), so count the claim itself.
         wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
-        assert_eq!(shard_file_holds(&o, "o"), (1, 1), "the release drained the queued item to its shard");
+        assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
+        assert_eq!(graph_messages(&o, left).await, 0, "the release drained the queued item to its shard, not the graph");
         rolled_back.push((left.to_owned(), "sent".to_owned()));
     }
     assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
@@ -8239,6 +8242,17 @@ fn shard_file_holds(node: &Node, writer: &str) -> (u64, u64) {
              ON envelopes.batch_id=claims.batch_id WHERE envelopes.writer=?1",
         ),
     )
+}
+
+/// How many claims about `subject` `node`'s messages shard file holds, sealed or not.
+fn shard_file_claims(node: &Node, subject: &str) -> u64 {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("shards/messages/claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT COUNT(*) FROM claims WHERE subject=?1", [subject], |row| row.get(0))
+    .unwrap()
 }
 
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.
