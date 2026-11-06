@@ -44,21 +44,41 @@ impl Quota {
             now.saturating_sub(at.timestamp()) >= i64::try_from(snapshot.freshness_horizon_seconds).unwrap_or(i64::MAX));
         doc.field("source", if stale(&snapshot.generated_at) { "STALE snapshot" } else { "Current snapshot" }, width, theme::dim());
         if snapshot.accounts.is_empty() { doc.field("accounts", "No accounts reported", width, theme::dim()); }
+        let meter_width = if width >= 48 { 10 } else if width >= 36 { 4 } else { 0 };
+        let label_width = width.saturating_sub(meter_width + 22).max(1);
+        let row = |doc: &mut Doc, label: &str, window: Option<&fractal_client::quota::QuotaWindow>, status: &str| {
+            let label = super::text::truncate(&super::text::sanitize(label), label_width);
+            let padding = " ".repeat(label_width.saturating_sub(super::text::width(&label)));
+            let used = window.and_then(|window| window.used_percent);
+            let percent = used.map_or_else(|| "?".into(), |value| format!("{value:.0}%"));
+            let meter = if meter_width == 0 { String::new() } else {
+                let filled = used.map(|value| (value.clamp(0.0, 100.0) * meter_width as f64 / 100.0).round() as usize);
+                match filled {
+                    Some(filled) => format!("{}{} ", "█".repeat(filled), "░".repeat(meter_width - filled)),
+                    None => format!("?{} ", " ".repeat(meter_width - 1)),
+                }
+            };
+            let reset = window.and_then(|window| window.resets_at.as_deref()).map_or_else(|| "?".into(), |at| {
+                chrono::DateTime::parse_from_rfc3339(at).map_or_else(|_| "?".into(), |at| {
+                    let seconds = at.timestamp().saturating_sub(now).max(0);
+                    if seconds == 0 { "due".into() } else if seconds >= 86400 {
+                        format!("{}d{}h", seconds / 86400, seconds % 86400 / 3600)
+                    } else { format!("{}h{}m", seconds / 3600, seconds % 3600 / 60) }
+                })
+            });
+            let line = format!("{label}{padding} {meter}{percent:>5} {reset:>6} {status}");
+            doc.lines.extend(super::text::wrap(&super::text::inline(&line, theme::label()), width, &[], &[], None));
+        };
+        let heading = format!("{:<label_width$} {:meter_width$} {:>5} {:>6} state", "Account (gov%) / window", "", "used", "reset");
+        doc.lines.extend(super::text::wrap(&super::text::inline(&heading, theme::dim()), width, &[], &[], None));
         for account in &snapshot.accounts {
-            doc.section(&super::text::sanitize(&format!("{} / {}", account.provider, account.label)), None, width);
-            if stale(&account.observed_at) { doc.field("status", "STALE observation", width, theme::dim()); }
-            if account.governing_window_id.is_none() { doc.field("governing", "Unknown (source did not select a window)", width, theme::dim()); }
+            let governing = account.windows.iter().find(|window| account.governing_window_id.as_ref() == Some(&window.id));
+            let status = if stale(&account.observed_at) { "STALE" } else { "fresh" };
+            row(&mut doc, &format!("{}/{}", account.provider, account.label), governing, status);
+            if governing.is_none() { doc.field("governing", "?", width, theme::dim()); }
             for window in &account.windows {
-                let governing = account.governing_window_id.as_ref() == Some(&window.id);
-                let percent = window.used_percent.map_or_else(|| "?".into(), |value| format!("{value:.0}%"));
-                doc.field(if governing { "governing" } else { "window" }, &format!("{}  {percent}", window.label), width, theme::label());
-                let reset = window.resets_at.as_deref().map_or_else(|| "unknown".into(), |at| {
-                    chrono::DateTime::parse_from_rfc3339(at).map_or_else(|_| "unknown".into(), |at| {
-                        let seconds = at.timestamp().saturating_sub(now).max(0);
-                        if seconds == 0 { "due".into() } else { format!("in {}h {}m", seconds / 3600, seconds % 3600 / 60) }
-                    })
-                });
-                doc.field("reset", &reset, width, theme::dim());
+                let marker = if account.governing_window_id.as_ref() == Some(&window.id) { "*" } else { " " };
+                row(&mut doc, &format!(" {marker} {}", window.label), Some(window), "");
             }
         }
         doc
@@ -111,6 +131,15 @@ mod tests {
         let capture = doc.lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>().trim_end().to_owned()).collect::<Vec<_>>().join("\n");
         assert_eq!(capture, include_str!("quota-panel.txt").trim_end());
         assert!(quota.doc(20, 1_767_225_661).lines.iter().any(|line| line.to_string().contains("STALE")));
+        for width in [20, 36, 48, 70] {
+            let doc = quota.doc(width, 1_767_225_600);
+            assert!(doc.lines.iter().all(|line| line.width() <= width));
+        }
+        if let Some(Ok(QuotaSource::Available { snapshot, .. })) = &mut quota.value {
+            snapshot.accounts[0].governing_window_id = None;
+        }
+        let text = quota.doc(70, 1_767_225_600).lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("governing ?") && !text.contains("* Weekly"));
         server.abort();
     }
 }

@@ -1,7 +1,6 @@
 Quota ────────────────────────────────────────────────────────────────
 source    Current snapshot
-example / Team ───────────────────────────────────────────────────────
-governing Weekly  72%
-reset     in 5h 30m
-window    Session  ?
-reset     unknown
+Account (gov%) / window                            used  reset state
+example/Team                           ███████░░░   72%  5h30m fresh
+ * Weekly                              ███████░░░   72%  5h30m
+   Session                             ?              ?      ?

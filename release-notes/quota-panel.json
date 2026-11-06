@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Open Quota from the TUI palette to inspect external account windows, governing usage, reset times, unknown values and stale readings.",
+  "summary": "Open Quota from the TUI palette to inspect account usage bars, governing windows, reset countdowns, unknown values and stale readings.",
   "replay": {"status": "none", "detail": "Read-only panel."},
   "schema": {"status": "none", "detail": "Uses quota-source v1."},
   "rules": {"status": "none", "detail": "No checkpoint changes."},

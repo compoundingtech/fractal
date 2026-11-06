@@ -153,8 +153,9 @@ conversation or a mission from the sidebar or **Ctrl+K**; **Ctrl+H** returns to 
 **Ctrl+Q** quits the interface while agents keep working.
 
 For external account limits, press **Ctrl+K**, search **Quota**, then **Enter**
-(pane key `quota:`). The panel shows each account's governing window, other usage
-windows and resets; `?` means unknown and `STALE` marks expired observations.
+(pane key `quota:`). Account rows show governing usage bars and reset countdowns;
+indented rows show every window (`*` marks the governing one). `?` means unknown
+and `STALE` marks expired observations. Bars cap at 100%; percentages can exceed it.
 Configure the daemon's [external quota source](st3/client-v0/README.md#external-quota-source-v1)
 first. Only visible quota panes refresh, at the source's configured cadence.
 
