@@ -8,12 +8,12 @@ import { optimisticAlertActions } from './optimistic-alert-actions.ts'
 const alert = {
   kind: 'attention', id: 'attention/original', revision: 'delivery/r1', source_id: 'step-run/example',
   episode: 'claim/original', attention_kind: 'person-step', state: 'open', title: 'Answer', detail: '',
-  priority: 'normal', requested_at: DateTime.makeUnsafe('2026-11-06T10:00:00Z'), person_id: 'person/reader',
+  priority: 'normal', requested_at: DateTime.makeUnsafe('2026-11-06T10:00:00Z'), person_id: 'person/receiver',
   conversation_ids: [], actions: ['work.done'], alert: true,
 } as Native.Attention
 const action = { type: 'work.done', summary: 'My answer' } as const
 const actorProof = { value: { claim_id: 'claim/accepted', resolved_by: 'agent/delegate',
-  person_id: 'person/reader', resolved_at: '2026-11-06T10:01:00.000Z' } }
+  person_id: 'person/receiver', resolved_at: '2026-11-06T10:01:00.000Z' } }
 const attentionGet = async () => ({ value: alert, snapshot: { id: 'snapshot/test' } })
 
 describe('source answer reconciliation', () => {
