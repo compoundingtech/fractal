@@ -43,6 +43,7 @@ pub mod raw_terminal;
 pub mod resources;
 pub mod search;
 pub mod arrangements;
+pub mod membership_paging;
 pub mod conversation_blocks;
 pub mod conversation_delivery;
 pub mod conversation_participants;
