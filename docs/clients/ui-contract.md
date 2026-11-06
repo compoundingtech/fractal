@@ -16,7 +16,7 @@ What every Fractal client shows and does. Three clients implement it: the termin
 When a client disagrees with this document, fix the client, or change this document first.
 
 The machine-checked half of the contract lives in `fixtures/clients/`. The terminal UI writes
-most of it (`STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract`) and fails its tests when it
+most of it (`FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract`) and fails its tests when it
 drifts. The iOS app tests `conversation-style.json`, the device-signing and pairing vectors, and
 the shared transcripts through `@fractal/views`. The transcripts are the conversation
 view's contract; the web app updates them (see below).
@@ -96,7 +96,7 @@ and cache tokens, cost with currency, and model, with a separate subagent breakd
 Responses distinguish `self` from `including_subagents`, carry an explicit `partial`
 flag and observation freshness. An observed read is not a claim of continuous liveness.
 
-The live source installs the st-only layer. It reuses native usage rows and the L3
+The live source installs the Fractal-only layer. It reuses native usage rows and the L3
 agent reader: self-only roster spend meters are labelled `agent-incarnations` and
 always partial. Native aggregate totals can include subagent responses and do not
 establish self-only coverage across historical incarnations. The default therefore
@@ -207,7 +207,7 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   what it holds now (mission › step, the step's goal, since when), its subagents, what is queued
   next, and how it runs (harness and state, runtime, host, worktree, parent, fault).
 - An agent on another host may show only its Fractal mail, not its transcript; say so.
-- An agent not started by st: show its saved transcript when Fractal can identify it; otherwise
+- An agent not started by Fractal: show its saved transcript when Fractal can identify it; otherwise
   explain in plain words why there is no conversation. A found process whose native session
   is unidentified opens into this explanatory state, not a missing-session error. OMP internal
   `__omp_worker_*` helpers are not agents and must not appear in the found-running group.
@@ -379,18 +379,18 @@ under test is release `ed31cfe`; main at `4f763ce` has no change to any path bel
 
 | Case | Terminal UI | iOS | Cause of each miss |
 |---|---|---|---|
-| Message with images (`st conversations send --attach`) | One line per image, `▣ garden.png · 71 KB  open`. Never drawn inline, in any terminal. | 200×150 box loaded at once; `🖼 name · size…` until then. | stui: the mail renderer draws no pictures (`fractal-conversation-ui/src/conversation.rs`, "a terminal draws no pictures here"), so no inline load exists for mail. iOS: `MailImageView` loads on mount, not when visible (FlatList overscan reads too), unlike transcript images. |
-| Open a message image | Saves to `$XDG_STATE_HOME/st3/stui/attachments/received/<sha>.png` and flashes the path. It runs `xdg-open` only when `DISPLAY` or `WAYLAND_DISPLAY` is set. | No open or save action. | stui: `attach::show` opens only on a local display; the person cannot choose where it is saved. iOS: `MailImageView` has no press or share action. |
+| Message with images (`fractal conversations send --attach`) | One line per image, `▣ garden.png · 71 KB  open`. Never drawn inline, in any terminal. | 200×150 box loaded at once; `🖼 name · size…` until then. | TUI: the mail renderer draws no pictures (`fractal-conversation-ui/src/conversation.rs`, "a terminal draws no pictures here"), so no inline load exists for mail. iOS: `MailImageView` loads on mount, not when visible (FlatList overscan reads too), unlike transcript images. |
+| Open a message image | Saves to `$XDG_STATE_HOME/st3/stui/attachments/received/<sha>.png` and flashes the path. It runs `xdg-open` only when `DISPLAY` or `WAYLAND_DISPLAY` is set. | No open or save action. | TUI: `attach::show` opens only on a local display; the person cannot choose where it is saved. iOS: `MailImageView` has no press or share action. |
 | Agent sends a person an image | Refused: `people do not have inboxes`, for `send` and `reply` alike. | Same. | By design, mail goes to agents. An agent shows a person an image only through its transcript (see the tool-result rows). |
-| Discord-bridge import (`external/discord/user/…` → agent) | Text only, no image line, until the person clicks the mail open. | Image shown, as for any message. | stui: mail between two others folds to two lines (`conversation.rs:124`, `mail_lines`), which drop its images with no marker. |
+| Discord-bridge import (`external/discord/user/…` → agent) | Text only, no image line, until the person clicks the mail open. | Image shown, as for any message. | TUI: mail between two others folds to two lines (`conversation.rs:124`, `mail_lines`), which drop its images with no marker. |
 | Claude transcript, image in the person's turn | `image · Ctrl+Enter details · Ctrl+U load inline` row, then `[image application/octet-stream, size unknown]`. Loads with Ctrl+Up then Ctrl+U, or by itself in kitty and iTerm2. | A `[image · load from owner]` text row, then a box: `Image`, `Loading image…`, the image. | Both: the server's continuation names `application/octet-stream` and no size (`conversation_blocks.rs`, `image_media`), though the native block names its type and its bytes are at hand. iOS: the fallback text is shown as the person's words besides the box. |
-| Claude tool result with an image (`Read` of a PNG) | `[image]` under the call; Ctrl+U and Ctrl+Enter load nothing. | Box under the call; loads when visible. | stui: the tool result's block is `tool_output` with `body_ref`; the image reference is in `body.content[].content`, which `Content::index` (`stui/src/ui/content.rs`) never reads, since it reads only block payloads, continuations and metadata. This is how an agent shows a person an image. |
-| Codex transcript (`input_image`, `view_image` result) | Both are `image` rows inside a "3 tool calls" bundle; each loads with Ctrl+U. | `[image · load from owner]` text rows with boxes. | stui: a person's pasted image counts and folds as a tool call. Both: type and size unknown before load, as above. |
+| Claude tool result with an image (`Read` of a PNG) | `[image]` under the call; Ctrl+U and Ctrl+Enter load nothing. | Box under the call; loads when visible. | TUI: the tool result's block is `tool_output` with `body_ref`; the image reference is in `body.content[].content`, which `Content::index` (`crates/fractal-tui/src/ui/content.rs`) never reads, since it reads only block payloads, continuations and metadata. This is how an agent shows a person an image. |
+| Codex transcript (`input_image`, `view_image` result) | Both are `image` rows inside a "3 tool calls" bundle; each loads with Ctrl+U. | `[image · load from owner]` text rows with boxes. | TUI: a person's pasted image counts and folds as a tool call. Both: type and size unknown before load, as above. |
 | Fractal delivery echoed in a transcript (`<attachment path=…/>`) | The raw element, file path included. | The same raw text in the mail body. | Neither client reads the `attachment` element of the delivery envelope (`docs/st3/attachments.md`, "Delivery to a seat"). The path is private and the image is not offered. |
-| Huge image (6000×4000 PNG, 623 KB) in a transcript | Drawn; the Fractal terminal UI grows from 36 MB to 108 MB resident (200 MB peak) and keeps it after the tab is left. | Whole file as a base64 data URI in a 200×150 box. | stui: the decoded image is held at full size (`Loaded::Image`). The draw path clones it to build the terminal protocol (`Content::draw_image`) at each new size. It is released on hide, collapse or eviction, not when it leaves the screen. iOS: no downscale; mail images keep up to 24 data URIs. |
+| Huge image (6000×4000 PNG, 623 KB) in a transcript | Drawn; the Fractal terminal UI grows from 36 MB to 108 MB resident (200 MB peak) and keeps it after the tab is left. | Whole file as a base64 data URI in a 200×150 box. | TUI: the decoded image is held at full size (`Loaded::Image`). The draw path clones it to build the terminal protocol (`Content::draw_image`) at each new size. It is released on hide, collapse or eviction, not when it leaves the screen. iOS: no downscale; mail images keep up to 24 data URIs. |
 | Alert card, decision or feedback form | Subjects are text: `north bed sketch  message/…`, `blob/<sha>`; Markdown `![alt](url)` reads `!north bed`. | Same text; `![alt](url)` reads `!` and a link. | The request schema has no image field (`person_request.rs`: `attachments` is refused, and no subject kind is an image). Neither Markdown renderer draws images. |
 | Image owned by another host, reachable | Same line as a local image; `open` fetches it from the owner. | Same box; the claim's size is shown before it loads. | Both drop `origin`, so neither can say whose it is. |
-| Image owned by another host, unreachable | `Not done: pond cannot be reached right now` flashes for about two seconds; the line itself does not change. | `🖼 name · size` and the server's message, with no retry; transcript images get Retry. | stui: the failure is a transient flash, not a state of the image. iOS: `MailImageView` reads again only when its row mounts again; remote-unavailable and expired are not told apart. |
+| Image owned by another host, unreachable | `Not done: pond cannot be reached right now` flashes for about two seconds; the line itself does not change. | `🖼 name · size` and the server's message, with no retry; transcript images get Retry. | TUI: the failure is a transient flash, not a state of the image. iOS: `MailImageView` reads again only when its row mounts again; remote-unavailable and expired are not told apart. |
 
 Terminals: each profile answers the query as that terminal does. Outside tmux, the pseudo-terminal
 is the terminal. Inside tmux, tmux 3 runs inside it with `allow-passthrough` set by
@@ -490,7 +490,7 @@ publication more than 10,000 claims after the previous one (a catch-up) is none 
 `st.slo.projection_fresh.skipped` counter counts each, by collection), and
 attention's first publication after no window read it (attention folds only while one does)
 is none either. Both targets appear on
-`GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
+`GET /v1/client/request-latency` and in `fractal doctor`. `daemon_load` keeps its 300 ms
 first-snapshot budget for every window, now with projections on its rows, and stays under
 twice main's baseline. Bounds per row: a mission projection stays within 4 KiB, an agent
 projection within 2 KiB, and an attention projection within 16 KiB including its launch preview.
@@ -568,8 +568,8 @@ Served on the `agents` collection as `Agent.presentation`, and on `GET /v1/clien
 
 | Field | Meaning |
 |---|---|
-| `state` | One of the eleven `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `retired`, `unknown`. A retired agent is `retired` whatever else st says of it. |
-| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting), `stopped` (stopped, unknown) or `retired`. Sessions st found running but did not start are not agent rows; clients list them in their own "found running" group. |
+| `state` | One of the eleven `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `retired`, `unknown`. A retired agent is `retired` whatever else Fractal says of it. |
+| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting), `stopped` (stopped, unknown) or `retired`. Sessions Fractal found running but did not start are not agent rows; clients list them in their own "found running" group. |
 | `because` | Why it needs someone, in plain words: the fault or why it is broken, when it lost its session, the ask, or the login it needs, for `fault`, `down`, `needs_you` and `needs_login`; otherwise `null`. |
 | `now` | What it holds: `{step, mission, path, title, label, goal, since, holder_down_since}`, or `null`. `label` is `mission › path`. The step's progress is on the mission projection's step. |
 | `next[]`, `queued` | Up to five queued steps as `{step, mission, path, title, label}`, next first, and how many are queued in all. |
@@ -823,7 +823,7 @@ document. The shared model is `fractal_ui_model::documents` (Rust) and `@fractal
   refers to, so a message, mission or step view can link to them.
 - Nothing here edits or publishes a document.
 - **Who may read:** every session with `read.projections` may list every document and read
-  any version, as the CLI already does (`st documents ls`, `st documents get doc/NAME`). Only a
+  any version, as the CLI already does (`fractal documents ls`, `fractal documents get doc/NAME`). Only a
   message subject in `document-references.get` is gated by who may read that message.
   Per-agent document privacy, if it comes, belongs to the agent isolation work and would gate
   these routes and the CLI together.

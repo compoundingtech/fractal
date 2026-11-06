@@ -619,6 +619,7 @@ where
             let mut updated = changes.seat || changes.resync || !changes.messages.is_empty();
             if changes.resync {
                 order.clear();
+                crate::profile::note("mailbox full read: resync");
                 let (seat, messages) =
                     crate::profile::task("task mailbox-snapshot", || read(store, binding))?;
                 (changes.mark, seat, messages)
@@ -674,6 +675,7 @@ where
                 // A waking change refills the bounded held batch from durable metadata.
                 // This is one bulk read per real turn, never an extra seek per delivery.
                 if waking_added && order.remaining > 0 {
+                    crate::profile::note("mailbox full read: held refill");
                     let (_, refreshed) = read(store, binding)?;
                     messages = refreshed;
                     close_own.extend(filter_messages(
@@ -695,6 +697,7 @@ where
             }
         } else {
             order.clear();
+            crate::profile::note("mailbox full read: no previous snapshot");
             let mark = store.mailbox_watermark(binding)?;
             let (seat, messages) =
                 crate::profile::task("task mailbox-snapshot", || read(store, binding))?;
@@ -994,9 +997,14 @@ async fn stream_with_timers_inner<F, S, H>(
                     crate::otel::record_mailbox_fence_check(caller, started.elapsed());
                     if admitted { return false; }
                     let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
-                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
+                    let repaired = matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
                         repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
-                    }), Ok(true))
+                    }), Ok(true));
+                    if repaired {
+                        // The stream's next update starts from a full read.
+                        crate::profile::note("mailbox repaired: snapshot restarts");
+                    }
+                    repaired
                 }))).await {
                     Ok(repaired) => repaired,
                     Err(_) => return,
