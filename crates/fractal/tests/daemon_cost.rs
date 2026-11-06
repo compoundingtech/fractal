@@ -3132,8 +3132,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                             }
                             if probe.route == "GET /v1/client/quota" {
                                 let source = value.get("value").unwrap_or(&value);
-                                anyhow::ensure!(source["state"] == "disabled",
-                                    "quota cost probe must exercise the disabled source");
+                                anyhow::ensure!(
+                                    source["state"] == "disabled",
+                                    "quota cost probe must exercise the disabled source"
+                                );
                             }
                             if matches!(probe.route, "GET /v1/client/usage" | "GET /v1/usage") {
                                 let period = value.get("value").unwrap_or(&value);
