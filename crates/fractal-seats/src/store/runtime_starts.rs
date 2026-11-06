@@ -865,7 +865,7 @@ impl RuntimeStartsStore for Store {
     fn unresolved_runtime_start_counts_for(&self, subject: &str) -> Result<(u64, u64)> {
         smallclaims::touched::note_read(|| format!("local-runtime-start:{subject}"));
         self.readers.get().query_row(
-            &format!("SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE subject=?1 AND ({PENDING})"),
+            /* sqlite-large-value: allow-for-now lv-hbf0a9000ffa3 owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE subject=?1 AND ({PENDING})"),
             [subject], |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(Into::into)
     }

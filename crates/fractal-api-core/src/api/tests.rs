@@ -16,6 +16,7 @@ use std::path::PathBuf;
 #[tokio::test]
 async fn agent_card_runtime_start_counts_are_subject_scoped() {
     use crate::store::runtime_starts_tests_shared_seats::{operation, publish};
+    use crate::RuntimeStartsStore;
 
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
