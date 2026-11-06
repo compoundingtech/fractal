@@ -43,7 +43,11 @@ CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
  SELECT binding.id,registration.subject FROM claims AS binding JOIN claims AS registration
  ON registration.kind='custom.st3-kinds.registered'
  AND substr(json_extract(registration.body,'$.fields.document'),1,length(binding.subject)+1)=binding.subject||'@'
- WHERE +binding.kind='doc.bound';
+ WHERE +binding.kind='doc.bound'
+ UNION ALL
+ SELECT claims.id,custom_sources.subject FROM claims JOIN custom_sources
+ ON custom_sources.subject LIKE 'custom/attention/%'
+ WHERE claims.kind='intent.desired' AND claims.subject LIKE 'agent/%';
 CREATE TRIGGER IF NOT EXISTS custom_document_insert AFTER INSERT ON documents BEGIN
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=NEW.name ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=NEW.name||'@'||NEW.hash ON CONFLICT(subject) DO NOTHING;
@@ -338,8 +342,8 @@ pub fn prepare(
     }
     let reserved = fractal_schema::notice::is_reserved_subject(&input.subject)
         || fractal_schema::notice::is_reserved_kind(&input.kind);
-    if reserved {
-        return Err(fail("notices unavailable: native graph authority admission is not enabled"));
+    if reserved && !fractal_schema::notice::is_reserved_subject(&input.subject) {
+        return Err(fail("notices unavailable: reserved claim kind outside notice prefix"));
     }
     if !input.subject.starts_with("custom/") {
         return Ok(None);
@@ -397,10 +401,7 @@ fn validate_fact(
         actor.starts_with("agent/") || actor.starts_with("person/"),
         "typed actor must be a person or agent"
     );
-    anyhow::ensure!(
-        !fractal_schema::notice::is_reserved_subject(subject) && !fractal_schema::notice::is_reserved_kind(kind),
-        "notices unavailable: native graph authority admission is not enabled"
-    );
+    notice_authority::validate(connection, subject, m, kind, actor, f, creation)?;
     match spec.authority {
         Authority::Creator => {
             if let Some(c) = creation {
@@ -586,7 +587,13 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
         .cloned()
         .collect::<Vec<_>>();
     let creation = pinned.iter().find(|c| c.kind == m.creation_kind);
-    let mut error = None;
+    let reserved = fractal_schema::notice::is_reserved_subject(subject);
+    let mut error = if reserved && pinned.len() != history.len() {
+        Some("notices unavailable: fact registration pin is missing or mismatched".to_owned())
+    } else if subject.starts_with(fractal_schema::notice::SOURCE_PREFIX)
+        && pinned.iter().filter(|claim| claim.kind == m.creation_kind).count() != 1 {
+        Some("notices unavailable: missing or duplicate source creation".to_owned())
+    } else { None };
     let mut valid = Vec::new();
     for c in &pinned {
         match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
