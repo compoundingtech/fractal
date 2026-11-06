@@ -28,6 +28,38 @@ pub fn note_local_claim(store: &crate::store::Store, subject: &str) {
         .unwrap();
 }
 
+/// Progress on a step this node writes: a claim the work list's check reads (a `step-run/`
+/// subject), and one the missions list's does not when no step of that name exists.
+pub fn note_local_progress(store: &crate::store::Store, step: &str) {
+    store
+        .append_claim(&crate::model::ClaimInput {
+            subject: step.into(),
+            kind: "work.progress".into(),
+            actor: Some("person/example".into()),
+            fields: serde_json::from_value(serde_json::json!({"summary": "a step moved"})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// A resource observation this node writes: a claim the attention list's check reads, as it
+/// reads any kind it does not name.
+pub fn note_local_resource(store: &crate::store::Store, subject: &str) {
+    store
+        .append_claim(&crate::model::ClaimInput {
+            subject: subject.into(),
+            kind: "resource.observed".into(),
+            actor: Some("person/example".into()),
+            fields: serde_json::from_value(serde_json::json!({"kind": "custom.example.notification", "facts": {}})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
 /// The fleet [`fleet_member`] binds every member to.
 pub const PAUSE_FLEET: &str = "6c5c2b9f-8d4e-4f3a-8b2c-1d7e6f5a4b3c";
 

@@ -6618,14 +6618,21 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster, or a claim this node commits, cuts it short to the
-/// refresh's own length.
+/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
+/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster, or a claim this node commits, can cut
-/// the refresher's pause to, so that a very cheap fold cannot turn fresh reads or a burst of
-/// local writes into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
+/// a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
+const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
@@ -6643,9 +6650,9 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
-        // Whether a commit holds a claim this node wrote is read off the writer, once for every
-        // refresher that pauses on it.
-        let mut local = store.local_commits();
+        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
+        // the writer, once for every refresher that pauses on it.
+        let mut local = agent_roster_local_commits(&store);
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
@@ -6677,14 +6684,29 @@ pub fn start_agent_roster(state: &AppState) {
 /// Why the refresher's pause between two refreshes ended.
 type AgentRosterPauseEnd = local_commits::PauseEnd;
 
+/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
+/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
+/// roster's incremental fold reads).
+fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
+}
+
+/// The name the roster's check has on the scanner.
+const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
+
 /// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
-/// however often readers ask or this node writes, and at least the minimum pause; then the rest
-/// of the full pause, unless a reader waits for a fresh roster or this node commits a claim after
-/// `through`, an index the refresh has surely folded. Either then waits for one fold, not the
-/// rest of the pause: a person waiting to see their own write is not left waiting up to a second
-/// for the next timed fold. A local claim waits twice the fold, so a stream of local writes keeps
-/// a cheap refresh to a third of a core. Commits that hold only claims other nodes wrote keep the
-/// full pause, so a busy replication stream does not fold the roster any more often. See
+/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
+/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
+/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
+/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
+/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
+/// fold, so a person waiting to see their own write is not left waiting up to a second for the
+/// next timed fold, while a stream of local writes folds no more than about twice a second and
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often. See
 /// [`local_commits::pause_after_fold`].
 async fn agent_roster_pause(
     store: &Arc<Store>,
@@ -6692,8 +6714,12 @@ async fn agent_roster_pause(
     folded: Duration,
     through: u64,
 ) -> AgentRosterPauseEnd {
-    let pace = local_commits::Pace { floor: AGENT_ROSTER_FRESH_PAUSE, full: AGENT_ROSTER_REFRESH_PAUSE };
-    local_commits::pause_after_fold(local, store.fresh_agent_roster_wanted(), pace, folded, through).await
+    let pace = local_commits::Pace {
+        floor: AGENT_ROSTER_FRESH_PAUSE,
+        local: AGENT_ROSTER_LOCAL_PAUSE,
+        full: AGENT_ROSTER_REFRESH_PAUSE,
+    };
+    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -8047,8 +8073,10 @@ pub fn relayed_held_mail(
             .get()
             .prepare_cached(
                 "SELECT held.subject, held.sent_ms FROM coordination_sends held
-                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
-                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
                  LIMIT ?3",
             )?
             .query_map(
