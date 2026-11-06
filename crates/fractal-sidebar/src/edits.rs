@@ -63,7 +63,7 @@ impl Edits {
         match event {
             Event::Plan { base, plan, folder, membership } if self.status == Status::Intent => {
                 if !self.valid_base(&base) { return vec![Effect::ReadBase]; }
-                if self.request.as_ref().is_some_and(|previous| base.snapshot.id == previous.fence.snapshot.id || base.revision == previous.fence.revision) { return vec![Effect::ReadBase]; }
+                if self.request.as_ref().is_some_and(|previous| base.snapshot.id == previous.fence.snapshot.id || base.snapshot.store_index < previous.fence.snapshot.store_index) { return vec![Effect::ReadBase]; }
                 if plan.folders.iter().any(|operation| !matches!(operation, arrangements::Operation::FolderCreate { .. } | arrangements::Operation::FolderRename { .. } | arrangements::Operation::FolderMove { .. } | arrangements::Operation::FolderDelete { .. })) { return self.refuse(Refusal::InvalidPlan); }
                 if plan.folders.is_empty() && plan.memberships.is_empty() { return self.refuse(Refusal::InvalidPlan); }
                 if !plan.folders.is_empty() {
@@ -240,6 +240,14 @@ mod tests {
         assert_eq!(state.reduce(Event::Plan { base: base(2), plan: plan(false, true), folder: id(3), membership: id(4) }), vec![Effect::PersistPending]);
         assert_eq!(state.request().unwrap().identity, id(4)); assert_eq!(state.request().unwrap().fence, base(2));
         assert!(state.reduce(Event::Ack(id(2))).is_empty());
+    }
+    #[test]
+    fn retry_revalidation_need_not_change_the_opaque_subject_revision() {
+        let mut state = state(); stage(&mut state, false, true);
+        state.reduce(Event::Persisted(id(2))); state.reduce(Event::Refused(id(2), Refusal::Unauthorized));
+        state.reduce(Event::Retry); let mut fresh = base(2); fresh.revision = base(1).revision;
+        assert_eq!(state.reduce(Event::Plan { base: fresh, plan: plan(false, true), folder: id(3), membership: id(4) }), vec![Effect::PersistPending]);
+        assert_eq!(state.request().unwrap().identity, id(4));
     }
     #[test]
     fn folder_only_finishes_and_completion_storage_failure_preserves_partial_status() {
