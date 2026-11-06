@@ -5397,7 +5397,7 @@ impl Store {
     /// Keep internal status and authoritative replication readers unchanged.
     pub fn status_for_generic_reads(
         &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
-        history: bool, harness_only: bool,
+        history: bool,
     ) -> Result<StatusResponse> {
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -5419,15 +5419,6 @@ impl Store {
                 return Err(anyhow::Error::new(FractalError::new(
                     "notices-unavailable", "reserved notice facts are unavailable through generic status",
                 ).with_detail("reason", "notices-unavailable")));
-            }
-            if harness_only && !history && let Some(subject) = selected {
-                // This shortcut intentionally reads the current harness view, not the cut.
-                if !self.generic_status_subject_visible_at(subject, current_index(&connection)?)? {
-                    return Err(anyhow::Error::new(FractalError::new(
-                        "notices-unavailable", "reserved notice facts are unavailable through generic status",
-                    ).with_detail("reason", "notices-unavailable")));
-                }
-                return self.status_harness_only(subject);
             }
             self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history, None, ClaimsReduction::Full, Some(&excluded),
