@@ -1029,6 +1029,14 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionControl = {
+  dismissed: boolean;
+  id: Id;
+  revision: string | null;
+  snoozed_until: string | null;
+  source_revision: string;
+};
+
 export type AttentionControlParameters = {
   attention_kind: string;
   episode: string;
@@ -1117,6 +1125,13 @@ export type AttentionPromptCall = {
   input: string;
   input_complete: boolean;
   tool: string;
+};
+
+export type AttentionResolution = {
+  claim_id: Id;
+  person_id: Id;
+  resolved_at: string;
+  resolved_by: Id;
 };
 
 export type AttentionRevision = {

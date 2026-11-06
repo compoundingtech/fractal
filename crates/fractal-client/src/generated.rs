@@ -544,6 +544,14 @@ pub struct AttentionPresentationControl {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionResolution {
+    pub claim_id: String,
+    pub resolved_by: String,
+    pub person_id: String,
+    pub resolved_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Attention {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_form: Option<Value>,
@@ -765,6 +773,16 @@ pub struct AttentionBlocked {
     pub goal: String,
     pub attempt: u64,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AttentionControl {
+    pub id: String,
+    pub source_revision: String,
+    pub revision: Option<String>,
+    pub dismissed: bool,
+    pub snoozed_until: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionTargetState {
     pub id: String,
