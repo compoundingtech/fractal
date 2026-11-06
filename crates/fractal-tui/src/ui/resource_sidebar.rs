@@ -192,7 +192,7 @@ impl Sidebar {
             && folder.is_none()
             && !siblings.iter().any(|(id, _)| id == before)
         {
-            let key = super::arrangement_keys::between(
+            let key = fractal_sidebar::keys::between(
                 siblings.last().map(|(_, key)| key.as_str()),
                 None,
             )?;
@@ -213,7 +213,7 @@ impl Sidebar {
                 .ok_or("The destination changed; choose it again.")?,
             None => siblings.len(),
         };
-        let (key, rekeys) = super::arrangement_keys::insertion(
+        let (key, rekeys) = fractal_sidebar::keys::insertion(
             &siblings
                 .iter()
                 .map(|(_, key)| key.as_str())
@@ -269,7 +269,7 @@ impl Sidebar {
                 .ok_or("The destination changed; choose it again.")?,
             None => siblings.len(),
         };
-        let (key, rekeys) = super::arrangement_keys::insertion(
+        let (key, rekeys) = fractal_sidebar::keys::insertion(
             &siblings
                 .iter()
                 .map(|(_, f)| f.position.value.key.as_str())
@@ -669,7 +669,7 @@ impl Ui {
             .filter(|f| f.tombstone.is_none())
             .map(|f| f.position.value.key.as_str())
             .max();
-        let key = match super::arrangement_keys::between(last, None) {
+        let key = match fractal_sidebar::keys::between(last, None) {
             Ok(key) => key,
             Err(error) => {
                 self.flash(error);
