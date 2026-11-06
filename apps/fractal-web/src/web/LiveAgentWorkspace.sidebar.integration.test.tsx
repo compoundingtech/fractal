@@ -142,6 +142,8 @@ it('draws served related runs under the host row in server order without joins, 
     // A refetch or its failure keeps the last served rows drawn.
     await act(async () => registry.set(related, observed({ value: served, freshness: 'stale', error: { reason: 'failed', detail: 'Refetch failed' } })))
     expect(row().querySelectorAll('[data-run]')).toHaveLength(3)
+    await act(async () => row().querySelector<HTMLElement>('[data-run="mission-run/example/zeta"]')!.click())
+    expect(new URLSearchParams(window.location.search).get('open')).toBe('mission/example/zeta:detail')
     await act(async () => registry.set(related, { _tag: 'Unavailable', reason: 'unsupported', detail: 'HTTP 404' }))
     expect(row().querySelector('[data-run]')).toBeNull()
     expect(section()?.querySelector('[data-failed]')?.textContent).toBe('Related missions unavailable: this server does not serve them yet')
