@@ -27,6 +27,8 @@ test('v2 live memberships enforce their body/event variant and public identities
     value => { value.cases[0].initial.memberships[0].member = 'person/private'; },
     value => { value.cases[0].initial.memberships[0].unknown = true; },
     value => { value.cases[0].initial.memberships[0].position.unknown = true; },
+    value => { value.cases[0].checkpoints[0].moves[0].edit.memberships[0].op = 'subject.place'; },
+    value => { value.cases[0].checkpoints[0].moves[0].edit.memberships[0].unknown = true; },
   ]) {
     const value = structuredClone(v2); change(value);
     assert.throws(() => checkFixture(value));

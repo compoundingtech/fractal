@@ -1,4 +1,4 @@
-//! Folder-only move validation, without ordering-key generation or wire writes.
+//! Pure move validation and v2 ordering plans, without wire dispatch.
 
 use serde::{Deserialize, Serialize};
 use crate::model::{NodeRef, Parent, SidebarTree, Source, node_key};
@@ -175,4 +175,96 @@ fn validate_move(tree: &SidebarTree, intent: &MoveIntent) -> Result<(), MoveRefu
 /// The same checks, precedence, and no-change semantics as [`plan_move`].
 pub fn can_place(tree: &SidebarTree, intent: &MoveIntent) -> Result<(), MoveRefusal> {
     validate_move(tree, intent)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct V2Plan {
+    pub folders: Vec<fractal_schema::arrangements::Operation>,
+    pub memberships: Vec<fractal_schema::ordered_membership::Operation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "_tag")]
+pub enum V2Refusal {
+    Projection { error: crate::model::ProjectionError },
+    Move { refusal: MoveRefusal },
+    OrderingUnavailable,
+    TooManyOperations { count: usize },
+    TooManyBytes { bytes: usize },
+}
+
+/// Plan one drop against complete confirmed v2 inputs. Folder and member ordering domains
+/// stay separate; membership moves emit only Place, never legacy subject.place.
+pub fn plan_v2(
+    arrangement: &crate::model::ArrangementInput,
+    memberships: &[crate::model::MembershipInput],
+    intent: &MoveIntent,
+) -> Result<V2Plan, V2Refusal> {
+    let tree = crate::projection::build_v2(arrangement, memberships).map_err(|error| V2Refusal::Projection { error })?;
+    validate_move(&tree, intent).map_err(|refusal| V2Refusal::Move { refusal })?;
+    let siblings = match &intent.parent {
+        Parent::Folder { id } => &tree.nodes[&format!("folder:{id}")].children,
+        _ => &tree.roots,
+    };
+    let siblings: Vec<_> = siblings.iter().filter(|n| **n != intent.node && same_kind(n, &intent.node)).collect();
+    let index = intent.before.as_ref().map_or(siblings.len(), |before| siblings.iter().position(|n| *n == before).expect("validated anchor"));
+    let keys: Vec<_> = siblings.iter().map(|n| tree.nodes[&node_key(n)].key.as_deref().expect("v2 positions")).collect();
+    let (key, rekeys) = insert_keys(&keys, index).ok_or(V2Refusal::OrderingUnavailable)?;
+    let count = 1 + rekeys.len();
+    if count > fractal_schema::arrangements::MAX_OPERATIONS { return Err(V2Refusal::TooManyOperations { count }); }
+    let parent = match &intent.parent { Parent::Folder { id } => Some(id.clone()), _ => None };
+    let mut plan = V2Plan { folders: Vec::new(), memberships: Vec::new() };
+    let changes = std::iter::once((&intent.node, key)).chain(rekeys.into_iter().map(|(at, key)| (siblings[at], key)));
+    for (node, key) in changes {
+        match node {
+            NodeRef::Folder { id } => plan.folders.push(fractal_schema::arrangements::Operation::FolderMove { id: id.clone(), parent: parent.clone(), key }),
+            NodeRef::Subject { subject } => plan.memberships.push(fractal_schema::ordered_membership::Operation::Place { member: subject.clone(), bucket: parent.clone(), key }),
+        }
+    }
+    let mut size = WireSize(0);
+    if plan.folders.is_empty() { serde_json::to_writer(&mut size, &plan.memberships) }
+    else { serde_json::to_writer(&mut size, &plan.folders) }.expect("schema operations serialize");
+    if size.0 > fractal_schema::ordered_membership::MAX_EDIT_BYTES { return Err(V2Refusal::TooManyBytes { bytes: size.0 }); }
+    Ok(plan)
+}
+
+struct WireSize(usize);
+impl std::io::Write for WireSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0 += bytes.len(); Ok(bytes.len()) }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+// Seed A: widen the nearest gap on one side; fewest rekeys, forward on a tie.
+fn insert_keys(keys: &[&str], index: usize) -> Option<(String, Vec<(usize, String)>)> {
+    let lower = index.checked_sub(1).map(|at| keys[at]);
+    let mut best = None;
+    for end in index..=keys.len() {
+        if let Some(placed) = spread(lower, keys.get(end).copied(), end - index + 1) {
+            let mut placed = placed.into_iter();
+            best = Some((placed.next()?, (index..end).zip(placed).collect::<Vec<_>>()));
+            break;
+        }
+    }
+    let forward = best.as_ref().map_or(usize::MAX, |(_, rekeys)| rekeys.len());
+    for start in (0..index).rev() {
+        if index - start >= forward { break; }
+        if let Some(mut placed) = spread(start.checked_sub(1).map(|at| keys[at]), keys.get(index).copied(), index - start + 1) {
+            best = Some((placed.pop()?, (start..index).zip(placed).collect()));
+            break;
+        }
+    }
+    best
+}
+
+fn spread(lower: Option<&str>, upper: Option<&str>, count: usize) -> Option<Vec<String>> {
+    if lower.into_iter().chain(upper).any(|key| !fractal_schema::arrangements::valid_key(key))
+        || lower.zip(upper).is_some_and(|(a, b)| a >= b) { return None; }
+    let mut keys: Vec<String> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let after = keys.last().map(String::as_str).or(lower);
+        let key = crate::keys::between(after, upper).ok()?;
+        if after.is_some_and(|a| a >= key.as_str()) || upper.is_some_and(|b| key.as_str() >= b) { return None; }
+        keys.push(key);
+    }
+    Some(keys)
 }
