@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v16.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -120,6 +120,32 @@ fn the_corpus_generates_valid_deployment_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
+}
+
+#[test]
+fn the_corpus_generates_durable_person_owned_attention_controls() {
+    let mut world = World::new(1, Sabotage::None);
+    assert!(!RULE_KINDS.contains(&"attention.control"));
+    assert_eq!(fractal_schema::registry().claim("attention.control").unwrap().retention, Retention::Durable);
+    for (operation, until) in [("dismiss", None), ("restore", None), ("snooze", Some(START_MS + DAY_MS)), ("snooze", None)] {
+        let mut input = world.claim_of(&corpus()["attention.control"], 0).unwrap();
+        assert_eq!(input.actor.as_deref(), Some(input.subject.as_str()));
+        fractal_schema::registry().validate_claim(&input.subject, &input.kind, &input.fields).unwrap();
+        input.fields.insert("operation".into(), json!(operation));
+        input.fields.insert("until_unix_ms".into(), json!(until));
+        let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+        assert_eq!(append_generated_claim(&world.nodes[0].store, &input).unwrap().id, claim.id);
+        world.tap(0);
+        world.oracle.rebuild_claim_projections().unwrap();
+        assert_eq!(claims(&world.oracle)[&claim.id].body, claim.body);
+        let state = world.oracle.attention_controls(PERSON, "attention/convergence", "source/one").unwrap();
+        assert_eq!(state, world.nodes[0].store.attention_controls(PERSON, "attention/convergence", "source/one").unwrap());
+        assert_eq!(state.dismissed, operation == "dismiss");
+        assert_eq!(state.snoozed_until_unix_ms, until);
+        assert!(!world.oracle.attention_controls(PERSON, "attention/convergence", "source/two").unwrap().hidden_at(START_MS));
+        assert!(!world.oracle.attention_controls("person/other", "attention/convergence", "source/one").unwrap().hidden_at(START_MS));
+    }
+    assert!(world.failures.is_empty(), "{}", world.report());
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -993,7 +1019,17 @@ impl World {
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
         let deployment = deployment_fields(&spec.kind);
-        let (fields, actor) = if let Some(mut fields) = deployment {
+        let (fields, actor) = if spec.kind == "attention.control" {
+            let operation = *self.rng.pick(&["dismiss", "restore", "snooze"]);
+            let until = (operation == "snooze" && self.rng.chance(50))
+                .then_some(self.clock(index) + DAY_MS);
+            let fields = Map::from_iter([
+                ("attention_id".into(), json!("attention/convergence")),
+                ("source_revision".into(), json!("source/one")),
+                ("operation".into(), json!(operation)), ("until_unix_ms".into(), json!(until)),
+            ]);
+            (fields, Some(subject.clone()))
+        } else if let Some(mut fields) = deployment {
             if spec.kind == "deploy.go" && self.rng.chance(40) {
                 fields.insert("combined".into(), json!({"stopId":"example-stop","planId":"example-plan"}));
             }
@@ -2014,7 +2050,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v17.json"
         }))
         .unwrap(),
     )
