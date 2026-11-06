@@ -4,7 +4,7 @@
   "replay": { "status": "changed", "detail": "Unreviewed reserved registrations are not trusted when custom projections rebuild." },
   "schema": { "status": "changed", "detail": "Adds three compiled v1 custom storage manifests with exact serialized-byte SHA256 pins." },
   "rules": { "status": "changed", "detail": "Reserved prefixes, prefix ancestors and notice claim kinds cannot be registered with substitute manifests. Reserved fact writes remain unavailable in this slice." },
-  "compatibility": { "status": "changed", "detail": "Generic custom list and detail reads no longer expose reserved raw notice rows, including legacy cache rows. Explicit reserved reads return notices-unavailable; unfiltered lists exclude them." },
+  "compatibility": { "status": "changed", "detail": "Generic custom pages use the shared reservation predicate before pagination, excluding reserved roots, ancestors and descendants. Legacy reserved rows are excluded from direct and cached attention reads without hiding unrelated items. Explicit reserved details and kind filters return notices-unavailable. This does not provide a native notice read capability." },
   "downtime": { "status": "none", "detail": "No deployment outage is required." },
   "manual": { "status": "none", "detail": "No notice publication is enabled by this change." },
   "recovery": { "status": "changed", "detail": "Restore the reviewed manifest, not a substitute registration. Replicated admission ordering and revocation provenance remain a separate change." }
