@@ -1031,10 +1031,14 @@ fractal work done step-run/release/ask-ID --as person/operator --summary "Friday
 An ask creates a person-assigned runtime step in the live owning generation. Its origin waits in
 `waiting-person`, without a lease or time/retry consumption. Only the assigned person can
 complete it. The response resumes the same origin attempt with a new readiness epoch, and the
-seat's ready-work wake tells the requester. No step waits on a `--new-run` ask, so the response
-also sends the requester one message from `daemon/runtime` with the answer. A requester
-can use `fractal work cancel-ask STEP --as AGENT --summary TEXT`. An unclaimed live requester can
-use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the same source.
+seat's ready-work wake tells the requester. Without `--step`, the ask creates an independent
+person-ask run owned by the agent, even while it holds claimed work. `--new-run NAME` optionally
+names that run. Independent asks consume no agent capacity, never release unrelated claims,
+and send the requester one message from `daemon/runtime` with the answer. They survive idle
+turns, re-declarations and the end of the agent's owning work while the agent remains declared.
+Only an answer, deadline resolution, withdrawal, or removal of the agent ends them.
+A requester withdraws with `fractal work cancel-ask STEP --as AGENT --summary TEXT`.
+Repeated keys return the same source.
 
 #### Deadlines
 

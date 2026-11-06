@@ -91,7 +91,7 @@ mod ownership_process_tests;
 // Ownership waits must not retain a Store read/write worker permit. The async path gate
 // limits each record to one blocking waiter; authority keeps its existing flock scope.
 async fn authority_action<T: Send + 'static>(
-    operation: impl FnOnce() -> Result<T, St3Error> + Send + 'static,
+    operation: impl FnOnce() -> Result<T, FractalError> + Send + 'static,
 ) -> Result<T, ApiError> {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
@@ -126,7 +126,7 @@ pub async fn subscribe(
         if !cfg!(target_os = "linux") { return checked_state.store.check_mailbox(&binding).map(|_| false); }
         if authority::with_argv_channel(&checked_state, &binding, &checked_peer, |member, validate| {
             if binding.epoch == 0 {
-                return Err(St3Error::new("stale-mailbox-session", "an argv subscription must already be bound"));
+                return Err(FractalError::new("stale-mailbox-session", "an argv subscription must already be bound"));
             }
             checked_state.store.bind_argv_mailbox_checked(&binding, member, validate)
         })?.is_some() { return Ok(false); }
@@ -244,7 +244,7 @@ pub async fn attachment(
             authority::with_authority(&checked_state, &fence, &peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&fence, owner)? {
-                    return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
                 }
                 store.check_mailbox(&fence)
             })?;
@@ -262,13 +262,13 @@ pub async fn attachment(
 
 fn authorize(fence: &Fence, peer: Option<&NativeDeliveryPeer>) -> Result<(), ApiError> {
     let Some(peer) = peer else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unbound-mailbox",
             "mailbox subscriptions require a local native driver",
         )));
     };
     if peer.agent != fence.subject || !matches!(fence.component.as_str(), "delivery" | "title") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-mailbox",
             "the subscription must belong to this native seat",
         )));
@@ -287,7 +287,7 @@ pub async fn receipt(
     if request.fence.component != "delivery"
         || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mailbox-receipt",
             "only the delivery component can publish staged, delivered or read",
         )));
@@ -296,7 +296,7 @@ pub async fn receipt(
         || payload.native_receipt.is_some() && (request.lifecycle != "read"
             || peer.as_ref().unwrap().0.transport != "claude-channel")
     {
-        return Err(ApiError::bad(St3Error::new("invalid-native-receipt",
+        return Err(ApiError::bad(FractalError::new("invalid-native-receipt",
             "a native record identity requires a Claude consumption receipt")));
     }
     let input = ClaimInput {
@@ -337,16 +337,16 @@ pub async fn receipt(
         // recipient's delivery component records it, under the fence a graph receipt checks.
         let stream = store
             .message(&input.subject)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
             .filter(|message| message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE);
         if let Some(message) = &stream
             && message.to != request.fence.subject
         {
-            return Err(St3Error::new("wrong-message-recipient", format!(
+            return Err(FractalError::new("wrong-message-recipient", format!(
                 "message `{}` belongs to `{}`, not `{}`", input.subject, message.to, request.fence.subject
             )));
         }
-        let record_stream = || -> Result<(ClaimRecord, bool), St3Error> {
+        let record_stream = || -> Result<(ClaimRecord, bool), FractalError> {
             let message = stream.as_ref().expect("only a stream item is recorded in the shard");
             record_stream_receipt(&store, &request.fence, message, &input, payload.native_receipt.as_ref())
         };
@@ -354,7 +354,7 @@ pub async fn receipt(
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
-                    return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
                 }
                 if stream.is_some() {
                     return record_stream();
@@ -391,15 +391,15 @@ fn record_stream_receipt(
     message: &MessageView,
     input: &ClaimInput,
     native: Option<&crate::conversation_delivery::NativeReceipt>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     if input.kind == "message.staged" && !store.rollout_message_allowed(message)? {
-        return Err(St3Error::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
+        return Err(FractalError::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
     }
     let mut fields = input.fields.clone();
     if let Some(native) = native {
         fields.insert(
             "native_receipt".into(),
-            serde_json::to_value(native).map_err(|error| St3Error::new("internal", error.to_string()))?,
+            serde_json::to_value(native).map_err(|error| FractalError::new("internal", error.to_string()))?,
         );
     }
     let appended = crate::store::messages_shard::record_fenced_lifecycle(
@@ -620,6 +620,7 @@ where
             let mut updated = changes.seat || changes.resync || !changes.messages.is_empty();
             if changes.resync {
                 order.clear();
+                crate::profile::note("mailbox full read: resync");
                 let (seat, messages) =
                     crate::profile::task("task mailbox-snapshot", || read(store, binding))?;
                 (changes.mark, seat, messages)
@@ -675,6 +676,7 @@ where
                 // A waking change refills the bounded held batch from durable metadata.
                 // This is one bulk read per real turn, never an extra seek per delivery.
                 if waking_added && order.remaining > 0 {
+                    crate::profile::note("mailbox full read: held refill");
                     let (_, refreshed) = read(store, binding)?;
                     messages = refreshed;
                     close_own.extend(filter_messages(
@@ -696,6 +698,7 @@ where
             }
         } else {
             order.clear();
+            crate::profile::note("mailbox full read: no previous snapshot");
             let mark = store.mailbox_watermark(binding)?;
             let (seat, messages) =
                 crate::profile::task("task mailbox-snapshot", || read(store, binding))?;
@@ -849,7 +852,7 @@ impl StreamProof {
             owner: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
-    fn observe<T, E>(&mut self, result: Result<Result<T, St3Error>, E>) -> ProofDecision {
+    fn observe<T, E>(&mut self, result: Result<Result<T, FractalError>, E>) -> ProofDecision {
         match result {
             Ok(Ok(_)) => {
                 self.failures = 0;
@@ -995,9 +998,14 @@ async fn stream_with_timers_inner<F, S, H>(
                     crate::otel::record_mailbox_fence_check(caller, started.elapsed());
                     if admitted { return false; }
                     let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
-                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
+                    let repaired = matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
                         repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
-                    }), Ok(true))
+                    }), Ok(true));
+                    if repaired {
+                        // The stream's next update starts from a full read.
+                        crate::profile::note("mailbox repaired: snapshot restarts");
+                    }
+                    repaired
                 }))).await {
                     Ok(repaired) => repaired,
                     Err(_) => return,
@@ -1035,7 +1043,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 }
                 Ok((Err(error), _, _, _)) => {
                     if error
-                        .downcast_ref::<St3Error>()
+                        .downcast_ref::<FractalError>()
                         .is_some_and(|error| error.code == "stale-mailbox-session")
                     {
                         finish_fenced(
@@ -1625,7 +1633,7 @@ mod tests {
         let fence = Fence::new("agent/stream-proof-unit", "fixture", "delivery");
         let mut old = StreamProof::new(fence.clone());
         for _ in 0..4 {
-            assert_eq!(old.observe::<(), ()>(Ok(Err(St3Error::new("mailbox-authority-unavailable", "fixture")))), ProofDecision::Unavailable);
+            assert_eq!(old.observe::<(), ()>(Ok(Err(FractalError::new("mailbox-authority-unavailable", "fixture")))), ProofDecision::Unavailable);
         }
         assert_eq!(old.failures, 3);
         let assessment = delivery_presence::assess_current(&fence.subject, "claude", Some(&fence.incarnation));
@@ -1637,7 +1645,7 @@ mod tests {
         assert_eq!(next.observe::<(), ()>(Err(())), ProofDecision::Unavailable);
         drop(old);
         assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_some(), "old stream drop cannot clear the replacement's uncertainty");
-        assert_eq!(next.observe::<(), ()>(Ok(Err(St3Error::new("stale-mailbox-session", "proven mismatch")))), ProofDecision::Refused);
+        assert_eq!(next.observe::<(), ()>(Ok(Err(FractalError::new("stale-mailbox-session", "proven mismatch")))), ProofDecision::Refused);
         drop(next);
         assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
     }
@@ -3263,7 +3271,7 @@ mod tests {
                                     let call =
                                         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                     match call {
-                                        0 => Err(anyhow::Error::new(St3Error::new(
+                                        0 => Err(anyhow::Error::new(FractalError::new(
                                             "internal",
                                             "injected SQLITE_BUSY",
                                         ))),

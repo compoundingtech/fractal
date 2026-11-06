@@ -24,7 +24,7 @@ use crate::claim::{
     ClaimInput, ClaimRecord, DocumentVersion, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
     ReplicaEnvelopePayload,
 };
-use crate::error::{Error as St3Error, internal};
+use crate::error::{Error as FractalError, internal};
 use crate::hash::{
     batch_header_hash, canonical_hash, canonical_json_text, canonical_json_value, claim_hash,
     claim_id_is_content_hash, replica_envelope_hash, replica_record_ref,
@@ -47,6 +47,8 @@ mod replica_record;
 use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
+#[cfg(test)]
+mod startup_profile_label_tests;
 #[cfg(test)]
 mod exchange_budget_tests;
 #[cfg(test)]
@@ -109,6 +111,7 @@ pub mod local_trim_citations;
 pub mod runtime;
 mod signature_backfill;
 pub mod transport_observation_index;
+pub mod operation_claim_digests;
 pub mod writer_heads;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
@@ -425,7 +428,7 @@ mod projection_failure_diagnostic_tests {
     #[test]
     fn diagnostic_reporter_releases_its_mutex_before_the_sink_and_preserves_error() {
         let store = Store::open_memory("node", Arc::new(runtime::Plain)).unwrap();
-        let error = St3Error::new("internal", "original error with input fragment")
+        let error = FractalError::new("internal", "original error with input fragment")
             .with_detail("projection_stage", "decode");
         let mut lines = Vec::new();
         let mut sink = |line: &str| {
@@ -2246,9 +2249,9 @@ pub fn current_index_tx(transaction: &Transaction<'_>) -> Result<u64> {
     current_index(transaction)
 }
 
-pub fn selected_index(current: u64, requested: Option<u64>) -> Result<u64, St3Error> {
+pub fn selected_index(current: u64, requested: Option<u64>) -> Result<u64, FractalError> {
     match requested {
-        Some(requested) if requested > current => Err(St3Error::new(
+        Some(requested) if requested > current => Err(FractalError::new(
             "invalid-snapshot-index",
             format!("snapshot index {requested} is after current index {current}"),
         )),
@@ -3679,17 +3682,17 @@ impl Store {
         transports: &[String],
         person: &str,
         migrate: bool,
-    ) -> Result<CreatedFleetInvite, St3Error> {
+    ) -> Result<CreatedFleetInvite, FractalError> {
         if let Some(name) = name
             && !valid_fleet_node_name(name)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-node-name",
                 "a node name is a letter or digit followed by letters, digits, `.`, `_`, or `-`",
             ));
         }
         if !(10..=86_400).contains(&lifetime.as_secs()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-invite-lifetime",
                 "an invite lasts between 10 seconds and 24 hours",
             ));
@@ -3698,13 +3701,13 @@ impl Store {
         match membership.state(&self.origin) {
             crate::fleet::MemberState::Current(own) if own.mode == "listening" => {}
             crate::fleet::MemberState::Current(_) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "dial-out-cannot-sponsor",
                     "a dial-out member accepts no connections, so it cannot sponsor an invite; run this on a listening member",
                 ));
             }
             _ => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "not-a-member",
                     "this node is not a current fleet member",
                 ));
@@ -3775,16 +3778,16 @@ impl Store {
         name: &str,
         reason: &str,
         person: &str,
-    ) -> Result<FleetRemoval, St3Error> {
+    ) -> Result<FleetRemoval, FractalError> {
         use crate::fleet::MemberState;
         if name == self.origin {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "cannot-remove-self",
                 "a member cannot remove itself; use st fleet leave",
             ));
         }
         let own_key = self.member_public_key().ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "not-a-member",
                 "only a member with a member key can remove; this node has none",
             )
@@ -3792,7 +3795,7 @@ impl Store {
         let membership = self.fleet_membership().map_err(internal)?;
         if !matches!(membership.state(&self.origin), MemberState::Current(own) if own.member_key == own_key)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "not-a-member",
                 "this node is not a current fleet member",
             ));
@@ -3804,7 +3807,7 @@ impl Store {
                 .map(|incarnation| Some(incarnation.member_key.clone()))
                 .collect(),
             MemberState::Ended(_) | MemberState::LegacyRemoved(_) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "already-removed",
                     format!("`{name}` is already out of the fleet"),
                 ));
@@ -3818,7 +3821,7 @@ impl Store {
                 .unwrap_or(0)
         };
         if keys == [None] && high_water == 0 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unknown-member",
                 format!("`{name}` has never been a member or written to this fleet"),
             ));
@@ -3876,10 +3879,10 @@ impl Store {
         &self,
         person: &str,
         shard_high_water: &BTreeMap<String, u64>,
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<ClaimRecord, FractalError> {
         let key = self
             .member_public_key()
-            .ok_or_else(|| St3Error::new("not-a-member", "this node has no member key"))?;
+            .ok_or_else(|| FractalError::new("not-a-member", "this node has no member key"))?;
         let subject = format!("host/{}", self.origin);
         if let Some(written) = self
             .latest_claim(&subject, Some("fleet.member-left"))
@@ -4479,7 +4482,7 @@ impl Store {
 pub fn record_invalid_replica_envelope(
     connection: &Connection,
     envelope: &ReplicaEnvelope,
-    error: &St3Error,
+    error: &FractalError,
 ) -> Result<()> {
     let record_ref = replica_record_ref(&envelope.writer, envelope.sequence, &envelope.hash, 0);
     connection.execute(
@@ -4766,7 +4769,7 @@ pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> R
         // Nothing here is dropped to fit: the inventory, digests and signatures are what the
         // peer needs to compare at all, so an exchange whose metadata alone passes the budget
         // is refused as it is, with its size, for the path that built it to be bounded.
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "replication-exchange-metadata-too-large",
             format!(
                 "the exchange without envelopes takes {base} bytes, past {budget}: inventory \
@@ -4801,7 +4804,7 @@ pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> R
     }
     if kept == 0 {
         let first = &envelopes[0];
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "replication-envelope-too-large",
             format!(
                 "envelope {} {} of {} cannot be sent: its exchange body would pass {budget} bytes",
@@ -6207,7 +6210,7 @@ pub fn collect_hash_fields(value: &Value, output: &mut BTreeSet<String>) {
     }
 }
 
-pub fn ensure_claim_blobs(transaction: &Connection, claim: &ClaimRecord) -> Result<(), St3Error> {
+pub fn ensure_claim_blobs(transaction: &Connection, claim: &ClaimRecord) -> Result<(), FractalError> {
     let mut hashes = BTreeSet::new();
     collect_hash_fields(&claim.body, &mut hashes);
     for hash in hashes {
@@ -6217,7 +6220,7 @@ pub fn ensure_claim_blobs(transaction: &Connection, claim: &ClaimRecord) -> Resu
             .map_err(internal)?
             .is_some();
         if !exists {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-replicated-blob",
                 format!("claim `{}` references missing blob `{hash}`", claim.id),
             ));
@@ -6233,7 +6236,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h3b22d926e1f0 owner=smallclai
     envelope: &ReplicaEnvelope,
     runtime: &dyn Runtime,
     outcome: &mut ReplicationAdmission,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let prepared = prepared_envelope::prepare_envelope(envelope, runtime, None);
     outcome.verify += prepared.verify;
     prepared_envelope::admit_prepared_envelope_tx(transaction, prepared, outcome)
@@ -6407,7 +6410,7 @@ impl Store {
     }
 
     /// Append a claim this node writes, through the runtime that knows its kind.
-    pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, St3Error> {
+    pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
         self.append_claim_outcome(input).map(|(claim, _)| claim)
     }
 
@@ -6416,7 +6419,7 @@ impl Store {
     pub fn append_claim_outcome(
         &self,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         if let Some(actor) = &input.actor {
             self.ensure_principal_key(actor)?;
         }
@@ -6531,7 +6534,7 @@ impl Store {
         bytes: &[u8],
         expected_document: &Option<String>,
         idempotency_key: &str,
-    ) -> Result<DocumentVersion, St3Error> {
+    ) -> Result<DocumentVersion, FractalError> {
         self.put_document_as(name, bytes, expected_document, idempotency_key, None)
     }
 
@@ -6544,20 +6547,20 @@ impl Store {
         expected_document: &Option<String>,
         idempotency_key: &str,
         writer: Option<&str>,
-    ) -> Result<DocumentVersion, St3Error> {
+    ) -> Result<DocumentVersion, FractalError> {
         validate_document_name(name)?;
         if bytes.len() > 1024 * 1024 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "document-too-large",
                 "one document cannot exceed 1 MiB",
             ));
         }
         std::str::from_utf8(bytes).map_err(|_| {
-            St3Error::new("document-not-text", "a document must contain valid UTF-8")
+            FractalError::new("document-not-text", "a document must contain valid UTF-8")
         })?;
         let hash = hex::encode(Sha256::digest(bytes));
         self.connection
-            .batched(|transaction| -> Result<DocumentVersion, St3Error> {
+            .batched(|transaction| -> Result<DocumentVersion, FractalError> {
                 if let Some(response) = transaction
                     .query_row(
                         "SELECT response FROM idempotency WHERE operation_id=?1",
@@ -6576,15 +6579,15 @@ impl Store {
                     ).optional().map_err(internal)?;
                     if let Some(record) = original {
                         return Ok(DocumentVersion {
-                            name: record.body["name"].as_str().ok_or_else(|| St3Error::new("internal","document claim has no name"))?.into(),
-                            hash: record.body["hash"].as_str().ok_or_else(|| St3Error::new("internal","document claim has no hash"))?.into(),
-                            size: record.body["size"].as_u64().ok_or_else(|| St3Error::new("internal","document claim has no size"))?,
+                            name: record.body["name"].as_str().ok_or_else(|| FractalError::new("internal","document claim has no name"))?.into(),
+                            hash: record.body["hash"].as_str().ok_or_else(|| FractalError::new("internal","document claim has no hash"))?.into(),
+                            size: record.body["size"].as_u64().ok_or_else(|| FractalError::new("internal","document claim has no size"))?,
                             created_index: record.store_index, latest: true,
                             binding_claim_id: record.id, created_at_unix_ms: record.accepted_at_unix_ms,
                             owner: record.actor.or(Some(record.origin)),
                         });
                     }
-                    return Err(St3Error::new("idempotency-key-expired","this request was already committed and its claim was checkpointed")
+                    return Err(FractalError::new("idempotency-key-expired","this request was already committed and its claim was checkpointed")
                         .with_detail("idempotency_key",idempotency_key.to_owned()).with_detail("claim_id",claim_id));
                 }
                 if let Some(version) = find_document(transaction, name, &hash).map_err(internal)? {
@@ -6599,7 +6602,7 @@ impl Store {
                     .optional()
                     .map_err(internal)?;
                 if &current != expected_document {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "stale-document-token",
                         format!("the selected binding for `{name}` changed before the post"),
                     )
@@ -6653,7 +6656,7 @@ impl Store {
                     .map_err(internal)?;
                 Ok(version)
             })
-            .map_err(|error| St3Error::new("internal", error))?
+            .map_err(|error| FractalError::new("internal", error))?
     }
 
     pub fn get_document(&self, name: &str, hash: &str) -> Result<Option<Vec<u8>>> {
@@ -6872,10 +6875,10 @@ impl Store {
         size: u64,
         quota: u64,
         ttl_ms: u64,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         let now = now_ms() as u64;
         let connection = self.connection.write();
-        let result = (|| -> rusqlite::Result<Result<(), St3Error>> {
+        let result = (|| -> rusqlite::Result<Result<(), FractalError>> {
             connection.execute(
                 /* sqlite-large-value: allow-for-now lv-hcaa611a3d35e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_blob_uploads WHERE uploaded_ms<?1",
                 [now.saturating_sub(ttl_ms)],
@@ -6892,7 +6895,7 @@ impl Store {
                     |row| row.get(0),
                 )?;
                 if held.saturating_add(size) > quota {
-                    return Ok(Err(St3Error::new(
+                    return Ok(Err(FractalError::new(
                         "blob-quota-exceeded",
                         format!(
                             "{actor} already holds {held} bytes of uploads; the limit is {quota}"
@@ -7101,14 +7104,17 @@ impl Store {
         // Batch-id order walks the envelope batch index sequentially. A rowid-ordered search
         // instead performs random probes over the entire history. Headers with no retained
         // untombstoned claim need no recovery after checkpoint adoption.
-        let missing: Option<i64> = self.readers.get().query_row(
-            "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
-             WHERE batches.rowid<=?1 AND NOT EXISTS (
-                 SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
-               AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
-                 AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
-            [cursor], |row| row.get(0),
-        )?;
+        let missing: Option<i64> = crate::profile::task("replication.sealing_recovery", || {
+            let _span = crate::profile::span("replication.sealing_recovery");
+            self.readers.get().query_row(
+                "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
+                 WHERE batches.rowid<=?1 AND NOT EXISTS (
+                     SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
+                   AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
+                     AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
+                [cursor], |row| row.get(0),
+            )
+        })?;
         if let Some(missing) = missing {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
@@ -7240,8 +7246,12 @@ impl Store {
             .map(|previous| previous.legacy_graph_digest.clone());
         let inventory_generation = inventory_generation::current(connection)?;
         let full = |connection: &Connection| -> Result<_> {
-            let (inventory, max_rowid, envelope_rows) =
-                load_compact_replication_inventory(connection)?;
+            // Every envelope identity this node holds: a full index walk, once per process
+            // unless the inventory generation moves. Named for the profile whoever asks first.
+            let (inventory, max_rowid, envelope_rows) = crate::profile::task("replication.inventory_full", || {
+                let _span = crate::profile::span("replication.inventory_full");
+                load_compact_replication_inventory(connection)
+            })?;
             let buckets = inventory.buckets();
             Ok((inventory, max_rowid, buckets, Vec::new(), 0, envelope_rows))
         };
@@ -7662,7 +7672,7 @@ impl Store {
         relay: &str,
         fleet_id: &str,
         input: &ReplicationExchange,
-    ) -> Result<ReplicationReceipt, St3Error> {
+    ) -> Result<ReplicationReceipt, FractalError> {
         self.receive_replication_exchange_asking(relay, fleet_id, input, false)
     }
 
@@ -7674,7 +7684,7 @@ impl Store {
         fleet_id: &str,
         input: &ReplicationExchange,
         asks: bool,
-    ) -> Result<ReplicationReceipt, St3Error> {
+    ) -> Result<ReplicationReceipt, FractalError> {
         let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())?;
         // One exchange is received in one writer hold.
         crate::windows::holds::covered("received envelopes", input.envelopes.len());
@@ -7688,21 +7698,21 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
         carrier: crate::replication::ReplicationCarrier,
-    ) -> Result<ReplicationReceipt, St3Error> {
+    ) -> Result<ReplicationReceipt, FractalError> {
         if input.peer != relay {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "peer-label-mismatch",
                 "the authenticated peer label does not match the exchange label",
             ));
         }
         if input.fleet_id != fleet_id {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "fleet-id-mismatch",
                 "the peer belongs to another fleet",
             ));
         }
-        if input.shard_id != self.bound_shard().map_err(|error| St3Error::new("shard-state", error.to_string()))? {
-            return Err(St3Error::new(
+        if input.shard_id != self.bound_shard().map_err(|error| FractalError::new("shard-state", error.to_string()))? {
+            return Err(FractalError::new(
                 "shard-mismatch",
                 "the exchange belongs to another shard or the default store",
             ));
@@ -7750,7 +7760,7 @@ impl Store {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
-            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize, u128), St3Error> {
+            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize, u128), FractalError> {
                 let mut received = 0;
                 let mut duplicate = 0;
                 let mut signatures = 0;
@@ -8639,7 +8649,7 @@ impl Store {
 
     fn log_projection_failure(
         &self,
-        error: &St3Error,
+        error: &FractalError,
         phase: &str,
         frontier: u64,
         target: u64,
@@ -8754,7 +8764,7 @@ impl Store {
                 processed: None,
                 total: None,
             });
-            let result = (|| -> Result<bool, St3Error> {
+            let result = (|| -> Result<bool, FractalError> {
                 if source_empty {
                     return Ok(false);
                 }
@@ -8783,7 +8793,7 @@ impl Store {
                                         .and_then(Value::as_str)
                                         .unwrap_or(reason)
                                         .to_owned();
-                                    let error = St3Error {
+                                    let error = FractalError {
                                         code: reason,
                                         message,
                                         details,
@@ -9071,7 +9081,7 @@ impl Store {
         reason: &str,
         actor: &str,
         idempotency_key: &str,
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<ClaimRecord, FractalError> {
         {
             let connection = self.connection.write();
             let state = connection
@@ -9083,13 +9093,13 @@ impl Store {
                 .optional()
                 .map_err(internal)?
                 .ok_or_else(|| {
-                    St3Error::new(
+                    FractalError::new(
                         "unknown-replica-record",
                         "the replica record does not exist",
                     )
                 })?;
             if !matches!(state.as_str(), "invalid" | "unknown" | "repaired") {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "record-does-not-need-repair",
                     "only an invalid or unknown replica record can be repaired",
                 ));
@@ -9104,7 +9114,7 @@ impl Store {
                 .map_err(internal)?
                 .is_some();
             if !replacement_exists {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unknown-replacement-claim",
                     "the replacement claim does not exist or is not valid",
                 ));
@@ -10241,23 +10251,23 @@ pub fn claims_for_subject_query(kind: bool) -> String {
     )
 }
 
-pub fn split_document_ref(reference: &str) -> Result<(&str, &str), St3Error> {
+pub fn split_document_ref(reference: &str) -> Result<(&str, &str), FractalError> {
     reference.rsplit_once('@').ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-document-reference",
             format!("document reference `{reference}` has no hash"),
         )
     })
 }
 
-pub fn validate_document_name(name: &str) -> Result<(), St3Error> {
+pub fn validate_document_name(name: &str) -> Result<(), FractalError> {
     if !name.starts_with("doc/")
         || name.len() <= 4
         || name.contains('@')
         || name.contains("..")
         || name.ends_with('/')
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-document-name",
             "a document name must use `doc/NAME` and cannot contain `@` or `..`",
         ));
@@ -10321,12 +10331,12 @@ pub fn operation_id_for_key(key: &str) -> String {
     )
 }
 
-pub fn claim_operation(input: &ClaimInput) -> Result<Option<(String, String)>, St3Error> {
+pub fn claim_operation(input: &ClaimInput) -> Result<Option<(String, String)>, FractalError> {
     let Some(key) = input.idempotency_key.as_deref() else {
         return Ok(None);
     };
     if key.is_empty() || key.len() > 512 || key.chars().any(char::is_control) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-idempotency-key",
             "an idempotency key must contain 1 through 512 non-control characters",
         ));
@@ -10381,20 +10391,20 @@ pub fn checkpointed_operation_outcome(
     connection: &Connection,
     operation_id: &str,
     request_digest: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let dropped = checkpoint::checkpointed_operation(connection, operation_id).map_err(internal)?;
     let Some((stored_digest, claim_id)) = dropped.first() else {
         return Ok(());
     };
     if dropped.iter().any(|(digest, _)| digest != stored_digest) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "idempotency-conflict",
             "the replicated operation has conflicting requests",
         )
         .with_detail("operation_id", operation_id.to_owned()));
     }
     if stored_digest != request_digest {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "idempotency-mismatch",
             "the idempotency key already identifies a different request",
         )
@@ -10402,7 +10412,7 @@ pub fn checkpointed_operation_outcome(
         .with_detail("stored_digest", stored_digest.clone())
         .with_detail("request_digest", request_digest.to_owned()));
     }
-    Err(St3Error::new(
+    Err(FractalError::new(
         "claim-checkpointed",
         "this request was already recorded, and a checkpoint has since dropped its claim",
     )
@@ -10716,13 +10726,13 @@ pub fn select_replicated_document(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     created_index: u64,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let name = claim
         .body
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-document-claim",
                 format!("replicated document claim `{}` has no name", claim.id),
             )
@@ -10732,7 +10742,7 @@ pub fn select_replicated_document(
         .get("hash")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-document-claim",
                 format!("replicated document claim `{}` has no hash", claim.id),
             )
@@ -10941,9 +10951,9 @@ pub fn validate_replicated_claim(
     batch: &ReplicaBatch,
     claim: &ClaimRecord,
     runtime: &dyn Runtime,
-) -> Result<ReplicatedClaimAdmission, St3Error> {
+) -> Result<ReplicatedClaimAdmission, FractalError> {
     if claim.batch_id != batch.id || claim.origin != batch.origin {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "claim-batch-mismatch",
             format!(
                 "replicated claim `{}` names another batch or writer",
@@ -10952,7 +10962,7 @@ pub fn validate_replicated_claim(
         ));
     }
     if !claim_id_is_content_hash(claim).map_err(internal)? {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "claim-hash-mismatch",
             format!("replicated claim `{}` failed verification", claim.id),
         ));

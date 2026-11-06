@@ -46,6 +46,7 @@ pub mod inventory;
 pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
+pub mod quota;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -110,6 +111,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -2711,7 +2713,7 @@ pub async fn agent_workspace(
                 return Ok(None);
             };
             if !status.conflicts.is_empty() {
-                return Err(anyhow::anyhow!(St3Error::new(
+                return Err(anyhow::anyhow!(FractalError::new(
                     "validation-failed",
                     "agent has conflicting declarations",
                 )));
@@ -2740,7 +2742,7 @@ pub async fn agent_workspace(
                     return Ok(Some((client_snapshot_at(&state, index), value)));
                 }
                 if desired.kind != "stop" || claim.predecessors.len() != 1 {
-                    return Err(anyhow::anyhow!(St3Error::new(
+                    return Err(anyhow::anyhow!(FractalError::new(
                         "validation-failed",
                         "agent has no unambiguous prior declaration",
                     )));
@@ -2790,7 +2792,7 @@ pub async fn agent_declaration(
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
-        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+        .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2823,7 +2825,7 @@ pub async fn usage_period(
         .since_ms
         .unwrap_or(until_ms.saturating_sub(86_400_000));
     if since_ms > until_ms {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -2873,7 +2875,7 @@ pub async fn subject_definition(
         require_scope(&session, "read.declarations")?;
     }
     if !query.subject.starts_with("agent/") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a definition subject must start with `agent/`; missions are published revisions \
              without a canonical declaration",
@@ -2920,7 +2922,7 @@ pub async fn subject_definition(
     if serde_json::to_vec(&value).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the applied definition exceeds the client response limit",
         )));
@@ -2946,7 +2948,7 @@ pub async fn publication_definition(
         .iter()
         .any(|prefix| query.subject.starts_with(prefix))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a publication definition subject must start with agent/, mission/, or schedule/",
         )));
@@ -2971,7 +2973,7 @@ pub async fn publication_definition(
         .len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the published definition exceeds the client response limit",
         )));
@@ -3000,6 +3002,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
         "requester".into()
     }
 }
+
 
 fn mission_visualization(
     store: &Store,
@@ -3625,7 +3628,7 @@ fn observer_subscription_detail_at(
         || (!id.starts_with(&format!("{kind}/"))
             && id.len() + kind.len() + 1 > MAX_DETAIL_KEY_BYTES)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "projection-detail-too-large",
             "observer/subscription detail ID exceeds the 4096 byte key budget",
         )
@@ -3668,7 +3671,7 @@ fn observer_subscription_detail_at(
         // Source bytes bound JSON decoding and rendering; escaping can enlarge the output.
         // Refuse the complete item rather than truncate any field or fall back to a list.
         if serde_json::to_vec(&value)?.len() + serde_json::to_vec(snapshot)?.len() > 512 * 1024 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "projection-detail-too-large",
                 "observer/subscription detail output exceeds the 512 KiB response budget",
             )
@@ -3689,7 +3692,7 @@ async fn observer_subscription_detail(
         state.store.clone().read_snapshot(|index| {
             use crate::store::observer_subscription_detail::{DetailBudget, MAX_DETAIL_KEY_BYTES};
             if state.node.len() > MAX_DETAIL_KEY_BYTES {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "projection-detail-too-large",
                     "observer/subscription detail host metadata exceeds the 4096 byte budget",
                 )
@@ -3707,7 +3710,7 @@ async fn observer_subscription_detail(
                 observer_subscription_detail_at(&state, kind, &id, &snapshot, &mut budget)
             })?;
             let value = value.ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "not-found",
                     format!("{kind} `{}` does not exist", client_detail_id(kind, &id)),
                 )
@@ -7364,7 +7367,7 @@ fn validate_message_session(
 
 fn import_lookup_error(error: anyhow::Error) -> ApiError {
     if error.is::<crate::external_sessions::AmbiguousSession>() {
-        ApiError::bad(St3Error::new("ambiguous-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("ambiguous-import-session", error.to_string()))
     } else {
         ApiError::internal(error)
     }
@@ -7406,7 +7409,7 @@ async fn import_external_session_action(
     }
 
     let import = crate::external_sessions::import_seat(&external).map_err(|error| {
-        ApiError::bad(St3Error::new("invalid-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("invalid-import-session", error.to_string()))
     })?;
     let seat_intent = parse_intent(&import.kdl, &state.node).map_err(ApiError::bad)?;
     let seat_preview = state
@@ -7420,7 +7423,7 @@ async fn import_external_session_action(
         )
         .map_err(ApiError::bad)?;
     if !seat_preview.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-import-seat",
             seat_preview.blockers.join("; "),
         )));
@@ -8044,7 +8047,7 @@ async fn dispatch_action(
             .0;
             Ok(vec![result.subject])
         }
-        "attention.resolve" => Err(ApiError::bad(St3Error::new(
+        "attention.resolve" => Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         ))),
@@ -8080,7 +8083,7 @@ async fn dispatch_action(
                         Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
                     };
                     if let Some(refused) = refused {
-                        return Err(ApiError::bad(St3Error::new(
+                        return Err(ApiError::bad(FractalError::new(
                             "stale-fence",
                             format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
                         )));
@@ -8169,7 +8172,7 @@ async fn dispatch_action(
                             .get("evidence")
                             .map(|value| {
                                 serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "evidence must be an array of strings",
                                     ))
@@ -8183,7 +8186,7 @@ async fn dispatch_action(
                             .get("answer")
                             .map(|value| {
                                 serde_json::from_value(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "answer takes an optional id and optional text",
                                     ))
@@ -9223,7 +9226,7 @@ fn validate_action_admission(
         ));
     }
     if request.action_type == "attention.resolve" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         )));
@@ -10678,7 +10681,7 @@ mission "queue-parity" state="ready" {
     #[test]
     fn terminal_contention_preserves_retryable_code_and_service_close() {
         for code in ["database-busy", "database-locked"] {
-            let envelope = terminal_stream_error(&ApiError::bad(St3Error::new(code, "fixture contention")));
+            let envelope = terminal_stream_error(&ApiError::bad(FractalError::new(code, "fixture contention")));
             assert_eq!(envelope["code"], code);
             assert_eq!(envelope["retryable"], true);
             assert_eq!(terminal_error_close_code(envelope["code"].as_str().unwrap()), 1011);
@@ -15442,7 +15445,7 @@ subscription "watch/source" {
 
     #[test]
     fn steady_errors_preserve_store_conflicts_and_distinguish_terminal_lifetime() {
-        let conflict = ApiError::internal(anyhow::Error::new(St3Error::new(
+        let conflict = ApiError::internal(anyhow::Error::new(FractalError::new(
             "stale-subject",
             "the resource changed",
         )));
@@ -15838,7 +15841,7 @@ subscription "watch/source" {
     #[test]
     fn typed_identity_conflicts_preserve_client_wire_codes() {
         for code in ["identity-cycle", "identity-occupied", "identity-retired-source"] {
-            let error = ApiError::bad(St3Error::new(code, "identity conflict"));
+            let error = ApiError::bad(FractalError::new(code, "identity conflict"));
             assert_eq!(error.status, StatusCode::CONFLICT);
             let envelope = client_error_envelope(error.status,
                 &json!({"code":error.code,"message":error.message}), "request/identity");
