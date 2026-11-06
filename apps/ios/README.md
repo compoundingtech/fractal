@@ -444,6 +444,8 @@ the active sidebar still follows its existing v1 path. The read model stages pag
 retains a stale last-complete base, joins collection epochs/frontiers and bounds
 automatic restarts to three attempts. Epochs must be supplied by a capable daemon;
 missing epochs refuse rather than deriving a frontier from whole-host snapshots.
+An older daemon's HTTP 404 produces a distinct `Unsupported` state (needs a newer
+daemon), not a generic refusal; any last-complete base remains stale and retained.
 Run `pnpm --dir apps/ios test sidebarMemberships.test.mjs` for its paging contract.
 
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored

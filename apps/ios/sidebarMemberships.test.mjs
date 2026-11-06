@@ -91,6 +91,15 @@ test('unwired frame conversion preserves metadata-only changes, requires epoch, 
   for (const status of [401, 403, 409, 500]) assert.equal(sidebarMembershipFailure(token, { status, response: { code: 'other' } }).type, 'Refused');
   assert.deepEqual(sidebarMembershipFailure(token, {}), { type: 'Disconnect', token });
 });
+test('older daemon 404 is unsupported, scoped to the current attempt and retains stale base', () => {
+  const { state, token: old } = ready(), base = state.complete, token = refresh(state, 2);
+  const failure = sidebarMembershipFailure(token, { status: 404, response: { code: 'not-found' } });
+  assert.deepEqual(failure, { type: 'Unsupported', token });
+  assert.deepEqual(state.reduce({ ...failure, token: old }), []); assert.equal(state.status, 'Paging');
+  assert.deepEqual(state.reduce(failure), []);
+  assert.equal(state.status, 'Unsupported'); assert.equal(state.stale, true); assert.equal(state.complete, base);
+  assert.deepEqual(deliver(state, token, page()), []); assert.equal(state.status, 'Unsupported');
+});
 test('first reads await subscription; continuations do not resubscribe', async () => {
   const state = new SidebarMemberships(), token = refresh(state), calls = [];
   let joined;

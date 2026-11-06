@@ -18,6 +18,7 @@ export const sidebarMembershipFrame = (token: MembershipToken, subscription: str
 
 /** A reset invalidates the whole attempt; transport loss retains a stale last-complete base. */
 export const sidebarMembershipFailure = (token: MembershipToken, error: { status?: number; response?: { code: string } }): MembershipEvent => {
+  if (error.status === 404) return { type: 'Unsupported', token };
   if (error.status === 409 && error.response?.code === 'membership-frontier-reset') return { type: 'Expired', token };
   return error.status === undefined ? { type: 'Disconnect', token } : { type: 'Refused', token };
 };
