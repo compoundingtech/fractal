@@ -1003,6 +1003,7 @@ export type Attention = ResourceHeader & {
   request?: StructuredRequest;
   requested_at: Timestamp;
   requester_id?: Id;
+  resolved_by?: Id;
   review_mode?: "approve" | "feedback";
   source_id: Id;
   source_kind?: string;

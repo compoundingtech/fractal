@@ -18,7 +18,7 @@ pub async fn get(
         return Err(ApiError::bad(St3Error::new("forbidden", "Attention resolutions require an authenticated person")));
     }
     let proof = blocking_store(move || Ok(state.store.attention_source_resolution(
-        &fractal_store::store::attention_controls::AttentionControlSource {
+        &crate::store::attention_controls::AttentionControlSource {
             source_id: &locator.source_id, kind: &locator.attention_kind, episode: &locator.episode,
         }, &session.authority_actor, &id,
     ))).await?.map_err(ApiError::bad)?
@@ -41,8 +41,8 @@ mod tests {
         opening.actor = Some(source.into());
         let observation = state.store.claim(opening).unwrap();
         let episode = observation.id.as_str();
-        let person = "person/reader";
-        let id = fractal_store::client_values::client_attention_id(source, person, episode).unwrap();
+        let person = "person/receiver";
+        let id = client_attention_id(source, person, episode).unwrap();
         let lookup = |person: &str, id: &str| get(State(state.clone()),
             Extension(client_v0::ClientSession::local(Some(person)).unwrap()), AxumPath(id.into()),
             Query(Locator { source_id: source.into(), attention_kind: "harness-prompt".into(), episode: episode.into() }));
@@ -57,7 +57,7 @@ mod tests {
         assert_eq!(proof["person_id"], person);
         assert_eq!(lookup(person, "attention/mismatch").await.unwrap_err().code, "validation-failed");
         assert_eq!(lookup("person/other", &id).await.unwrap_err().code, "validation-failed");
-        let foreign_id = fractal_store::client_values::client_attention_id(source, "person/other", episode).unwrap();
+        let foreign_id = client_attention_id(source, "person/other", episode).unwrap();
         assert_eq!(lookup("person/other", &foreign_id).await.unwrap_err().code, "not-found");
         assert_eq!(lookup("agent/reader", &id).await.unwrap_err().code, "forbidden");
     }
