@@ -444,10 +444,12 @@ the active sidebar still follows its existing v1 path. The read model stages pag
 retains a stale last-complete base, joins collection epochs/frontiers and bounds
 automatic restarts to three attempts. Epochs must be supplied by a capable daemon;
 missing epochs refuse rather than deriving a frontier from whole-host snapshots.
-An older daemon's HTTP 404 produces a distinct `Unsupported` state (needs a newer
-daemon), not a generic refusal; any last-complete base remains stale and retained.
-HTTP 409 `membership-frontier-reset`/`membership-collection-changed` and HTTP 410
-`page-cursor-expired` discard the whole staged attempt and restart at page one.
+HTTP 404 and 422 `unsupported-membership-paging-contract` produce `Unsupported`
+(needs a newer daemon). HTTP 422 `invalid-membership-cursor` yields `InvalidCursor`;
+500 `membership-frontier-inconsistent` yields `FrontierInconsistent`. These states
+retain stale complete data without retries. Both collection-v1 HTTP 409 codes
+(`membership-frontier-reset`/`membership-collection-changed`) restart at page one.
+Legacy HTTP 410 cursor expiry is not a collection-v1 restart signal.
 Run `pnpm --dir apps/ios test sidebarMemberships.test.mjs` for its paging contract.
 
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored

@@ -91,17 +91,19 @@ test('unwired frame conversion preserves metadata-only changes, requires epoch, 
   for (const status of [401, 403, 409, 500]) assert.equal(sidebarMembershipFailure(token, { status, response: { code: 'other' } }).type, 'Refused');
   assert.deepEqual(sidebarMembershipFailure(token, {}), { type: 'Disconnect', token });
 });
-test('older daemon 404 is unsupported, scoped to the current attempt and retains stale base', () => {
-  const { state, token: old } = ready(), base = state.complete, token = refresh(state, 2);
-  const failure = sidebarMembershipFailure(token, { status: 404, response: { code: 'not-found' } });
-  assert.deepEqual(failure, { type: 'Unsupported', token });
-  assert.deepEqual(state.reduce({ ...failure, token: old }), []); assert.equal(state.status, 'Paging');
-  assert.deepEqual(state.reduce(failure), []);
-  assert.equal(state.status, 'Unsupported'); assert.equal(state.stale, true); assert.equal(state.complete, base);
-  assert.deepEqual(deliver(state, token, page()), []); assert.equal(state.status, 'Unsupported');
+test('unsupported and terminal collection-v1 failures retain stale base without retry loops', () => {
+  for (const [status, code, type] of [[404, 'not-found', 'Unsupported'], [422, 'unsupported-membership-paging-contract', 'Unsupported'], [422, 'invalid-membership-cursor', 'InvalidCursor'], [500, 'membership-frontier-inconsistent', 'FrontierInconsistent']]) {
+    const { state, token: old } = ready(), base = state.complete, token = refresh(state, 2);
+    const failure = sidebarMembershipFailure(token, { status, response: { code } });
+    assert.deepEqual(failure, { type, token });
+    assert.deepEqual(state.reduce({ ...failure, token: old }), []); assert.equal(state.status, 'Paging');
+    assert.deepEqual(state.reduce(failure), []);
+    assert.equal(state.status, type); assert.equal(state.stale, true); assert.equal(state.complete, base);
+    assert.deepEqual(deliver(state, token, page()), []); assert.deepEqual(state.reduce(failure), []); assert.equal(state.status, type);
+  }
 });
-test('exact server reset and cursor-expiration pairs restart whole attempts, never continuations', () => {
-  for (const [status, code] of [[409, 'membership-frontier-reset'], [409, 'membership-collection-changed'], [410, 'page-cursor-expired']]) {
+test('both collection-v1 409 pairs restart whole attempts, never continuations', () => {
+  for (const [status, code] of [[409, 'membership-frontier-reset'], [409, 'membership-collection-changed']]) {
     const { state } = ready(), base = state.complete, token = refresh(state);
     deliver(state, token, page(['b'], 'cursor', frontier(2, 2)));
     const event = sidebarMembershipFailure(token, { status, response: { code } });
@@ -110,7 +112,7 @@ test('exact server reset and cursor-expiration pairs restart whole attempts, nev
     assert.equal(state.complete, base); assert.deepEqual(deliver(state, token, page()), []);
     deliver(state, effect.token, page(['c'], undefined, frontier(3, 1))); assert.deepEqual(state.complete.members.map(row => row.member), ['c']);
   }
-  for (const [status, code] of [[410, 'membership-frontier-reset'], [410, 'membership-collection-changed'], [409, 'page-cursor-expired'], [410, 'other']]) assert.equal(sidebarMembershipFailure(refresh(new SidebarMemberships()), { status, response: { code } }).type, 'Refused');
+  for (const [status, code] of [[410, 'membership-frontier-reset'], [410, 'membership-collection-changed'], [409, 'page-cursor-expired'], [410, 'page-cursor-expired'], [409, 'invalid-membership-cursor'], [422, 'membership-frontier-inconsistent'], [500, 'unsupported-membership-paging-contract'], [422, 'other']]) assert.equal(sidebarMembershipFailure(refresh(new SidebarMemberships()), { status, response: { code } }).type, 'Refused');
 });
 test('first reads await subscription; continuations do not resubscribe', async () => {
   const state = new SidebarMemberships(), token = refresh(state), calls = [];

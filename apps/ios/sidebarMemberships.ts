@@ -7,7 +7,8 @@ export type MembershipPage = { frontier: MembershipFrontier; snapshot: Snapshot;
 export type MembershipComplete = { scope: MembershipScope; frontier: MembershipFrontier; snapshots: Snapshot[]; members: OrderedMembership[] };
 export type MembershipEvent = { type: 'Refresh'; scope: MembershipScope; generation: number } | { type: 'Disconnect'; token?: MembershipToken }
   | { type: 'Page'; token: MembershipToken; page: MembershipPage } | { type: 'Metadata'; token: MembershipToken; frontier: MembershipFrontier }
-  | { type: 'Expired'; token: MembershipToken } | { type: 'Refused'; token: MembershipToken } | { type: 'Unsupported'; token: MembershipToken };
+  | { type: 'Expired'; token: MembershipToken } | { type: 'Refused'; token: MembershipToken } | { type: 'Unsupported'; token: MembershipToken }
+  | { type: 'InvalidCursor'; token: MembershipToken } | { type: 'FrontierInconsistent'; token: MembershipToken };
 export type MembershipEffect = { type: 'SubscribeAndRead'; token: MembershipToken } | { type: 'Read'; token: MembershipToken; cursor: string } | { type: 'PersistBase' };
 const sameScope = (a: MembershipScope, b: MembershipScope): boolean => a.owner === b.owner && a.container === b.container && a.endpoint === b.endpoint && a.host === b.host && a.projection === b.projection;
 const sameFrontier = (a: MembershipFrontier, b: MembershipFrontier): boolean => a.epoch === b.epoch && a.changed_index === b.changed_index && a.live_count === b.live_count;
@@ -15,7 +16,7 @@ const conflict = (a: MembershipFrontier, b: MembershipFrontier): boolean => a.ep
 /** Unwired: SubscribeAndRead executors must subscribe BEFORE dispatching the first read.
  * Restored/last-complete data stays stale until a complete, consistent attempt publishes. */
 export class SidebarMemberships {
-  status: 'Unloaded' | 'Paging' | 'Ready' | 'Disconnected' | 'Refused' | 'Unsupported' | 'Exhausted' = 'Unloaded';
+  status: 'Unloaded' | 'Paging' | 'Ready' | 'Disconnected' | 'Refused' | 'Unsupported' | 'InvalidCursor' | 'FrontierInconsistent' | 'Exhausted' = 'Unloaded';
   private token?: MembershipToken;
   private serial = 0;
   private attempts = 0;
@@ -46,6 +47,7 @@ export class SidebarMemberships {
     if (event.type === 'Disconnect') { this.newest = undefined; return this.stop('Disconnected'); }
     if (event.type === 'Refused') return this.stop('Refused');
     if (event.type === 'Unsupported') return this.stop('Unsupported');
+    if (event.type === 'InvalidCursor' || event.type === 'FrontierInconsistent') return this.stop(event.type);
     if (event.type === 'Expired') return this.start(token);
     if (event.type === 'Page' && this.status !== 'Paging') return [];
     const incoming = event.type === 'Metadata' ? event.frontier : event.page.frontier;
