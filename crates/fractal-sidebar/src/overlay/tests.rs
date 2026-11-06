@@ -28,8 +28,7 @@ fn staged(intent: MoveIntent, plan: V2Plan) -> Edits {
     edits
 }
 fn member_edit() -> (Edits, SidebarTree, SidebarTree) {
-    let (arrangement, mut members) = inputs();
-    let observed = build_v2(&arrangement, &members).unwrap();
+    let (arrangement, mut members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
     let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-a"), before: None };
     let plan = plan_v2(&arrangement, &members, &intent).unwrap();
     let Member::Place { bucket, key, .. } = &plan.memberships[0] else { panic!("move emits Place"); };
@@ -116,8 +115,7 @@ fn observation_drops_overlay_before_completion_persistence_without_double_apply(
 }
 #[test]
 fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
-    let (arrangement, members) = inputs();
-    let observed = build_v2(&arrangement, &members).unwrap();
+    let (arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
     let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
     let mut edits = staged(intent, V2Plan { folders: vec![
         Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("folder-a".into()), key: "a0".into() },
