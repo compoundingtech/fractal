@@ -6660,8 +6660,9 @@ async fn restored_node(parent: &Path, directory: &str, archive: &Path) -> (Node,
 /// Backups across the messages shard (db break-up step 4c-1). While the shard holds nothing, the
 /// previous release and this build restore each other's archives, and this build writes what the
 /// release writes from the same database: its version and every record but the build that wrote
-/// it. Once the shard holds a stream item the archive is version 5: the release refuses it, naming
-/// the format, and this build restores it with the item and its read on the member.
+/// it. Once the shard holds a stream item the archive is version 5: a release predating the
+/// shard refuses it, naming the format, and this build restores it with the item and its read
+/// on the member. Releases already opening the shard skip only the refusal expectations.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items() {
@@ -6673,6 +6674,7 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     let mut o = Node::new(root.path(), "o");
     o.binary = old.clone();
     o.start().await;
+    let release_opens_shard = o.state_dir().join("shards").exists();
     let send = |node: &Node, key: &str| {
         let client = node.client();
         let key = key.to_owned();
@@ -6815,14 +6817,21 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
         assert!(records.iter().any(|record| record["record"] == kind), "the archive has no {kind} record");
     }
 
-    // The release refuses it and publishes nothing.
-    let target = root.path().join("release-refused/claims.sqlite3");
-    let refused = release_restore(&mut o, &shard_archive, &target);
-    assert!(!refused.status.success());
-    let error = String::from_utf8_lossy(&refused.stderr);
-    // The release names no version: that is the message an operator sees.
-    assert!(error.trim_end().ends_with(": unsupported claim backup format/version"), "{error}");
-    assert!(!target.exists());
+    // Only a release predating the shard refuses it and publishes nothing.
+    if release_opens_shard {
+        eprintln!(
+            "baseline release already opens shards/: the messages-shard transition is behind \
+             this fleet; skipping only the version-5 archive refusal assertions"
+        );
+    } else {
+        let target = root.path().join("release-refused/claims.sqlite3");
+        let refused = release_restore(&mut o, &shard_archive, &target);
+        assert!(!refused.status.success());
+        let error = String::from_utf8_lossy(&refused.stderr);
+        // The release names no version: that is the message an operator sees.
+        assert!(error.trim_end().ends_with(": unsupported claim backup format/version"), "{error}");
+        assert!(!target.exists());
+    }
 
     // This build restores it: the graph's mail, and the stream item still read.
     let (restored, report) = restored_node(root.path(), "from-shard", &shard_archive).await;
