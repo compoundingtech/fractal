@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use fractal_socket_discovery::default_unix_socket;
 #[cfg(test)]
-use fractal_socket_discovery::{unix_socket_answers, unix_socket_path_fits};
+use fractal_socket_discovery::{runtime_or_published_socket, unix_socket_answers, unix_socket_path_fits};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
