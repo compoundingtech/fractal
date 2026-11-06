@@ -5,13 +5,10 @@
 //! extension, and neither is discoverable from inside the harness. The first is *which* st2 to run
 //! — resolving `st2` from `PATH` would let a replaced control plane and its live agents disagree,
 //! which the R11 control-plane replacement guarantee exists to prevent — so the wrapper exports its
-//! own executable path. The second is the catalog and identity the channel must bind.
-//!
-//! Catalog wrappers also own their status lease for the same reason Claude does: the extension lives
-//! only as long as the provider's process, and a measured SIGKILL of pi produces no terminal record
-//! at all ([historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/.experiments/2026-08-18-pi-harness-integration.md)). Presence therefore decays
-//! by staleness, exactly as for the other harnesses. Native launches omit that status transport
-//! and retain session-owned observed records and terminal fencing.
+//! own executable path. The second is the native seat identity and session-owned paths the channel
+//! must bind. Both callers launch native sessions: the channel owns live observed records, and the
+//! provider wrapper supplies terminal fencing. The wrapper omits catalog status transport and
+//! removes inherited catalog environment values before launching the provider.
 //!
 //! The fork between the two harnesses is a [`HarnessKind`] descriptor, mirroring the
 //! [`crate::pi_channel::ChannelKind`] fork the family's channel side already uses: the same fork
@@ -28,7 +25,7 @@ use crate::provider_session::{
     PROVIDER_POLL, ProviderOutcome, STOP, describe_exit, install_signal_handler,
     run_provider_observed_with_env_removals,
 };
-use crate::{harness_state, hooks, message, status};
+use crate::{harness_state, hooks};
 
 /// pi's startup network work, which a supervised seat should not be doing.
 ///
@@ -78,36 +75,6 @@ pub(crate) struct HarnessKind {
 /// the channel extension spliced in.
 type PreparedLaunch = (Vec<(String, String)>, Vec<String>);
 
-/// Run one interactive pi-family provider and maintain its presence until it exits.
-pub(crate) fn run_for_with_environment(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    provider_argv: Vec<String>,
-    kind: &HarnessKind,
-    additional_env: &[(String, String)],
-    removed_env: &[&str],
-    required_incarnation: Option<String>,
-    legacy_presence: bool,
-) -> Result<()> {
-    let label = kind.label;
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, &identity, &crate::run::detect_host())?
-            .with_context(|| format!("{label} driver agent '{identity}' is not declared"))?;
-    run_for_paths(
-        catalog_root,
-        &agent_dir,
-        identity,
-        runtime_id,
-        provider_argv,
-        kind,
-        additional_env,
-        removed_env,
-        required_incarnation,
-        legacy_presence,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_for_paths(
     catalog_root: &Path,
@@ -118,8 +85,6 @@ pub(crate) fn run_for_paths(
     kind: &HarnessKind,
     additional_env: &[(String, String)],
     removed_env: &[&str],
-    required_incarnation: Option<String>,
-    legacy_presence: bool,
 ) -> Result<()> {
     let label = kind.label;
     anyhow::ensure!(
@@ -137,7 +102,7 @@ pub(crate) fn run_for_paths(
     };
     let executable = std::env::current_exe()
         .with_context(|| format!("resolving st executable for the {label} channel"))?;
-    let session = required_incarnation.unwrap_or_else(harness_state::session_token);
+    let session = harness_state::session_token();
     // The claim is written: it supersedes whatever the predecessor left — including a
     // still-fresh live record — before the channel or terminal writer act under it.
     let seq = harness_state::claim(agent_dir, identity.clone(), label, &session)?;
@@ -154,9 +119,7 @@ pub(crate) fn run_for_paths(
             &session,
             seq,
         )?;
-        if !legacy_presence {
-            env.retain(|(name, _)| name != kind.catalog_env);
-        }
+        env.retain(|(name, _)| name != kind.catalog_env);
         env.extend_from_slice(additional_env);
         env.extend(offline_defaults(|key| std::env::var_os(key).is_some()));
         if label == "omp" {
@@ -183,9 +146,7 @@ pub(crate) fn run_for_paths(
             .iter()
             .find(|(name, _)| name == crate::driver_paths::SESSION_DIR_ENV)
         {
-            Some((_, path)) if !legacy_presence => {
-                std::path::PathBuf::from(path).join("provider-sessions")
-            }
+            Some((_, path)) => std::path::PathBuf::from(path).join("provider-sessions"),
             _ => agent_dir.join("provider-sessions"),
         };
         std::fs::create_dir_all(&session_dir).with_context(|| {
@@ -233,14 +194,10 @@ pub(crate) fn run_for_paths(
         seq,
     );
     let mut native_removals = removed_env.to_vec();
-    if !legacy_presence {
-        native_removals.extend([kind.catalog_env, "CATALOG", "ST_ROOT"]);
-    }
+    native_removals.extend([kind.catalog_env, "CATALOG", "ST_ROOT"]);
     let outcome = run_provider_observed_with_env_removals(
         label,
-        legacy_presence
-            .then(|| status::status_path(agent_dir))
-            .as_deref(),
+        None,
         &provider_argv,
         &env,
         &native_removals,
