@@ -8067,7 +8067,10 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.start().await;
     let mut rolled_back = before.clone();
     if release_drains_outbox {
-        wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
+        // Observe both stores: an empty outbox alone does not establish shard visibility.
+        wait_until("the baseline drains its outbox into the shard", 60, || async {
+            outbox(&o).is_empty() && shard_file_holds(&o, "o") == (1, 1)
+        }).await;
         assert_eq!(shard_file_holds(&o, "o"), (1, 1), "the release drained the queued item to its shard");
         rolled_back.push((left.to_owned(), "sent".to_owned()));
     }
@@ -8085,7 +8088,9 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    wait_until("the upgraded member drains the outbox", 60, || async { outbox(&o).is_empty() }).await;
+    wait_until("the upgraded member drains the outbox into the shard", 60, || async {
+        outbox(&o).is_empty() && stream_items(&o, left).await == 1
+    }).await;
     assert_eq!(stream_items(&o, left).await, 1);
     assert_eq!(graph_messages(&o, left).await, 0);
     before.push((left.to_owned(), "sent".to_owned()));
