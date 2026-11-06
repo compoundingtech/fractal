@@ -45,6 +45,7 @@ struct Tui {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     screen: Arc<Mutex<String>>,
+    screen_changed: Arc<Notify>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
 impl Drop for Tui {
@@ -55,6 +56,10 @@ impl Drop for Tui {
 }
 impl Tui {
     fn start(root: &Path) -> Self {
+        Self::start_with(root, |_| {})
+    }
+
+    fn start_with(root: &Path, configure: impl FnOnce(&mut CommandBuilder)) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 32,
@@ -81,12 +86,15 @@ impl Tui {
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");
         command.cwd(root);
+        configure(&mut command);
         let child = pty.slave.spawn_command(command).unwrap();
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().unwrap();
         let writer = pty.master.take_writer().unwrap();
         let screen = Arc::new(Mutex::new(String::new()));
         let observed = screen.clone();
+        let screen_changed = Arc::new(Notify::new());
+        let changed = screen_changed.clone();
         std::thread::spawn(move || {
             let mut term = Term::new(Config::default(), &Size, Events);
             let mut parser: Processor = Processor::new();
@@ -105,12 +113,14 @@ impl Tui {
                     .collect::<Vec<_>>()
                     .join("\n");
                 *observed.lock().unwrap() = text;
+                changed.notify_one();
             }
         });
         Self {
             child,
             writer,
             screen,
+            screen_changed,
             _master: pty.master,
         }
     }
@@ -119,18 +129,18 @@ impl Tui {
         self.writer.flush().unwrap();
     }
     async fn wait(&self, label: &str, predicate: impl Fn(&str) -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
-        loop {
-            let screen = self.screen.lock().unwrap().clone();
-            if predicate(&screen) {
-                return;
+        tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                let changed = self.screen_changed.notified();
+                let screen = self.screen.lock().unwrap().clone();
+                if predicate(&screen) {
+                    return;
+                }
+                changed.await;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{label} did not appear:\n{screen}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{label} did not appear:\n{}", self.screen.lock().unwrap()));
     }
 }
 
@@ -852,38 +862,33 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     .unwrap();
     let device = tempfile::tempdir().unwrap();
     let log = device.path().join("legacy.jsonl");
-    let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut command = Command::new("python3");
-    command
-        .arg(repo.join("scripts/fractal-ui-test-client"))
-        .args([
-            "--binary",
-            test_env!("CARGO_BIN_EXE_fractal-unstamped"),
-            "--seconds",
-            "4",
-            "--label",
-            "older-inventory",
-            "--keys",
-            "\\x0bfleet\\r",
-        ])
-        .arg("--timing")
-        .arg(&log)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap())
-        .env("HOME", device.path())
-        .env("XDG_CONFIG_HOME", device.path().join("config"))
-        .env("XDG_CACHE_HOME", device.path().join("cache"))
-        .env("XDG_STATE_HOME", device.path().join("state"))
-        .env("ST3_ENDPOINT", &socket)
-        .env("ST3_PERSON", "person/avery");
-    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // Wait for the live view and each palette transition, not a fixed startup delay.
+    // Slow terminal initialization must not consume the keys intended to focus Fleet.
+    let mut tui = Tui::start_with(device.path(), |command| {
+        command.env("ST3_ENDPOINT", &socket);
+        command.env("ST3_PERSON", "person/avery");
+        command.env("STUI_TIMING_LOG", &log);
+    });
+    tui.wait("live older member", |screen| screen.contains("live")).await;
+    tui.send("\x0b");
+    tui.wait("open palette", |screen| screen.contains("every machine, its clients")).await;
+    tui.send("fleet");
+    tui.wait("Fleet palette query", |screen| screen.contains("fleet") && screen.contains("every machine, its clients")).await;
+    tui.send("\r");
+    let routes = [
+        "/v1/client/clients",
+        "/v1/client/machines",
+        "/v1/client/devices",
+        "/v1/client/sessions",
+    ];
+    tui.wait("Fleet inventory reads", |_| {
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+        routes.iter().all(|route| recorded.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|row|
+                row["type"] == "request" && row["route"].as_str().is_some_and(|actual| actual.starts_with(route)))
+        }))
+    }).await;
+    drop(tui);
     let rows = std::fs::read_to_string(&log)
         .unwrap()
         .lines()
