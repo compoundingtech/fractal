@@ -74,11 +74,34 @@ This seam changes no storage, schema or wire format. Mixed parents, declared
 defaults/reset, availability, optimistic application and revision/cycle-cut
 settlement belong to format-v2 work, not this API.
 
+`node scripts/check-sidebar-fixtures.mjs` gates every sidebar JSON fixture and
+seed snapshot recursively before publication. The TypeScript runner invokes the
+same gate before replay. `node --test scripts/check-sidebar-fixtures.test.mjs`
+exercises the public-data policy and schema checks. Subjects use `person/test`,
+`agent/test/*`, or numbered `machine/test-*` / `host/test-*` identities; the
+retained legacy `machine/retained` is synthetic. Folder IDs use the fixed
+zero-prefixed UUID family. New case names use `synthetic-case-N`, labels use
+`Synthetic Folder N` / `Synthetic Resource N`, and revisions use `claim/test-N`.
+Unknown schema keywords fail closed, so extending the behavior format requires
+updating its validator and public-identity policy together.
+
+The web runner `apps/fractal-web/src/folders/sidebarBehavior.unit.test.ts` loads
+these vectors through `scripts/sidebar-behavior-fixtures.mjs`, which runs the
+shared schema/public-data gate before returning a fixture. It exercises the
+production arrangement conversion, sidebar adapter and optimistic editor.
+Its explicit divergence table pins both golden and native outcomes where
+legacy web catalog-seat visibility, drop targets or Unfiled ordering differ;
+no dormant seats are synthesized to make the goldens pass. The pure semantic
+rollup remains covered by the shared-view runner, not the web adapter.
+Run the focused web suite in the web dev shell with
+`CI=1 pnpm --dir apps/fractal-web exec vitest run src/folders/sidebarBehavior.unit.test.ts`.
+
 From the repository root with Node 24 and Corepack (or `nix develop .#web`):
 
 ```sh
 corepack enable # Outside the Nix web shell
 pnpm install --frozen-lockfile
+node scripts/check-sidebar-fixtures.mjs
 pnpm --filter @fractal/views test
 pnpm --filter @fractal/views typecheck
 ```
