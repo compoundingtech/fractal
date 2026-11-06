@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "Serving reads canonical attention.control registers; restarting reconstructs suppression and its next wake from durable claims." },
   "schema": { "status": "none", "detail": "No additional stored schema changes." },
   "rules": { "status": "none", "detail": "No checkpoint or coordination changes." },
-  "compatibility": { "status": "changed", "detail": "Direct and published attention collections omit dismissed and currently snoozed rows without resolving their underlying work. Snooze deadlines join the existing server publication deadline; clear and restore claims republish the row. New source episodes invalidate previous controls." },
+  "compatibility": { "status": "changed", "detail": "Direct and published attention collections omit dismissed and currently snoozed rows without resolving their underlying work. Snooze deadlines join the existing server publication deadline; clear and restore claims republish the row. A fingerprint of source semantics invalidates controls when source content or its episode changes, excluding delivery and presentation changes." },
   "downtime": { "status": "none", "detail": "No service interruption required." },
   "manual": { "status": "none", "detail": "Public control actions are unchanged in this serving-only change." },
   "recovery": { "status": "none", "detail": "The underlying attention source remains intact; inverse control claims restore its presentation." }

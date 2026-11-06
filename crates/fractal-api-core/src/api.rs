@@ -4547,6 +4547,11 @@ pub fn client_attention_resources_at(
     Ok(client_attention_resources_fenced_at(store, person, at_unix_ms)?.0)
 }
 
+/// Source semantics only: presentation, delivery receipts and control claims cannot wake a snooze.
+pub fn client_attention_control_source(item: &crate::model::AttentionItemView) -> anyhow::Result<String> {
+    smallclaims::hash::canonical_hash(item)
+}
+
 pub fn client_attention_resources_fenced_at(
     store: &Store,
     person: Option<&str>,
@@ -4561,7 +4566,8 @@ pub fn client_attention_resources_fenced_at(
         if failure.is_some() { return true; }
         let read = || -> anyhow::Result<_> {
             let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
-            crate::store::attention_controls::current(&connection, &item.person, &id, &item.episode)
+            let source = client_attention_control_source(item)?;
+            crate::store::attention_controls::current(&connection, &item.person, &id, &source)
         };
         match read() {
             Ok(controls) => {

@@ -682,7 +682,12 @@ mod tests {
         let original = client_attention_resources_at(&store, Some("person/example"), false, now).unwrap();
         assert_eq!(original.len(), 1);
         let id = original[0]["id"].as_str().unwrap();
-        let revision = original[0]["revision"].as_str().unwrap();
+        let items = store.attention_snapshot(Some("person/example"), now).unwrap();
+        let source = client_attention_control_source(&items[0]).unwrap();
+        let mut changed = items[0].clone();
+        changed.detail.push_str(" Updated");
+        assert_ne!(client_attention_control_source(&changed).unwrap(), source);
+        let revision = source.as_str();
         let write = |change, key| {
             let controls = store.attention_controls("person/example", id, revision).unwrap();
             store.write_attention_control(&AttentionControlRequest {
