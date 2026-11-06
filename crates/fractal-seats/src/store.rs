@@ -33,7 +33,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
@@ -264,7 +264,7 @@ pub trait SeatsStoreCore {
             &self,
             intent: &NormalizedIntent,
             key: &str,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Reduce only subjects whose IDs begin with `prefix`.
     ///
     /// Product projections use this instead of reducing every subject in the graph and filtering
@@ -305,7 +305,7 @@ impl SeatsStoreCore for Store {
             &self,
             intent: &NormalizedIntent,
             key: &str,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         self.apply_internal_with_declared_agents(intent, key, &BTreeSet::new())
     }
 

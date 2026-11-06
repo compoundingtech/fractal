@@ -9,18 +9,18 @@ pub use fractal_delivery::store::declarations::{PublicationDefinition, diffs};
 pub trait DeclarationsStore {
     fn mission_declaration(
         &self, mission: &str, revision: Option<&str>, at: u64,
-    ) -> Result<Option<(MissionSpec, u64)>, St3Error>;
+    ) -> Result<Option<(MissionSpec, u64)>, FractalError>;
     fn publication_definition(
             &self,
             subject: &str,
             at: u64,
-        ) -> Result<Option<PublicationDefinition>, St3Error>;
+        ) -> Result<Option<PublicationDefinition>, FractalError>;
 }
 
 impl DeclarationsStore for Store {
     fn mission_declaration(
         &self, mission: &str, revision: Option<&str>, at: u64,
-    ) -> Result<Option<(MissionSpec, u64)>, St3Error> {
+    ) -> Result<Option<(MissionSpec, u64)>, FractalError> {
         let connection = self.readers.get();
         let mission = crate::store::missions::mission_storage_id(&connection, mission)?;
         let row: Option<(String, String)> = connection.query_row(
@@ -40,7 +40,7 @@ impl DeclarationsStore for Store {
             &self,
             subject: &str,
             at: u64,
-        ) -> Result<Option<PublicationDefinition>, St3Error> {
+        ) -> Result<Option<PublicationDefinition>, FractalError> {
         selected(&self.readers.get(), subject, Some(at))
     }
 }

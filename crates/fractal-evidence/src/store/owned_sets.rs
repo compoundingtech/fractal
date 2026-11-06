@@ -13,44 +13,44 @@ pub const STAGED_SUBJECTS_QUERY: &str =
     "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.owned_set') IS NOT NULL";
 
 pub trait OwnedSetsStore {
-    fn owned_sets(&self) -> Result<Vec<View>, St3Error>;
+    fn owned_sets(&self) -> Result<Vec<View>, FractalError>;
     /// Snapshot-bound retirement authority for client agent terminal projections.
-    fn retired_owned_subjects_at(&self, at: u64) -> Result<BTreeSet<String>, St3Error>;
+    fn retired_owned_subjects_at(&self, at: u64) -> Result<BTreeSet<String>, FractalError>;
     /// Known replica names from graph membership, without sealing batches during a read.
-    fn owned_set_replica_names(&self) -> Result<Vec<String>, St3Error>;
-    fn owned_set_history(&self, set: &str) -> Result<Vec<View>, St3Error>;
+    fn owned_set_replica_names(&self) -> Result<Vec<String>, FractalError>;
+    fn owned_set_history(&self, set: &str) -> Result<Vec<View>, FractalError>;
     fn owned_set_effective_members(
             &self,
             view: &View,
-        ) -> Result<Vec<(String, Member, bool)>, St3Error>;
+        ) -> Result<Vec<(String, Member, bool)>, FractalError>;
     fn owned_set_preview(
             &self,
             intent: &NormalizedIntent,
             options: &Options,
-        ) -> Result<Preview, St3Error>;
-    fn owned_member_guard(&self, s: &str) -> Result<(), St3Error>;
+        ) -> Result<Preview, FractalError>;
+    fn owned_member_guard(&self, s: &str) -> Result<(), FractalError>;
     /// Select a pass's candidates from one authority snapshot. This is not an effect fence:
     /// callers must still check current authority before workspace, render or runtime effects.
     fn owned_desired_subjects(
             &self,
             desired: &[DesiredSubject],
-        ) -> Result<BTreeSet<String>, St3Error>;
+        ) -> Result<BTreeSet<String>, FractalError>;
     fn apply_owned_set(
             &self,
             intent: &NormalizedIntent,
             options: &Options,
             key: &str,
             actor: &str,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
 }
 
 impl OwnedSetsStore for Store {
 
-    fn owned_sets(&self) -> Result<Vec<View>, St3Error> {
+    fn owned_sets(&self) -> Result<Vec<View>, FractalError> {
         selected(&self.readers.get(), None)
     }
 
-    fn retired_owned_subjects_at(&self, at: u64) -> Result<BTreeSet<String>, St3Error> {
+    fn retired_owned_subjects_at(&self, at: u64) -> Result<BTreeSet<String>, FractalError> {
         let connection = self.readers.get();
         let mut retired = BTreeSet::new();
         for view in selected(&connection, Some(at))? {
@@ -62,7 +62,7 @@ impl OwnedSetsStore for Store {
         Ok(retired)
     }
 
-    fn owned_set_replica_names(&self) -> Result<Vec<String>, St3Error> {
+    fn owned_set_replica_names(&self) -> Result<Vec<String>, FractalError> {
         let membership = fleet_membership_tx(&self.readers.get()).map_err(internal)?;
         Ok(membership
             .incarnations()
@@ -71,7 +71,7 @@ impl OwnedSetsStore for Store {
             .collect())
     }
 
-    fn owned_set_history(&self, set: &str) -> Result<Vec<View>, St3Error> {
+    fn owned_set_history(&self, set: &str) -> Result<Vec<View>, FractalError> {
         let subject = subject(set)?;
         Ok(rows(&self.readers.get(), None)?
             .into_iter()
@@ -82,7 +82,7 @@ impl OwnedSetsStore for Store {
     fn owned_set_effective_members(
             &self,
             view: &View,
-        ) -> Result<Vec<(String, Member, bool)>, St3Error> {
+        ) -> Result<Vec<(String, Member, bool)>, FractalError> {
         Ok(effective_members(&self.readers.get(), view, None)?
             .into_iter()
             .map(|(s, (m, retired, _))| (s, m, retired))
@@ -93,10 +93,10 @@ impl OwnedSetsStore for Store {
             &self,
             intent: &NormalizedIntent,
             options: &Options,
-        ) -> Result<Preview, St3Error> {
+        ) -> Result<Preview, FractalError> {
         let mut preview = self.connection
             .batched(|tx| plan_tx(tx, intent, options).map(|p| p.preview))
-            .map_err(|e| St3Error::new("internal", e))??;
+            .map_err(|e| FractalError::new("internal", e))??;
         // Operational annotations belong to preview only. Publication keeps its existing
         // transaction reads and suspension follows the shared launch-lineage comparator.
         for (subject, effect) in &mut preview.effects {
@@ -114,14 +114,14 @@ impl OwnedSetsStore for Store {
         Ok(preview)
     }
 
-    fn owned_member_guard(&self, s: &str) -> Result<(), St3Error> {
+    fn owned_member_guard(&self, s: &str) -> Result<(), FractalError> {
         guard_member(&self.readers.get(), s)
     }
 
     fn owned_desired_subjects(
             &self,
             desired: &[DesiredSubject],
-        ) -> Result<BTreeSet<String>, St3Error> {
+        ) -> Result<BTreeSet<String>, FractalError> {
         if desired.is_empty() {
             return Ok(BTreeSet::new());
         }
@@ -211,7 +211,7 @@ impl OwnedSetsStore for Store {
             options: &Options,
             key: &str,
             actor: &str,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         let key = format!("owned-set:{}:{key}", options.set);
         self.apply_as_impl(
             intent,
