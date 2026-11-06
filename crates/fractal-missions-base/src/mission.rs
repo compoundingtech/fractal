@@ -2067,6 +2067,9 @@ fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), S
     let mut rewritten = BTreeMap::new();
     for (id, mut step) in old {
         step.path = format!("{parent}/{}/{}", mission.id, step.id);
+        if let Some(loop_spec) = step.loop_spec.as_mut() {
+            loop_spec.path.clone_from(&step.path);
+        }
         if let Some(nested) = step.nested_mission.as_mut() {
             rewrite_nested_paths(nested, &step.path)?;
         }
@@ -3092,6 +3095,59 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_loop_paths_follow_their_distinct_owning_steps() {
+        let source = r#"mission "collision" state="ready" {
+          goal "Keep nested histories separate."
+          step "left" { mission "left-inner" { goal "Left.";
+            loop "repeat" { max-rounds 2; round { goal "Left round."; }; }
+          }; }
+          step "right" { mission "right-inner" { goal "Right.";
+            loop "repeat" { max-rounds 2; round { goal "Right round."; }; }
+          }; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "node").unwrap();
+        let mission = &missions["collision"];
+        let left = &mission.steps["left"].nested_mission.as_ref().unwrap().steps["repeat"];
+        let right = &mission.steps["right"]
+            .nested_mission
+            .as_ref()
+            .unwrap()
+            .steps["repeat"];
+        for (step, expected) in [
+            (left, "left/left-inner/repeat"),
+            (right, "right/right-inner/repeat"),
+        ] {
+            assert_eq!(step.path, expected);
+            assert_eq!(step.loop_spec.as_ref().unwrap().path, step.path);
+        }
+        assert_ne!(
+            left.loop_spec.as_ref().unwrap().path,
+            right.loop_spec.as_ref().unwrap().path
+        );
+    }
+
+    #[test]
+    fn top_level_loop_retains_local_path_and_legacy_publication_hashes() {
+        let source = r#"mission "top" state="ready" { goal "Top.";
+          loop "repeat" { max-rounds 2; round { goal "Round."; }; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "node").unwrap();
+        let mission = &missions["top"];
+        let step = &mission.steps["repeat"];
+        assert_eq!(step.path, "repeat");
+        assert_eq!(step.loop_spec.as_ref().unwrap().path, "repeat");
+        // Reconstruct the pre-fix hash inputs: local loop path, empty hash fields.
+        let mut legacy = mission.clone();
+        let legacy_step = legacy.steps.get_mut("repeat").unwrap();
+        legacy_step.loop_spec.as_mut().unwrap().path = "repeat".into();
+        legacy_step.definition_hash.clear();
+        legacy_step.definition_hash = super::hash(legacy_step).unwrap();
+        assert_eq!(step.definition_hash, legacy_step.definition_hash);
+        legacy.revision.clear();
+        assert_eq!(mission.revision, super::hash(&legacy).unwrap());
+    }
+
     #[test]
     fn kdl_interpolation_preserves_arbitrary_text_input() {
         let source = r#"version 2
