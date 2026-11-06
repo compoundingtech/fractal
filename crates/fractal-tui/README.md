@@ -167,6 +167,13 @@ The extracted widget must compare against this capture, never regenerate it to c
 The explicit dependency feature reproduces CI's workspace-unified test-support helpers
 without compiling every workspace test target.
 
+`fractal-sidebar/ratatui` exposes an unwired `widget::render` over borrowed host-prepared
+rows, presentation and styles, returning stable-ID hit/context regions. Hosts retain
+label sanitization, row projection, catalog/fold/filter state and input/navigation.
+`cargo test -p fractal-sidebar --features ratatui --test widget` compares all eleven
+states against the original immutable capture. Default features remain empty; enabling
+the widget does not enable a client adapter or introduce client dependencies.
+
 The PTY smoke test runs with or without a local daemon or Fractal config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release

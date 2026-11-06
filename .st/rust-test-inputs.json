@@ -320,7 +320,8 @@
   "fractal-sidebar": {
    "extra": [
     "fixtures/clients/sidebar/behavior-v1.json",
-    "fixtures/clients/sidebar/behavior.schema.json"
+    "fixtures/clients/sidebar/behavior.schema.json",
+    "fixtures/clients/sidebar/tui-v1.snapshot"
    ]
   },
   "fractal-storage-version": {
