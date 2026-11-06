@@ -1,6 +1,50 @@
 use super::*;
 use crate::store::attention_controls::{AttentionControlChange, AttentionControlRequest, AttentionControlSource, current};
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReadQuery {
+    source_id: String,
+    attention_kind: String,
+    episode: String,
+    source_revision: String,
+}
+
+pub(super) async fn read(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ReadQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    let person = session.authority_actor.as_str();
+    if !person.starts_with("person/") {
+        return Err(forbidden("attention presentation controls require an authenticated person"));
+    }
+    let expected = crate::client_values::client_attention_id(&query.source_id, person, &query.episode)
+        .map_err(ApiError::internal)?;
+    if expected != id {
+        return Err(validation("Attention locator does not match the native item identity"));
+    }
+    let source = AttentionControlSource {
+        source_id: &query.source_id, kind: &query.attention_kind, episode: &query.episode,
+    };
+    let controls = state.store.read_attention_control(
+        &source, person, &id, &query.source_revision, client_now_ms(),
+    ).map_err(|error| if error.code == "stale-fence" {
+        ApiError::not_found("attention source is not available for this person")
+    } else { ApiError::bad(error) })?;
+    let until = controls.snoozed_until_unix_ms.map(|until| {
+        chrono::DateTime::from_timestamp_millis(until)
+            .map(|until| until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .ok_or_else(|| ApiError::internal("stored attention snooze exceeds timestamp range"))
+    }).transpose()?;
+    Ok(Json(json!({
+        "id": id, "source_revision": query.source_revision, "revision": controls.revision,
+        "dismissed": controls.dismissed, "snoozed_until": until,
+    })))
+}
+
 pub(super) fn write(
     state: &AppState, session: &ClientSession, request: &ActionRequest,
     receipt_subject: &str, request_digest: &str, actor_key: &str,

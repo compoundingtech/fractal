@@ -1014,6 +1014,18 @@
         "attempt": { "type": "integer", "minimum": 0 }
       }
     },
+    "AttentionControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_revision", "revision", "dismissed", "snoozed_until"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id" },
+        "source_revision": { "type": "string" },
+        "revision": { "type": ["string", "null"] },
+        "dismissed": { "type": "boolean" },
+        "snoozed_until": { "type": ["string", "null"], "format": "date-time", "description": "RFC3339 UTC deadline, including an expired deadline until explicitly cleared." }
+      }
+    },
     "AttentionTargetState": {
       "type": "object",
       "additionalProperties": false,

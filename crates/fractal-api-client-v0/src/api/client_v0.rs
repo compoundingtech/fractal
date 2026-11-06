@@ -183,6 +183,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(operation_detail),
         )
         .route("/v1/client/events", get(events))
+        .route("/v1/client/attention-controls/{*id}", get(attention_controls::read))
         .route(
             "/v1/client/collections/stream",
             get(collection_stream),

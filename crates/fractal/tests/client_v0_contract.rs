@@ -105,6 +105,26 @@ fn compile_contract_validator(mut schema: Value, definition: &str) -> jsonschema
         .unwrap_or_else(|error| panic!("compile {definition} contract: {error}"))
 }
 
+#[test]
+fn attention_control_contract_requires_explicit_nullable_registers() {
+    let validator = contract_validator("AttentionControl");
+    for (revision, until) in [(Value::Null, Value::Null),
+        (serde_json::json!("control/revision"), serde_json::json!("2026-11-06T12:00:00.000Z"))] {
+        let value = serde_json::json!({
+            "id": "attention/0123456789abcdef0123456789abcdef", "source_revision": "source/revision",
+            "revision": revision, "dismissed": false, "snoozed_until": until,
+        });
+        assert_conforms(&validator, "exact native control", &value);
+        let typed: fractal_client::AttentionControl = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), value);
+        for field in ["revision", "snoozed_until"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(!validator.is_valid(&missing), "accepted absent {field}");
+        }
+    }
+}
+
 fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Value) {
     if !validator.is_valid(value) {
         let errors = validator

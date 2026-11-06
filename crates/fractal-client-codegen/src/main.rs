@@ -246,6 +246,10 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
         }
+        if id == "attention-controls.get" {
+            writeln!(out, "    pub async fn attention_controls_get(&self, id: &str, source_id: &str, attention_kind: &str, episode: &str, source_revision: &str) -> Result<Envelope<AttentionControl>, ClientError> {{ self.get(&format!(\"/v1/client/attention-controls/{{}}?source_id={{}}&attention_kind={{}}&episode={{}}&source_revision={{}}\", percent_encode(id), percent_encode(source_id), percent_encode(attention_kind), percent_encode(episode), percent_encode(source_revision))).await }}")?;
+            continue;
+        }
         if id == "arrangements.get" {
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
             continue;
@@ -542,6 +546,8 @@ fn swift_operation_methods(
                 out,
                 "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
             )?;
+        } else if id == "attention-controls.get" {
+            writeln!(out, "    public func attentionControlsGet(id: String, sourceID: String, attentionKind: String, episode: String, sourceRevision: String) async throws -> Envelope<AttentionControl> {{ try await get(\"v1/client/attention-controls/\\(Self.pathSegment(id))\", query: [.init(name: \"source_id\", value: sourceID), .init(name: \"attention_kind\", value: attentionKind), .init(name: \"episode\", value: episode), .init(name: \"source_revision\", value: sourceRevision)]) }}")?;
         } else if id == "message-body.get" {
             writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
         } else if id == "status-history.get" {
@@ -810,6 +816,7 @@ fn validate_surfaces(
         "ResourcesFilter",
         "ResourcesPage",
         "AttentionBlocked",
+        "AttentionControl",
         "AttentionTargetState",
         "DocumentContent",
         "DocumentItem",
@@ -1626,6 +1633,10 @@ fn typescript_operation_methods(
         if let Some((projection, request, response)) = assistant_read(read)? {
             let response = if response == "Value" { "unknown" } else { response };
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
+            continue;
+        }
+        if id == "attention-controls.get" {
+            writeln!(out, "    async attentionControlsGet(id: string, options: {{ source_id: string; attention_kind: string; episode: string; source_revision: string }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AttentionControl>> {{ return this.get(`/v1/client/attention-controls/${{encodeURIComponent(id)}}` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "device-command.get" {

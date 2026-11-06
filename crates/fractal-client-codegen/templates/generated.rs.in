@@ -763,6 +763,16 @@ pub struct AttentionBlocked {
     pub attempt: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AttentionControl {
+    pub id: String,
+    pub source_revision: String,
+    pub revision: Option<String>,
+    pub dismissed: bool,
+    pub snoozed_until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionTargetState {
     pub id: String,
     pub state: String,

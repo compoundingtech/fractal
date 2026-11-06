@@ -23,6 +23,19 @@ Generated Effect string length checks count Unicode code points, matching JSON S
 URI-reference format checks validate RFC3986 syntax, including relative references,
 without URL-constructor normalization of malformed input.
 
+Native presentation controls have an authenticated point read:
+`GET /v1/client/attention-controls/{id}` with the original `source_id`,
+`attention_kind`, `episode`, and `source_revision` query fields. No person selector
+is accepted. The server recomputes the native identity for the authenticated person,
+authorizes that exact source, and reads its control reduction in one SQLite snapshot,
+including while dismiss/snooze hides the still-open source from attention feeds.
+The `AttentionControl` envelope value contains `id`, `source_revision`,
+`revision: null|string`, `dismissed`, and `snoozed_until: null|RFC3339 UTC`.
+TypeScript `attentionControlsGet(id, locator)` decodes the nullable strings as Options.
+Read after an action ACK and on reconnect, never by polling; bounded feed omission
+is not evidence that a control was applied. An identity mismatch is `validation-failed`;
+an unavailable, changed, or unauthorized exact source is `not-found`.
+
 The standalone `NoticeCreated`, `NoticeSnapshot`, `NoticeFence` and notice parameter
 definitions are internal contract models, not server support: no notice Resource,
 operation, action, collection or capability is registered. `NoticeSnapshot.input`
