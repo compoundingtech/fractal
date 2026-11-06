@@ -1135,7 +1135,10 @@ fn has_selector_cleanup(connection: &Connection) -> Result<bool> {
 fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) -> String {
     let flag=if person { "recipient_current" } else { "global_current" };
     let alive=if current { "retired_index IS NULL" } else { "born_index<=?1 AND (retired_index IS NULL OR retired_index>?1)" };
-    let eligible=if history { String::new() } else { format!("AND {flag}=1") };
+    // This member's closed mark (message_marks.rs) moves no index, so the cut cannot leave it out and
+    // a header may not have folded it yet. The page reads it live, as the message's status does.
+    let marked=|subject: &str|format!("EXISTS(SELECT 1 FROM local_message_marks WHERE message={subject} AND kind='message.closed')");
+    let eligible=if history { String::new() } else { format!("AND {flag}=1 AND NOT {}",marked("local_client_message_selectors_v1.subject")) };
     let recipient_scope=if person { "AND recipient=?2 AND mailbox=1" } else { "" };
     let branch=|index: &str,scope: &str,alive: &str| {
         let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{flag} current,closed FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {eligible} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) ORDER BY sent_key DESC,subject LIMIT ?6");
@@ -1165,7 +1168,8 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
             eligible_branch("client_selector_order","client_selector_global_eligible","client_selector_global_retired_eligible","")
         }
     };
-    format!("SELECT subject,created_index,current,closed FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
+    let marked=marked("page.subject");
+    format!("SELECT subject,created_index,current AND NOT {marked},closed OR {marked} FROM ({candidates}) page WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
 }
 
 fn selectors_not_ready() -> FractalError {

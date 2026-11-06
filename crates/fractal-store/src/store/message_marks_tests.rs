@@ -359,3 +359,45 @@ fn a_mark_holds_the_writer_no_longer_than_the_claim_it_replaces() {
     }
     println!("{}", json!({"messages": messages, "per_kind": report}));
 }
+
+#[test]
+fn a_closed_mark_leaves_the_open_page_before_its_header_folds() {
+    let (_root, claims, marks) = twins();
+    let subject = "message/marks-0-0";
+    for kind in ["message.staged", "message.delivered", "message.read"] {
+        claims.append_claim(&lifecycle(subject, kind, RECIPIENT)).unwrap();
+        message_marks::record(&marks, subject, kind, RECIPIENT).unwrap();
+    }
+    // Each pass then folds one row and stops, and a send that sorts first takes more than one, so
+    // the close's header waits behind it for maintenance as it can on a loaded host.
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
+        store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+        store.append_claim(&sent("message/backlog", RECIPIENT, &[])).unwrap();
+    }
+    claims.append_claim(&lifecycle(subject, "message.closed", RECIPIENT)).unwrap();
+    message_marks::record(&marks, subject, "message.closed", RECIPIENT).unwrap();
+    // (status, closed, current) of the message's row at the page's own cut.
+    let page = |store: &Store, history: bool| -> Vec<(String, bool, bool)> {
+        let cut = store.client_messages_page_cut(store.index().unwrap()).unwrap();
+        store.client_messages_page(Some(RECIPIENT), None, history, cut, None, 100).unwrap().into_iter()
+            .filter(|(message, ..)| message.subject == subject)
+            .map(|(message, metadata, current)| (message.status, metadata["closed"].as_bool().unwrap(), current))
+            .collect()
+    };
+    let closed = vec![("closed".to_string(), true, false)];
+    for store in [&claims, &marks] {
+        let unfolded = &projections(store)["local_client_message_selectors_v1 unfolded"];
+        assert_eq!(unfolded, &[format!("{:?}", rusqlite::types::ValueRef::from(subject))], "only the close's header is unfolded");
+    }
+    // A claim's close is above the pinned cut, so the page shows the message as it was at the cut.
+    assert_eq!(page(&claims, false), vec![("read".to_string(), false, true)]);
+    // A mark's close has no index to pin, so the page reads it live, as the message's status does.
+    assert_eq!(page(&marks, false), Vec::new(), "a closed mark is on the open page");
+    assert_eq!(page(&marks, true), closed);
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
+        assert_eq!(page(store, false), Vec::new());
+        assert_eq!(page(store, true), closed);
+    }
+}

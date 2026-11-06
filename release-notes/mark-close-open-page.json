@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A message this member closed with a local mark leaves the client messages open page right away, and its row on any page reads closed and not current, instead of showing as closed on the open page until the selector fold catches up",
+  "replay": {"status": "none", "detail": "No claim or projection replay; the page reads local_message_marks live, as the message's status already does."},
+  "schema": {"status": "none", "detail": "No table, index or schema change; only the page query's predicate and two result columns."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change; marks stay outside every digest."},
+  "compatibility": {"status": "none", "detail": "Mixed-version fleets are unaffected: marks are member-local and the page is served by the member that holds them; no wire or stored-format change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}
