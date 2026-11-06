@@ -433,6 +433,12 @@ and previously seen rows are scoped to the gateway and person. Missing rows stay
 unavailable. Edits use `arrangement.edit` and the live winning registers, with Sidebar
 created only on the first edit.
 
+Run `pnpm --dir apps/ios test sidebarBehavior.test.mjs` from the repository root
+to replay the schema-validated shared v1 vectors through the native feed, view and
+edit planners. The runner's explicit divergence table locks down the current
+flat-folder presentation, UTF-16 ties and native planner validation differences;
+it does not claim recursive layouts, structured refusal parity or v2 support.
+
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
 tab orders are intentionally retired. A fresh workspace names its host and points to
 Now → New → New terminal; New mission is available there too.

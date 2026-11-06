@@ -751,7 +751,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha2f85639d60c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1051,6 +1051,8 @@ CREATE INDEX IF NOT EXISTS claims_person_ask_owner_index ON claims(json_extract(
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_origin_step_index ON claims(json_extract(body, '$.fields.origin_step'))
 WHERE kind='work.person-asked';
+CREATE INDEX IF NOT EXISTS claims_person_ask_recipient_index
+ON claims(json_extract(body, '$.fields.person')) WHERE kind='work.person-asked';
 
 CREATE TABLE IF NOT EXISTS mission_run_requests (
     operation_id TEXT PRIMARY KEY,
@@ -1165,6 +1167,7 @@ CREATE TABLE IF NOT EXISTS mission_runs (
     updated_at_unix_ms TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mission_runs_mission_index ON mission_runs(mission_id, created_at_unix_ms);
+CREATE INDEX IF NOT EXISTS mission_runs_requester_index ON mission_runs(requester);
 -- Additive seek-index migration: schema installation runs for existing stores too.
 -- Distinct mission keys, latest headers and live-state probes never fold run history.
 CREATE INDEX IF NOT EXISTS mission_runs_collection_latest_index
@@ -1243,6 +1246,10 @@ CREATE INDEX IF NOT EXISTS step_runs_assignee_index ON step_runs(assignee, statu
 -- The steps a lease holds, a handful of all the steps a fleet has ever run.
 CREATE INDEX IF NOT EXISTS step_runs_lease_index ON step_runs(lease_owner)
 WHERE lease_owner IS NOT NULL;
+DROP INDEX IF EXISTS step_runs_individual_offer_index;
+DROP INDEX IF EXISTS step_runs_single_recipient_index;
+CREATE INDEX IF NOT EXISTS step_runs_single_agent_offer_index ON step_runs(available_to, run_id)
+WHERE CASE WHEN json_valid(available_to) THEN json_array_length(available_to)=1 ELSE 0 END;
 -- The few steps offered to several seats, so a seat's steps are found without reading every step.
 CREATE INDEX IF NOT EXISTS step_runs_available_index ON step_runs(run_id)
 WHERE available_to!='[]';
