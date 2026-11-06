@@ -1,9 +1,10 @@
 import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
-import { ArrangementEditParameters, ErrorCode, decodeUnknownSync, type ActionResult } from '@fractal/client/schema'
+import { ErrorCode, decodeUnknownSync, type ActionResult } from '@fractal/client/schema'
 import type { ActionFailure } from '@fractal/sdk/mutations'
 import type { SdkChunkFailure } from '../data/lazySdk.ts'
-import { Effect, Schema } from 'effect'
+import { Effect } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
+import { prepareArrangementRetry, stageArrangementEdit, type EditJob } from './editRequest.ts'
 
 /** Loading errors are refused before submission, and the existing edit retry reacquires the chunk. */
 export interface ArrangementActionPort {
@@ -151,19 +152,6 @@ export interface StructuralIntent {
   /** Continues a combined intent once this edit is applied, including after an explicit retry. */
   readonly onApplied?: () => void
 }
-interface EditJob {
-  operations: readonly SidebarOperation[]
-  readonly intent?: StructuralIntent
-  /** Sidebar selected when the gesture was accepted; undefined only for a bootstrap with no Sidebar. */
-  readonly sidebar?: string
-  readonly id: string
-  readonly key: string
-  readonly done: PromiseWithResolvers<EditOutcome>
-  request?: ActionOf<'arrangement.edit'>
-  /** The last submitted request was authoritatively refused, not transport-uncertain. */
-  requestRefused?: boolean
-  creationObserved?: boolean
-}
 export interface ArrangementEditor {
   readonly accept: (inventory: ArrangementInventory) => void
   readonly edit: (operations: readonly SidebarOperation[], intent?: StructuralIntent) => Promise<EditOutcome>
@@ -188,19 +176,8 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
   let refusal: ArrangementRefusal | undefined
   let failed: EditJob | undefined
   let retryReady = false
-  const prepareRetry = (job: EditJob): EditJob => {
-    const winner = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)
-    if (job.intent !== undefined) {
-      const { request: _request, ...fields } = job
-      return { ...fields, id: `action/${crypto.randomUUID()}`, key: crypto.randomUUID() }
-    }
-    const request = job.request
-    if (request === undefined || (request.parameters.subject === (winner?.id ?? reservation) &&
-      request.parameters.operations.some((operation) => operation.op === 'create') === (winner === undefined))) return job
-    // Changed parameters after a known non-applied refusal need a new action identity/key.
-    const { request: _request, ...fields } = job
-    return { ...fields, id: `action/${crypto.randomUUID()}`, key: crypto.randomUUID() }
-  }
+  const prepareRetry = (job: EditJob): EditJob =>
+    prepareArrangementRetry(job, inventory === undefined ? undefined : sidebarWinner(inventory.items, owner), reservation)
   const queue: EditJob[] = []
   const abort = new AbortController()
   const targets = (job: EditJob) => [...new Set(job.operations.flatMap((operation) => operation.op === 'subject.place'
@@ -288,52 +265,26 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
         }
         // Retarget only a definitive non-applied refusal, after the fresh inventory is accepted.
         if (job.requestRefused) { job = prepareRetry(job); queue[0] = job }
-        // A structural intent uses fresh siblings, but only within the Sidebar the user edited.
-        // Bootstrap is the narrow exception: no Sidebar existed, so only the reserved creation target qualifies.
-        if (job.request === undefined && job.intent !== undefined) {
-          const bound = job.sidebar === undefined ? winner === undefined || winner.id === reservation : winner?.id === job.sidebar
-          const verdict: RestageVerdict = bound ? job.intent.restage(winner) : { _tag: 'Refused', sentence: 'The folder layout changed elsewhere; make the change again.' }
-          if (verdict._tag === 'Refused') {
-            fail(job, { ...unknown(verdict.sentence, job), restageRefusal: verdict.sentence })
-            return
-          }
-          if (verdict._tag === 'Satisfied') {
-            queue.shift()
-            publish()
-            job.done.resolve({ _tag: 'Success' })
-            job.intent.onApplied?.()
-            continue
-          }
-          job.operations = structuredClone(verdict.operations)
+        const staged = stageArrangementEdit(job, owner, winner, reservation, fresh.success, creation?.phase === 'acknowledged')
+        if (staged._tag === 'Refused') {
+          fail(job, { ...unknown(staged.detail, job), ...(staged.restageRefusal === undefined ? {} : { restageRefusal: staged.restageRefusal }) })
+          return
         }
-        if (job.request === undefined) {
-          if (winner === undefined && creation?.phase === 'acknowledged') {
-            fail(job, unknown('The created Sidebar is not visible in the complete inventory yet. Refresh before retrying.', job))
-            return
-          }
-          const parameters = { owner, subject: winner?.id ?? reservation, operations: winner === undefined ? [{ op: 'create', name: 'Sidebar' } as const, ...job.operations] : [...job.operations] }
-          if (!Schema.is(Schema.toEncoded(ArrangementEditParameters))(parameters as unknown)) {
-            fail(job, unknown('The edit does not match the generated arrangement operation contract.', job))
-            return
-          }
-          // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-          job.request = { api_version: 'st3.client.v0', type: 'arrangement.edit', id: job.id, idempotency_key: job.key, parameters, fence: { snapshot_id: fresh.success, subject_revisions: winner === undefined ? {} : { [winner.id]: winner.revision } } }
-        } else {
-          // Unknown delivery retries must replay exactly the original identity and parameters.
-          const unobservedCreation = job.request.parameters.operations.some((operation) => operation.op === 'create') && !job.creationObserved
-          if (winner?.id !== job.request.parameters.subject && !(winner === undefined && unobservedCreation)) {
-            fail(job, unknown('The folder layout changed elsewhere; refresh and try again.', job))
-            return
-          }
-          job.request = { ...job.request, fence: { snapshot_id: fresh.success, subject_revisions: winner === undefined ? {} : { [winner.id]: winner.revision } } }
+        if (staged._tag === 'Satisfied') {
+          queue.shift()
+          publish()
+          job.done.resolve({ _tag: 'Success' })
+          job.intent?.onApplied?.()
+          continue
         }
+        const request = staged.request
         job.requestRefused = false
-        const result = await Effect.runPromise(Effect.result(actions.submitAction(job.request)), { signal: abort.signal })
+        const result = await Effect.runPromise(Effect.result(actions.submitAction(request)), { signal: abort.signal })
         if (closed) return
         if (result._tag === 'Failure') {
           job.requestRefused = result.failure._tag === 'ActionRefused'
           const reason = arrangementRefusal(result.failure, targets(job))
-          if (reason.error?.code === 'arrangement-retired' && job.request.parameters.subject === reservation) reservedRetired = true
+          if (reason.error?.code === 'arrangement-retired' && request.parameters.subject === reservation) reservedRetired = true
           const refreshRequired = reason.error?.code === 'stale-fence' || reason.error?.code === 'arrangement-exists'
           fail(job, reason, refreshRequired)
           if (refreshRequired) {
@@ -355,8 +306,8 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
           fail(job, unknown('The action result was rejected without a refusal reason.', job))
           return
         }
-        if (job.request.parameters.operations.some((operation) => operation.op === 'create'))
-          creation = { subject: job.request.parameters.subject, phase: 'acknowledged' }
+        if (request.parameters.operations.some((operation) => operation.op === 'create'))
+          creation = { subject: request.parameters.subject, phase: 'acknowledged' }
         // Replace optimism only with a complete inventory read, not an assumed register winner.
         accept(await read(abort.signal))
         queue.shift()
