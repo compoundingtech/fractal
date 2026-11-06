@@ -1003,6 +1003,7 @@ export type Attention = ResourceHeader & {
   request?: StructuredRequest;
   requested_at: Timestamp;
   requester_id?: Id;
+  resolved_by?: Id;
   review_mode?: "approve" | "feedback";
   source_id: Id;
   source_kind?: string;
@@ -1026,6 +1027,14 @@ export type AttentionBlocked = {
   goal: string;
   step: string;
   step_run_id: Id;
+};
+
+export type AttentionControl = {
+  dismissed: boolean;
+  id: Id;
+  revision: string | null;
+  snoozed_until: string | null;
+  source_revision: string;
 };
 
 export type AttentionControlParameters = {
@@ -1116,6 +1125,13 @@ export type AttentionPromptCall = {
   input: string;
   input_complete: boolean;
   tool: string;
+};
+
+export type AttentionResolution = {
+  claim_id: Id;
+  person_id: Id;
+  resolved_at: string;
+  resolved_by: Id;
 };
 
 export type AttentionRevision = {

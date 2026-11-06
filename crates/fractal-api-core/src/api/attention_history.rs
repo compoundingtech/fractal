@@ -157,6 +157,9 @@ fn resource(row: Resolution, person: Option<&str>) -> Option<Value> {
         "title":title,"detail":detail,"priority":"normal","state":"resolved",
         "requested_at":client_timestamp(original.at),"targets":[row.claim.subject],"actions":[],"alert":alert,
         "operational":{"layer":"history","actionable":false,"reasons":["source-resolved"]}});
+    if let Some(actor) = row.claim.actor {
+        item["resolved_by"] = json!(actor);
+    }
     if kind == "person-step" {
         item["update"] = source["request"].clone();
     }
