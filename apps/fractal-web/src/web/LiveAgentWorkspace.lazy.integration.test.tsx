@@ -59,6 +59,8 @@ vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
   // Rows read their own agent feed; serve it from the mocked roster.
   useAgent: (ref: string) => rosterFeed._tag === 'Observed' ? { ...rosterFeed, value: rosterFeed.value.agents.find(row => row.ref === ref) } : rosterFeed,
+  useAgentRowSelection: ({ select }: { select: (feed: Feed<never>) => unknown }) => select({ _tag: 'Waiting' }),
+  useAgentAttentionSelection: ({ select }: { select: (feed: Feed<never>) => unknown }) => select({ _tag: 'Waiting' }),
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
   useAttention: () => ({ _tag: 'Waiting' }),
@@ -67,7 +69,7 @@ vi.mock('../data/react.tsx', () => ({
   useNow: () => 0,
   useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed }),
+  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed, subjectReads: { relatedRuns: { feed: () => waitingFeed } } }),
   useFeedInterest: () => {},
 }))
 
