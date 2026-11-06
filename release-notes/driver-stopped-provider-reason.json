@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A provider that its driver stopped, because the driver could no longer serve it, now ends with the reason driver-stopped on its harness record. Before, that record looked like the provider's own exit (#4743).",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No schema change. The harness record's reason field already exists and is diagnostic only."},
+  "rules": {"status": "none", "detail": "No rule changes. No consumer branches on a harness record's reason."},
+  "compatibility": {"status": "none", "detail": "Mixed-version fleets with the previous release interoperate. The reason is an optional field that every build already reads and carries; a previous-release member shows it as text and decides nothing by it."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No step is required."},
+  "recovery": {"status": "none", "detail": "Rolling back stops writing the reason. Records already written keep it, and an earlier build reads them unchanged."}
+}

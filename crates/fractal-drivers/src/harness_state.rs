@@ -565,10 +565,15 @@ impl Writer {
     /// Write the terminal record for this session. Idempotent-shaped: callers on racing teardown
     /// paths may both call it.
     pub fn ended(&mut self, exit: impl Into<String>) -> anyhow::Result<()> {
-        self.observe(
-            Observation::new(Activity::Ended, BlockedOn::None, InputBuffer::Unknown)
-                .with_exit(exit),
-        )
+        let ended = Observation::new(Activity::Ended, BlockedOn::None, InputBuffer::Unknown)
+            .with_exit(exit);
+        // A driver that could no longer serve its provider stopped it, so the record says so
+        // rather than reading as the provider's own end (#4743).
+        self.observe(if crate::provider_session::driver_stop_requested() {
+            ended.with_reason(crate::provider_session::DRIVER_STOPPED)
+        } else {
+            ended
+        })
     }
 }
 
