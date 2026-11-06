@@ -62,14 +62,14 @@ assert.deepEqual([found.target, found.harness, found.activity, found.host, found
 assert.deepEqual([rows[3].path, rows[3].harness, rows[3].activity, rows[3].target], ['example/alpha', 'claude', '1h', 'agent/example/alpha']);
 
 // The tree puts each agent under the folders of its path, opening each folder once.
-const tree = agentTreeLines(agentRows([agent('example/cos/standing/cos'), agent('example/stui'), agent('example/cos/other')], [], 'example-linux', now));
+const tree = agentTreeLines(agentRows([agent('example/cos/standing/cos'), agent('example/term'), agent('example/cos/other')], [], 'example-linux', now));
 assert.deepEqual(tree.map(line => line.kind === 'folder' ? `${'  '.repeat(line.depth)}${line.name}/` : `${'  '.repeat(line.depth)}${line.row.name}`), [
   'example/',
   '  cos/',
   '    Other',
   '    standing/',
   '      COS',
-  '  Stui',
+  '  Term',
 ]);
 
 // The search field keeps rows matching every word, in name, path, harness, or host.

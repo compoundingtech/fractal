@@ -2,7 +2,7 @@
 //! never loses it (Nathan, 2026-10-11: "I was just typing a big message and the tui crashed and
 //! lost it"). One file beside the prefs, never synced through st: a draft is the person's own
 //! words until they send them. Every change to the boxes is written at once, by key (the agent
-//! whose box it is), and only the keys this Fractal TUI changed, so two stuis on one device do not
+//! whose box it is), and only the keys this Fractal TUI changed, so two TUIs on one device do not
 //! undo each other.
 
 use serde::{Deserialize, Serialize};

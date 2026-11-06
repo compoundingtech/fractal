@@ -907,6 +907,79 @@ def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     return lane, None
 
 
+def memory_caps(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """The cgroups whose memory limit can OOM-kill what a check that builds starts, each with how the summary names it: every cgroup
+    above this process that holds a memory.max (its own cap: a lane, builds.slice or a gate slot); the seat's capped lane when `governed`
+    puts the check in it (no cap of its own, a user bus to scope with: `seat_lane`); and the user manager's builds.slice, where a check
+    outside every cap runs and the host's sccache server compiles for every check. A kernel OOM kill leaves only a bare exit in the check (2026-11-05, on a build host:
+    a lane's compiles were OOM-killed at its memory limit, and the summary said only FAILED (1))."""
+    try:
+        parts = next((line[3:] for line in Path(cgroup_file).read_text().splitlines() if line.startswith('0::')), '').strip('/').split('/')
+    except OSError:
+        return {}
+
+    def limited(cgroup):
+        try:
+            return cgroup.joinpath('memory.max').read_text().split()[0] != 'max'
+        except (OSError, IndexError):
+            return False
+
+    def named(part):
+        if part == 'builds.slice':
+            return "builds.slice's memory limit"
+        if part.startswith('app-lanes-') and part.endswith('.slice'):
+            return f"the lane's memory limit ({part})"
+        return f'the memory limit of {part}'
+
+    caps = {Path(root, *parts[:depth]): named(parts[depth - 1]) for depth in range(1, len(parts) + 1) if parts[0] and limited(Path(root, *parts[:depth]))}
+    manager = next((depth for depth, part in enumerate(parts) if re.fullmatch(r'user@\d+\.service', part)), None)
+    if manager is not None:
+        runtime = os.environ.get('XDG_RUNTIME_DIR')
+        scoped = (os.environ.get('ST_EVIDENCE_GOVERN') != 'off' and not own_cap(cgroup_file, root) and shutil.which('systemd-run')
+                  and runtime and Path(runtime, 'bus').exists())
+        if scoped:
+            lane, _ = seat_lane(cgroup_file, root)
+            if lane:
+                caps[Path(root, *parts[:manager + 1], 'app.slice', 'app-lanes.slice', lane)] = named(lane)
+        builds = Path(root, *parts[:manager + 1], 'builds.slice')
+        if limited(builds):
+            caps.setdefault(builds, named('builds.slice'))
+    return caps
+
+
+def oom_kills(caps):
+    """Each cap's `oom_kill` count (memory.events, which counts the kills in the cgroup and below it); a cap without one is left out."""
+    kills = {}
+    for cgroup in caps:
+        try:
+            kills[cgroup] = int(next(line.split()[1] for line in cgroup.joinpath('memory.events').read_text().splitlines()
+                                     if line.startswith('oom_kill ')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            continue
+    return kills
+
+
+def oom_note(caps, before):
+    """What the summary row of a failed check adds when the kernel OOM-killed in one of its caps (memory_caps) while it ran, or ''. Only the
+    innermost cap that counted kills is named: the kills in a lane also count in every cgroup above it. A cap is shared with what else
+    runs in it (builds.slice with every run's compiles, a lane with the run's other checks and the seat's harness), so a kill there may
+    be theirs: the note says where and how many, not whose."""
+    after = oom_kills(caps)
+    grew = {cgroup: after[cgroup] - before[cgroup] for cgroup in after if cgroup in before and after[cgroup] > before[cgroup]}
+    inner = [cgroup for cgroup in grew if not any(other != cgroup and cgroup in other.parents for other in grew)]
+    if not inner:
+        return ''
+
+    def limit(cgroup):
+        try:
+            return f'{int(cgroup.joinpath("memory.max").read_text().split()[0]) / 2 ** 30:.1f}G'
+        except (OSError, IndexError, ValueError):
+            return 'unreadable'
+
+    return ''.join(f'; killed by {caps[cgroup]}: {grew[cgroup]} OOM kill{"s" if grew[cgroup] != 1 else ""} at memory.max {limit(cgroup)} while it ran'
+                   for cgroup in sorted(inner))
+
+
 def governed(argv, name, output=None):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
@@ -3739,6 +3812,8 @@ def run_main(argv, cleanup):
                                                                           keyed=name in KEYED).items() for argument in ('--input', f'{key}={value}')]
                     if name == WEB:
                         wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
+                    caps = memory_caps() if name in BUILDS else {}
+                    kills = oom_kills(caps)  # read again once it ends: a check killed at a memory limit is named (oom_note)
                     started = time.monotonic()
                     streams = output is None and CI_LOCAL in LOCAL[name]
                     limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
@@ -3757,7 +3832,7 @@ def run_main(argv, cleanup):
                                                stdout=output, stderr=subprocess.STDOUT if output else None)
                             if code != 0:
                                 return (name, 'timed out' if code == 124 else f'FAILED ({code})', round(time.monotonic() - started),
-                                        f'the {stage} stage failed: nothing signed' + queue_note(limit)), True, False
+                                        f'the {stage} stage failed: nothing signed' + queue_note(limit) + oom_note(caps, kills)), True, False
                         environment[reader_variable] = str(report)
                         environment = report_environment(scratch, environment)
                         wrap += ['--input', f'run_command_sha256={run_sha}']
@@ -3794,7 +3869,8 @@ def run_main(argv, cleanup):
                         is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, base_commit, repository, lane_base)
                         if args.push and is_covered and record:
                             CLAIMED.extend(record_refs(directory, record))
-                    return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
+                    return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds,
+                            why + queue_note(limit) + ('' if ok else oom_note(caps, kills))), not ok, False
 
                 def run_one(name, output=None):
                     if name in ('typescript-client', WEB):
