@@ -374,7 +374,8 @@ async fn client_work_history(
                 state: None,
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
-                before_index: None, before_stream_index: None,
+                before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })
@@ -1557,7 +1558,8 @@ pub async fn client_history(
                 state: None,
                 native_only: query.native_only,
                 items_digest: String::new(),
-                before_index: Some(next), before_stream_index: None,
+                before_index: Some(next),
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })

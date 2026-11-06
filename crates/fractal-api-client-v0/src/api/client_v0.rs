@@ -4072,7 +4072,8 @@ pub async fn missions(
                 state: None,
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
-                before_index: None, before_stream_index: None,
+                before_index: None,
+                before_stream_index: None,
                 after_key: after_key.clone(),
                 expires_at_unix_ms,
             })

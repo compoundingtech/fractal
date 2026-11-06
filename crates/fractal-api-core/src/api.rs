@@ -2390,7 +2390,8 @@ fn client_page_read_projected(
                 state: terminal_state.map(str::to_owned),
                 native_only: query.native_only,
                 items_digest: items_digest.clone(),
-                before_index: None, before_stream_index: None,
+                before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })?)
@@ -5873,7 +5874,8 @@ fn published_work_cursor(
         state: None,
         native_only: query.native_only,
         items_digest,
-        before_index: None, before_stream_index: None,
+        before_index: None,
+        before_stream_index: None,
         after_key: None,
         expires_at_unix_ms,
     }
