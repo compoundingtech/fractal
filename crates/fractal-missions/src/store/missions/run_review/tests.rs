@@ -42,7 +42,7 @@ mission "child" state="ready" { goal "Check child responsibility."
   step "work" { assigned-to "agent/example/child" } }
 mission "pool" state="ready" { goal "Keep raw responsibility."
   step "work" { available-to "agent/example/requester"; available-to "agent/example/free" } }
-mission "source" state="ready" { goal "Keep carried requesters."; step "work" { agentless } }
+mission "source" state="ready" { goal "Keep carried requesters."; step "work" {} }
 mission "looping" state="ready" { goal "Review every round."
   loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } } }
 mission "nested-loop" state="ready" { goal "Review nested loop history."
@@ -441,7 +441,6 @@ fn agent_review_owner_snapshot_step_children_not_siblings() {
 fn agent_review_owner_snapshot_default_agentless_and_unknown_owner() {
     let (store, parent, _) = fixture();
     let other = &step(&parent, "other").subject;
-    // Neither the pinned mission nor this step declares a selector.
     assert!(snapshot(&store, other, FREE).unwrap().agentless);
     for s in [
         WorkSelector::Assigned {
@@ -451,12 +450,13 @@ fn agent_review_owner_snapshot_default_agentless_and_unknown_owner() {
             agents: vec![PARENT.into()],
         },
     ] {
-        let mut req = request("parent");
-        req.idempotency_key = format!("{s:?}");
+        let (store, parent, _) = fixture();
+        let other = &step(&parent, "other").subject;
+        let req = request("source");
         let run = store
             .create_child_mission_run(&req, &parent, other, Some(&s))
             .unwrap();
-        let inherited = &step(&run, "other").subject;
+        let inherited = &step(&run, "work").subject;
         assert!(!snapshot(&store, inherited, FREE).unwrap().agentless);
     }
     let assigned = &step(&parent, "start").subject;
