@@ -3,7 +3,7 @@
   "summary": "Expose declared admission data in agent and mission reads with explicit declared-not-enforced CLI output",
   "replay": {
     "status": "none",
-    "detail": "Read projections only; no claim history rewrite or replay rule change. Declaration validation and all-member publication admission are supplied by the preceding declared-admission stack changes."
+    "detail": "Read projections only; no claim history rewrite or replay rule change. Declaration validation is supplied by the preceding declared-admission stack changes; all-member publication admission is supplied by the companion publication-gate change."
   },
   "schema": {
     "status": "changed",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Health and daemon.started features advertise declared_admission=1 while retaining existing feature flags and messages-store read progress. Requires the preceding stack's declared-admission model, generated clients and validation barrier. Existing declarations without these fields keep their previous read shape."
+    "detail": "Health and daemon.started features advertise declared_admission=1 while retaining existing feature flags and messages-store read progress. Requires the preceding stack's declared-admission model, generated clients and declaration validation. The companion publication-gate change consumes the feature advertisement. Existing declarations without these fields keep their previous read shape."
   },
   "downtime": {
     "status": "none",
