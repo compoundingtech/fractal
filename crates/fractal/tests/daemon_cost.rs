@@ -825,6 +825,8 @@ const PROBES: &[Probe] = &[
         "/v1/client/document-references?subject=message/{sent}",
     ),
     get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
+    // Measure the disabled gateway read; external fetch work is byte-bounded, not store-sized.
+    get("GET /v1/client/quota", "/v1/client/quota"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",
@@ -3127,6 +3129,11 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                     value["published"] == true,
                                     "the transport cost probe must publish an attributed endpoint announcement",
                                 );
+                            }
+                            if probe.route == "GET /v1/client/quota" {
+                                let source = value.get("value").unwrap_or(&value);
+                                anyhow::ensure!(source["state"] == "disabled",
+                                    "quota cost probe must exercise the disabled source");
                             }
                             if matches!(probe.route, "GET /v1/client/usage" | "GET /v1/usage") {
                                 let period = value.get("value").unwrap_or(&value);
