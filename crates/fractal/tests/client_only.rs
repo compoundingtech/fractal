@@ -46,20 +46,30 @@ struct Tui {
     writer: Box<dyn Write + Send>,
     screen: Arc<Mutex<String>>,
     screen_changed: Arc<Notify>,
+    timing_log: Option<PathBuf>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
 impl Drop for Tui {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Some(pid) = self.child.process_id().and_then(|pid| i32::try_from(pid).ok()) {
+            // portable-pty starts a new session, but Child::kill sends catchable SIGHUP.
+            // Force this fixture's child and its process group to exit before reaping.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+        } else {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
 impl Tui {
     fn start(root: &Path) -> Self {
-        Self::start_with(root, |_| {})
+        Self::start_with(root, None, |_| {})
     }
 
-    fn start_with(root: &Path, configure: impl FnOnce(&mut CommandBuilder)) -> Self {
+    fn start_with(root: &Path, timing_log: Option<&Path>, configure: impl FnOnce(&mut CommandBuilder)) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 32,
@@ -86,6 +96,7 @@ impl Tui {
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");
         command.cwd(root);
+        if let Some(log) = timing_log { command.env("STUI_TIMING_LOG", log); }
         configure(&mut command);
         let child = pty.slave.spawn_command(command).unwrap();
         drop(pty.slave);
@@ -121,6 +132,7 @@ impl Tui {
             writer,
             screen,
             screen_changed,
+            timing_log: timing_log.map(Path::to_path_buf),
             _master: pty.master,
         }
     }
@@ -140,7 +152,12 @@ impl Tui {
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("{label} did not appear:\n{}", self.screen.lock().unwrap()));
+        .unwrap_or_else(|_| {
+            let screen = self.screen.lock().unwrap().clone();
+            let rows = self.timing_log.as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
+            panic!("{label} did not appear:\n{screen}\nRecorded requests and frames:\n{rows}");
+        });
     }
 }
 
@@ -864,10 +881,9 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     let log = device.path().join("legacy.jsonl");
     // Wait for the live view and each palette transition, not a fixed startup delay.
     // Slow terminal initialization must not consume the keys intended to focus Fleet.
-    let mut tui = Tui::start_with(device.path(), |command| {
+    let mut tui = Tui::start_with(device.path(), Some(&log), |command| {
         command.env("ST3_ENDPOINT", &socket);
         command.env("ST3_PERSON", "person/avery");
-        command.env("STUI_TIMING_LOG", &log);
     });
     tui.wait("live older member", |screen| screen.contains("live")).await;
     tui.send("\x0b");
