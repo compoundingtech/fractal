@@ -541,12 +541,12 @@ fn the_first_local_commit_after_a_cut_skips_claims_another_node_wrote() {
 }
 
 #[test]
-fn keying_signs_every_own_envelope_and_later_batches_are_signed_as_written() {
+fn keying_signs_fresh_local_work_and_later_batches_are_signed_as_written() {
     let a = Store::open_memory("a").unwrap();
     a.bind_fleet(FLEET).unwrap();
     note(&a, "before the key");
     let member = key();
-    assert!(a.set_member_key(Some(member.clone())).unwrap() >= 1);
+    a.set_member_key(Some(member.clone())).unwrap();
     note(&a, "after the key");
     let exchange = a
         .export_replication_exchange(FLEET, &ReplicationInventory::default())
@@ -563,7 +563,7 @@ fn keying_signs_every_own_envelope_and_later_batches_are_signed_as_written() {
 }
 
 #[test]
-fn worker_signs_batches_already_sealed_by_an_unkeyed_daemon() {
+fn worker_does_not_sign_batches_already_sealed_by_an_unkeyed_daemon() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("claims.sqlite3");
     let worker = Store::open(&path, "alder").unwrap();
@@ -580,14 +580,7 @@ fn worker_signs_batches_already_sealed_by_an_unkeyed_daemon() {
         .export_replication_exchange(FLEET, &ReplicationInventory::default())
         .unwrap();
     let envelope = exchange.envelopes.iter().find(|e| e.sequence == 1).unwrap();
-    assert!(verify_signature(
-        member.public(),
-        &envelope_signature_message(FLEET, "alder", envelope.sequence, &envelope.hash),
-        envelope
-            .signature
-            .as_deref()
-            .expect("already sealed batches must be signed")
-    ));
+    assert!(envelope.signature.is_none(), "retained history has no local seal proof");
     let receiver = node("birch", None, None);
     sync(&worker, &receiver);
     assert!(admitted(&receiver, &claim));
