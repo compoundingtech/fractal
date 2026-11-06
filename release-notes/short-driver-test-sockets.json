@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep attachment and driver socket test fixtures independent of long temporary-directory paths",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "No authority or runtime behavior changes."},
+  "compatibility": {"status": "none", "detail": "Test-only Unix socket directories use a short temporary root so inherited TMPDIR paths cannot exceed the socket address limit."},
+  "downtime": {"status": "none", "detail": "No runtime changes."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Temporary directories retain automatic cleanup."}
+}

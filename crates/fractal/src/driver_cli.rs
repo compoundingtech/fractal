@@ -2992,7 +2992,8 @@ mod tests {
         let clock = Arc::new(AtomicU64::new(0));
         let deadline = Arc::new(AtomicU64::new(600));
         let failed = Arc::new(AtomicBool::new(false));
-        let root = tempfile::tempdir().unwrap();
+        // A long inherited TMPDIR must not prevent the fixture server from binding.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("renew.sock");
         let step = json!({
             "subject":"step-run/test/work", "run":"mission-run/test",
@@ -3061,7 +3062,7 @@ mod tests {
     /// note keeps its own 10 s limit, so the outage note still follows the error's (#4733).
     #[tokio::test]
     async fn a_stopping_daemons_error_does_not_hide_the_outage_note_after_it() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let unreachable = Client::unix(root.path().join("absent.sock"))
             .get::<serde_json::Value>("/v1/health")
             .await
@@ -3092,7 +3093,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let subject = "agent/eval/gated";
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("control.sock");
         let reads = Arc::new(AtomicUsize::new(0));
         let count = reads.clone();
