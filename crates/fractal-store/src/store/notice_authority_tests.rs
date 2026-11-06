@@ -267,11 +267,14 @@ fn notice_only_runtime_dependency_chain_queues_revalidation() {
                 Ok(tx.query_row("SELECT count(*) FROM local_custom_dirty", [], |r| r.get(0))?)
             };
             assert_eq!(queued(tx)?, 0);
+            // Observe transient missing-generation projections, then restore referential integrity.
+            tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
             if mutation == "unrelated" {
                 for sql in [
                     "UPDATE mission_runs SET status='completed' WHERE id='unrelated'",
                     "UPDATE step_runs SET status='completed' WHERE subject='step-run/unrelated'",
                     "UPDATE run_generations SET id='unrelated-next' WHERE id='unrelated'",
+                    "UPDATE run_generations SET id='unrelated' WHERE id='unrelated-next'",
                     "UPDATE desired SET body='{\"children\":[]}' WHERE subject='agent/example/unrelated'",
                 ] {
                     tx.execute(sql, [])?;
@@ -286,7 +289,12 @@ fn notice_only_runtime_dependency_chain_queues_revalidation() {
             }, [])?;
             assert!(queued(tx)? > 0);
             custom::flush(tx)?;
-            assert_links_fail_closed_like_rebuild(tx)
+            assert_links_fail_closed_like_rebuild(tx)?;
+            if mutation == "ancestor-generation" {
+                tx.execute("INSERT INTO run_generations VALUES('ancestor','ancestor','revision',NULL,
+                    'running','person/example','Fixture','0','0')", [])?;
+            }
+            Ok(())
         }).unwrap().unwrap();
     }
 }
