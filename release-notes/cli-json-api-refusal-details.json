@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve structured API refusal details in JSON CLI output",
+  "replay": { "status": "none", "detail": "CLI presentation only; retained operations and replay are unchanged." },
+  "schema": { "status": "none", "detail": "No database or API wire schema changes." },
+  "rules": { "status": "none", "detail": "No authorization, admission or physical closure requirements change." },
+  "compatibility": { "status": "changed", "detail": "Failed --json commands emit decoded API status, code, message and details to stdout while retaining safe human diagnostics on stderr and existing nonzero exit codes. Undecoded HTTP and protocol bodies are not exposed through arbitrary error chains." },
+  "downtime": { "status": "none", "detail": "No daemon restart or migration is required for the CLI presentation change." },
+  "manual": { "status": "none", "detail": "No operator action is required; JSON consumers can inspect refusal details directly." },
+  "recovery": { "status": "none", "detail": "Refusals remain failures and do not grant repair authority or change retry behavior." }
+}
