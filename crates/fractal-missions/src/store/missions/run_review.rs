@@ -240,7 +240,7 @@ fn pinned_agentless(
         let selector = step.work_selector.as_ref().or(selector);
         (!selected(&step.path)
             || step.loop_spec.is_some()
-            || matches!(selector, Some(crate::model::WorkSelector::Agentless)))
+            || matches!(selector, None | Some(crate::model::WorkSelector::Agentless)))
             && step
                 .nested_mission
                 .as_ref()

@@ -37,7 +37,7 @@ agent "example/child" { command "true"; workspace "/tmp" }
 agent "example/requester" { command "true"; workspace "/tmp" }
 agent "example/originator" { command "true"; workspace "/tmp" }
 mission "parent" state="ready" { goal "Check the complete run boundary."
-  step "start" { assigned-to "agent/example/parent" }; step "other" { agentless } }
+  step "start" { assigned-to "agent/example/parent" }; step "other" {} }
 mission "child" state="ready" { goal "Check child responsibility."
   step "work" { assigned-to "agent/example/child" } }
 mission "pool" state="ready" { goal "Keep raw responsibility."
@@ -438,9 +438,10 @@ fn agent_review_owner_snapshot_step_children_not_siblings() {
 }
 
 #[test]
-fn agent_review_owner_snapshot_pinned_agentless_and_unknown_owner() {
+fn agent_review_owner_snapshot_default_agentless_and_unknown_owner() {
     let (store, parent, _) = fixture();
     let other = &step(&parent, "other").subject;
+    // Neither the pinned mission nor this step declares a selector.
     assert!(snapshot(&store, other, FREE).unwrap().agentless);
     assert!(
         !snapshot(&store, &step(&parent, "start").subject, FREE)
