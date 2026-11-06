@@ -15,7 +15,9 @@ const HAS_PERSON_ASKS_FOR_RECONCILE: &str =
     "SELECT EXISTS(SELECT 1 FROM step_runs INDEXED BY step_runs_open_index CROSS JOIN claims
      WHERE step_runs.status NOT IN ('completed','failed','cancelled')
        AND step_runs.status IN ('ready','pending')
-       AND claims.subject=step_runs.subject AND claims.kind='work.person-asked')";
+       AND claims.subject=step_runs.subject AND claims.kind='work.person-asked'
+       AND NOT EXISTS(SELECT 1 FROM claims resolved WHERE resolved.subject=claims.subject
+         AND resolved.kind IN ('work.person-done','work.person-cancelled')))";
 
 pub const PERSON_ASKS_FOR_RECONCILE: &str =
     "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
@@ -24,6 +26,8 @@ pub const PERSON_ASKS_FOR_RECONCILE: &str =
      WHERE step_runs.status NOT IN ('completed','failed','cancelled')
        AND step_runs.status IN ('ready','pending')
        AND claims.subject=step_runs.subject AND claims.kind='work.person-asked'
+       AND NOT EXISTS(SELECT 1 FROM claims resolved WHERE resolved.subject=claims.subject
+         AND resolved.kind IN ('work.person-done','work.person-cancelled'))
      ORDER BY CANONICAL_ASC(claims)";
 
 /// The images an ask carries and the two parties to it (`Store::ask_images`).
@@ -434,7 +438,7 @@ impl PersonWorkStore for Store {
             let structured = canonical_request(input)?;
             let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-step-run", "the asking step does not exist"))?;
+                .ok_or_else(|| St3Error::new("missing-step-run", format!("asking step `{}` does not exist; use a current step from `work ls`, or omit --step for an independent ask", input.step.as_deref().unwrap())))?;
             // A revision moves a step into the run's new generation, and its worker may still
             // name it by the predecessor subject, as the seat's environment does. Work actions
             // accept that name; so does an ask, and only the claimant may ask from either.
@@ -477,8 +481,8 @@ impl PersonWorkStore for Store {
                 || origin.claim_incarnation != input.incarnation
                 || origin.claim_expires_at_unix_ms.is_none_or(|expiry| expiry <= now_ms()))) {
                 return Err(St3Error::new("stale-work-ask", format!(
-                    "only the current claimant and incarnation of live work can ask a person; expected incarnation `{}`, given `{}`",
-                    origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
+                    "cannot ask from step `{origin_subject}`: status `{}`, claimant `{}`, expected incarnation `{}`, given `{}`; only its live claimant can block this step. Refresh `work ls` and use its current claim and incarnation, or omit --step for an independent ask",
+                    origin.status, origin.claimant.as_deref().unwrap_or("<none>"), origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
             }
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
@@ -965,7 +969,7 @@ impl PersonWorkStore for Store {
             .new_run
             .as_deref()
             .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| St3Error::new("missing-ask-owner", "specify --step or --new-run"))?;
+            .unwrap_or(&input.title);
         if input.step.is_some() {
             return Err(St3Error::new(
                 "ambiguous-ask-owner",
@@ -982,17 +986,17 @@ impl PersonWorkStore for Store {
                 stable_input.actor = actor;
                 &stable_input
             };
-            if !declaration_live(tx, &input.actor).map_err(internal)? {
-                return Err(St3Error::new("missing-ask-owner", "the requester must have a live declaration"));
+            if !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
+                return Err(St3Error::new("missing-ask-owner", "the requester must have an existing agent declaration; declare the agent before asking"));
             }
-            let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner=?1 AND status IN ('claimed','working'))",
-                [&input.actor], |row| row.get(0)).map_err(internal)?;
-            if active { return Err(St3Error::new("ambiguous-ask-owner", "use --step while you hold claimed work")); }
-            let desired = current_desired_row(tx, &input.actor).map_err(internal)?.unwrap();
-            // A top-level seat's ask survives its re-declaration, so asking again with the same key
-            // after a restart or harness change finds the same ask instead of raising another.
-            let declaration = desired.owner_run.is_some().then_some(&desired.claim_id);
-            let key = serde_json::to_string(&(&input.actor, name, &desired.owner_run, &desired.owner_generation, declaration, &input.idempotency_key)).map_err(internal)?;
+            let key = if input.new_run.is_some() {
+                // Preserve the identity of named asks written before independent ownership.
+                let desired = current_desired_row(tx, &input.actor).map_err(internal)?.unwrap();
+                let declaration = desired.owner_run.is_some().then_some(&desired.claim_id);
+                serde_json::to_string(&(&input.actor, name, &desired.owner_run, &desired.owner_generation, declaration, &input.idempotency_key))
+            } else {
+                serde_json::to_string(&(&input.actor, name, &input.idempotency_key))
+            }.map_err(internal)?;
             let hash = hex::encode(Sha256::digest(key.as_bytes()));
             let generation = format!("ask-{}", &hash[..32]);
             let subject = format!("step-run/{generation}/ask");
@@ -1014,8 +1018,8 @@ impl PersonWorkStore for Store {
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
                 &with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
                     "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
-                    "attempt": 1, "status": "ready", "mission_spec": mission, "owner_run": desired.owner_run,
-                    "owner_generation": desired.owner_generation, "requester_declaration": desired.claim_id, "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
+                    "attempt": 1, "status": "ready", "mission_spec": mission,
+                    "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask could not be projected"))
         }).map_err(internal)?
