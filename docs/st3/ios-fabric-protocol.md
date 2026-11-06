@@ -82,18 +82,18 @@ Expose exactly the **paired-only** gateway socket, whose router is
 that is the privileged local API. A generic socket exposure is sufficient; no
 new server-side Rust service is needed.
 
-### st grants paired phones
+### Fractal grants paired phones
 
 On a member that serves phones, run once:
 
 ```sh
-st devices fabric enable            # exposes client_gateway_socket as st3-client-v0
+fractal devices fabric enable            # exposes client_gateway_socket as st3-client-v0
 ```
 
 It runs `fabric expose st3-client-v0 --socket CLIENT_GATEWAY_SOCKET` and records the
 service and the `fabric` executable in `STATE/fabric-gateway.toml`. From then on:
 
-- **Adding a phone** is `st devices pair NAME --fabric-gateway` on the member and the code on
+- **Adding a phone** is `fractal devices pair NAME --fabric-gateway` on the member and the code on
   the phone. Pairing grants nothing over Fabric unless the code was made with
   `--fabric-gateway`: the person decides per pairing, and the default is no grant. A phone
   asks for the member's pairing advertisement with `GET /v1/client/capabilities?accepts=fabric-gateway-grant`;
@@ -104,19 +104,19 @@ service and the `fabric` executable in `STATE/fabric-gateway.toml`. From then on
   is committed,
   `fabric add NODE_ID st-device-<first 12 hex> --inbound-only --allow st3-client-v0`.
   The paired session's `fabric_grant` says what happened: `granted`, `already-trusted`
-  (someone already trusts that NodeID under another name; st leaves that entry alone),
-  `not-enabled` (no `st devices fabric enable` on this member), `not-requested` (the code was
+  (someone already trusts that NodeID under another name; Fractal leaves that entry alone),
+  `not-enabled` (no `fractal devices fabric enable` on this member), `not-requested` (the code was
   made without `--fabric-gateway`; the NodeID is not kept), or `failed` with a detail. The
   pairing stands whatever Fabric says, and the phone shows a failure.
-- **Removing a phone** is `st devices revoke DEVICE`. After the revocation is recorded,
+- **Removing a phone** is `fractal devices revoke DEVICE`. After the revocation is recorded,
   the member removes the `st-device-…` peer it added for that NodeID, which ends the
   phone's admitted sessions. It keeps the grant while another live pairing on this member
   carries the same NodeID.
 - **Replacing a phone** is pairing the new phone and revoking the old one.
-- `st devices fabric status` lists the grants st made. `st devices fabric disable`
+- `fractal devices fabric status` lists the grants Fractal made. `fractal devices fabric disable`
   removes them and the exposure.
 
-st only changes peers named `st-device-…` that it added, never a grant made by hand, and
+Fractal only changes peers named `st-device-…` that it added, never a grant made by hand, and
 it never grants anything but the one client gateway service. Each member grants only
 the phones paired with it: each member is paired on its own.
 
@@ -127,9 +127,9 @@ What this does not cover yet:
   that member's grant first, and so does pairing a phone that has only Fabric.
 - **An expired pairing keeps its grant.** A pairing expires after 30 days without any
   record of it, so nothing removes the grant then. The grant reaches only the paired-only
-  gateway, which no longer accepts the expired credential. `st devices revoke` removes it.
+  gateway, which no longer accepts the expired credential. `fractal devices revoke` removes it.
 - **A failed removal is only logged.** When `fabric remove` fails after a revocation,
-  the member logs a warning and the revocation still stands. `st devices fabric status`
+  the member logs a warning and the revocation still stands. `fractal devices fabric status`
   shows the grant that is left.
 - **It runs the fabric CLI** until the daemon has a runtime peer and grant API
   (compoundingtech/fabric#312) and a control-socket client (compoundingtech/fabric#310).

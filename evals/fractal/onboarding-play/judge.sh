@@ -15,7 +15,7 @@ jq -e '.variant and (.started_ms|type=="number") and (.assistant_text|type=="arr
 
 # What the person reads must never name these. Matches are case-insensitive except Home and Ada,
 # which are only a problem as proper words.
-banned='(attention item|step-run|work step|mission step|\bgates?\b|\bverif(y|ies|ying|ied|ication)\b|the graph|st conversations|st ui |person/|the person|the user)'
+banned='(attention item|step-run|work step|mission step|\bgates?\b|\bverif(y|ies|ying|ied|ication)\b|the graph|(fractal|st) conversations|(fractal|st) ui |person/|the person|the user)'
 # Working narration between tool calls, found by the 2026-10-09 paid runs: notes to itself instead
 # of words to the person.
 narration='(\bi need (the|to)\b|\blet me (read|check|look|see)\b|still working through|\bnow i (need|will|am)\b)'
@@ -59,7 +59,7 @@ jq --argjson first "$first_message_budget_s" \
                 ($skip != null and ($e.person_messages | map(select(.text | test("skip"; "i"))) | length) > 0);
                 "skip at \($skip)"),
           check("the Assistant answered the skip in time and said how to come back";
-                ($skip != null and ([$e.assistant_text[] | select(.ms >= $skip and .ms <= $skip + ($skipb * 1000) and (.text | test("st setup --onboarding")))] | length) > 0);
+                ($skip != null and ([$e.assistant_text[] | select(.ms >= $skip and .ms <= $skip + ($skipb * 1000) and (.text | test("(fractal|st) setup --onboarding")))] | length) > 0);
                 "within \($skipb) s of the skip"),
           check("the demo mission is not left running and no agent is messaged after the skip";
                 ($e.demo_mission_state != "running"

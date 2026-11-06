@@ -16,4 +16,6 @@ serde_json = { version = "1", features = ["raw_value"] }
 ratatui = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Exercise the optional painter in ordinary workspace tests without enabling it for consumers.
+fractal_sidebar_self = { package = "fractal-sidebar", path = ".", features = ["ratatui"] }
 jsonschema = { version = "0.33", default-features = false }

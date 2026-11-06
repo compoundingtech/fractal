@@ -1351,7 +1351,7 @@ fn claims_rebuilds(store: &Store) -> u64 {
     store.published_work_list().rebuilds().get("claims").copied().unwrap_or(0)
 }
 
-fn handoff(store: &Store, step: &str, from: &str, to: &str, key: &str) -> Result<crate::model::StepRunView, St3Error> {
+fn handoff(store: &Store, step: &str, from: &str, to: &str, key: &str) -> Result<crate::model::StepRunView, FractalError> {
     store.handoff_work(
         step,
         &crate::model::WorkHandoffRequest {

@@ -3,6 +3,7 @@ import type { Agent, AgentReference, Declarations, Mission, Schedule, Step } fro
 
 const editor = {
   id: 'docs/editor', workspace: '.', launch: { command: 'true' },
+  principal: 'person/operator',
 } as const satisfies Agent
 const writer = {
   id: 'docs/writer', workspace: '.', launch: { argv: ['tool', '--review'] },
@@ -11,7 +12,8 @@ const writer = {
 const mission = {
   id: 'docs/daily-review', state: 'ready', reportTo: editor,
   goals: ['Review documentation.'], completion: 'all-steps-exhausted',
-  steps: [{ id: 'review', assignedTo: writer, goals: ['Report corrections.'] }],
+  capacity: { cores: 2, memory: '4G' },
+  steps: [{ id: 'review', assignedTo: writer, goals: ['Report corrections.'], capacity: { memory: '8G' } }],
 } as const satisfies Mission
 
 export const declarations = {
@@ -40,10 +42,12 @@ export const dottedReference = 'agent/remote.editor' satisfies AgentReference
 type Assert<T extends true> = T
 type Rejects<TValue, TTarget> = TValue extends TTarget ? false : true
 type Equal<TLeft, TRight> = [TLeft] extends [TRight] ? [TRight] extends [TLeft] ? true : false : false
+export type InvalidPrincipal = Assert<Rejects<'agent/docs/editor', NonNullable<Agent['principal']>>>
+export type EmptyStepCapacity = Assert<Rejects<{}, NonNullable<Step['capacity']>>>
 
-export type AgentFields = Assert<Equal<keyof Agent, 'id' | 'workspace' | 'launch' | 'under'>>
-export type MissionFields = Assert<Equal<keyof Mission, 'id' | 'state' | 'reportTo' | 'goals' | 'completion' | 'steps'>>
-export type StepFields = Assert<Equal<keyof Step, 'id' | 'assignedTo' | 'goals'>>
+export type AgentFields = Assert<Equal<keyof Agent, 'id' | 'workspace' | 'launch' | 'under' | 'principal'>>
+export type MissionFields = Assert<Equal<keyof Mission, 'id' | 'state' | 'reportTo' | 'goals' | 'completion' | 'steps' | 'capacity'>>
+export type StepFields = Assert<Equal<keyof Step, 'id' | 'assignedTo' | 'goals' | 'capacity'>>
 export type ScheduleFields = Assert<Equal<keyof Schedule, 'id' | 'host' | 'every' | 'anchor' | 'catchUp' | 'maxCatchUp' | 'work'>>
 export type WorkFields = Assert<Equal<keyof Schedule['work'], 'mission' | 'revision' | 'workspace'>>
 export type DeclarationFields = Assert<Equal<keyof Declarations, 'agents' | 'missions' | 'schedules'>>

@@ -1825,15 +1825,15 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 }
 
 #[test]
-fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
+fn harness_actor_rejection_uses_fractal_work_ask_at_the_error_rendering_boundary() {
     let cli = Cli::try_parse_from([
         "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
     ]).unwrap();
     let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
     for native_driver in [false, true] {
         let output = cli_error_message(&error, native_driver);
-        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
-        assert!(!output.contains("fractal work ask"), "{output}");
+        assert!(output.contains("`fractal work ask --as \"$ST_AGENT\"`"), "{output}");
+        assert!(!output.contains("`st work ask"), "{output}");
     }
 }
 
@@ -4713,14 +4713,14 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
         // Agent-only continuations deliberately keep the executable available in agent seats.
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
-            "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
+            "the wait stopped because agent/worker has a new message: message/new. Run `fractal conversations ls`"
                 .into()
         )
     );
     assert_eq!(
         wait_interruption_reason(actor, true, &["step-run/new".into()], &[]),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4732,7 +4732,7 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
             &["message/new".into()]
         ),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4769,7 +4769,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
             text.starts_with("people do not have inboxes: print your answer in the chat"),
             "{to}: {text}"
         );
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     // Even a preview of the message is refused.
     let mut preview = args("person/ada");
@@ -9318,7 +9319,7 @@ async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
 
 #[test]
 fn github_watch_continuation_keeps_the_agent_executable() {
-    assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
+    assert_eq!(GH_UNWATCH_HINT, "To stop: fractal gh unwatch");
 }
 
     #[test]

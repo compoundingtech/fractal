@@ -495,6 +495,13 @@ fi
     }
     if let Some(owner) = rejection_fence {
         assert!(shell.try_wait().unwrap().is_none());
+        // The ended record says the driver stopped the provider exactly when it did (#4743): a
+        // provider that ended before the fence ended on its own.
+        assert_eq!(
+            !driver_stopped_records(root.path()).is_empty(),
+            order.is_none(),
+            "the provider's ended record says the driver stopped it only when the driver did"
+        );
         if rejection == Some("token") {
             if cfg!(target_os = "linux") {
             assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
@@ -538,6 +545,28 @@ fi
     shell.kill().await.unwrap();
     shell.wait().await.unwrap();
     let _ = diagnostics.await.unwrap();
+}
+
+/// Every agent directory under `root` whose harness record ended because its driver stopped the
+/// provider. The record is read where its writer keeps it, which need not be a plain file.
+fn driver_stopped_records(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let record = fractal_drivers::harness_state::harness_state_path(&directory);
+        if fractal_drivers::harness_state::read(&record, None).is_some_and(|record| {
+            record.state == fractal_drivers::harness_state::Activity::Ended
+                && record.reason.as_deref() == Some(fractal_drivers::provider_session::DRIVER_STOPPED)
+        }) {
+            found.push(directory.clone());
+        }
+        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                directories.push(entry.path());
+            }
+        }
+    }
+    found
 }
 
 /// The seat's next invocation starts its own driver in the same shell once the fenced one has

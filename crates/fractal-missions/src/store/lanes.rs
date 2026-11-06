@@ -8,23 +8,23 @@ pub use fractal_delivery::store::lanes::*;
 /// How many joins, leaves, moves, and approvals a lane view lists.
 const LANE_RECENT_LIMIT: usize = 20;
 
-fn lane_not_found(argument: &str) -> St3Error {
-    St3Error::new(
+fn lane_not_found(argument: &str) -> FractalError {
+    FractalError::new(
         "lane-not-found",
         format!("no open lane matches `{argument}`; `st lanes ls` lists them"),
     )
 }
 
 /// The full entry subject for an argument in this lane, checked against its prefix.
-fn lane_entry(view: &LaneView, argument: &str) -> Result<String, St3Error> {
+fn lane_entry(view: &LaneView, argument: &str) -> Result<String, FractalError> {
     let entry = lane::entry_subject(view.entries_prefix.as_deref(), argument);
     fractal_schema::registry()
         .validate_subject(&entry)
-        .map_err(|error| St3Error::new("invalid-lane-entry", error.message))?;
+        .map_err(|error| FractalError::new("invalid-lane-entry", error.message))?;
     if let Some(prefix) = view.entries_prefix.as_deref()
         && !entry.starts_with(prefix)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-lane-entry",
             format!("entries in `{}` start with `{prefix}`", view.subject),
         ));
@@ -187,15 +187,15 @@ pub trait LanesStore {
     /// Find the lane an argument names: an exact `lane/...` subject, `RUN/NAME`, a mission run
     /// that declares exactly one open lane, a mission whose open lanes are exactly one, or a lane
     /// name that exactly one open lane uses.
-    fn resolve_lane(&self, argument: &str) -> Result<String, St3Error>;
+    fn resolve_lane(&self, argument: &str) -> Result<String, FractalError>;
     /// Record one join, leave, move, mark, or approval. A join of an entry that is already in the
     /// lane records nothing.
-    fn change_lane(&self, request: &LaneChangeRequest) -> Result<LaneChangeResponse, St3Error>;
+    fn change_lane(&self, request: &LaneChangeRequest) -> Result<LaneChangeResponse, FractalError>;
     fn lane_change_response(
             &self,
             subject: &str,
             claim: Option<ClaimRecord>,
-        ) -> Result<LaneChangeResponse, St3Error>;
+        ) -> Result<LaneChangeResponse, FractalError>;
 }
 
 impl LanesStore for Store {
@@ -242,7 +242,7 @@ impl LanesStore for Store {
             .transpose()
     }
 
-    fn resolve_lane(&self, argument: &str) -> Result<String, St3Error> {
+    fn resolve_lane(&self, argument: &str) -> Result<String, FractalError> {
         let argument = argument.trim();
         if argument.starts_with("lane/") {
             return match self.lane(argument).map_err(internal)? {
@@ -275,7 +275,7 @@ impl LanesStore for Store {
                 [] => {}
                 [view] => return Ok(view.subject.clone()),
                 many => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "ambiguous-lane",
                         format!(
                             "`{argument}` names {} open lanes; use one subject: {}",
@@ -292,7 +292,7 @@ impl LanesStore for Store {
         Err(lane_not_found(argument))
     }
 
-    fn change_lane(&self, request: &LaneChangeRequest) -> Result<LaneChangeResponse, St3Error> {
+    fn change_lane(&self, request: &LaneChangeRequest) -> Result<LaneChangeResponse, FractalError> {
         let lane_subject = self.resolve_lane(&request.lane)?;
         let view = self
             .lane(&lane_subject)
@@ -300,7 +300,7 @@ impl LanesStore for Store {
             .ok_or_else(|| lane_not_found(&lane_subject))?;
         let actor = request.actor.trim();
         if !(actor.starts_with("person/") || actor.starts_with("agent/")) || actor.contains(' ') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-lane-actor",
                 "a lane change is made by a `person/` or `agent/` actor",
             ));
@@ -323,7 +323,7 @@ impl LanesStore for Store {
             "leave" => {
                 let outcome = text(&request.outcome).unwrap_or_else(|| "removed".into());
                 if !lane::OUTCOMES.contains(&outcome.as_str()) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-lane-outcome",
                         "an entry leaves a lane `completed` or `removed`",
                     ));
@@ -336,7 +336,7 @@ impl LanesStore for Store {
                     .as_deref()
                     .and_then(Placement::parse)
                     .ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "invalid-lane-placement",
                             "a lane move uses top, bottom, before, or after",
                         )
@@ -344,13 +344,13 @@ impl LanesStore for Store {
                 let named = text(&request.anchor).map(|value| lane_entry(&view, &value));
                 match (placement.needs_anchor(), named) {
                     (true, None) => {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "missing-lane-anchor",
                             format!("a {} move names another entry", placement.as_str()),
                         ));
                     }
                     (false, Some(_)) => {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "unexpected-lane-anchor",
                             format!("a {} move does not name another entry", placement.as_str()),
                         ));
@@ -358,7 +358,7 @@ impl LanesStore for Store {
                     (true, Some(named)) => {
                         let named = named?;
                         if named == entry {
-                            return Err(St3Error::new(
+                            return Err(FractalError::new(
                                 "invalid-lane-anchor",
                                 "an entry cannot move relative to itself",
                             ));
@@ -374,7 +374,7 @@ impl LanesStore for Store {
             "mark" => {
                 let state = text(&request.state).unwrap_or_default();
                 if !lane::STATES.contains(&state.as_str()) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-lane-state",
                         "a lane entry is marked waiting, held, ready, or running",
                     ));
@@ -391,7 +391,7 @@ impl LanesStore for Store {
             }
             "approve" => {
                 if view.approver.as_deref() != Some(actor) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "lane-approval-denied",
                         match view.approver.as_deref() {
                             Some(approver) => {
@@ -404,7 +404,7 @@ impl LanesStore for Store {
                 lane::APPROVED_CLAIM
             }
             other => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-lane-change",
                     format!(
                         "`{other}` is not a lane change; use join, leave, move, mark, or approve"
@@ -432,7 +432,7 @@ impl LanesStore for Store {
             return self.lane_change_response(&lane_subject, Some(claim));
         }
         if !view.open {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "lane-closed",
                 format!("`{lane_subject}` is closed: its run ended or a revision dropped it"),
             ));
@@ -445,7 +445,7 @@ impl LanesStore for Store {
         } else {
             for named in std::iter::once(&entry).chain(anchor.as_ref()) {
                 if !queued(named) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "entry-not-in-lane",
                         format!("`{named}` is not in `{lane_subject}`"),
                     )
@@ -462,7 +462,7 @@ impl LanesStore for Store {
             &self,
             subject: &str,
             claim: Option<ClaimRecord>,
-        ) -> Result<LaneChangeResponse, St3Error> {
+        ) -> Result<LaneChangeResponse, FractalError> {
         let lane = self
             .lane(subject)
             .map_err(internal)?

@@ -585,33 +585,6 @@ pub fn resolve_declared_dir(
     Ok(None)
 }
 
-/// The exact selector for a declaration key used as a message endpoint — a runtime naming itself
-/// as the sender, or a declared `supervisor` as the recipient.
-///
-/// An unresolvable reference keeps its own bytes, so a caller that is not a declared subject — a
-/// flat compat box, an external requester — still fails with today's diagnostic.
-pub fn declared_selector(
-    catalog_root: &Path,
-    reference: &str,
-    this_host: &str,
-) -> anyhow::Result<AgentSelector> {
-    for selector in declaration_readings(reference, this_host) {
-        if optional_agent_handle(catalog_root, &selector, this_host)?.is_some() {
-            return Ok(selector);
-        }
-    }
-    Ok(AgentSelector::Id(reference.to_owned()))
-}
-
-pub fn with_resolved_agent_dir<T>(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-    operation: impl FnOnce(&Path) -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    with_resolved_state_dir(catalog_root, selector, this_host, &[], true, operation)
-}
-
 /// Run an operation against one selected agent's state directory.
 ///
 /// An exact-ID selector performs only ID lookup, so a subject whose address differs from its ID
@@ -1175,53 +1148,6 @@ fn test_capability_checkpoint() {
 #[cfg(not(debug_assertions))]
 fn test_capability_checkpoint() {}
 
-pub fn archive_resolved_message(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-    filename: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        is_message_filename(filename),
-        "invalid message filename {filename:?}"
-    );
-    let identity = selector_reference(selector);
-    let agent = match optional_agent_handle(catalog_root, selector, this_host)? {
-        Some(agent) => agent,
-        None => {
-            let discovered = crate::discover(catalog_root);
-            if crate::catalog_transaction::catalog_transition(catalog_root)?.is_none()
-                && !catalog_root.join(crate::catalog_lock::CONTROL_DIR).exists()
-                && discovered.specs.is_empty()
-                && discovered.errors.is_empty()
-            {
-                return archive_msg(
-                    &catalog_root.join(identity).join("inbox"),
-                    &catalog_root.join(identity).join("archive"),
-                    filename,
-                );
-            }
-            anyhow::bail!(
-                "no agent '{identity}' found in catalog {}",
-                catalog_root.display()
-            )
-        }
-    };
-    if let Some(capability) = agent.capability.as_ref() {
-        let inbox = open_message_box(capability, &["resources", "inbox"], false)?
-            .context("message inbox does not exist")?;
-        let archive = open_message_box(capability, &["resources", "archive"], true)?
-            .context("created archive capability is missing")?;
-        archive_msg(
-            &crate::directory::retained_dir_path(&inbox)?,
-            &crate::directory::retained_dir_path(&archive)?,
-            filename,
-        )
-    } else {
-        archive_msg(&inbox_dir(&agent.path), &archive_dir(&agent.path), filename)
-    }
-}
-
 fn open_message_box(
     agent: &File,
     components: &[&str],
@@ -1287,19 +1213,6 @@ pub fn archive_msg(inbox_dir: &Path, archive_dir: &Path, filename: &str) -> anyh
         Err(_) if receipt.is_file() => remove_inbox_duplicate(&source, filename),
         Err(e) => Err(anyhow::anyhow!("archiving {filename}: {e}")),
     }
-}
-
-/// Settle every canonical message still present in an agent's inbox.
-///
-/// Retirement invokes this on every reconciliation pass. The archive receipt remains authoritative,
-/// so replay after an interrupted pass or a sync-restored inbox duplicate is idempotent.
-pub fn archive_inbox(agent_dir: &Path) -> anyhow::Result<()> {
-    let inbox = inbox_dir(agent_dir);
-    let archive = archive_dir(agent_dir);
-    for message in list_inbox(&inbox)? {
-        archive_msg(&inbox, &archive, &message.filename)?;
-    }
-    Ok(())
 }
 
 fn remove_inbox_duplicate(source: &Path, filename: &str) -> anyhow::Result<()> {

@@ -10,7 +10,7 @@ fn check_registry(
     origin: &str,
     configured_peers: &[String],
     digest: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     fractal_store::store::identities::check_fleet_registry_conn(
         connection,
         origin,
@@ -24,7 +24,7 @@ fn check_registry(
             return error;
         }
         let peer = error.details.get("peer").and_then(Value::as_str).unwrap_or("unknown");
-        St3Error::new(
+        FractalError::new(
             "retirement-upgrade-required",
             format!("terminal retirement requires every member to run the new registry; `{peer}` has not advertised it"),
         )
@@ -33,8 +33,8 @@ fn check_registry(
     })
 }
 
-fn check_successor(connection: &Connection, subject: &str, successor: &str) -> Result<(), St3Error> {
-    let invalid = || St3Error::new(
+fn check_successor(connection: &Connection, subject: &str, successor: &str) -> Result<(), FractalError> {
+    let invalid = || FractalError::new(
         "invalid-custody-successor",
         format!("`{successor}` is not an eligible successor for `{subject}`"),
     ).with_detail("applied", "none");
@@ -54,7 +54,7 @@ fn check_successor(connection: &Connection, subject: &str, successor: &str) -> R
     Ok(())
 }
 
-fn holds_custody(connection: &Connection, successor: &str) -> Result<bool, St3Error> {
+fn holds_custody(connection: &Connection, successor: &str) -> Result<bool, FractalError> {
     // The existing kind index narrows this infrequent retirement-only check. Repaired
     // replica records are quarantined evidence, not operative retirement grants.
     connection.query_row(
@@ -77,7 +77,7 @@ pub trait RetirementsStore {
             incarnation: Option<&str>,
             key: &str,
             peers: &[String],
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     #[allow(clippy::too_many_arguments)]
     fn retire_agent_with_successor(
             &self,
@@ -90,9 +90,9 @@ pub trait RetirementsStore {
             peers: &[String],
             successor: Option<&str>,
             expect_revision: Option<&str>,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
-    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, St3Error>;
-    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
+    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, FractalError>;
+    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, FractalError>;
 }
 
 impl RetirementsStore for Store {
@@ -107,7 +107,7 @@ impl RetirementsStore for Store {
             incarnation: Option<&str>,
             key: &str,
             peers: &[String],
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         self.retire_agent_with_successor(subject, actor, reason, token, incarnation, key, peers, None, None)
     }
 
@@ -123,12 +123,12 @@ impl RetirementsStore for Store {
             peers: &[String],
             successor: Option<&str>,
             expect_revision: Option<&str>,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         use fractal_store::store::identities::{IdentityKind, IdentityStore as _};
         let resolved = self.resolve_identity(IdentityKind::Agent, subject)?;
         let subject = resolved.identity.as_str();
         if reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-retirement",
                 "retirement needs a reason",
             ));
@@ -166,7 +166,7 @@ impl RetirementsStore for Store {
                     [subject], |row| row.get(0),
                 ).optional().map_err(internal)?;
                 if current.as_deref() != Some(expected) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "retire-revision-mismatch", format!("agent `{subject}` declaration changed"),
                     ).with_detail("expected", expected)
                         .with_detail("current", json!(current))
@@ -175,7 +175,7 @@ impl RetirementsStore for Store {
             }
             admit_recipient(connection, Some(subject))?;
             if holds_custody(connection, subject)? {
-                return Err(St3Error::new("custody-pending", format!(
+                return Err(FractalError::new("custody-pending", format!(
                     "`{subject}` holds pending mail custody; complete the custody first"
                 )).with_detail("applied", "none"));
             }
@@ -191,7 +191,7 @@ impl RetirementsStore for Store {
                 .optional()
                 .map_err(internal)?;
             if current.as_deref() != Some(token) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "stale-subject",
                     format!("agent `{subject}` declaration changed"),
                 ));
@@ -203,7 +203,7 @@ impl RetirementsStore for Store {
                 .map(|member| member.host.as_str())
                 .ok_or_else(|| unavailable(subject, LifecycleUnavailableReason::Unavailable))?;
             if owner != self.origin() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "runtime-not-local",
                     format!("agent `{subject}` must be retired at its owning host `{owner}`"),
                 )
@@ -217,7 +217,7 @@ impl RetirementsStore for Store {
                     .and_then(|body| body.get("fields").unwrap_or(body).get("incarnation_id"))
                     .and_then(Value::as_str);
                 if current != Some(incarnation) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "retire-incarnation-mismatch",
                         format!("agent `{subject}` incarnation changed"),
                     )
@@ -251,7 +251,7 @@ impl RetirementsStore for Store {
         )
     }
 
-    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, St3Error> {
+    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, FractalError> {
         use fractal_store::store::identities::{IdentityKind, resolve_identity_conn};
         let connection = self.readers.get();
         let resolved = match resolve_identity_conn(&connection, IdentityKind::Agent, subject) {
@@ -262,7 +262,7 @@ impl RetirementsStore for Store {
         record(&connection, &resolved.identity, None)
     }
 
-    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, St3Error> {
+    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, FractalError> {
         let connection = self.readers.get();
         let Some(retirement) = record(&connection, subject, None)? else { return Ok(None); };
         let Some(successor) = retirement.body["fields"]["successor"].as_str() else {

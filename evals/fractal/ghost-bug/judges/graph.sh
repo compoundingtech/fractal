@@ -6,7 +6,7 @@ set -euo pipefail
 : "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 run="mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
-mission="$(env -u FRACTAL_AGENT -u ST_AGENT st3 --json missions show "$run")"
+mission="$(env -u FRACTAL_AGENT -u ST_AGENT fractal --json missions show "$run")"
 
 steps=(
   start-team

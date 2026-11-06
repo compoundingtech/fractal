@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Daemon stderr prefixes and CLI help and next-step hints use the canonical Fractal command name.",
+  "replay": {"status": "none", "detail": "No graph replay changes."},
+  "schema": {"status": "none", "detail": "No durable or wire identifier changes."},
+  "rules": {"status": "none", "detail": "No authorization changes."},
+  "compatibility": {"status": "changed", "detail": "Daemon stderr_message log prefixes now read fractal rather than st3. Suggested commands use fractal; legacy executable aliases and their deprecation notices remain unchanged."},
+  "downtime": {"status": "none", "detail": "Normal binary upgrade only."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No durable state changes to recover."}
+}

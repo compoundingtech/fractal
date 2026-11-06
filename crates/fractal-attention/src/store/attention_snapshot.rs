@@ -19,7 +19,7 @@ pub trait AttentionSnapshotStore {
             episode: &str,
             input: &AttentionRequest,
             condition: &str,
-        ) -> Result<AttentionRequestView, St3Error>;
+        ) -> Result<AttentionRequestView, FractalError>;
     fn pending_operational_failures(
             &self,
             actor: &str,
@@ -30,7 +30,7 @@ pub trait AttentionSnapshotStore {
             episode: &str,
             reason: &str,
             key: &str,
-        ) -> Result<AttentionRequestView, St3Error>;
+        ) -> Result<AttentionRequestView, FractalError>;
     /// Whether a record with the idempotency key `key` exists.
     fn operation_recorded(&self, key: &str) -> Result<bool>;
     /// The person's answer to the screen prompt `claim` recorded, and whether st pressed its keys.
@@ -94,7 +94,7 @@ impl AttentionSnapshotStore for Store {
             episode: &str,
             input: &AttentionRequest,
             condition: &str,
-        ) -> Result<AttentionRequestView, St3Error> {
+        ) -> Result<AttentionRequestView, FractalError> {
         self.record_failure(episode, input, condition)
     }
 
@@ -125,17 +125,17 @@ impl AttentionSnapshotStore for Store {
             episode: &str,
             reason: &str,
             key: &str,
-        ) -> Result<AttentionRequestView, St3Error> {
+        ) -> Result<AttentionRequestView, FractalError> {
         let current = self
             .operational_failure(episode)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new("missing-operational-failure", "the episode does not exist")
+                FractalError::new("missing-operational-failure", "the episode does not exist")
             })?;
         let source = current
             .targets
             .first()
-            .ok_or_else(|| St3Error::new("missing-failure-source", "the episode has no source"))?;
+            .ok_or_else(|| FractalError::new("missing-failure-source", "the episode has no source"))?;
         self.append_claim(&ClaimInput {
             subject: source.clone(),
             kind: "operational.recovered".into(),
@@ -151,7 +151,7 @@ impl AttentionSnapshotStore for Store {
         })?;
         self.operational_failure(episode)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the recovery was not recorded"))
+            .ok_or_else(|| FractalError::new("internal", "the recovery was not recorded"))
     }
 
     fn operation_recorded(&self, key: &str) -> Result<bool> {

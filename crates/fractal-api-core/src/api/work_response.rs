@@ -2,7 +2,7 @@ use crate::SeatsStoreCore;
 use super::*;
 
 /// A work acknowledgement needs the selected seat's hierarchy, not the fleet's desired graph.
-pub fn enrich_under(store: &Store, response: &mut StepRunView) -> Result<(), St3Error> {
+pub fn enrich_under(store: &Store, response: &mut StepRunView) -> Result<(), FractalError> {
     let Some(assignee) = response
         .claimant
         .as_ref()
@@ -15,7 +15,7 @@ pub fn enrich_under(store: &Store, response: &mut StepRunView) -> Result<(), St3
     response.under = store
         .desired_subjects_named(std::slice::from_ref(assignee))
         .map_err(|error| {
-            St3Error::new("store-read-failed", format!("read desired agent: {error}"))
+            FractalError::new("store-read-failed", format!("read desired agent: {error}"))
         })?
         .into_iter()
         .find(|subject| subject.kind == "agent")

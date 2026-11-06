@@ -14,7 +14,7 @@ remain byte-for-byte unchanged: the wrapper owns its guard, config and state pat
 The installer does not restart services or agent seats. If a direct definition needs
 a different executable path, stop its loaded service before installing; the installer
 refuses to rewrite a loaded definition.
-For a first daemon install, run `st service install` from the installed app executable;
+For a first daemon install, run `fractal service install` from the installed app executable;
 for an update, restart the daemon and replication services when ready.
 
 When the `--from` directory also holds `StListen.app` (the terminal UI's speech helper, built by

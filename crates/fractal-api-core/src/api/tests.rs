@@ -5072,6 +5072,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     .await
     .unwrap()
     .0;
+    let appended: smallclaims::claim::ClaimRecord = serde_json::from_value(appended).unwrap();
     let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
         .await
         .expect("a stream item did not wake the waiter")
@@ -6957,6 +6958,73 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     }
 }
 
+/// #4500: a seat whose declaration is a stop while its process still runs says it is stopping,
+/// and once the stop is deferred, what holds it.
+#[test]
+fn a_stop_declared_seat_that_still_runs_is_stopping_and_says_what_holds_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let seat = "agent/example-held/worker";
+    let declare = parse_intent(
+        "version 2\nagent \"example-held/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&declare, "held-card-declaration").unwrap();
+    let observe = |status: &str, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: seat.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!(status)),
+                ("runtime_id".into(), json!("held-runtime")),
+                ("incarnation_id".into(), json!("held-incarnation")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    observe("running", "held-running");
+    let card = |store: &Store| {
+        client_agent_resources_uncached(store, true, store.index().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|card| card["id"] == seat)
+            .unwrap()
+    };
+    assert_eq!(card(&store)["stopping"], Value::Null, "a declared seat is not stopping");
+
+    let stop = parse_intent("version 2\nstop \"agent/example-held/worker\"\n", store.origin()).unwrap();
+    store.apply_internal(&stop, "held-card-stop").unwrap();
+    assert_eq!(card(&store)["stopping"], json!({"held": null}));
+
+    let token = store.selected_desired_token(seat).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: seat.into(),
+        kind: "harness.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("warning")),
+            ("status".into(), json!("waiting")),
+            ("code".into(), json!("stop-deferred")),
+            ("reason".into(), json!("the seat holds a message nobody has read")),
+            ("observed_since_ms".into(), json!(1)),
+            ("incarnation_id".into(), json!("held-incarnation")),
+        ]),
+        evidence: vec![token],
+        expected_subject: None,
+        idempotency_key: Some("held-diagnostic".into()),
+    }).unwrap();
+    assert_eq!(
+        card(&store)["stopping"],
+        json!({"held": "the seat holds a message nobody has read"})
+    );
+
+    observe("stopped", "held-stopped");
+    assert_eq!(card(&store)["stopping"], Value::Null, "a stopped seat is no longer stopping");
+}
+
 #[test]
 fn client_work_projection_includes_agentless_mission_steps() {
     let root = tempfile::tempdir().unwrap();
@@ -7784,9 +7852,10 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
         assert_eq!(body["code"], "person-has-no-inbox", "{key}");
         let text = body["message"].as_str().unwrap();
         assert!(text.starts_with("people do not have inboxes: print your answer in the chat"), "{text}");
-        let chat = text.find("print in the chat").unwrap();
+        let chat = text.find("print your answer in the chat").unwrap();
         assert!(chat < text.find("work ask").unwrap() && chat < text.find("work update").unwrap());
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     assert_eq!(
         state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
@@ -13286,13 +13355,13 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
 #[test]
 fn identity_rename_refusals_keep_typed_http_statuses() {
     for code in ["identity-cycle", "identity-occupied", "identity-retired-source", "lifecycle-unavailable"] {
-        let error = ApiError::bad(St3Error::new(code, "rename refused"));
+        let error = ApiError::bad(FractalError::new(code, "rename refused"));
         assert_eq!(error.status, StatusCode::CONFLICT, "{code}");
         assert_eq!(error.code, code);
     }
-    assert_eq!(ApiError::bad(St3Error::new("identity-cross-kind", "wrong kind")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-cross-kind", "wrong kind")).status,
         StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(ApiError::bad(St3Error::new("identity-unknown", "missing")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-unknown", "missing")).status,
         StatusCode::NOT_FOUND);
 }
 

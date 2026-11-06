@@ -71,6 +71,65 @@ test('URI-reference formats validate RFC3986 without URL normalization', async (
     }
 });
 
+test('declared admission is optional nonnullable data with lossless future enums', async () => {
+    const [{ Effect, Schema }, Rich] = await modules;
+    const admission = {
+        priority: 'normal', lane: 'check',
+        budgets: { cpu_seconds: 300, memory_max: '8G', disk_max: '20G', token_budget: 100000 },
+    };
+    const resources = [
+        [Rich.Agent, { id: 'agent/example/worker', kind: 'agent', name: 'Worker',
+            revision: 'claim/one', updated_at: '2026-11-01T00:00:00.000Z',
+            state: 'running', reachability: 'local', runtime_ids: [] }],
+        [Rich.Mission, { id: 'mission/example', kind: 'mission', title: 'Example',
+            revision: 'claim/one', updated_at: '2026-11-01T00:00:00.000Z',
+            state: 'ready', mission_revision: 'claim/one', runs: [], run_generations: {} }],
+        [Rich.AgentDeclaration, { id: 'agent/example/worker', revision: 'claim/one',
+            tree: {}, kdl: '', revisions: ['claim/one'] }],
+    ];
+    for (const [model, wire] of resources) {
+        for (const mode of ['tolerant', 'strict']) {
+            const decode = Rich.decodeUnknownSync(model, mode);
+            assert.equal(Object.hasOwn(decode(wire), 'declared_admission'), false);
+            assert.equal(Object.hasOwn(Schema.encodeSync(model)(decode(wire)), 'declared_admission'), false);
+            const decoded = decode({ ...wire, declared_admission: admission });
+            assert.deepEqual(decoded.declared_admission, admission);
+            assert.deepEqual(Schema.encodeSync(model)(decoded).declared_admission, admission);
+            assert.deepEqual(Effect.runSync(Rich.decodeUnknownEffect(model, mode)(
+                { ...wire, declared_admission: admission })).declared_admission, admission);
+            assert.deepEqual(decode({ ...wire, declared_admission: { lane: 'build' } }).declared_admission, { lane: 'build' });
+        }
+        const future = { ...admission, priority: 'future-level', lane: 'future-lane' };
+        const decoded = Rich.decodeUnknownSync(model)({ ...wire, declared_admission: future });
+        assert.deepEqual(decoded.declared_admission.priority, { _tag: 'Unknown', raw: 'future-level' });
+        assert.deepEqual(decoded.declared_admission.lane, { _tag: 'Unknown', raw: 'future-lane' });
+        assert.deepEqual(Schema.encodeSync(model)(decoded).declared_admission, future);
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...wire, declared_admission: future }));
+        assert.equal(Object.hasOwn(Rich.decodeUnknownSync(model)(
+            { ...wire, declared_admission: null }), 'declared_admission'), false);
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...wire, declared_admission: null }));
+        const extra = { ...admission, future: true, budgets: { ...admission.budgets, future: true } };
+        assert.deepEqual(Schema.encodeSync(model)(Rich.decodeUnknownSync(model)(
+            { ...wire, declared_admission: extra })).declared_admission, admission);
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...wire, declared_admission: extra }));
+        if (wire.kind !== undefined) {
+            const resource = Rich.decodeUnknownSync(Rich.Resource)(
+                { ...wire, declared_admission: future });
+            assert.deepEqual(Schema.encodeSync(Rich.Resource)(resource).declared_admission, future);
+        }
+    }
+    for (const priority of ['background', 'normal'])
+        assert.equal(Rich.decodeUnknownSync(Rich.DeclaredPriority, 'strict')(priority), priority);
+    for (const lane of ['check', 'build'])
+        assert.equal(Rich.decodeUnknownSync(Rich.DeclaredLane, 'strict')(lane), lane);
+    for (const field of ['cpu_seconds', 'token_budget']) {
+        const decode = Rich.decodeUnknownSync(Rich.DeclaredBudgets, 'strict');
+        for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null])
+            assert.throws(() => decode({ [field]: invalid }));
+        assert.deepEqual(decode({ [field]: Number.MAX_SAFE_INTEGER }), { [field]: Number.MAX_SAFE_INTEGER });
+    }
+});
+
 test('harness questions retain canonical private metadata and open response enums', async () => {
     const [{ DateTime, Option, Schema }, Rich] = await modules;
     const wire = {
@@ -162,6 +221,14 @@ test('harness refusal details stay closed while result statuses remain lossless'
     const known = { status: 'accepted', resolution: { status: 'answered', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
     assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(known)), known);
 });
+test('placement migration is a strict typed arrangement operation', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const operation = { op: 'membership.migrate' };
+    const decoded = Rich.decodeUnknownSync(Rich.ArrangementOperation, 'strict')(operation);
+    assert.deepEqual(Schema.encodeSync(Rich.ArrangementOperation)(decoded), operation);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.ArrangementOperation, 'strict')({ ...operation, version: 2 }));
+});
+
 test('revisioned agents opt-in and frames are strict disjoint branches with lossless provenance', async () => {
     const [{ Schema }, Rich] = await modules;
     const command = require('../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json');

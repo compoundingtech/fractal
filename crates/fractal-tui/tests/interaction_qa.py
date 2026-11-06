@@ -124,7 +124,7 @@ def open_agent(session: str, name: str) -> str:
 
 
 def main(binary: str, name: str) -> None:
-    session = start(binary, "stui-qa")
+    session = start(binary, "fractal-tui-qa")
     try:
         initial = open_agent(session, name)
         # The conversation sits under the tab strip, right of any sidebar: aim at its middle.
@@ -158,5 +158,5 @@ def main(binary: str, name: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        raise SystemExit("usage: interaction_qa.py STUI AGENT_NAME")
+        raise SystemExit("usage: interaction_qa.py FRACTAL_BINARY AGENT_NAME")
     main(sys.argv[1], sys.argv[2])

@@ -62,6 +62,10 @@ fleet_compat() {
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_back 2>&1 | tee "$logs/compat-outbox-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-outbox-result.log" || return
+  # Stream mail counted alike on two members of this build beside the release, which upgrades in place and rolls back.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_beside_members_that_count_stream_mail_alike 2>&1 | tee "$logs/compat-mirror-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-mirror-result.log" || return
   # Message marks: a previous-release member beside one recording them, one store across upgrade, a v4 backup and rollback,
   # a release member that keeps this build's hosts writing lifecycle claims, one node upgraded in place to marks, and a
   # release fleet upgraded to marks with one member rolled back.

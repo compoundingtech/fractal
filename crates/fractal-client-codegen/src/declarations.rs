@@ -29,6 +29,7 @@ model!(Agent {
     workspace: String => "readonly workspace: string",
     launch: Launch => "readonly launch: Launch",
     under: Option<Under> => "readonly under?: Under",
+    principal: Option<String> => "readonly principal?: `person/${string}`",
 });
 model!(Under {
     agent: AgentReference => "readonly agent: AgentReference",
@@ -38,6 +39,7 @@ model!(Step {
     id: String => "readonly id: string",
     assigned_to: AgentReference => "readonly assignedTo: AgentReference",
     goals: Vec<String> => "readonly goals: readonly [] | readonly [string] | readonly [string, string] | readonly [string, string, string]",
+    capacity: Option<StepCapacity> => "readonly capacity?: StepCapacity",
 });
 model!(Mission {
     id: String => "readonly id: string",
@@ -46,7 +48,17 @@ model!(Mission {
     goals: Vec<String> => "readonly goals: readonly [string] | readonly [string, string] | readonly [string, string, string]",
     completion: Completion => "readonly completion: Completion",
     steps: Vec<Step> => "readonly steps: readonly Step[]",
+    capacity: Option<Capacity> => "readonly capacity?: Capacity",
 });
+// Authored memory uses the parser's size strings, not normalized byte counts.
+model!(Capacity {
+    cores: Option<u32> => "readonly cores?: number",
+    memory: Option<String> => "readonly memory?: string",
+});
+model!(StepCapacity {
+    cores: Option<u32> => "readonly cores?: number",
+    memory: Option<String> => "readonly memory?: string",
+} => "({ readonly cores: number } | { readonly memory: string })");
 model!(Schedule {
     id: String => "readonly id: string",
     host: String => "readonly host: string",
@@ -118,6 +130,8 @@ pub fn typescript() -> String {
         Under::typescript(),
         Step::typescript(),
         Mission::typescript(),
+        Capacity::typescript(),
+        StepCapacity::typescript(),
         Schedule::typescript(),
         ScheduledWork::typescript(),
         Declarations::typescript(),
@@ -161,6 +175,16 @@ mod tests {
             AgentReference::Declaration(agent) => format!("agent/{}", agent.id),
         }
     }
+    fn render_capacity(out: &mut String, indent: &str, cores: Option<u32>, memory: Option<&str>) {
+        write!(out, "{indent}capacity").unwrap();
+        if let Some(cores) = cores {
+            write!(out, " cores={cores}").unwrap();
+        }
+        if let Some(memory) = memory {
+            write!(out, " memory={}", quote(memory)).unwrap();
+        }
+        out.push('\n');
+    }
     fn render(document: &Declarations) -> String {
         let mut out = "version 2\n".to_owned();
         for agent in &document.agents {
@@ -171,6 +195,9 @@ mod tests {
                 quote(&agent.workspace)
             )
             .unwrap();
+            if let Some(principal) = &agent.principal {
+                writeln!(out, "  principal {}", quote(principal)).unwrap();
+            }
             if let Some(under) = &agent.under {
                 writeln!(
                     out,
@@ -201,6 +228,9 @@ mod tests {
                 quote(&agent_reference(&mission.report_to))
             )
             .unwrap();
+            if let Some(capacity) = &mission.capacity {
+                render_capacity(&mut out, "  ", capacity.cores, capacity.memory.as_deref());
+            }
             for goal in &mission.goals {
                 writeln!(out, "  goal {}", quote(goal)).unwrap();
             }
@@ -218,6 +248,9 @@ mod tests {
                     quote(&agent_reference(&step.assigned_to))
                 )
                 .unwrap();
+                if let Some(capacity) = &step.capacity {
+                    render_capacity(&mut out, "    ", capacity.cores, capacity.memory.as_deref());
+                }
                 for goal in &step.goals {
                     writeln!(out, "    goal {}", quote(goal)).unwrap();
                 }
@@ -260,11 +293,13 @@ mod tests {
             workspace: ".".into(),
             launch: Launch::Command("true".into()),
             under: None,
+            principal: None,
         };
         let writer = Agent {
             id: "docs/writer".into(),
             workspace: ".".into(),
             launch: Launch::Command("true".into()),
+            principal: None,
             under: Some(Under {
                 agent: AgentReference::Declaration(Box::new(editor.clone())),
                 reason: "The editor reviews the writer's work.".into(),
@@ -276,10 +311,12 @@ mod tests {
             report_to: AgentReference::Declaration(Box::new(editor.clone())),
             goals: vec!["Review the documentation each day.".into()],
             completion: Completion::AllStepsExhausted,
+            capacity: None,
             steps: vec![Step {
                 id: "review".into(),
                 assigned_to: AgentReference::Declaration(Box::new(writer.clone())),
                 goals: vec!["Review the documentation and report corrections.".into()],
+                capacity: None,
             }],
         };
         let schedule = Schedule {
@@ -337,6 +374,49 @@ mod tests {
         let mut no_steps = document.clone();
         no_steps.missions[0].steps.clear();
         fractal_store::graph::parse_intent(&render(&no_steps), "local").unwrap();
+        let mut extended = document;
+        extended.agents[0].principal = Some("person/operator".into());
+        extended.missions[0].capacity = Some(Capacity {
+            cores: Some(2),
+            memory: Some("4G".into()),
+        });
+        extended.missions[0].steps[0].capacity = Some(StepCapacity {
+            cores: None,
+            memory: Some("8G".into()),
+        });
+        extended.schedules.clear();
+        let source = render(&extended);
+        assert_eq!(
+            source,
+            include_str!(
+                "../../../clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl"
+            )
+        );
+        let intent = fractal_store::graph::parse_intent(&source, "local").unwrap();
+        let mission = &intent.missions["docs/daily-review"];
+        assert_eq!(mission.capacity.unwrap().cores, 2);
+        assert_eq!(
+            mission.steps["review"].capacity.unwrap().memory,
+            Some(8 << 30)
+        );
+        for (source, code) in [
+            (
+                source.replace("person/operator", "agent/docs/editor"),
+                "invalid-agent-principal",
+            ),
+            (
+                source.replace("assigned-to \"agent/docs/writer\"", "agentless"),
+                "invalid-capacity",
+            ),
+        ] {
+            assert_eq!(
+                fractal_store::graph::parse_intent(&source, "local")
+                    .err()
+                    .unwrap()
+                    .code,
+                code
+            );
+        }
     }
 
     #[test]
@@ -352,6 +432,7 @@ mod tests {
                             rest: vec!["line\nnext\ttab\rreturn\u{8}\u{c}".into()],
                         },
                         under: None,
+                        principal: None,
                     }],
                     missions: vec![Mission {
                         id: "job".into(),
@@ -359,10 +440,12 @@ mod tests {
                         report_to: AgentReference::Subject("agent/local.worker".into()),
                         goals: vec!["Work".into()],
                         completion: Completion::AllStepsExhausted,
+                        capacity: None,
                         steps: vec![Step {
                             id: "work".into(),
                             assigned_to: AgentReference::Subject("agent/local.worker".into()),
                             goals: vec!["Do work".into()],
+                            capacity: None,
                         }],
                     }],
                     schedules: vec![Schedule {

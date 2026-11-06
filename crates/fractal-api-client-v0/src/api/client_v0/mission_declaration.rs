@@ -23,7 +23,7 @@ pub async fn get(
             let value = state.store.mission_declaration(&query.mission, query.revision.as_deref(), index)?;
             let value = value.map(|(spec, published_at)| {
                 let rendered = crate::mission_render::render_mission_kdl(&spec)?;
-                Ok::<_, St3Error>(json!({"mission": spec.subject, "revision": spec.revision,
+                Ok::<_, FractalError>(json!({"mission": spec.subject, "revision": spec.revision,
                     "published_at": published_at, "text": rendered.text, "legacy": rendered.legacy}))
             }).transpose()?;
             Ok((client_snapshot_at(&state, index), value))
