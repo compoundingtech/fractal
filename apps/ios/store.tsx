@@ -132,7 +132,7 @@ function useAppStore(proof?: FabricProfile) {
   const [order, setOrder] = useState<Tab[]>(tabOrder(null));
   const [url, setUrl] = useState(proof?.url ?? ''), [urlDraft, setUrlDraft] = useState('');
   const [credential, setCredential] = useState<string | null>(proof?.credential ?? null);
-  const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string } | null>(null);
+  const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string; scanned?: true } | null>(null);
   const [data, setData] = useState<Data>(emptyData);
   const [truncated, setTruncated] = useState<Partial<Record<keyof Data, boolean>>>({});
   const [loadErrors, setLoadErrors] = useState<Partial<Record<keyof Data, string>>>({});
@@ -689,7 +689,8 @@ function useAppStore(proof?: FabricProfile) {
     const requestFetch = gatewayFetch();
     // With fabric chosen and its bridge open, the pairing requests go over fabric to the same member: the
     // gateway typed (or saved) stays this device's identity and its fallback route.
-    const requestUrl = member ? fabricSnapshot.bridgeUrl : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
+    // QR pairing always goes to its explicit gateway, never a different currently connected Fabric member.
+    const requestUrl = member ? fabricSnapshot.bridgeUrl : pairDraft?.scanned ? gateway : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
     if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
@@ -792,7 +793,15 @@ function useAppStore(proof?: FabricProfile) {
       const gateway = pairDraft?.gateway ?? (url || fabricOnly);
       if (!gateway || !id.trim() || !code.trim()) return false;
       setBusy(true);
-      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) {
+        setError(pairDraft?.scanned ? 'Could not pair this device. The previous pairing was kept. Check the separately copied fingerprint and start a fresh pairing on the trusted machine; inspect its devices if the code was consumed.' : errorText(e));
+        return false;
+      } finally { setBusy(false); }
+    },
+    /** A QR proposes only a draft; saved routing, credential and root pin remain untouched. */
+    prefillScannedPairing(gateway: string, id: string, code: string) {
+      setPairDraft({ gateway, id, code, scanned: true });
+      setPairingIssue('Enter the fingerprint copied separately from the trusted machine before completing this pairing.');
     },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
