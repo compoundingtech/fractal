@@ -35,6 +35,10 @@ the leaves), not assigned: `scripts/check-module-layers --layers`.
 A module that has to use a type or function from a module above it moves that definition down, or
 takes a small trait. Do not add an allowlist entry for new code.
 
+Local Unix socket discovery belongs to `fractal-socket-discovery`, a leaf with no client or
+daemon dependency. Configuration and transports share its `UnixSocketDiscovery` identity and
+socket resolution, so the kernel does not depend on the client transport to discover an endpoint.
+
 ## What a change affects
 
 The `protocol` class in `docs/st3/change-impact.md` lists `api.rs` whole, so nearly every daemon

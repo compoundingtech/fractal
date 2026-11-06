@@ -351,7 +351,7 @@ mod tests {
             }
             let listener = tokio::net::UnixListener::bind(&live).unwrap();
             let client = crate::client::Client::new(crate::client::Endpoint::DiscoveredUnix(
-                fractal_client::UnixSocketDiscovery::Defaults {
+                fractal_socket_discovery::UnixSocketDiscovery::Defaults {
                     runtime: primary.clone(), published: primary,
                 },
             ));

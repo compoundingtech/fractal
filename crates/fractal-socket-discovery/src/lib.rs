@@ -1,6 +1,24 @@
 //! Local control socket selection shared by configuration and transport.
 use std::path::{Path, PathBuf};
 
+/// A trusted local control socket's discovery identity, retained across daemon outages.
+/// Explicit and configured paths are exact; only defaults use published/legacy discovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnixSocketDiscovery {
+    Explicit(PathBuf),
+    Defaults { runtime: PathBuf, published: PathBuf },
+}
+
+impl UnixSocketDiscovery {
+    /// Resolve the currently available daemon without freezing a default's selected path.
+    pub fn resolve(&self) -> PathBuf {
+        match self {
+            Self::Explicit(path) => path.clone(),
+            Self::Defaults { runtime, published } => default_unix_socket(runtime, published),
+        }
+    }
+}
+
 /// The runtime default, unless nothing answers there and the daemon's published discovery link
 /// leads to a socket that does. A daemon started with `--socket` elsewhere links its state
 /// directory's `run/fractal.sock` to that socket, while the runtime default can hold a dead socket
@@ -120,4 +138,26 @@ pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
     }
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
     primary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::{fs::symlink, net::UnixListener};
+
+    #[test]
+    fn defaults_follow_published_daemons_but_explicit_paths_remain_exact() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("fractal.sock");
+        let published = root.path().join("published.sock");
+        let discovery = UnixSocketDiscovery::Defaults { runtime: runtime.clone(), published: published.clone() };
+        assert_eq!(discovery.resolve(), runtime);
+        let target = root.path().join("daemon.sock");
+        let listener = UnixListener::bind(&target).unwrap();
+        symlink(&target, &published).unwrap();
+        assert_eq!(discovery.resolve(), target.canonicalize().unwrap());
+        assert_eq!(UnixSocketDiscovery::Explicit(runtime.clone()).resolve(), runtime);
+        drop(listener);
+        assert_eq!(discovery.resolve(), runtime);
+    }
 }

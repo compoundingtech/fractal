@@ -843,15 +843,15 @@ impl Config {
     }
 
     /// Keep default discovery live through daemon restarts; configured paths remain exact.
-    pub fn client_discovery(&self) -> fractal_client::UnixSocketDiscovery {
+    pub fn client_discovery(&self) -> fractal_socket_discovery::UnixSocketDiscovery {
         let published = state_socket(&self.state_dir);
         let runtime = env::var_os("XDG_RUNTIME_DIR")
             .map(|directory| PathBuf::from(directory).join("fractal.sock"))
             .unwrap_or_else(|| published.clone());
         if !self.socket_is_explicit && (self.socket == runtime || self.socket == published) {
-            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+            fractal_socket_discovery::UnixSocketDiscovery::Defaults { runtime, published }
         } else {
-            fractal_client::UnixSocketDiscovery::Explicit(self.socket.clone())
+            fractal_socket_discovery::UnixSocketDiscovery::Explicit(self.socket.clone())
         }
     }
 
@@ -1754,13 +1754,13 @@ sekrets_profile = "nathan/daemon-gh"
         let config = Config::load_unvalidated(Some(&path)).unwrap();
         assert!(matches!(
             config.client_discovery(),
-            fractal_client::UnixSocketDiscovery::Explicit(path) if path == defaults.socket
+            fractal_socket_discovery::UnixSocketDiscovery::Explicit(path) if path == defaults.socket
         ));
         fs::write(&path, "").unwrap();
         let config = Config::load_unvalidated(Some(&path)).unwrap();
         assert!(matches!(
             config.client_discovery(),
-            fractal_client::UnixSocketDiscovery::Defaults { .. }
+            fractal_socket_discovery::UnixSocketDiscovery::Defaults { .. }
         ));
     }
 

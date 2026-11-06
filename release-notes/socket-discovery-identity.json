@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep Unix socket discovery identities in the neutral discovery leaf rather than the client transport.",
+  "replay": {"status": "none", "detail": "No replay or backfill."},
+  "schema": {"status": "none", "detail": "No database or stored-data changes."},
+  "rules": {"status": "none", "detail": "Default discovery remains live; explicit endpoints remain exact."},
+  "compatibility": {"status": "none", "detail": "Internal Rust type ownership changes only; no wire or command changes."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Revert the change; no data recovery needed."}
+}

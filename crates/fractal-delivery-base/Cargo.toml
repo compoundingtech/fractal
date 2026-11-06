@@ -20,6 +20,7 @@ serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 fractal-client = { path = "../fractal-client", features = ["trace-propagation"] }
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 fractal-drivers = { path = "../fractal-drivers" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

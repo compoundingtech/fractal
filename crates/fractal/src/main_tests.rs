@@ -1710,13 +1710,13 @@ async fn execution_requests_carry_actor_without_changing_the_work() {
                 },
             ));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let endpoint = Endpoint::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Defaults {
+        let endpoint = Endpoint::DiscoveredUnix(fractal_socket_discovery::UnixSocketDiscovery::Defaults {
             runtime: socket.clone(),
             published: socket.clone(),
         });
         let client = execution_client(&endpoint, actor.into()).unwrap();
         assert!(matches!(&client.endpoint, Endpoint::DiscoveredUnix(
-            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+            fractal_socket_discovery::UnixSocketDiscovery::Defaults { runtime, published }
         ) if runtime == &socket && published == &socket));
         change_cli::run(&client, change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync {

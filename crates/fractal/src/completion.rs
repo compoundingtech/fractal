@@ -176,7 +176,7 @@ fn completion_words() -> Vec<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalTarget {
     pub socket: PathBuf,
-    pub discovery: Option<fractal_client::UnixSocketDiscovery>,
+    pub discovery: Option<fractal_socket_discovery::UnixSocketDiscovery>,
     /// `ST_AGENT` in a seat, otherwise the configured person.
     pub caller: Option<String>,
     /// `person` in the st config.

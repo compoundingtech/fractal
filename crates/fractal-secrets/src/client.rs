@@ -26,7 +26,7 @@ use crate::model::{
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
-    DiscoveredUnix(fractal_client::UnixSocketDiscovery),
+    DiscoveredUnix(fractal_socket_discovery::UnixSocketDiscovery),
     Http(String),
     Fabric(FabricEndpoint),
 }
@@ -35,7 +35,7 @@ impl Endpoint {
     /// Resolve discovery at use time; explicit Unix endpoints remain exact.
     pub fn unix_socket(&self) -> Option<std::borrow::Cow<'_, Path>> {
         match self {
-            Self::Unix(path) | Self::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Explicit(path)) =>
+            Self::Unix(path) | Self::DiscoveredUnix(fractal_socket_discovery::UnixSocketDiscovery::Explicit(path)) =>
                 Some(std::borrow::Cow::Borrowed(path)),
             Self::DiscoveredUnix(discovery) => Some(std::borrow::Cow::Owned(discovery.resolve())),
             Self::Http(_) | Self::Fabric(_) => None,
@@ -2581,7 +2581,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let primary = directory.path().join("fractal.sock");
         let legacy = directory.path().join("st3.sock");
-        let discovery = fractal_client::UnixSocketDiscovery::Defaults {
+        let discovery = fractal_socket_discovery::UnixSocketDiscovery::Defaults {
             runtime: primary.clone(),
             published: primary.clone(),
         };
