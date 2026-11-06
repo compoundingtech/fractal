@@ -22220,6 +22220,9 @@ pub fn append_claim_with_subject_fences(
 }
 
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + 'a;
+/// Persist a native attention control's client receipt before its claim commits.
+pub type AttentionControlCommit<'a> =
+    dyn Fn(&Transaction<'_>, &ClaimRecord, bool) -> Result<(), St3Error> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22231,6 +22234,7 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    pub attention_control_commit: Option<&'a AttentionControlCommit<'a>>,
     /// Write the claim as a build from before its kind became a local observation did: a
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
@@ -22653,6 +22657,12 @@ pub fn append_claim_with_commit_context(
                     /* sqlite-large-value: allow-for-now lv-hd9ad37ed7efe owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
                     params![input.subject,input.kind,input.actor],
                 ).map_err(internal)?;
+            }
+            if let Some(observe) = context.attention_control_commit {
+                if input.kind != attention_controls::KIND {
+                    return Err(St3Error::new("invalid-attention-control-receipt", "control receipt requires an attention control"));
+                }
+                observe(transaction, &outcome.0, outcome.1)?;
             }
             Ok(outcome)
         })

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Commit attention controls and their client receipts atomically",
+  "replay": { "status": "changed", "detail": "A narrow control-write observer can persist the action result and exact post-write revision before commit. Same-key retries preserve the original receipt even after subsequent controls." },
+  "schema": { "status": "none", "detail": "No claim or database schema changes." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "Existing store callers need no client receipt. An observer failure rolls back both control and receipt, avoiding an acknowledged control without its undo fence." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No public mutation is advertised by this internal write change." },
+  "recovery": { "status": "none", "detail": "Retry the same idempotency key after a pre-commit refusal." }
+}

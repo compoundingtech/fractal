@@ -710,6 +710,7 @@ mod tests {
                 person:"person/example", attention_id:id, source_revision:revision,
                 expected_revision:controls.revision.as_deref(), change, now_unix_ms:now as i64, key,
                 validate_source:&|_| Ok(()),
+                commit_receipt:None,
             }).unwrap();
         };
         store.start_attention_list_refresher().unwrap();

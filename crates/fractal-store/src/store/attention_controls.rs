@@ -48,6 +48,7 @@ pub struct AttentionControlRequest<'a> {
     pub key: &'a str,
     /// Source ownership/currency is checked under the same writer lock as control CAS.
     pub validate_source: &'a ClaimAdmission<'a>,
+    pub commit_receipt: Option<&'a AttentionControlCommit<'a>>,
 }
 
 /// Two indexed point reductions use the shared canonical order, never arrival order.
@@ -142,7 +143,7 @@ impl Store {
             Ok(())
         };
         append_claim_with_commit_context(&self.graph, &input, None, None, None, None,
-            ClaimCommitContext { admission: Some(&admission), ..Default::default() }).map(|(claim, _)| claim)
+            ClaimCommitContext { admission: Some(&admission), attention_control_commit: request.commit_receipt, ..Default::default() }).map(|(claim, _)| claim)
     }
 }
 
@@ -156,6 +157,7 @@ mod tests {
         store.write_attention_control(&AttentionControlRequest {
             person: PERSON, attention_id: ITEM, source_revision: "source/one", expected_revision: state.revision.as_deref(),
             change, now_unix_ms: 100, key, validate_source: &|_| Ok(()),
+            commit_receipt: None,
         }).unwrap()
     }
     #[test]
@@ -189,6 +191,7 @@ mod tests {
             person: PERSON, attention_id: ITEM, source_revision: "source/one", expected_revision: None,
             change: AttentionControlChange::Snooze(Some(1000)), now_unix_ms: 2000, key: "snooze-one",
             validate_source: &|_| Err(St3Error::new("stale-fence", "source changed")),
+            commit_receipt: None,
         };
         assert_eq!(store.write_attention_control(&request).unwrap().id, first.id);
         assert_eq!(store.write_attention_control(&AttentionControlRequest { key: "new-key", ..request }).unwrap_err().code, "stale-fence");
@@ -201,8 +204,54 @@ mod tests {
             person: PERSON, attention_id: ITEM, source_revision: "source/one", expected_revision: None,
             change: AttentionControlChange::Restore, now_unix_ms: 100, key: "stale-restore",
             validate_source: &|_| Ok(()),
+            commit_receipt: None,
         }).unwrap_err();
         assert_eq!(error.code, "stale-fence");
         assert!(store.attention_controls(PERSON, ITEM, "source/one").unwrap().dismissed);
+    }
+
+    #[test]
+    fn receipt_failure_rolls_back_and_replay_keeps_original_control_revision() {
+        let store = Store::open_memory("member").unwrap();
+        let fail = std::sync::atomic::AtomicBool::new(true);
+        let receipt_subject = "client-action/control-test";
+        let observer = |transaction: &Transaction<'_>, _: &ClaimRecord, inserted: bool| {
+            if !inserted { return Ok(()); }
+            let controls = current(transaction, PERSON, ITEM, "source/one").map_err(internal)?;
+            insert_local_observation_tx(transaction, store.origin(), &ClaimInput {
+                subject: receipt_subject.into(), kind: "client.action-result".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("authority_actor".into(), json!(PERSON)),
+                    ("request_digest".into(), json!("control-test")),
+                    ("result".into(), json!({"control_revision": controls.revision})),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: Some("receipt-one".into()),
+            }, 100)?;
+            if fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(St3Error::new("receipt-failed", "simulated interruption before commit"));
+            }
+            Ok(())
+        };
+        let request = AttentionControlRequest {
+            person: PERSON, attention_id: ITEM, source_revision: "source/one", expected_revision: None,
+            change: AttentionControlChange::Dismiss, now_unix_ms: 100, key: "atomic-dismiss",
+            validate_source: &|_| Ok(()), commit_receipt: Some(&observer),
+        };
+        assert_eq!(store.write_attention_control(&request).unwrap_err().code, "receipt-failed");
+        assert!(!store.attention_controls(PERSON, ITEM, "source/one").unwrap().dismissed);
+        assert!(store.observations_for(receipt_subject, "client.action-result").unwrap().is_empty());
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let accepted = store.write_attention_control(&request).unwrap();
+        let original = store.observations_for(receipt_subject, "client.action-result").unwrap();
+        assert_eq!(original.len(), 1);
+        assert_eq!(original[0].body["fields"]["result"]["control_revision"],
+            json!(store.attention_controls(PERSON, ITEM, "source/one").unwrap().revision));
+        write(&store, AttentionControlChange::Restore, "intervening-restore");
+        assert_eq!(store.write_attention_control(&request).unwrap().id, accepted.id);
+        let replayed = store.observations_for(receipt_subject, "client.action-result").unwrap();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].body, original[0].body);
+        assert_ne!(replayed[0].body["fields"]["result"]["control_revision"],
+            json!(store.attention_controls(PERSON, ITEM, "source/one").unwrap().revision));
     }
 }
