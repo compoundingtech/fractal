@@ -12,7 +12,7 @@ for (const name of ['Models.generated', 'Client.generated', 'errors', 'fetch-rec
     const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, rewriteRelativeImportExtensions: true } }).outputText;
     fs.writeFileSync(path.join(temporary, `${name}.js`), output);
 }
-const { FractalClient, ClientError, applyWindow } = require(path.join(temporary, 'Client.generated.js'));
+const { FractalClient, ClientError, applyWindow, MembershipPaging } = require(path.join(temporary, 'Client.generated.js'));
 const { plainMessage, plainError } = require(path.join(temporary, 'errors.js'));
 require(path.join(temporary, 'fetch-receiver.test.js'));
 fs.rmSync(temporary, { recursive: true, force: true });
@@ -967,6 +967,75 @@ test('applyWindow keeps the newest membership state even when the window is unch
     assert.deepEqual(window.membership, fixture.outside_window_changes_frame.membership);
     assert(window.membership.changed_index > before.membership.changed_index);
     assert.equal(applyWindow(window, { kind: 'resync', id: 'sidebar' }), window);
+});
+
+test('collection paging publishes complete pages without waiting for a matching stream frame', () => {
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
+    const base = fixture.collection_v1;
+    const state = { ...base.page.membership, live_count: 2 };
+    const rows = fixture.snapshot_frame.items;
+    const page = (items, has_more) => ({ ...base.page, membership: state, items, page: { limit: 1, has_more, ...(has_more ? { next_cursor: 'membership-v1/opaque' } : {}) } });
+    for (const streamIndex of [undefined, state.changed_index - 1, state.changed_index]) {
+        const join = new MembershipPaging('person/ada', state.container);
+        if (streamIndex !== undefined) join.observeStream({ ...base.frame, membership: { ...state, changed_index: streamIndex } });
+        assert.equal(join.acceptPage(base.frame.snapshot, page([rows[0]], true)).kind, 'continue');
+        const complete = join.acceptPage(base.frame.snapshot, page([rows[1]], false));
+        assert.equal(complete.kind, 'complete');
+        assert.deepEqual(complete.items, rows);
+        assert.equal(join.observeStream({ ...base.frame, membership: { ...state, changed_index: state.changed_index - 1 } }), 'ignored');
+    }
+    const join = new MembershipPaging('person/ada', state.container);
+    join.acceptPage(base.frame.snapshot, page([rows[0]], true));
+    assert.equal(join.observeStream({ ...base.frame, snapshot: { ...base.frame.snapshot, store_index: 1843 }, membership: { ...state, changed_index: 1843 } }), 'restart');
+    assert.equal(join.acceptPage(base.frame.snapshot, page([rows[1]], false)).kind, 'restart');
+});
+
+test('collection paging refuses duplicate/count/epoch/scope/inexact metadata', () => {
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
+    const base = fixture.collection_v1;
+    const make = () => new MembershipPaging('person/ada', base.page.membership.container);
+    assert.equal(make().acceptPage(base.frame.snapshot, base.page).kind, 'complete');
+    for (const membership of [
+        { ...base.page.membership, epoch: undefined },
+        { ...base.page.membership, live_count: 1 },
+        { ...base.page.membership, changed_index: 9007199254740992 },
+        { ...base.page.membership, changed_index: 1843 },
+    ]) assert.throws(() => make().acceptPage(base.frame.snapshot, { ...base.page, membership }), /membership-frontier-inconsistent/);
+    const duplicate = fixture.snapshot_frame.items[0];
+    assert.throws(() => make().acceptPage(base.frame.snapshot, { ...base.page, membership: { ...base.page.membership, live_count: 2 }, items: [duplicate, duplicate] }), /membership-frontier-inconsistent/);
+    for (const change of [
+        frame => ({ ...frame, snapshot: { ...frame.snapshot, host_id: 'host/other' } }),
+        frame => ({ ...frame, snapshot: { ...frame.snapshot, projection_version: 'projection/other' } }),
+        frame => ({ ...frame, membership: { ...frame.membership, epoch: 'opaque-reset' } }),
+    ]) {
+        const join = make();
+        join.acceptPage(base.frame.snapshot, base.page);
+        assert.equal(join.observeStream(change(base.frame)), 'restart');
+    }
+    const mismatch = make();
+    mismatch.observeStream({ ...base.frame, membership: { ...base.page.membership, live_count: 1 } });
+    assert.throws(() => mismatch.acceptPage(base.frame.snapshot, base.page), /membership-frontier-inconsistent/);
+});
+
+test('explicit membership methods send selectors without changing legacy requests', async () => {
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
+    const requests = [], sent = [];
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
+        requests.push(new URL(url));
+        return response(String(url).includes('/capabilities') ? capabilityFixture : { ...envelope(fixture.collection_v1.page), snapshot: fixture.collection_v1.frame.snapshot });
+    } });
+    const socket = { onopen: null, onmessage: null, onclose: null, onerror: null, send: value => sent.push(JSON.parse(value)), close() {} };
+    const stream = await client.collectionStream({ onFrame() {}, socket: () => socket });
+    stream.subscribeOrderedMembershipsCollection('selected', 'person/ada', fixture.collection_v1.page.membership.container);
+    socket.onopen();
+    assert.equal(sent[0].paging_contract, 'collection-v1');
+    stream.subscribeOrderedMemberships('legacy', 'person/ada', fixture.collection_v1.page.membership.container);
+    assert.equal(sent[1].paging_contract, undefined);
+    const selected = await client.arrangementsMembershipsCollection('ada', 'uuid', 'person/ada', { limit: 1 });
+    assert.equal(selected.value.membership.epoch, 'opaque-epoch/1');
+    assert.equal(requests.at(-1).searchParams.get('paging_contract'), 'collection-v1');
+    assert.equal(requests.at(-1).searchParams.get('person'), 'person/ada');
+    stream.close();
 });
 
 test('glass methods preserve structure, null creation base, and idempotency headers', async () => {
