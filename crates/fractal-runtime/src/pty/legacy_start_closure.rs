@@ -559,6 +559,62 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn observed_runtime_prefix_collisions_preserve_exact_unit_ownership() {
+        let operation = "01234567-89ab-7cde-8fab-0123456789ab";
+        let runtime_units = |id: &str| {
+            [
+                crate::scope_unit("st3", id),
+                crate::scope_unit("st3-work", id),
+                crate::scope_unit("st3", &format!("{id}-{operation}")),
+                crate::scope_unit("st3-work", &format!("{id}-{operation}")),
+                crate::server_unit(id, 42),
+            ]
+        };
+        for (id, successor) in [
+            ("dotfiles.devnet", "dotfiles.devnet-2"),
+            ("dotfiles.fractal", "dotfiles.fractal-product-lead"),
+            ("st-delegation", "st-delegation-2"),
+        ] {
+            let owned = runtime_units(id);
+            let successor_units = runtime_units(successor);
+            let units: Vec<_> = owned.iter().chain(&successor_units)
+                .map(|unit| ManagerUnit {
+                    unit: unit.clone(), load: "loaded".into(),
+                    active: "active".into(), sub: "running".into(),
+                }).collect();
+            let mut expected = owned.to_vec();
+            expected.sort();
+            assert_eq!(matching_units(id, &units).unwrap(), expected, "{id}");
+            let mut expected = successor_units.to_vec();
+            expected.sort();
+            assert_eq!(matching_units(successor, &units).unwrap(), expected, "{successor}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_unit_ownership_requires_complete_scope_and_operation_suffixes() {
+        let id = "dotfiles.devnet";
+        for unit in [
+            // Work scopes have both a PID and sequence; server scopes only a PID.
+            "st3-dotfiles.devnet-42.scope",
+            "st3-work-dotfiles.devnet-42.scope",
+            "st3-dotfiles.devnet-pid-7.scope",
+            "st3-dotfiles.devnet-42-sequence.scope",
+            "st3-pty-server-dotfiles.devnet-pid.scope",
+            "st3-dotfiles.devnet-42-7.service",
+            // A runtime-name suffix is not an operation just because it looks similar.
+            "st3-dotfiles.devnet-01234567-89ab-7cde-8fab-0123456789a-42-7.scope",
+            "st3-dotfiles.devnet-01234567-89ab-7cde-8fab-0123456789ag-42-7.scope",
+            "st3-dotfiles.devnet-0123456789ab-7cde-8fab-0123456789ab-42-7.scope",
+            "st3-dotfiles.devnet-01234567-89ab-7cde-8fab-0123456789ab-extra-42-7.scope",
+        ] {
+            assert!(!runtime_unit_matches(unit, id), "{unit}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn server_prefixed_runtime_work_scope_is_still_a_candidate() {
         let id = "pty-server-repo.worker";
         let unit = crate::scope_unit("st3", id);

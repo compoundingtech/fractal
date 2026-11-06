@@ -186,6 +186,16 @@ producer metadata. The owner daemon must positively enumerate no matching seat/w
 systemd units and no live owner-user process carrying the exact start-operation label.
 Unreadable or incomplete evidence refuses repair. A null PID or an older operation tag alone
 never authorizes cleanup.
+Unit ownership is matched against the complete sanitized runtime identity, not a runtime-name
+prefix. Seat/work scopes use `st3-RUNTIME-PID-SEQUENCE.scope` or the legacy
+`st3-work-RUNTIME-PID-SEQUENCE.scope`; operation-bound scopes append the start-operation's
+hyphenated UUID to `RUNTIME` before the numeric suffixes. PTY server scopes use
+`st3-pty-server-RUNTIME-PID.scope`. Numeric suffixes are parsed from the right, so runtime
+names containing hyphens remain intact. A live `dotfiles.devnet-2`,
+`dotfiles.fractal-product-lead`, or `st-delegation-2` unit does not belong to
+`dotfiles.devnet`, `dotfiles.fractal`, or `st-delegation`, respectively. The same
+ownership matcher selects candidate process cgroups.
+
 Dry-run, apply, and doctor return HTTP 422 `legacy-start-proof-unavailable` when native
 capture cannot establish that proof. Process-read refusals expose only `stage`, `pid`,
 and the numeric OS `errno` when available; they never expose environment contents or
