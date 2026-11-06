@@ -167,6 +167,7 @@ describe('memory-only winning Sidebar edits', () => {
           return decodeUnknownSync(ActionResult)({
             kind: 'action-result', action_id: request.id, operation_id: 'operation/example',
             snapshot_id: testSnapshot.id, status: 'completed', affected_ids: [base.id],
+            arrangement_revision: `claim/accepted-${requests.length}`,
           })
         }),
       },
