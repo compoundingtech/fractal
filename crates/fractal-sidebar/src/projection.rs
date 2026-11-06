@@ -23,6 +23,10 @@ pub fn build(
     inventory: &[String],
 ) -> Result<SidebarTree, ProjectionError> {
     let projected = build_available(arrangement, inventory)?;
+    // Completeness precedes ancestry validation, independent of identity ordering.
+    if projected.unavailable.values().any(|error| *error == ProjectionError::NotReady) {
+        return Err(ProjectionError::NotReady);
+    }
     if let Some(error) = projected.unavailable.into_values().next() {
         return Err(error);
     }
@@ -353,6 +357,20 @@ mod tests {
             ("subject:mission/missing".into(), ProjectionError::NotReady),
         ]));
         assert!(build(&a, &[]).is_err(), "partial display must not enable complete-tree planning");
+    }
+
+    #[test]
+    fn strict_completeness_precedes_invalid_ancestry_in_both_identity_orders() {
+        for (missing, invalid) in [("a", "z"), ("z", "a")] {
+            let mut a = arrangement();
+            add_folder(&mut a, missing, None, "a0");
+            add_folder(&mut a, invalid, Some(invalid), "a1");
+            a.resolved.as_mut().unwrap().parents.remove(missing);
+            assert_eq!(build(&a, &[]), Err(ProjectionError::NotReady));
+            let projected = build_available(&a, &[]).unwrap();
+            assert_eq!(projected.unavailable[&format!("folder:{missing}")], ProjectionError::NotReady);
+            assert_eq!(projected.unavailable[&format!("folder:{invalid}")], ProjectionError::InvalidResolution);
+        }
     }
 
     #[test]
