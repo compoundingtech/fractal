@@ -235,15 +235,15 @@ mod tests {
             let route = format!("/v1/client/custom-subjects?{filter}limit=1");
             let (status, page) = client_json(app.clone(), &route).await;
             assert_eq!(status, StatusCode::OK, "{page}");
-            assert_eq!(page["value"]["items"].as_array().unwrap().len(), 1);
-            assert_eq!(page["value"]["items"][0]["id"], "custom/garden/review/v1/one");
-            assert_eq!(page["value"]["page"]["has_more"], true);
-            let cursor = page["value"]["page"]["next_cursor"].as_str().unwrap();
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            assert_eq!(page["items"][0]["id"], "custom/garden/review/v1/one");
+            assert_eq!(page["page"]["has_more"], true);
+            let cursor = page["page"]["next_cursor"].as_str().unwrap();
             let (status, next) = client_json(app.clone(), &format!("{route}&cursor={cursor}")).await;
             assert_eq!(status, StatusCode::OK, "{next}");
-            assert_eq!(next["value"]["items"].as_array().unwrap().len(), 1);
-            assert_eq!(next["value"]["items"][0]["id"], "custom/garden/review/v1/two");
-            assert_eq!(next["value"]["page"]["has_more"], false);
+            assert_eq!(next["items"].as_array().unwrap().len(), 1);
+            assert_eq!(next["items"][0]["id"], "custom/garden/review/v1/two");
+            assert_eq!(next["page"]["has_more"], false);
         }
         let (status, error) = client_json(
             app, "/v1/client/custom-subjects/custom/attention/source/legacy",
