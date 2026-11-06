@@ -927,7 +927,7 @@ fn stream_sync(frame: &serde_json::Value) -> Option<StreamSync> {
 }
 
 impl CollectionEvent {
-    fn from_frame(frame: serde_json::Value) -> Result<Self, ClientError> {
+    pub fn from_frame(frame: serde_json::Value) -> Result<Self, ClientError> {
         fn field<T: DeserializeOwned>(frame: &serde_json::Value, name: &str) -> Result<T, ClientError> {
             serde_json::from_value(frame.get(name).cloned().unwrap_or(serde_json::Value::Null))
                 .map_err(|error| ClientError::Protocol(format!("collection frame `{name}`: {error}")))
