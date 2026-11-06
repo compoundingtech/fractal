@@ -96,7 +96,7 @@ impl Tui {
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");
         command.cwd(root);
-        if let Some(log) = timing_log { command.env("STUI_TIMING_LOG", log); }
+        if let Some(log) = timing_log { command.env("FRACTAL_TUI_TIMING_LOG", log); }
         configure(&mut command);
         let child = pty.slave.spawn_command(command).unwrap();
         drop(pty.slave);

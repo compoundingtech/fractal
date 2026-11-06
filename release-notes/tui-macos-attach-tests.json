@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Make terminal attachment and inventory focus tests portable and independently buildable",
+  "summary": "Make terminal attachment regression tests portable and independently buildable",
   "replay": {
     "status": "none",
     "detail": "Test configuration only; no replay changes."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Attachment tests configure read timeouts before discarding stale streams, avoiding macOS socket-option errors after closure while preserving EOF assertions. The TUI dev-dependency explicitly enables daemon test support so its tests compile independently. The older-member inventory test waits for live UI, palette transitions and completed reads instead of injecting keys after a fixed startup delay; its PTY helper wakes on screen output. Production behavior and dependencies are unchanged."
+    "detail": "Attachment tests configure read timeouts before discarding stale streams, avoiding macOS socket-option errors after closure while preserving EOF assertions. The TUI dev-dependency explicitly enables daemon test support so its tests compile without another workspace package enabling that feature. Production behavior and dependencies are unchanged."
   },
   "downtime": {
     "status": "none",
