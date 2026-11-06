@@ -759,6 +759,7 @@ impl Daemon {
             .unwrap_or_else(|error| panic!("{kind} replay: {error}"));
         let replay = serde_json::to_value(replay.value).unwrap();
         assert_eq!(replay["affected_ids"], accepted["affected_ids"], "{kind}");
+        assert_eq!(replay["control_revision"], accepted["control_revision"], "{kind}");
         assert_eq!(
             self.store().index().unwrap(),
             index,
@@ -859,6 +860,8 @@ async fn dispatch(
         "harness.answer" => harness_answer,
         "arrangement.membership.edit" => arrangement_membership_edit,
         "attention.resolve" => attention_resolve,
+        "attention.dismiss" => attention_dismiss, "attention.restore" => attention_restore,
+        "attention.snooze" => attention_snooze,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
         "lane.mark" => lane_mark, "lane.move" => lane_move,
         "launch.approve" => launch_approve, "launch.cancel" => launch_cancel,
@@ -880,6 +883,64 @@ async fn dispatch(
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attention_presentation_controls_survive_stale_fences_and_restarts() {
+    use fractal_daemon::PersonWorkStore;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    daemon.store().ask_person(&serde_json::from_value(json!({
+        "person": PERSON, "actor": WORKER, "title": "Choose",
+        "reason": "A person decides", "new_run": "example/choice", "idempotency_key": "coverage-ask",
+        "request": {"version": 1, "type": "feedback", "question": "Which?", "why_person": "Only you can choose"}
+    })).unwrap()).unwrap();
+    let attention: Value = daemon.transport().get("/v1/client/attention").await.unwrap();
+    let original = attention["items"].as_array().unwrap().iter()
+        .find(|item| item["title"] == "Choose").unwrap();
+    let mut parameters = json!({
+        "target_id": original["id"], "source_id": original["source_id"],
+        "attention_kind": original["attention_kind"], "episode": original["episode"],
+        "source_revision": original["presentation_control"]["source_revision"],
+        "expected_control_revision": null
+    });
+    let mut accepted = Vec::new();
+    for (kind, hidden) in [
+        ("attention.dismiss", true), ("attention.restore", false), ("attention.snooze", true)
+    ] {
+        if kind == "attention.snooze" {
+            parameters["until"] = json!("2999-01-01T00:00:00Z");
+        }
+        let fence = daemon.fence(PERSON).await;
+        let result = daemon.exercise(PERSON, kind, parameters.clone(), fence.clone()).await;
+        assert!(result["control_revision"].is_string(), "{kind}: {result}");
+        assert_eq!(result["affected_ids"], json!([original["id"]]));
+        let attention: Value = daemon.transport().get("/v1/client/attention").await.unwrap();
+        let visible = attention["items"].as_array().unwrap().iter()
+            .any(|item| item["id"] == original["id"]);
+        assert_eq!(visible, !hidden, "{kind}: presentation did not survive restart");
+        assert!(daemon.store().attention_items(Some(PERSON)).unwrap().iter()
+            .any(|item| item.title == "Choose"), "{kind}: source was resolved");
+        accepted.push((kind, parameters.clone(), fence, result.clone()));
+        parameters["expected_control_revision"] = result["control_revision"].clone();
+    }
+    // Replaying an older dismiss/restore after snooze returns its original receipt,
+    // not the current revision, and cannot undo the newer presentation state.
+    let index = daemon.store().index().unwrap();
+    daemon.restart().await;
+    for (kind, parameters, fence, result) in accepted {
+        let replay = dispatch(&daemon.client(PERSON), kind, &format!("coverage:{kind}:accepted"), fence, parameters)
+            .await.unwrap();
+        let replay = serde_json::to_value(replay.value).unwrap();
+        assert_eq!(replay["control_revision"], result["control_revision"], "{kind}");
+        assert_eq!(replay["operation_id"], result["operation_id"], "{kind}");
+        assert_eq!(daemon.store().index().unwrap(), index, "{kind}: old replay wrote");
+    }
+    let attention: Value = daemon.transport().get("/v1/client/attention").await.unwrap();
+    assert!(!attention["items"].as_array().unwrap().iter().any(|item| item["id"] == original["id"]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

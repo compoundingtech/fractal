@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Track and exercise native attention presentation actions across daemon restarts",
+  "replay": { "status": "none", "detail": "Coverage asserts that dismiss, restore and snooze retain their original action receipt and control revision without duplicate writes, including retries after intervening controls and daemon restart." },
+  "schema": { "status": "none", "detail": "No claim or database schema changes." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "The action inventory now names the three native attention controls and links their real Unix restart, route authorization, store reopen and atomic receipt tests." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "No recovery behavior changes." }
+}
