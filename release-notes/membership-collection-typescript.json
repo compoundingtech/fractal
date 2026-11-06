@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Join opted-in membership pages and streams without waiting for an unchanged window",
+  "replay": {"status": "none", "detail": "No replay is required."},
+  "schema": {"status": "none", "detail": "The canonical graph schema is unchanged."},
+  "rules": {"status": "none", "detail": "Existing membership authorization is unchanged."},
+  "compatibility": {"status": "none", "detail": "Explicit TypeScript collection-v1 methods preserve legacy methods. MembershipPaging publishes complete unique pages with authoritative counts even without a matching stream frame; newer frontiers and changed scopes restart attempts."},
+  "downtime": {"status": "none", "detail": "Normal client rollout only."},
+  "manual": {"status": "none", "detail": "Subscribe first, then feed page and stream metadata to MembershipPaging. No client activation or daemon capability advertisement is included."},
+  "recovery": {"status": "none", "detail": "Delayed older frames cannot roll back accepted pages. Inexact JavaScript integers and inconsistent metadata are refused instead of rounded or guessed."}
+}

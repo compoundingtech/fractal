@@ -293,8 +293,9 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
                 .cloned(),
         );
     }
-    if discriminators.len() != 1 {
-        // Independent properties constrain one object, not a shared tagged union.
+    if discriminators.len() != 1 || discriminators.iter().any(|key| !base["required"]
+        .as_array().is_some_and(|names| names.contains(&json!(key)))) {
+        // Optional discriminators and independent properties constrain one object.
         if !is_object(&base)
             || base.get("const").is_some()
             || base.get("enum").is_some()
@@ -312,12 +313,6 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         return Ok(base);
     }
     let key = discriminators.into_iter().next().unwrap();
-    if !base["required"]
-        .as_array()
-        .is_some_and(|names| names.contains(&json!(key)))
-    {
-        bail!("conditional discriminator `{key}` must be required");
-    }
     let tag = resolve(&base["properties"][&key], defs)?.clone();
     let (domain, open) = match open_enum(&tag) {
         Some(known) => (known, true),
@@ -846,6 +841,10 @@ impl Object {
 
 /// One positive schema allowlist gates both decoded targets and every emitted assertion.
 fn validate_condition_schema(value: &Value, cx: &Cx, depth: usize) -> Result<()> {
+    validate_condition_identity(value, cx, depth, false)
+}
+
+fn validate_condition_identity(value: &Value, cx: &Cx, depth: usize, field: bool) -> Result<()> {
     if depth > 64 {
         bail!("recursive conditional schemas are not translated");
     }
@@ -863,23 +862,26 @@ fn validate_condition_schema(value: &Value, cx: &Cx, depth: usize) -> Result<()>
             | "minItems" | "maxItems" | "uniqueItems" | "minLength" | "maxLength"
             | "pattern" | "format" | "minimum" | "maximum" | "exclusiveMinimum"
             | "exclusiveMaximum" | "multipleOf" => {}
+            // Field annotations constrain the decoder, not the conditional predicate.
+            "additionalProperties" if field && part.is_boolean() => {}
+            "x-st-ref" | "x-st-brand" if field && part.is_string() => {}
             "type" if matches!(part.as_str(), Some("boolean" | "string" | "number" | "integer" | "array" | "object")) => {}
             "const" if scalar(part) => {}
             "enum" if part.as_array().is_some_and(|values| !values.is_empty() && values.iter().all(scalar)) => {}
             "$ref" => {
                 let name = part.as_str().context("conditional reference")?
                     .strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
-                validate_condition_schema(cx.normalized.get(name).context("conditional definition")?, cx, depth + 1)?;
+                validate_condition_identity(cx.normalized.get(name).context("conditional definition")?, cx, depth + 1, field)?;
             }
             "properties" => {
                 for schema in part.as_object().context("conditional properties")?.values() {
-                    validate_condition_schema(schema, cx, depth + 1)?;
+                    validate_condition_identity(schema, cx, depth + 1, field)?;
                 }
             }
-            "items" => validate_condition_schema(part, cx, depth + 1)?,
+            "items" => validate_condition_identity(part, cx, depth + 1, field)?,
             "oneOf" | "allOf" => {
                 for schema in part.as_array().context("conditional alternatives")? {
-                    validate_condition_schema(schema, cx, depth + 1)?;
+                    validate_condition_identity(schema, cx, depth + 1, field)?;
                 }
             }
             _ => bail!("conditional schema keyword `{key}` is outside the wire-identity allowlist"),
@@ -907,7 +909,7 @@ fn validate_condition_fields(
                     let name = name.as_str().context("conditional required name")?;
                     let field = fields.get(name)
                         .with_context(|| format!("conditional field `{name}` is undeclared"))?;
-                    validate_condition_schema(field, cx, depth + 1)?;
+                    validate_condition_identity(field, cx, depth + 1, true)?;
                     if nullable_inner(field).is_some() {
                         bail!("conditional presence of nullable field `{name}` is not translated");
                     }
@@ -944,7 +946,7 @@ fn validate_condition_value(assertion: &Value, field: &Value, cx: &Cx, depth: us
     if depth > 64 {
         bail!("recursive conditional fields are not translated");
     }
-    validate_condition_schema(field, cx, depth)?;
+    validate_condition_identity(field, cx, depth, true)?;
     if let Some(reference) = field.get("$ref").and_then(Value::as_str) {
         let name = reference.strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
         return validate_condition_value(
@@ -966,6 +968,9 @@ fn validate_condition_value(assertion: &Value, field: &Value, cx: &Cx, depth: us
             .is_some_and(|values| !values.is_empty() && values.iter().all(scalar));
     match field.get("type").and_then(Value::as_str) {
         Some("boolean" | "string" | "number" | "integer") => {}
+        Some("object") => return validate_condition_fields(
+            assertion, field.get("properties").and_then(Value::as_object).context("conditional object properties")?, cx, depth + 1,
+        ),
         Some("array") => {
             validate_condition_value(&Value::Bool(true), field.get("items").context("conditional array items")?, cx, depth + 1)?;
             if assertion.as_object().is_some_and(|object| object.keys().any(|key| !matches!(
@@ -1904,6 +1909,27 @@ mod tests {
     }
 
     #[test]
+    fn optional_discriminator_preserves_legacy_and_checks_selected_metadata() {
+        let schema = json!({"x-st-integers": "json-safe", "$defs": {"Entry": {
+            "type": "object", "properties": {
+                "contract": {"const": "collection-v1"},
+                "membership": {"type": "object", "additionalProperties": false, "properties": {"epoch": {"type": "string", "x-st-brand": "Epoch"}}}
+            },
+            "allOf": [{"if": {"required": ["contract"], "properties": {"contract": {"const": "collection-v1"}}},
+                "then": {"required": ["membership"], "properties": {"membership": {"required": ["epoch"]}}}}]
+        }}});
+        let normalized = normalize(&schema["$defs"]["Entry"], &Map::new()).unwrap();
+        assert!(normalized.get("oneOf").is_none());
+        assert_eq!(normalized["x-st-conditions"].as_array().unwrap().len(), 1);
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("conditional object relationship"));
+        assert!(generated.contains("hasOwnProperty.call((o as Record<string, unknown>)[\"membership\"], \"epoch\")"));
+        let mut unsupported = schema;
+        unsupported["$defs"]["Entry"]["allOf"][0]["then"]["additionalProperties"] = json!(false);
+        assert!(models(&unsupported).is_err(), "unsupported predicates must still fail closed");
+    }
+
+    #[test]
     fn nested_and_merged_independent_assertions_accumulate() {
         let properties = json!({"a": {"type": "boolean"}, "b": {"type": "boolean"}, "c": {"type": "boolean"}});
         let inner = json!({"type": "object", "properties": properties, "allOf": [
@@ -2087,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_conditional_discriminators_fail_instead_of_changing_missing_semantics() {
+    fn optional_conditional_discriminators_preserve_missing_semantics() {
         let mut input = conditional_schema();
         input["required"] = json!(["id"]);
         let schema = json!({
@@ -2097,7 +2123,10 @@ mod tests {
                 "Entry": input
             }
         });
-        assert!(models(&schema).is_err());
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("!Object.prototype.hasOwnProperty.call(o, \"type\")"));
+        assert!(generated.contains("Object.prototype.hasOwnProperty.call(o, \"payload\")"));
+        assert!(generated.contains("conditional object relationship"));
     }
 
     #[test]
