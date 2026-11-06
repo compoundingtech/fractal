@@ -125,7 +125,7 @@ if mode in ("missing", "missing-once", "missing-new-cause"):
     if mode == "missing-once":
         channel_mode.write_text("healthy")
     if mode == "missing-new-cause":
-        # Channel recovery charges its budget only for a new failure (#4801): the cause names whether
+        # Channel recovery charges its budget only for a new failure (#4789, fixed by #4801): the cause names whether
         # the project declares its own `st` server, which the driver read before this launch. Flip it
         # for the next launch, so each one fails for another cause than the last.
         project = Path.cwd() / ".mcp.json"

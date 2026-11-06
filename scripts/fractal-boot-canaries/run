@@ -843,7 +843,7 @@ def claude_channel_parked(node, seats):
     """A channel failing again for the cause its charged attempt named spends no budget and does
     not loop; one that keeps failing for new causes exhausts a durable budget and keeps mail held.
 
-    Only a new channel failure charges the budget (#4801). The uncharged restarts for a repeated
+    Only a new channel failure charges the budget (#4789, fixed by #4801). The uncharged restarts for a repeated
     cause come on a backoff of minutes, with a fault after three, so the reconciler's own tests
     cover them; this checks that a repeated cause is neither charged nor restarted inside the short
     schedule. Then the stand-in changes the cause for each launch, so three charged attempts park."""
