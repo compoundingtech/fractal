@@ -107,6 +107,34 @@
       "behavior": "real typed client over Unix transport: stale fence refused without writes; version-2 membership edit accepted after restart; exact replay after another restart adds no duplicate claim and preserves owner, actor, and projected root placement"
     },
     {
+      "action": "attention.dismiss",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::attention_presentation_controls_survive_stale_fences_and_restarts",
+        "crates/fractal-api-client-v0/src/api/client_v0/attention_controls_tests.rs::native_attention_controls_are_person_scoped_fenced_and_replay_the_original_revision",
+        "crates/fractal-store/src/store/attention_controls.rs::independent_registers_and_explicit_clears_survive_reopen_and_replay",
+        "crates/fractal-store/src/store/attention_controls.rs::receipt_failure_rolls_back_and_replay_keeps_original_control_revision"
+      ],
+      "behavior": "Person-scoped presentation only; stale fences refuse without writes; typed Unix dismiss survives daemon restart; exact replay preserves its original control revision even after restore and snooze; atomic receipt failure rolls back without resolving the source."
+    },
+    {
+      "action": "attention.restore",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::attention_presentation_controls_survive_stale_fences_and_restarts",
+        "crates/fractal-api-client-v0/src/api/client_v0/attention_controls_tests.rs::native_attention_controls_are_person_scoped_fenced_and_replay_the_original_revision",
+        "crates/fractal-store/src/store/attention_controls.rs::independent_registers_and_explicit_clears_survive_reopen_and_replay"
+      ],
+      "behavior": "Person-scoped fenced restore reveals the unresolved source across daemon restart; exact typed Unix replay preserves its original receipt after a later snooze without changing current presentation or adding writes."
+    },
+    {
+      "action": "attention.snooze",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::attention_presentation_controls_survive_stale_fences_and_restarts",
+        "crates/fractal-api-client-v0/src/api/client_v0/attention_controls_tests.rs::native_attention_controls_are_person_scoped_fenced_and_replay_the_original_revision",
+        "crates/fractal-store/src/store/attention_controls.rs::independent_registers_and_explicit_clears_survive_reopen_and_replay"
+      ],
+      "behavior": "Explicit UTC deadline or null clear; expiry reveals the unresolved source; stale fences refuse without writes; typed Unix snooze and its original receipt survive daemon restart and exact replay without duplicate writes."
+    },
+    {
       "action": "attention.resolve",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::unavailable_actions_refuse_before_and_after_restart_without_writes"
