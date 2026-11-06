@@ -11874,8 +11874,12 @@ mission "differential" state="ready" {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abe";
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        state.store.bind_fleet(FLEET).unwrap();
+        let edge = Store::open_memory("edge").unwrap();
+        edge.bind_fleet(FLEET).unwrap();
         let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
@@ -11910,8 +11914,23 @@ mission "differential" state="ready" {
             .await.expect("the refresher publishes the asked-for cut").unwrap();
 
         // Unchanged: plain reads during the pause answer from the publication and do not cut it
-        // short, however many ask.
-        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        // short, however many ask. The change comes from a peer: a claim this node wrote would
+        // cut the pause itself.
+        edge.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "harness.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"one"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = edge
+            .export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap())
+            .unwrap();
+        state.store.receive_replication_exchange("edge", FLEET, &exchange).unwrap();
+        state.store.validate_replication_backlog().unwrap();
+        state.store.apply_replication_repairs().unwrap();
+        state.store.project_replication_backlog().unwrap();
+        let idle = state.store.index().unwrap();
+        assert!(idle > working, "the peer's claim reached this node");
         for _ in 0..3 {
             let (Extension(snapshot), Json(page)) = list(false).await.unwrap();
             assert!(snapshot.store_index < idle, "a plain read answers from the publication");

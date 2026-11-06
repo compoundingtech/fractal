@@ -109,6 +109,7 @@
     "clients/swift/FractalClient/Sources/FractalClient/Models.swift",
     "clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift",
     "clients/typescript/fractal-client",
+    "clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl",
     "clients/typescript/fractal-declarations/fixtures/daily-review.kdl",
     "clients/typescript/fractal-declarations/index.ts",
     "crates/fractal-client/src/contract.rs",
