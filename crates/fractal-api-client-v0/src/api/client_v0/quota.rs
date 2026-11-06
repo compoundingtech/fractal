@@ -9,10 +9,9 @@ struct Source {
 }
 impl Source {
     async fn read(&mut self, url: &str, refresh_seconds: u64) -> QuotaSource {
-        if let Some((key, interval, until, value)) = &self.cached {
-            if key == url && *interval == refresh_seconds && *until > Instant::now() {
-                return value.clone();
-            }
+        if let Some((key, interval, until, value)) = &self.cached
+            && key == url && *interval == refresh_seconds && *until > Instant::now() {
+            return value.clone();
         }
         let value = match fetch(url).await {
             Ok(snapshot) => QuotaSource::Available { snapshot, refresh_seconds },
