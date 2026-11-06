@@ -46,12 +46,26 @@ impl Store {
 }
 
 impl Store {
-    /// The member `desired`, a seat's selected declaration, authorizes its mailbox for, as
-    /// `mailbox_lease::mailbox_member` decides it.
-    pub fn mailbox_member_of(&self, desired: &DesiredSubject) -> Result<Option<MemberSpec>> {
-        if desired.kind != "stop" {
-            return Ok(desired.member.clone());
-        }
-        stopping_member(&self.readers.get(), &desired.subject)
+    /// The member `seat`'s selected declaration authorizes its mailbox for, as
+    /// `mailbox_lease::mailbox_member` decides it, with the declaration and the stop's ended
+    /// declaration read on one snapshot: `None` when the seat is no longer declared, `Some(None)`
+    /// when it is intentionally stopped.
+    pub fn mailbox_member_named(
+        &self,
+        seat: &str,
+    ) -> Result<Option<Option<MemberSpec>>, FractalError> {
+        let connection = self.readers.get();
+        let Some((kind, member)) = connection
+            .query_row(
+                "SELECT kind, member FROM desired WHERE subject=?1",
+                [seat],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        super::mailbox_lease::mailbox_member(&connection, seat, &kind, member.as_deref()).map(Some)
     }
 }

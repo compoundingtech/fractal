@@ -136,17 +136,10 @@ fn physical_wrapper(
 ) -> Result<fractal_drivers::claude_process::Process, FractalError> {
     use fractal_drivers::claude_process;
     let dir = source_agent_dir(state, fence);
-    let desired = state
-        .store
-        .desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| refused("seat no longer declared"))?;
     let member = state
         .store
-        .mailbox_member_of(&desired)
-        .map_err(internal)?
+        .mailbox_member_named(&fence.subject)?
+        .ok_or_else(|| refused("seat no longer declared"))?
         .ok_or_else(|| refused("seat intentionally stopped"))?;
     if member.host != state.node
         || member.driver.as_deref() != Some("claude")
@@ -1005,10 +998,8 @@ pub fn with_argv_channel<T>(
     peer: &NativeDeliveryPeer,
     action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), FractalError>) -> Result<T, FractalError>,
 ) -> Result<Option<T>, FractalError> {
-    let desired = state.store.desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?.into_iter().next()
-        .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = state.store.mailbox_member_of(&desired).map_err(internal)?
+    let member = state.store.mailbox_member_named(&fence.subject)?
+        .ok_or_else(|| refused("the seat is no longer declared"))?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
     if member.driver.is_some() { return Ok(None); }
     if member.kind != crate::model::MemberKind::Agent
@@ -1165,17 +1156,10 @@ fn with_authority_mode<T>(
             .find_map(|entry| entry.strip_prefix(&format!("{key}=")).map(str::to_owned))
     };
     let process_token = process_birth(peer.pid)?;
-    let desired = state
-        .store
-        .desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| refused("the seat is no longer declared"))?;
     let member = state
         .store
-        .mailbox_member_of(&desired)
-        .map_err(internal)?
+        .mailbox_member_named(&fence.subject)?
+        .ok_or_else(|| refused("the seat is no longer declared"))?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
     if member.host != state.node {
         return Err(refused("the seat is stopped or belongs to another host"));

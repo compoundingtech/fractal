@@ -481,8 +481,9 @@ impl MailboxOrder {
 
 /// The seat's intake holds, read at most once per update; `None` until first needed: a draining
 /// rollout's operation, and the store index of the stop the seat's run declared. A seat still
-/// running past that stop reads only the mail sent before it; later mail waits for the seat's
-/// next incarnation (`stopping_seat`).
+/// running past that stop reads only the graph mail sent before it; later mail waits for the
+/// seat's next incarnation (`stopping_seat`). A stream item's index is past every graph index, so
+/// stream items wait too; no stream item holds a stopping seat either.
 type IntakeHold = Option<(Option<crate::rollout::Operation>, Option<u64>)>;
 
 type SnapshotUpdate = (crate::store::MailboxWatermark, Snapshot, bool, MaintenanceIds);

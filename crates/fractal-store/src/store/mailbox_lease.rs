@@ -95,16 +95,20 @@ fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberS
 
 /// The member a seat's selected declaration authorizes its mailbox for: the declared member, or
 /// for a stop a run declared, the member that stop ended, which the reconciler may still be
-/// running past its stop (`stopping_seat`). `None` when the seat is intentionally stopped.
+/// running past its stop (`stopping_seat`). `None` when the seat is intentionally stopped. This
+/// is the reconciler's own test for holding a seat past its stop, `owner_run` on the stop: only a
+/// run's cleanup, or a run stopping a seat it declared, sets it, and a stop a person or an agent
+/// applies has none (`intentional_stop_cannot_become_automatic_repair_or_new_admission`).
 pub fn mailbox_member(
     connection: &Connection,
     subject: &str,
-    desired: &DesiredRow,
+    kind: &str,
+    member: Option<&str>,
 ) -> Result<Option<MemberSpec>, FractalError> {
-    if desired.kind == "stop" {
+    if kind == "stop" {
         return super::stopping_seat::stopping_member(connection, subject).map_err(internal);
     }
-    desired.member.as_deref().map(serde_json::from_str).transpose().map_err(internal)
+    member.map(serde_json::from_str).transpose().map_err(internal)
 }
 
 pub fn check_lease_fence(
@@ -128,7 +132,7 @@ pub fn check_lease_fence(
     let desired = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = mailbox_member(connection, &fence.subject, &desired)?;
+    let member = mailbox_member(connection, &fence.subject, &desired.kind, desired.member.as_deref())?;
     if member.as_ref().is_none_or(|member| {
         member.driver.as_deref() != Some(&owner.provider)
             || member.host != host
@@ -156,7 +160,7 @@ pub fn check_argv_declaration(
     let desired = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the argv seat is no longer declared"))?;
-    let current = mailbox_member(connection, &fence.subject, &desired)?
+    let current = mailbox_member(connection, &fence.subject, &desired.kind, desired.member.as_deref())?
         .ok_or_else(|| refused("the argv seat is intentionally stopped"))?;
     if current.kind != MemberKind::Agent
         || current.host != host

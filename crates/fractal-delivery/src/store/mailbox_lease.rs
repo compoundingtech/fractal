@@ -115,7 +115,7 @@ pub fn check_declaration(
         .ok_or_else(|| refused("the seat is no longer declared"))?;
     // A seat its run's end stopped keeps the mailbox of the declaration it ended while the
     // reconciler holds it, so it can read the mail that holds it.
-    let member = mailbox_member(connection, &fence.subject, &declared)?
+    let member = mailbox_member(connection, &fence.subject, &declared.kind, declared.member.as_deref())?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
     if member.driver.as_deref() != Some(&authority.provider)
         || member.host != host
