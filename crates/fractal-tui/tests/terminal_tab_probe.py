@@ -440,7 +440,7 @@ def matrix(tab):
 
 
 def agent_guards(worker):
-    with tempfile.TemporaryDirectory(prefix="stui-guard-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-guard-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
         tab.env["FRACTAL_TUI_PROBE_AGENT"] = "1"
         try:
@@ -460,7 +460,7 @@ def agent_guards(worker):
 
 def controls_and_images(worker):
     import base64
-    with tempfile.TemporaryDirectory(prefix="stui-controls-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-controls-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
         tab.env["FRACTAL_TUI_PROBE_GRAPHICS"] = "1"
         rows = []
@@ -591,7 +591,7 @@ def controls_and_images(worker):
 
 
 def check_program(worker, name, binary):
-    with tempfile.TemporaryDirectory(prefix="stui-app-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-app-") as directory:
         root = Path(directory)
         document = root / ("document.html" if name == "cha" else "document.txt")
         lines = [f"copper line {number:03}" for number in range(200)]
@@ -630,7 +630,7 @@ def action_publication(worker):
     # Force the consumer to run while the producer has written only the first byte.
     # Two title acknowledgements span a new worker loop during that interval.
     from unittest.mock import patch
-    with tempfile.TemporaryDirectory(prefix="stui-action-probe-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-action-probe-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
         original_write = Path.write_text
 
@@ -679,7 +679,7 @@ def main():
         return
     rows = []
     if args.part in (None, "matrix"):
-        with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
+        with tempfile.TemporaryDirectory(prefix="fractal-tui-probe-") as directory:
             command = [sys.executable, str(HERE / "copper_probe.py"), directory]
             tab = Tab(args.worker.resolve(), command, directory)
             try:

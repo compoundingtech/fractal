@@ -160,7 +160,7 @@ def run_case(binary: str, ending: str, endpoint: str | None = None) -> None:
 
 
 def delayed_getter_case(binary: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="stui-delay-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-delay-") as directory:
         endpoint = os.path.join(directory, "slow.sock")
         server = socket.socket(socket.AF_UNIX)
         server.bind(endpoint)
@@ -224,7 +224,7 @@ def tmux_hangup_case(binary: str) -> None:
     if not os.path.exists(tmux):
         print("tmux hangup: skipped (tmux unavailable)")
         return
-    socket_name = f"stui-pty-smoke-{os.getpid()}"
+    socket_name = f"fractal-tui-pty-smoke-{os.getpid()}"
     target = "hup"
     base = [tmux, "-L", socket_name]
     subprocess.run(
