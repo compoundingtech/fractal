@@ -1094,7 +1094,13 @@ mod tests {
         assert_eq!(different["snapshot"]["store_index"], first["snapshot"]["store_index"]);
         assert_eq!(different["value"]["membership"]["changed_index"], first["value"]["membership"]["changed_index"]);
         assert_ne!(different["value"]["items"], first["value"]["items"]);
-        drop(state); // Closing all handles checkpoints each fixture before copying the database.
+        drop(state);
+        // Explicitly checkpoint both files; background store handles may outlive AppState.
+        for root in [original.path(), replacement.path()] {
+            let connection = rusqlite::Connection::open(root.join("graph.db")).unwrap();
+            let busy: i64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0)).unwrap();
+            assert_eq!(busy, 0, "restore requires a complete checkpoint");
+        }
         std::fs::copy(replacement.path().join("graph.db"), original.path().join("graph.db")).unwrap();
         let restored = test_state_named(original.path(), "collection-epoch-lifetime");
         let (_, page) = membership_json(&restored, PATH, "person/ada").await;
