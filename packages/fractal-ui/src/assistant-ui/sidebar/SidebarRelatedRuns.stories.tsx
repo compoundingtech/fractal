@@ -3,20 +3,22 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
-import { SidebarRelatedRuns, type SidebarRelatedRun, type SidebarRelatedRunsState } from './SidebarRelatedRuns'
+import { SidebarRelatedRuns, type SidebarRelatedRunsState } from './SidebarRelatedRuns'
+import { AgentRelatedRuns, decodeUnknownSync, type AgentRelatedRunEncoded as Wire, type RelatedRunWaitEncoded as Wait } from '../../../../../clients/typescript/fractal-client/ReadSchema.generated.ts'
 import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 
-type Wait = NonNullable<SidebarRelatedRun['current_step']>
+// Fixtures are wire JSON, decoded once at the boundary as the host does, so rows reach the component as the Native DTO.
+const decode = decodeUnknownSync(AgentRelatedRuns, 'strict')
 const storyNow = Date.UTC(2026, 10, 6, 9, 30, 0)
 const eta = (lowMin: number, highMin: number) => ({ remaining_low_ms: lowMin * 60_000, remaining_high_ms: highMin * 60_000, basis: { method: 'critical-path' as const, samples: 12 }, as_of: storyNow - 60_000 })
 const wait = (step: string, rest: Partial<Wait> = {}): Wait => ({ step, path: `step/${step}`, state: 'open', kind: 'step', ...rest })
-const run = (slug: string, rest: Partial<SidebarRelatedRun>): SidebarRelatedRun => ({
+const run = (slug: string, rest: Partial<Wire>): Wire => ({
   id: `mission-run/${slug}`, mission_id: `mission/${slug}`, status: 'running', status_chip: 'running', progress: { done: 3, total: 7 }, eta: null, waiting_on_you: false, late: false,
   deadline_at: null, completed_at: null, current_step: null, waits_on: [], urgency_rank: 3, folded: false, ...rest,
 })
 // Served order: person hold, late, stalled, active, then finished.
-const rows: SidebarRelatedRun[] = [
+const rows: Wire[] = [
   run('release-notes', { status_chip: 'waiting-on-you', waiting_on_you: true, urgency_rank: 0, progress: { done: 2, total: 5 }, current_step: wait('outline', { title: 'Approve the page outline' }), waits_on: [wait('outline', { who: 'person/reviewer', kind: 'ask' })] }),
   run('billing-migration', { late: true, urgency_rank: 1, deadline_at: storyNow - 3_600_000, eta: eta(40, 75), progress: { done: 4, total: 9 }, current_step: wait('backfill', { title: 'Backfill the invoice ledger for every archived account' }) }),
   run('flaky-test-hunt', { status_chip: 'stalled', urgency_rank: 2, progress: { done: 1, total: 4 }, current_step: wait('bisect', { title: 'Bisect the failing run' }), waits_on: [wait('ci', { who: 'agent/ci-runner', kind: 'agent' })] }),
@@ -24,7 +26,7 @@ const rows: SidebarRelatedRun[] = [
   run('docs-refresh', { status: 'completed', status_chip: 'completed', folded: true, urgency_rank: 4, progress: { done: 4, total: 4 }, completed_at: storyNow - 7_200_000 }),
   run('search-index', { status: 'failed', status_chip: 'failed', folded: true, urgency_rank: 4, progress: { done: 2, total: 6 }, completed_at: storyNow - 18_000_000 }),
 ]
-const loaded = (value: SidebarRelatedRun[], total = value.length): SidebarRelatedRunsState => ({ _tag: 'Loaded', value: { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: storyNow, work_cut: 1, missions_cut: 1, total_rows: total, truncated: total > value.length, rows: value } })
+const loaded = (value: Wire[], total = value.length): SidebarRelatedRunsState => ({ _tag: 'Loaded', value: decode({ kind: 'agent-related-runs', agent_id: 'agent/example', as_of: storyNow, work_cut: 1, missions_cut: 1, total_rows: total, truncated: total > value.length, rows: value }) })
 const states: readonly (readonly [string, SidebarRelatedRunsState])[] = [
   ['loaded', loaded(rows)], ['truncated', loaded(rows.slice(2, 4), 140)], ['empty', loaded([])],
   ['loading', { _tag: 'Loading' }], ['failed', { _tag: 'Failed', message: 'the daemon did not answer' }],
