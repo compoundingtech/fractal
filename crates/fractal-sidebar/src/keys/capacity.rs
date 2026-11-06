@@ -103,7 +103,7 @@ impl Trie<'_> {
 
 /// Allocate `count` canonical keys strictly inside the bounds. Use the shortest sufficient
 /// maximum length, selecting evenly spaced ranks over its union of all shorter legal lengths.
-/// None means invalid bounds or insufficient capacity even through MAX_KEY_BYTES.
+/// None means invalid bounds, unrepresentable allocation, or insufficient canonical capacity.
 pub fn spread(lower: Option<&str>, upper: Option<&str>, count: usize) -> Option<Vec<String>> {
     spread_with_max(lower, upper, count, MAX)
 }
@@ -112,6 +112,7 @@ fn spread_with_max(lower: Option<&str>, upper: Option<&str>, count: usize, max: 
         || lower.zip(upper).is_some_and(|(lo, hi)| lo >= hi) { return None; }
     if count == 0 { return Some(Vec::new()); }
     let denominator = count.checked_add(1)?;
+    if count > isize::MAX as usize / std::mem::size_of::<String>() { return None; }
     let mut powers = [Rank::default(); MAX + 1];
     powers[0] = Rank::small(1);
     for index in 1..=max { powers[index] = powers[index - 1]; powers[index].mul(62); }
@@ -182,6 +183,14 @@ mod tests {
         for count in [1, 2, 17] {
             let short: Vec<_> = universe.iter().filter(|key| key.len() == 2).collect();
             assert_eq!(spread_with_max(None, None, count, 3).unwrap(), (1..=count).map(|i| short[short.len() * i / (count + 1)].clone()).collect::<Vec<_>>());
+        }
+    }
+    #[test]
+    fn huge_counts_refuse_before_allocation_with_or_without_bounds() {
+        for count in [usize::MAX - 1, usize::MAX] {
+            for (lower, upper) in [(None, None), (Some("a0"), None), (None, Some("a1")), (Some("a0"), Some("a1"))] {
+                assert!(spread(lower, upper, count).is_none());
+            }
         }
     }
     #[test]
