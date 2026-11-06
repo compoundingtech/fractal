@@ -744,10 +744,10 @@ mission "person-work" state="ready" {{
             let mut stranger = input.clone();
             stranger.actor = "agent/alder.other".into();
             stranger.idempotency_key = "stranger".into();
-            assert_eq!(
-                store.ask_person(&stranger).unwrap_err().code,
-                "stale-work-ask"
-            );
+            let error = store.ask_person(&stranger).unwrap_err();
+            assert_eq!(error.code, "stale-work-ask");
+            assert!(error.to_string().contains(&moved.subject));
+            assert!(error.to_string().contains("omit --step"));
         }
     }
 
@@ -785,6 +785,101 @@ mission "person-work" state="ready" {{
             store.step_run(&ask.subject).unwrap().unwrap().status,
             "cancelled"
         );
+    }
+
+    #[test]
+    fn answered_ask_is_not_cancelled_when_origin_is_reclaimed() {
+        let (store, origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: input.person.clone(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "answer-before-reclaim".into(), answer: None,
+        }, false).unwrap();
+        let reclaimed = store.work_action(&origin.subject, "claim", &crate::model::WorkRequest {
+            wait_ms: None, actor: Some(input.actor.clone()), incarnation: input.incarnation.clone(),
+            summary: None, reason: None, evidence: vec![],
+            idempotency_key: "reclaim-after-answer".into(),
+        }).unwrap();
+        assert_eq!(reclaimed.person_answers.len(), 1);
+        assert_eq!(reclaimed.person_answers[0].status, "completed");
+        for replay in [false, true] {
+            if replay { store.replay_replication_graph().unwrap(); }
+            store.reconcile_person_asks().unwrap();
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+            let parent = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(parent.person_answers.len(), 1);
+            assert_eq!(parent.person_answers[0].status, "completed");
+            let cancelled: bool = store.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.person-cancelled')",
+                [&ask.subject], |row| row.get(0)).unwrap();
+            assert!(!cancelled);
+            assert!(store.messages(Some(&input.actor), true).unwrap().iter()
+                .all(|message| !message.content.contains("was cancelled")));
+        }
+    }
+
+    #[test]
+    fn independent_asks_leave_claims_and_capacity_unchanged() {
+        let (store, origin, mut input) = fixture();
+        input.step = None;
+        for name in [None, Some("named-question".to_owned())] {
+            input.new_run = name;
+            let ask = store.ask_person(&input).unwrap();
+            assert_ne!(ask.run, origin.run);
+            assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject);
+            let held = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(held.status, "claimed");
+            assert_eq!(held.claimant.as_deref(), Some(input.actor.as_str()));
+            assert_eq!(held.claim_incarnation.as_deref(), Some("asker-one"));
+            let queue = &store.agent_work_queues_for(Some(&input.actor)).unwrap()[&input.actor];
+            assert_eq!(queue.active_work_count, 1);
+            assert_eq!(queue.current_work_ids, [origin.subject.clone()]);
+        }
+        // The same agent can still use --step to explicitly block its held work.
+        input.step = Some(origin.subject.clone());
+        input.new_run = None;
+        store.ask_person(&input).unwrap();
+        let blocked = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(blocked.status, "waiting-person");
+        assert_eq!(blocked.claimant, None);
+    }
+
+    #[test]
+    fn independent_asks_outlive_managed_owner_work_and_redeclaration() {
+        for ending in ["completed", "cancelled", "failed"] {
+            let (store, origin, mut input) = fixture();
+            let mut owned = crate::graph::parse_internal_intent(
+                r#"version 2
+agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
+                "alder",
+            ).unwrap();
+            let declaration = owned.subjects.get_mut(&input.actor).unwrap();
+            declaration.owner_run = Some(origin.run.clone());
+            declaration.owner_generation = Some(origin.generation.clone());
+            store.apply_internal(&owned, "managed-requester").unwrap();
+            input.step = None;
+            let ask = store.ask_person(&input).unwrap();
+            store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
+            store.reconcile_person_asks().unwrap();
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+            assert!(store.attention_items(Some(&input.person)).unwrap().iter()
+                .any(|item| item.subject == ask.subject));
+            // Idle managed agents can also raise another independent question.
+            input.idempotency_key = "after-work-ended".into();
+            let later = store.ask_person(&input).unwrap();
+            store.apply_internal(&owned, "requester-next-turn").unwrap();
+            store.replay_replication_graph().unwrap();
+            store.reconcile_person_asks().unwrap();
+            assert_eq!(store.ask_person(&input).unwrap().subject, later.subject);
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+            let response = PersonStepResponse {
+                delegation: None, subject: ask.subject.clone(), actor: input.actor.clone(),
+                summary: "Withdrawn".into(), evidence: vec![], episode: None,
+                idempotency_key: "withdraw-independent".into(), answer: None,
+            };
+            assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
+        }
     }
 
     #[test]
