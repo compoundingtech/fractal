@@ -1,0 +1,7 @@
+Quota ────────────────────────────────────────────────────────────────
+source    Current snapshot
+example / Team ───────────────────────────────────────────────────────
+governing Weekly  72%
+reset     in 5h 30m
+window    Session  ?
+reset     unknown

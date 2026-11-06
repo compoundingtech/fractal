@@ -24,6 +24,7 @@ pub enum Pane {
     /// Token spend: one group's (`agent/…`, `mission/…`, `model/…` as the Usage list names
     /// them), or the whole period's.
     Usage(Option<String>),
+    Quota,
     /// The new mission form.
     NewMission,
     /// An observed graph resource, with open vocabulary facts.
@@ -49,6 +50,7 @@ impl Pane {
             Pane::Machine(subject) => with("machine", subject),
             Pane::Worktree(subject) => with("worktree", subject),
             Pane::Usage(subject) => with("usage", subject),
+            Pane::Quota => "quota:".into(),
             Pane::NewMission => "new-mission:".into(),
             Pane::Resource(id) => format!("resource:{id}"),
             Pane::Document(reference) => format!("document:{reference}"),
@@ -74,6 +76,7 @@ impl Pane {
             "machine" => Pane::Machine(subject),
             "worktree" => Pane::Worktree(subject),
             "usage" => Pane::Usage(subject),
+            "quota" if subject.is_none() => Pane::Quota,
             "new-mission" => Pane::NewMission,
             "resource" => Pane::Resource(subject?),
             "document" => Pane::Document(subject?),
@@ -103,6 +106,7 @@ mod tests {
             Pane::Worktree(None),
             Pane::Usage(some("mission/example/harbor/audit")),
             Pane::Usage(None),
+            Pane::Quota,
             Pane::NewMission,
             Pane::Resource("resource/github/acme/garden/issue/9".into()),
             Pane::Document("doc/garden/plan".into()),

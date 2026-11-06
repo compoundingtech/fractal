@@ -152,6 +152,12 @@ the `garden/worker` agent used in its examples.
 conversation or a mission from the sidebar or **Ctrl+K**; **Ctrl+H** returns to Now.
 **Ctrl+Q** quits the interface while agents keep working.
 
+For external account limits, press **Ctrl+K**, search **Quota**, then **Enter**
+(pane key `quota:`). The panel shows each account's governing window, other usage
+windows and resets; `?` means unknown and `STALE` marks expired observations.
+Configure the daemon's [external quota source](st3/client-v0/README.md#external-quota-source-v1)
+first. Only visible quota panes refresh, at the source's configured cadence.
+
 After quitting, make the installed commands available in this shell and reopen fractal:
 
 ```sh

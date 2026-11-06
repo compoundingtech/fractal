@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Open Quota from the TUI palette to inspect external account windows, governing usage, reset times, unknown values and stale readings.",
+  "replay": {"status": "none", "detail": "Read-only panel."},
+  "schema": {"status": "none", "detail": "Uses quota-source v1."},
+  "rules": {"status": "none", "detail": "No checkpoint changes."},
+  "compatibility": {"status": "none", "detail": "Older TUIs ignore stored quota panes as unknown pane keys."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "none", "detail": "Ctrl+K, search Quota, Enter; pane key quota:."},
+  "recovery": {"status": "none", "detail": "Close the pane or revert."}
+}

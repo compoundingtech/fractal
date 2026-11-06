@@ -22,6 +22,7 @@ mod demo_test_fixture;
 mod direct;
 pub mod doc;
 mod documents;
+mod quota;
 pub mod checklist;
 mod edit;
 mod glass;
@@ -417,6 +418,7 @@ pub struct Ui {
     resource_sidebar: resource_sidebar::Sidebar,
     /// Documents read so far, the list, and the documents missions name.
     documents: documents::Documents,
+    quota: quota::Quota,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -794,6 +796,7 @@ impl Ui {
             help: false,
             resource_sidebar,
             documents: documents::Documents::default(),
+            quota: quota::Quota::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -2533,6 +2536,7 @@ impl Ui {
             }
             Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
+            Pane::Quota => self.quota.doc(width, chrono::Utc::now().timestamp()),
             Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
             Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
         };

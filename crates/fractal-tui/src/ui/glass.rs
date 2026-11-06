@@ -1310,6 +1310,7 @@ impl Ui {
             open(1, ("▤", theme::OVERLAY1), reference.to_owned(), "open this document".into(), Pane::Document(reference.to_owned()));
         }
         open(1, ("▤", theme::OVERLAY1), "Documents".into(), "every document, by name".into(), Pane::Documents(None));
+        open(1, ("%", theme::OVERLAY1), "Quota".into(), "external account limits and resets".into(), Pane::Quota);
         if id.starts_with("doc/") && id.ends_with('/') {
             open(1, ("▤", theme::OVERLAY1), format!("Documents under {id}"), "the list under this prefix".into(), Pane::Documents(Some(id.to_owned())));
         }
@@ -2502,7 +2503,7 @@ impl Ui {
                 );
             }
             // A usage tab names its group whatever the list groups by, so it draws from its key.
-            Some(pane @ (Pane::Usage(_) | Pane::Documents(_))) => self.draw_pane(buf, content, &pane),
+            Some(pane @ (Pane::Usage(_) | Pane::Documents(_) | Pane::Quota)) => self.draw_pane(buf, content, &pane),
             Some(Pane::Document(reference)) => {
                 self.draw_document(buf, content, &reference, &format!("{}/{index}", glass.id))
             }
@@ -3070,6 +3071,7 @@ impl Ui {
             Pane::Document(name) => document_title(name),
             Pane::Documents(None) => "Documents".into(),
             Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),
+            Pane::Quota => "Quota".into(),
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
@@ -3751,7 +3753,7 @@ impl Ui {
                 self.world.machines.items().iter().any(|m| m.name == name)
             }
             // A document is read when its pane opens; one st does not have says so there.
-            Pane::Document(_) | Pane::Documents(_) => true,
+            Pane::Document(_) | Pane::Documents(_) | Pane::Quota => true,
             _ => false,
         }
     }

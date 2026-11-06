@@ -388,6 +388,7 @@ impl AnswerTiming {
 }
 
 enum Fetched {
+    Quota(Result<fractal_client::quota::QuotaSource, String>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
     Protocol(super::content::Key, u16, u16, super::content::Encoding),
@@ -991,6 +992,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         while let Ok(result) = fetched.try_recv() {
             match result {
+                Fetched::Quota(value) => ui.quota.complete(value, Instant::now()),
                 Fetched::Content(key, result) => {
                     content_reads.complete(&key);
                     ui.content.finish(key, result);
@@ -1315,6 +1317,15 @@ pub fn run(context: Context) -> Result<()> {
                     });
                 }
             }
+        }
+        // External HTTP sources have no change signal. Only visible quota panes refresh.
+        let quota_shown = ui.shown_panes().iter().any(|(_, pane)| *pane == super::pane::Pane::Quota);
+        if ui.quota.wanted(quota_shown, extras.live, Instant::now()) {
+            let reader = client.clone(); let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let value = reader.quota().await.map(|reply| reply.value).map_err(|error| error.human());
+                let _ = tx.send(Fetched::Quota(value));
+            });
         }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
