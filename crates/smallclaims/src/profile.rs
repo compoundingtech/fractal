@@ -1626,11 +1626,11 @@ mod tests {
         );
     }
 
-    fn unfinished_op(label: &str, age: Duration) -> Arc<OpInner> {
+    fn unfinished_op(label: &str, started: Instant) -> Arc<OpInner> {
         Arc::new(OpInner {
             label: label.into(),
             caller: Some("test caller".into()),
-            started: Instant::now() - age,
+            started,
             acc: Mutex::new(Acc::default()),
             recorded: AtomicBool::new(false),
         })
@@ -1639,7 +1639,7 @@ mod tests {
     #[test]
     fn in_flight_snapshot_reports_unfinished_work_without_retaining_it() {
         let registry = Mutex::new(InFlight::default());
-        let op = unfinished_op("queued read", Duration::from_secs(20));
+        let op = unfinished_op("queued read", Instant::now() - Duration::from_secs(20));
         registry.lock().unwrap().insert(&op);
         let sample = in_flight_snapshot(&registry, Instant::now());
         assert_eq!(sample["tracked_live"], 1);
@@ -1659,11 +1659,13 @@ mod tests {
     #[test]
     fn in_flight_registry_and_output_are_bounded_and_keep_oldest_work() {
         let mut registry = InFlight::default();
+        // Keep the fixture's age order independent of scheduling during construction.
+        let now = Instant::now();
         let ops = (0..IN_FLIGHT_LIMIT + 3)
             .map(|index| {
                 unfinished_op(
                     &format!("read {index}"),
-                    Duration::from_millis(index as u64),
+                    now - Duration::from_millis(index as u64),
                 )
             })
             .collect::<Vec<_>>();
@@ -1671,7 +1673,7 @@ mod tests {
             registry.insert(op);
         }
         let registry = Mutex::new(registry);
-        let sample = in_flight_snapshot(&registry, Instant::now());
+        let sample = in_flight_snapshot(&registry, now);
         assert_eq!(sample["tracked_live"], IN_FLIGHT_LIMIT);
         assert_eq!(sample["untracked_starts"], 3);
         assert_eq!(
@@ -1697,7 +1699,7 @@ mod tests {
     #[test]
     fn in_flight_text_is_bounded_and_preserves_utf8_with_visible_truncation() {
         let registry = Mutex::new(InFlight::default());
-        let mut op = unfinished_op(&"☃".repeat(100), Duration::from_secs(2));
+        let mut op = unfinished_op(&"☃".repeat(100), Instant::now() - Duration::from_secs(2));
         Arc::get_mut(&mut op).unwrap().caller = Some("🧬".repeat(100).into());
         registry.lock().unwrap().insert(&op);
         let sample = in_flight_snapshot(&registry, Instant::now());

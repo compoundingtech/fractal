@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry the sidebar tabs title-fixture repair and current main into the stacked Alerts feature",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No new rules or exemptions."},
+  "compatibility": {"status": "none", "detail": "Merge the parent sidebar tabs branch without changing its feature contract."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

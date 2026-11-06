@@ -114,6 +114,18 @@ def bootstrap_env(home):
             'NIX_CONFIG': 'experimental-features = nix-command flakes\n'}
 
 
+def capacity_precheck():
+    """Exercise the sandbox bootstrap's authoritative Nix policy, without a build."""
+    nix = shutil.which('nix')
+    if not nix:
+        raise RuntimeError('Nix is required to realize the pinned sandbox tools')
+    # eval and build share agent-nix's memory-pressure preflight. A literal needs
+    # no flake, store realization, temporary HOME, or candidate filesystem access.
+    return subprocess.run([nix, 'eval', *NIX_OPTIONS, '--expr', 'null'],
+                          cwd=TRUSTED_CHECKOUT, env=bootstrap_env('/nonexistent'),
+                          check=True, capture_output=True, text=True)
+
+
 @functools.lru_cache(maxsize=1)
 def tools():
     if required('FRACTAL_INTEGRATOR_SANDBOX') != 'bwrap':
@@ -350,7 +362,9 @@ def main():
                    network=options.network, output=options.output, working_directory=options.directory,
                    readonly_dependencies=options.readonly_dependencies).returncode
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
-        parser.exit(1, f'candidate sandbox: {error}\n')
+        # Preserve agent-nix EX_TEMPFAIL through the shell helper to the integrator.
+        status = 75 if isinstance(error, subprocess.CalledProcessError) and error.returncode == 75 else 1
+        parser.exit(status, f'candidate sandbox: {error}\n')
 
 
 if __name__ == '__main__':

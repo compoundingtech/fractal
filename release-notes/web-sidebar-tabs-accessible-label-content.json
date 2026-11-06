@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep decorative sidebar tab markers outside text-label matching and update independent panel assertions",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes or accessibility exemptions."},
+  "compatibility": {"status": "none", "detail": "Tab glyphs and counts are painted decoratively while spoken attention labels stay unchanged. Story landmarks are unique, fitting assertions include the frame, and phone tests address workspace panels rather than the new sidebar panel."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

@@ -1,6 +1,6 @@
 /** W3C propagation at the browser HTTP and WebSocket transport edges. */
 import type { CollectionSocket, CollectionSocketFactory, TraceContext } from '@fractal/client'
-import { isValidTraceparent, validTraceContext } from '@fractal/sdk/effect'
+import { isValidTraceparent, validTraceContext } from '@fractal/sdk/read'
 
 /**
  * A `fetch` that adds the callback's context to each request to `baseUrl`'s origin when it starts;

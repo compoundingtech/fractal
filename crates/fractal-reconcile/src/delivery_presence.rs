@@ -417,6 +417,58 @@ fn stale_after(recipient: &str) -> Duration {
     CHANNEL_STALE_AFTER
 }
 
+/// How long ago the daemon started, as the assessments on this thread read it.
+fn uptime(presence: &Presence) -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(uptime) = uptime_pin::PINNED.get() {
+        return uptime;
+    }
+    presence.started.elapsed()
+}
+
+/// A seat that has not polled its mailbox is described by the daemon's uptime, a live age read
+/// from a process-wide start. A test that reads the same seat twice, or one whose verdict depends
+/// on the startup grace, pins the uptime its own thread's assessments read. A pinned thread also
+/// keeps its own state clocks (`since_unix_ms`): tests sharing a process assess the same fixture
+/// seats, and an unpinned or differently pinned test reading another state would otherwise restart
+/// the clock this one reads. Production always reads the real clock and the process-wide map.
+#[cfg(any(test, feature = "test-support"))]
+pub mod uptime_pin {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        pub(super) static PINNED: Cell<Option<Duration>> = const { Cell::new(None) };
+        pub(super) static CLOCKS: RefCell<Option<HashMap<String, IncarnationStateClocks>>> = const { RefCell::new(None) };
+    }
+
+    /// Assessments on this thread read `uptime`, and keep state clocks of their own, until the
+    /// returned pin drops. A nested pin shares the clocks of the pin it is inside.
+    pub fn pin(uptime: Duration) -> Pin {
+        let started = CLOCKS.with_borrow_mut(|clocks| clocks.is_none() && clocks.insert(HashMap::new()).is_empty());
+        Pin(PINNED.replace(Some(uptime)), started)
+    }
+
+    /// Restores the uptime this thread read before it was pinned, and drops the clocks it started.
+    pub struct Pin(Option<Duration>, bool);
+
+    impl Pin {
+        /// Move this thread's pinned uptime, as the daemon ageing between two reads would.
+        pub fn set(&self, uptime: Duration) {
+            PINNED.set(Some(uptime));
+        }
+    }
+
+    impl Drop for Pin {
+        fn drop(&mut self) {
+            PINNED.set(self.0);
+            if self.1 {
+                CLOCKS.set(None);
+            }
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 static WINDOW_OVERRIDES: std::sync::LazyLock<Mutex<HashMap<String, Duration>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -797,7 +849,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         beat = Some(captured(monitor));
     }
     let assessment = assess_beat(
-        presence.started.elapsed(),
+        uptime(presence),
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
             report.follows_image = report.follows.as_deref().and_then(|path| {
@@ -840,18 +892,29 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         assessment.state = "refused";
         assessment.reason = Some(format!("delivery refused: {}", refusal.code));
     }
-    if let Ok(mut rows) = presence.state_since.lock() {
-        if !rows.contains_key(recipient) { rows.insert(recipient.into(), HashMap::new()); }
-        let incarnations = rows.get_mut(recipient).expect("inserted seat");
-        let incarnation = incarnation.unwrap_or_default();
-        if !incarnations.contains_key(incarnation) {
-            incarnations.insert(incarnation.into(), (assessment.state, unix_ms()));
-        }
-        let row = incarnations.get_mut(incarnation).expect("inserted incarnation");
-        if row.0 != assessment.state { *row = (assessment.state, unix_ms()); }
-        assessment.since_unix_ms = Some(row.1);
+    if let Some(since) = state_since(presence, recipient, incarnation.unwrap_or_default(), assessment.state) {
+        assessment.since_unix_ms = Some(since);
     }
     assessment
+}
+
+/// When this incarnation's assessments entered `state`, restarting the clock when the state changes.
+fn state_since(presence: &Presence, recipient: &str, incarnation: &str, state: &'static str) -> Option<u64> {
+    let record = |rows: &mut HashMap<String, IncarnationStateClocks>| {
+        if !rows.contains_key(recipient) { rows.insert(recipient.into(), HashMap::new()); }
+        let incarnations = rows.get_mut(recipient).expect("inserted seat");
+        if !incarnations.contains_key(incarnation) {
+            incarnations.insert(incarnation.into(), (state, unix_ms()));
+        }
+        let row = incarnations.get_mut(incarnation).expect("inserted incarnation");
+        if row.0 != state { *row = (state, unix_ms()); }
+        row.1
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(since) = uptime_pin::CLOCKS.with_borrow_mut(|clocks| clocks.as_mut().map(record)) {
+        return Some(since);
+    }
+    presence.state_since.lock().ok().map(|mut rows| record(&mut rows))
 }
 
 /// A message view may include a local poll when one exists; absent remote evidence stays absent.
@@ -1026,6 +1089,45 @@ mod tests {
     use super::*;
 
     const DAEMON: Option<&str> = Some("new");
+
+    /// Let the wall clock pass `after`, so a state clock restarted from now reads a later time.
+    fn past(after: u64) {
+        while unix_ms() <= after {
+            std::hint::spin_loop();
+        }
+    }
+
+    #[test]
+    fn pinned_threads_keep_their_own_state_clocks_for_one_seat() {
+        let seat = "agent/example/pinned-state-clock";
+        let _inside = uptime_pin::pin(Duration::ZERO);
+        let first = assess_current(seat, "omp", Some("current"));
+        assert_eq!(first.state, "unknown");
+        past(first.since_unix_ms.unwrap());
+        std::thread::scope(|scope| scope.spawn(|| {
+            let _past = uptime_pin::pin(STARTUP_GRACE * 3);
+            assert_eq!(assess_current(seat, "omp", Some("current")).state, "stale");
+        }).join().unwrap());
+        assert_eq!(assess_current(seat, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+    }
+
+    #[test]
+    fn an_unpinned_assessment_of_the_seat_does_not_restart_a_pinned_state_clock() {
+        let seat = "agent/example/unpinned-state-clock";
+        let unpinned = || std::thread::scope(|scope| scope.spawn(|| assess_current(seat, "omp", Some("current"))).join().unwrap());
+        let live = unpinned();
+        // Pin the uptime that gives the seat the other state from the one its unpinned reads see.
+        let _pin = uptime_pin::pin(if live.state == "unknown" { STARTUP_GRACE * 3 } else { Duration::ZERO });
+        let first = assess_current(seat, "omp", Some("current"));
+        assert_ne!(first.state, live.state);
+        past(first.since_unix_ms.unwrap());
+        unpinned();
+        assert_eq!(assess_current(seat, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+        // Pinned assessments keep out of the process-wide clocks that production and unpinned reads use.
+        let pinned_only = "agent/example/pinned-only-state-clock";
+        assess_current(pinned_only, "omp", Some("current"));
+        assert!(!presence().state_since.lock().unwrap().contains_key(pinned_only));
+    }
 
     #[test]
     fn malformed_report_does_not_replace_a_beat_or_prove_recording() {

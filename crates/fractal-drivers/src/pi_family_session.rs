@@ -9,7 +9,7 @@
 //!
 //! Catalog wrappers also own their status lease for the same reason Claude does: the extension lives
 //! only as long as the provider's process, and a measured SIGKILL of pi produces no terminal record
-//! at all (`docs/vrs/.experiments/2026-08-18-pi-harness-integration.md`). Presence therefore decays
+//! at all ([historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/.experiments/2026-08-18-pi-harness-integration.md)). Presence therefore decays
 //! by staleness, exactly as for the other harnesses. Native launches omit that status transport
 //! and retain session-owned observed records and terminal fencing.
 //!
@@ -28,7 +28,7 @@ use crate::provider_session::{
     PROVIDER_POLL, ProviderOutcome, STOP, describe_exit, install_signal_handler,
     run_provider_observed_with_env_removals,
 };
-use crate::{harness_state, hooks, message, status};
+use crate::{harness_state, hooks, status};
 
 /// pi's startup network work, which a supervised seat should not be doing.
 ///
@@ -77,57 +77,6 @@ pub(crate) struct HarnessKind {
 /// What the wrapper hands the provider process: the channel environment plus the launch argv with
 /// the channel extension spliced in.
 type PreparedLaunch = (Vec<(String, String)>, Vec<String>);
-
-/// Run one ordinary interactive pi-family provider.
-pub(crate) fn run_for(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    provider_argv: Vec<String>,
-    kind: &HarnessKind,
-) -> Result<()> {
-    run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        provider_argv,
-        kind,
-        &[],
-        &[],
-        None,
-        true,
-    )
-}
-
-/// Run one interactive pi-family provider and maintain its presence until it exits.
-pub(crate) fn run_for_with_environment(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    provider_argv: Vec<String>,
-    kind: &HarnessKind,
-    additional_env: &[(String, String)],
-    removed_env: &[&str],
-    required_incarnation: Option<String>,
-    legacy_presence: bool,
-) -> Result<()> {
-    let label = kind.label;
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, &identity, &crate::run::detect_host())?
-            .with_context(|| format!("{label} driver agent '{identity}' is not declared"))?;
-    run_for_paths(
-        catalog_root,
-        &agent_dir,
-        identity,
-        runtime_id,
-        provider_argv,
-        kind,
-        additional_env,
-        removed_env,
-        required_incarnation,
-        legacy_presence,
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_for_paths(
@@ -282,36 +231,8 @@ pub(crate) fn run_for_paths(
     )
 }
 
-/// Resume supervising a pi-family provider a predecessor driver image launched and released for
-/// adoption. The channel the extension spawned keeps the live record; this image keeps presence
-/// and the terminal record, exactly as the launching image did.
-pub(crate) fn adopt_for(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    kind: &HarnessKind,
-    pid: u32,
-    session: String,
-    seq: u64,
-    legacy_presence: bool,
-) -> Result<()> {
-    let label = kind.label;
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, &identity, &crate::run::detect_host())?
-            .with_context(|| format!("{label} driver agent '{identity}' is not declared"))?;
-    adopt_paths(
-        &agent_dir,
-        identity,
-        runtime_id,
-        kind,
-        pid,
-        session,
-        seq,
-        legacy_presence,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Resume supervising a native pi-family provider released by a predecessor driver image.
+/// The channel keeps the live record; this image keeps its terminal fencing.
 pub(crate) fn adopt_paths(
     agent_dir: &Path,
     identity: String,
@@ -320,7 +241,6 @@ pub(crate) fn adopt_paths(
     pid: u32,
     session: String,
     seq: u64,
-    legacy_presence: bool,
 ) -> Result<()> {
     let label = kind.label;
     let observer = crate::provider_session::SessionObserver::terminal_only(
@@ -333,9 +253,7 @@ pub(crate) fn adopt_paths(
     );
     let outcome = crate::provider_session::adopt_provider_observed(
         label,
-        legacy_presence
-            .then(|| status::status_path(agent_dir))
-            .as_deref(),
+        None,
         pid,
         crate::provider_session::SESSION_REFRESH,
         PROVIDER_POLL,

@@ -33,6 +33,18 @@ pub fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
+/// Set once a driver can no longer serve its provider. Unlike a signal's stop, a wrapper that
+/// installs its handlers afterwards keeps it, so a provider not yet launched is stopped too.
+static DRIVER_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Stop the provider as a stop signal would: its wrapper ends the child, records the end and
+/// returns. A driver that can no longer serve its provider asks for this, possibly before the
+/// wrapper has started.
+pub fn request_stop() {
+    DRIVER_STOP.store(true, Ordering::SeqCst);
+    STOP.store(true, Ordering::SeqCst);
+}
+
 /// Set by a driver that is about to re-execute itself into a replaced st binary. Every wrapper
 /// loop that sees it returns [`Detached`] with what the next image needs to adopt its provider,
 /// and leaves the provider, its terminal, and its observed record exactly as they are.
@@ -185,8 +197,20 @@ extern "C" fn on_stop_signal(_signal: libc::c_int) {
 
 extern "C" fn on_interrupt_signal(_signal: libc::c_int) {}
 
+/// The stop flags are process-global: every test that reads or raises them holds this lock, so
+/// parallel readers never see another test's stop.
+#[cfg(test)]
+pub(crate) fn stop_flag_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(std::sync::Mutex::default);
+    match LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub(crate) fn install_signal_handler() {
-    STOP.store(false, Ordering::SeqCst);
+    STOP.store(DRIVER_STOP.load(Ordering::SeqCst), Ordering::SeqCst);
     install_stop_handlers();
 }
 
@@ -243,32 +267,6 @@ impl SessionObserver {
     /// — coalescing, heartbeat eligibility, terminal fencing — is decided by the claim across
     /// all of them. A claim that cannot be written is fatal at construction: acting without
     /// ownership would silently produce a writer every record refuses.
-    pub(crate) fn new(
-        agent_dir: &Path,
-        identity: &str,
-        harness: &'static str,
-        pty_session: &str,
-    ) -> anyhow::Result<Self> {
-        Self::with_session(
-            agent_dir,
-            identity,
-            harness,
-            pty_session,
-            harness_state::session_token(),
-        )
-    }
-
-    /// Claim an explicitly supplied session incarnation for a host-owned launch attempt.
-    pub(crate) fn with_session(
-        agent_dir: &Path,
-        identity: &str,
-        harness: &'static str,
-        pty_session: &str,
-        session: String,
-    ) -> anyhow::Result<Self> {
-        Self::with_session_policy(agent_dir, identity, harness, pty_session, session, false)
-    }
-
     pub(crate) fn new_claude_with_primary_ownership(
         agent_dir: &Path,
         identity: &str,
@@ -799,9 +797,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_driver_stop_survives_a_wrapper_that_starts_after_it() {
+        // The driver can give up before its provider's wrapper reaches its handler install,
+        // for example when the daemon refuses the mailbox at once.
+        let _stop_exclusive = stop_flag_tests();
+        request_stop();
+        install_signal_handler();
+        assert!(stop_requested());
+        DRIVER_STOP.store(false, Ordering::SeqCst);
+        STOP.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
     fn native_supervision_keeps_observations_without_creating_status() {
         let root = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(root.path(), "h.native", "claude", "native").unwrap();
+        let observer = SessionObserver::new_claude_with_primary_ownership(
+            root.path(),
+            "h.native",
+            "native",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
         run_provider(
             "native",
@@ -826,11 +841,11 @@ mod tests {
     fn an_unspawnable_provider_writes_a_real_terminal_record() {
         use crate::harness_state::{self, Activity};
         let tmp = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(
+        let observer = SessionObserver::new_claude_with_primary_ownership(
             tmp.path(),
             "example-linux.worker",
-            "claude",
             "example-linux.worker",
+            false,
         )
         .unwrap();
         let stop = AtomicBool::new(false);
@@ -912,11 +927,11 @@ mod tests {
     #[test]
     fn detaching_releases_a_live_provider_with_its_observed_session() {
         let tmp = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(
+        let observer = SessionObserver::new_claude_with_primary_ownership(
             tmp.path(),
             "example-linux.worker",
-            "claude",
             "example-linux.worker",
+            false,
         )
         .unwrap();
         let pid = spawn_sleeper("30");
@@ -1026,7 +1041,12 @@ mod tests {
         use crate::claude_process::{self, Admission, Caller};
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let legacy = SessionObserver::new(dir, "fixture", "claude", "runtime").unwrap();
+        let legacy = SessionObserver::new_claude_with_primary_ownership(
+            dir,
+            "fixture",
+            "runtime",
+            false,
+        ).unwrap();
         assert!(!claude_process::recorded(dir).unwrap());
         assert!(!dir.join("claude-primary-process.lock").exists());
         // An impossible kernel caller still reaches the EXACT old admission callback. Off
@@ -1095,12 +1115,13 @@ mod tests {
     #[test]
     fn an_explicit_session_incarnation_is_claimed_exactly() {
         let tmp = tempfile::tempdir().unwrap();
-        let _observer = SessionObserver::with_session(
+        let _observer = SessionObserver::with_session_policy(
             tmp.path(),
             "example-linux.worker",
             "claude",
             "example-linux.worker",
             "attempt-exact".into(),
+            false,
         )
         .unwrap();
         let record: serde_json::Value = serde_json::from_slice(
@@ -1109,12 +1130,13 @@ mod tests {
         .unwrap();
         assert_eq!(record["incarnation"], "attempt-exact");
 
-        let error = SessionObserver::with_session(
+        let error = SessionObserver::with_session_policy(
             tmp.path(),
             "example-linux.worker",
             "claude",
             "example-linux.worker",
             String::new(),
+            false,
         )
         .err()
         .unwrap();

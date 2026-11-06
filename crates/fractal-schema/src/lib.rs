@@ -384,7 +384,7 @@ impl std::error::Error for ValidationError {}
 
 /// Local SQLite projection notes. They are documentation only: the projection is
 /// not part of the serialized registry, so it cannot change the registry digest.
-const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-h63ee7b740f4a owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
+const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-hbfa81626a10c owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
 ## Local message selectors
 
 The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
@@ -442,6 +442,8 @@ The fourteen page indexes are partial on `born_index >= 0` and order by `sent_ke
 ### Maintenance
 
 Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
+
+A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). A read that hears a host's close queues it without waiting for the writer; a background writer records at most 64 per transaction, and its insert trigger adds a pending row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
 
 The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
 
@@ -535,6 +537,7 @@ impl Registry {
         }
         output.push_str("\n`resource.observed` validates facts against the resource kind. Custom resource facts remain open.\n");
         output.push_str("\nA `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.\n");
+        output.push_str("\n## Agent principal grammar\n\nAn agent may declare one optional `principal \"person/operator\"` child. It takes\nexactly one canonical person ID string, with no properties or body; agent IDs,\nmalformed person IDs and duplicate principal children are rejected. `principal`\nis not an agent property. The canonical `intent.desired.desired` tree retains\nthe child without adding a separate claim field. Omitting it remains valid.\nThis grammar declaration is distinct from the accountable-root contract below.\n\nPending harness observations with `ask=\"question\"` route to the declared\nprincipal, otherwise to the daemon's configured `person`. Account ownership,\nhelper bindings, mission requesters and declaration authors are not question\nauthority. If neither principal exists, global attention retains the prompt\nwith an empty person and a configuration diagnostic instead of dropping it.\nOnly a live declaration and its running incarnation can produce the item;\nrepublishing its principal invalidates attention. `under` remains non-owning.\nPermission and review prompts retain their existing ownership and answer\nauthorization. This routing does not enable answering unsupported harnesses.\nSupported native question answers require the effective principal as answerer.\nUpgrade readers before publishing the child: older readers reject it.\n");
         output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
         output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
         output.push_str("\n## Authored subject notes\n\n`note.set` records short context on `note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7`. The immutable person or agent author is encoded before the lowercase UUIDv7; every local and replicated claim actor must equal that author. Required `target` references an agent, session, mission, mission-run or step-run. Required `text` is null to archive, or nonblank text of at most 1024 UTF-8 bytes. Required `audience` is an open vocabulary; new local writes store `agent` and API inputs have no audience field. Optional `expires_at` is a valid RFC 3339 UTC timestamp. There is no note session field.\n\n`session/agent/ID/ENCODED_INCARNATION` is a read-only reference to an existing runtime incarnation. Its final component uses uppercase percent encoding of UTF-8, leaving only RFC 3986 unreserved bytes literal. The immutable parent agent and incarnation must match authoritative running runtime evidence at local admission. Session notes are current and resolve to their parent only while that exact incarnation runs; retained incarnation ids and provider session ids do not establish currency. No session declarations or lifecycle claims are introduced.\n\nThe latest canonical claim supplies revision and update time; the first supplies creation time. Archived, expired and ended-session revisions remain historical but are omitted from current views. Every current note, including historical self and unfamiliar audience values, is readable by persons with target access, its author and resolved agents. Audience is not a privacy boundary. Agents may write notes on themselves, their own sessions and assigned mission/step runs. Replicated admission enforces the stateless author and field rules. Notes live in the separate notes collection, never in agent or mission rows. Publication requires `features.subject_notes=1` on every active member's latest own-origin `daemon.started`, using the directive-note publication barrier. Notes and daemon-origin digests inform only: they do not assign work, approve gates, wake agents or grant authority.\n");
@@ -1889,6 +1892,8 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             true,
             &[],
         ),
+        ("work.handoff-returned", &["step-run"], WritePolicy::AuthorizedParticipant,
+            Cardinality::Append, Some("work"), true, &[]),
         (
             "work.extended",
             &["step-run"],
@@ -2125,6 +2130,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "runtime.refresh", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("runtimes"), true, &[],
+        ),
+        (
             "runtime.restart-window-reset",
             &["agent", "exec", "pty"],
             WritePolicy::SystemOnly,
@@ -2208,6 +2217,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::AuthorizedRequester,
             Cardinality::Append,
             Some("agents"),
+            true,
+            &[],
+        ),
+        (
+            "member.admission-override",
+            &["host"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("fleet"),
             true,
             &[],
         ),
@@ -2827,6 +2845,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "fleet.shard-bounds",
+            &["host"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("fleet"),
+            false,
+            &[],
+        ),
+        (
             "rule.set",
             &["rule"],
             WritePolicy::SystemOnly,
@@ -3344,6 +3371,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("attempt", integer()),
             ("episode", string()),
         ],
+        "work.handoff-returned" => &[
+            ("attempt", integer()), ("status", string()), ("reason", string()),
+            ("handoff_claim", string()), ("handoff_message", reference()),
+            ("handoff_to", reference()), ("readiness_epoch", integer()),
+            ("disposition", enumeration(&["withdrawn", "declined"])), ("return_request", object()),
+        ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
             ("attempt", integer()),
@@ -3690,6 +3723,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", required_string()),
             ("removed_by", reference_to(&["person"])),
         ],
+        "fleet.shard-bounds" => &[
+            ("member_key", required_string()),
+            ("shard_high_water", required_object()),
+        ],
         "rule.set" => &[
             ("mode", required_enum(&["off", "audit", "enforce"])),
             ("description", string()),
@@ -3787,6 +3824,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("incarnation_id", string()),
             ("runtime_pid", integer()),
             ("runtime_pid_start_token", string()),
+            ("launch_contract", object()),
             ("deadline_key", string()),
             ("desired_token", string()),
             ("rollout_operation", string()),
@@ -3815,6 +3853,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("shutdown_timeout_ms", integer()),
         ],
         "render.applied" => &[("writes", array()), ("warnings", array())],
+        "runtime.refresh" => &[("version", required_integer()), ("episode", FieldSpec { required: true, ..object() })],
         "runtime.restart-window-reset" => &[
             ("desired_token", string()),
             ("incarnation_id", required_string()),
@@ -3841,6 +3880,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("desired_token", required_string()),
             ("destination", required_string()),
             ("sources", required_array()),
+        ],
+        "member.admission-override" => &[
+            ("start", required_string()),
+            ("peers", required_array()),
+            ("reason", required_string()),
         ],
         "delivery.hold" => &[
             ("held", required_boolean()),
@@ -4661,10 +4705,14 @@ mod tests {
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         fields.insert("runtime_pid".into(), Value::from(1234));
         fields.insert("runtime_pid_start_token".into(), Value::from("987654321"));
+        fields.insert("launch_contract".into(), serde_json::json!({
+            "version":1, "digest":"combined", "prompt":"prompt", "binary":"binary",
+        }));
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         for (name, invalid) in [
             ("runtime_pid", Value::from("1234")),
             ("runtime_pid_start_token", Value::from(987654321)),
+            ("launch_contract", Value::from("not an object")),
         ] {
             let mut invalid_fields = fields.clone();
             invalid_fields.insert(name.into(), invalid);
@@ -5020,6 +5068,7 @@ mod tests {
                 "work.claimed",
                 "work.extended",
                 "work.failed",
+                "work.handoff-returned",
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",

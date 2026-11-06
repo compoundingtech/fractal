@@ -1,4 +1,4 @@
-"""CI assertions for fresh st seats; predecessor compatibility and st2 stay independent."""
+"""CI assertions for fresh seats; retired catalog imports stay outside current products."""
 import os
 import shutil
 import re

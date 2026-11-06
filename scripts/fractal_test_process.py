@@ -70,7 +70,7 @@ def set_child_subreaper():
         raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
 
 
-def guardian(command, watched, result, temporary_roots=(), keep=False):
+def guardian(command, watched, result, temporary_roots=(), keep=False, control=None):
     # PR_SET_CHILD_SUBREAPER, before launching any descendants.
     set_child_subreaper()
     interrupted = False
@@ -84,11 +84,14 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
     task = None
     previous_sigchld = None
     roots = []
-    evidence_manifest = tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
+    evidence_manifest = (tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
+                         if control is None else None)
     code = 1
     try:
-        env = {**os.environ, "FRACTAL_TEST_SUPERVISOR": str(os.getpid()),
-               "FRACTAL_TEST_EVIDENCE_MANIFEST": evidence_manifest.name}
+        env = dict(os.environ)
+        if evidence_manifest is not None:
+            env.update(FRACTAL_TEST_SUPERVISOR=str(os.getpid()),
+                       FRACTAL_TEST_EVIDENCE_MANIFEST=evidence_manifest.name)
         # Allocate under the guardian, not the killable controller. Remove only
         # these freshly created roots, and only after their processes are reaped.
         for name, prefix, parent in temporary_roots:
@@ -97,7 +100,12 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             env[name] = root
             if keep:
                 print(f"isolated test keeping {root}", file=sys.stderr, flush=True)
-        task = subprocess.Popen(command, env=env, start_new_session=True)
+        task = subprocess.Popen(command, env=env, start_new_session=True,
+                                **({"stdin": subprocess.DEVNULL} if control is not None else {}))
+        if control is not None:
+            # A duplex inherited socket reports the real daemon PID. Its EOF also
+            # ends the scope if the Rust owner unwinds before requesting stop.
+            os.write(control, task.pid.to_bytes(4, "big"))
         # Reap adopted exits when SIGCHLD arrives, rather than leaving zombies
         # visible until the owner-watch timer. PTY lifecycle checks can launch
         # their next --once pass immediately after killing a detached process.
@@ -106,7 +114,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
         reap_exited_descendants(task.pid)
         with os.fdopen(os.pidfd_open(task.pid), "rb") as task_fd:
             poller = select.poll()
-            for fd in [*watched, task_fd.fileno()]:
+            for fd in [*watched, task_fd.fileno(), *([control] if control is not None else [])]:
                 poller.register(fd, select.POLLIN)
             # pidfds avoid PID reuse and the check/launch race. An already dead
             # owner is immediately readable, including after the double fork.
@@ -119,19 +127,22 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             kill_group(task.pid)
             code = task.wait()
         reap_descendants()
-        from fractal_test_evidence import finish
-        try:
-            finish(Path(evidence_manifest.name), code)
-        except Exception as error:
-            print(f"isolated test evidence capture: {error}", file=sys.stderr)
-            code = code or 1
-        finally:
-            evidence_manifest.close()
+        if evidence_manifest is not None:
+            from fractal_test_evidence import finish
+            try:
+                finish(Path(evidence_manifest.name), code)
+            except Exception as error:
+                print(f"isolated test evidence capture: {error}", file=sys.stderr)
+                code = code or 1
+            finally:
+                evidence_manifest.close()
         if not keep:
             for root in roots:
                 shutil.rmtree(root)
         # Return status only AFTER every daemon, worker, driver and PTY is gone.
-        os.write(result, str(code).encode())
+        if control is None:
+            os.write(result, str(code).encode())
+    return code
 
 
 def run_supervised(command, owners=None, temporary_roots=(), keep=False):
@@ -204,6 +215,8 @@ if __name__ == "__main__":
     parser.add_argument("--temporary-root", nargs=3, action="append", default=[],
                         metavar=("ENV", "PREFIX", "PARENT"))
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--scope", action="store_true",
+                        help="foreground descendant scope, with a duplex control socket on stdin")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command
@@ -211,4 +224,8 @@ if __name__ == "__main__":
         command = command[1:]
     if not command:
         parser.error("a command is required")
+    if args.scope:
+        watched = [os.pidfd_open(pid) for pid in args.owner or [os.getppid()]]
+        code = guardian(command, watched, 0, control=0)
+        raise SystemExit(code if code >= 0 else 128 - code)
     raise SystemExit(run_supervised(command, args.owner, args.temporary_root, args.keep))

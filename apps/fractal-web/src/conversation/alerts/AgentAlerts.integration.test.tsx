@@ -8,7 +8,8 @@ import type * as Native from '@fractal/client/schema'
 vi.mock('@stylexjs/stylex', () => import('../../testStylex.ts'))
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
-import { AgentAlerts, waitingCalls } from './AgentAlerts.tsx'
+import { AgentAlerts } from './AgentAlerts.tsx'
+import { Option } from 'effect'
 
 const seat = 'agent/example/atlas'
 
@@ -34,8 +35,8 @@ const prompting = (episode: string, answers: readonly string[], callId: string):
   }) as unknown as Native.Attention
 
 const asking = (callId: string, labels: readonly string[]) => ({
-  _tag: 'ToolCall', id: `item/${callId}`, callId, name: 'AskUserQuestion', callSeen: true,
-  input: { questions: [{ question: 'Which one?', header: 'Pick', multiSelect: false, options: labels.map((label) => ({ label, description: '' })) }] },
+  call_id: callId, tool: 'AskUserQuestion', input_complete: true,
+  input: JSON.stringify({ questions: [{ question: 'Which one?', header: 'Pick', multiSelect: false, options: labels.map((label) => ({ label, description: '' })) }] }),
 })
 
 let host: HTMLDivElement
@@ -62,8 +63,8 @@ describe('AgentAlerts, pressed', () => {
       answered.push({ episode: (alert as unknown as { episode: string }).episode, answer, sent })
       return { _tag: 'Sent' } as const
     }
-    const show = (alert: Native.Attention, items: Parameters<typeof waitingCalls>[0]) =>
-      act(async () => root.render(<AgentAlerts alerts={[alert]} calls={waitingCalls(items)} onAnswer={onAnswer} />))
+    const show = (alert: Native.Attention, calls: Native.AttentionPromptCall[]) =>
+      act(async () => root.render(<AgentAlerts alerts={[{ ...alert, presentation: { prompt: { calls: Option.some(calls), allow: true, answers: [] } } } as unknown as Native.Attention]} onAnswer={onAnswer} />))
 
     await show(prompting('episode-1', ['answer', 'deny'], 'q1'), [asking('q1', ['Red', 'Blue'])])
     expect(button('Send')!.disabled).toBe(true)
@@ -86,9 +87,10 @@ describe('AgentAlerts, pressed', () => {
 
   it('allows the one waiting call it shows, by pressing Allow', async () => {
     const answered: string[] = []
-    const alert = { ...prompting('episode-3', ['allow', 'deny'], 'c1'), detail: 'Claude asks to use Bash' } as Native.Attention
+    const alert = { ...prompting('episode-3', ['allow', 'deny'], 'c1'), detail: 'Claude asks to use Bash',
+      presentation: { prompt: { calls: Option.some([{ call_id: 'c1', tool: 'Bash', input: '{"command":"make"}', input_complete: true }]), allow: true, answers: ['allow', 'deny'] } } } as unknown as Native.Attention
     await act(async () => root.render(
-      <AgentAlerts alerts={[alert]} calls={waitingCalls([{ _tag: 'ToolCall', id: 'item/c1', callId: 'c1', name: 'Bash', input: { command: 'make' }, callSeen: true }])}
+      <AgentAlerts alerts={[alert]}
         onAnswer={async (_alert, answer, sent) => { answered.push(`${answer}:${sent}`); return { _tag: 'Sent' } }} />,
     ))
     await press('Allow')

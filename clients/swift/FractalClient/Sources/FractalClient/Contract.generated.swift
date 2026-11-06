@@ -77,10 +77,12 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case setsList = "sets.list"
     case setsGet = "sets.get"
     case capabilitiesGet = "capabilities.get"
+    case deviceCommandGet = "device-command.get"
     case documentGet = "document.get"
     case documentsList = "documents.list"
     case documentReferencesGet = "document-references.get"
     case publicationDefinition = "publication.definition"
+    case missionDeclarationGet = "mission-declaration.get"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
@@ -165,10 +167,12 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .setsList: "/v1/client/sets",
     .setsGet: "/v1/client/sets/{id}",
     .capabilitiesGet: "/v1/client/capabilities",
+    .deviceCommandGet: "/v1/client/device-commands/{id}",
     .documentGet: "/v1/client/documents/content",
     .documentsList: "/v1/client/documents",
     .documentReferencesGet: "/v1/client/document-references",
     .publicationDefinition: "/v1/client/publication-definition",
+    .missionDeclarationGet: "/v1/client/mission-declaration",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
@@ -239,6 +243,9 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .assistantConversationContent: "/v1/client/assistant/conversation-content",
     .assistantTerminalContent: "/v1/client/assistant/terminal-content",
 ]
+
+/// Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>.
+public let st3PinsArrangementUuid: String = "00000000-0000-7000-8000-000000000002"
 
 /// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
 public let st3SidebarArrangementUuid: String = "00000000-0000-7000-8000-000000000001"

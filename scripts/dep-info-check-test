@@ -180,8 +180,8 @@ class LinuxClippyKey(unittest.TestCase):
 
     INSIDE = {
         'a workspace crate': 'crates/key-test/src/lib.rs',
-        "the root package's sources": 'src/key_test.rs',
-        "the root package's tests": 'tests/key_test.rs',
+        "the CLI crate's sources": 'crates/fractal/src/key_test.rs',
+        "the CLI crate's tests": 'crates/fractal/tests/key_test.rs',
         'the workspace manifest': 'Cargo.toml',
         'the lockfile': 'Cargo.lock',
         "cargo's config": '.cargo/config.toml',

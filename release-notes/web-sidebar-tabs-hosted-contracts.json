@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align sidebar tab marker accessibility and synthetic scenario coverage with hosted validation contracts",
+  "replay": {"status": "none", "detail": "No production replay changes."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "No accessibility or scanner exemptions are added."},
+  "compatibility": {"status": "none", "detail": "Descriptive tab labels are retained; graphical markers are decorative to assistive technology. Scenario variants retain the backing world's existing unknown-field declarations."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent data or recovery changes."}
+}

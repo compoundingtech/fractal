@@ -17,6 +17,7 @@ export const sortModes = {
 export type SortMode = keyof typeof sortModes
 const priority: Record<AgentStatus, number> = {
   waiting: 0,
+  failed: 0,
   working: 1,
   pending: 2,
   idle: 3,

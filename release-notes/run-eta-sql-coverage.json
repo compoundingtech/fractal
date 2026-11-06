@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Cover person-held ETA samples and nonuniform empirical quartiles in SQLite",
+  "replay": {
+    "status": "none",
+    "detail": "Regression coverage only; no production fold changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Only isolated in-memory test fixtures are added."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Person-held exclusion and nearest-rank quartiles remain unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire shape or client behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration or rollout action is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent data changes."
+  }
+}

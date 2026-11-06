@@ -3633,12 +3633,24 @@ mod tests {
         assert_eq!(item(&next.facts, "issues", 2)["recent_comments"][0]["id"], 92);
 
         // A cursor an earlier build left at the future stamp reads on from the look's start.
+        // The look's start is pinned through its poll checkpoint, so the listing it asks for
+        // does not depend on which wall-clock second the look runs in.
+        let pinned = SystemTime::now() - Duration::from_secs(30 * 60);
+        let look_start = watermark_at(pinned);
+        let (issues, comments) = listings(&look_start);
+        github.route(&issues, json!([issue(1, &ahead, json!({})), issue(2, &just_after, json!({}))]));
+        github.route(&comments, json!([comment(91, 1, &ahead), comment(92, 2, &just_after)]));
         let stuck = json!({"items_since": ahead, "comments_since": ahead}).to_string();
-        let resumed = observe_at(request(&["comments"], Some(&stuck), None), &base, Some(&token))
+        let resuming = request(&["comments"], None, None);
+        let poll = json!({
+            "poll_started_ms": u64::try_from(pinned.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(),
+            "cursor": stuck, "scope": format!("{} {:?}", resuming.locator, resuming.fields), "reads": {},
+        }).to_string();
+        let resumed = observe_at(ObservationRequest { cursor: Some(poll), ..resuming }, &base, Some(&token))
             .await.unwrap();
         let resumed = RepositoryCursor::parse(resumed.cursor.as_deref());
-        assert!(resumed.items_since.as_deref().unwrap() < ahead.as_str());
-        assert!(resumed.comments_since.as_deref().unwrap() < ahead.as_str());
+        assert_eq!(resumed.items_since.as_deref(), Some(look_start.as_str()));
+        assert_eq!(resumed.comments_since.as_deref(), Some(look_start.as_str()));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { changelogDeployment, changelogSources } from '../extensions/build.ts'
+import { changelogDeployment, changelogSources } from '../../.changelog/mod.ts'
 import { changelogEntryIdentity, compareChangelogEntryIds } from './contract.ts'
 
 /**

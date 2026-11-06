@@ -195,3 +195,43 @@ With v12 every fixed seed converges. The new kind shifts the draws, so seeds 2, 
 longer reach a checkpoint trim; they are the exact never-trim set, and every other fixed seed
 trims. Characterization used
 `cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
+
+`claims-v13.json` captures the registry that adds `member.admission-override` (a person's or an
+agent's release of a restarted member from waiting for the named peers, for its current daemon
+start). Versions 1 through 12 stay frozen. Generate v13 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v13.json`;
+do not hand-edit or overwrite v12. The simulation selects v13 and records its filename in audit
+summaries.
+
+With v13 every fixed seed converges. The new kind shifts the draws: seeds 2, 34 and 106 now trim,
+and seed 1597 is the exact never-trim set. Characterization used
+`cargo nextest run -p fractal --features test-support -E 'test(/convergence::/)'`.
+
+`claims-v14.json` captures the registry that adds `work.handoff-returned`, the durable
+record that returns handed-off work to its owning agent. Versions 1 through 13 stay
+frozen. Generate v14 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v14.json`;
+do not hand-edit the snapshot. The simulation selects v14 and records its filename
+in audit summaries.
+
+With v14 every fixed seed converges; seeds 21 and 74 are the exact never-trim set.
+Characterization used
+`cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+The first characterization run failed only the three stale v13 trim expectations;
+the per-seed equality and majority-trim assertions remain enforced.
+
+`claims-v15.json` captures the registry that adds `fleet.shard-bounds`, a leaving member's signed
+record of how far it wrote in the messages shard. Versions 1 through 14 stay frozen. Generate v15
+from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v15.json`;
+do not hand-edit the snapshot. The simulation selects v15 and records its filename in audit
+summaries.
+
+With v15 every fixed seed converges; seeds 2 and 27 are the exact never-trim set (seeds 21 and 74
+trim again). Characterization used
+`cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+The first characterization run failed only the four stale v14 trim expectations.
+
+`claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
+Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
+Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.

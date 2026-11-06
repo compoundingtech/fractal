@@ -132,14 +132,14 @@ async fn run_note(
     if matches!(args.command, Some(NoteCommand::Set { .. } | NoteCommand::Clear)) {
         super::parse_person_subject(&actor).map_err(anyhow::Error::msg)?;
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         anyhow::bail!("fractal note requires the authenticated local Unix socket");
     };
     let client = if actor.starts_with("agent/") {
-        Client::unix_agent(socket, &actor)?
+        Client::unix_agent(socket.as_ref(), &actor)?
     } else {
-        Client::unix_as(socket, &actor)?
-    };
+        Client::unix_as(socket.as_ref(), &actor)?
+    }.with_endpoint(endpoint.clone());
     if matches!(args.command, Some(NoteCommand::Add { .. } | NoteCommand::Ls { .. } | NoteCommand::Archive { .. })) {
         return run_subject_note(&client, &actor, args.command.expect("subject command"), json_output).await;
     }

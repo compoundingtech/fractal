@@ -128,7 +128,7 @@ typecheck, Storybook build, full play suite and controls cover those fixes.
 Times include shell startup but exclude admission queue waits. No dependency
 installation was needed.
 
-Re-review fixes #15–#17 were verified serially on dev3 on 2026-11-03 at
+Re-review fixes #15–#17 were verified serially on the build host on 2026-11-03 at
 `e5b40bc507441e3ecdb8283cc1733ca0583db25d`. Closing the disclosure restores
 **Add note** while retaining the draft; per-target create state survives pane
 unmounts, and a settled create does not steal focus from the transcript.
@@ -146,7 +146,7 @@ All requested checks passed without further source changes or weakened tests.
 | Complete notes play gate | 124/124 passed across 31 stories | 1,175,656 | 1 m 14.15 s |
 
 The complete gate used `^fractal-(plugins|explore)-notes-`, accessibility on,
-and no omissions; receipts are in dev3 `tmp/notes-2867-rr-play`.
+and no omissions; receipts are in the build checkout's `tmp/notes-2867-rr-play`.
 Each requested negative control used `negativeControl:true`, rejected all
 four scheme/width cases, and exited 1:
 
@@ -161,7 +161,7 @@ four scheme/width cases, and exited 1:
 Measurements include the remote Nix shell startup, exclude admission waits,
 and report GNU time's maximum resident set size. Every remote run pulled the
 branch fast-forward first and used nice/gate-slot admission; all ran before
-15:00Z. No builds ran on dev5, and no commits were made on dev3.
+15:00Z. No builds ran on the editing host, and no commits were made on the build host.
 
 ## Scope
 

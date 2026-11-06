@@ -4,6 +4,10 @@ use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
 
+mod run_review;
+#[doc(hidden)]
+pub use run_review::validate_run_reviewer;
+
 /// The batches one resource observation seals its claims in. A claim whose retention class
 /// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
 /// class: an envelope is signed and deleted whole, so a durable message in an observer's batch
@@ -196,8 +200,56 @@ pub struct RuntimeAuthority {
 #[derive(Clone, Debug, Default)]
 pub struct MissionRunStateMoment {
     pub since_unix_ms: u128,
+    pub completed_at_unix_ms: Option<u128>,
     pub status: Option<String>,
     pub outcome: Option<MissionRunOutcomeView>,
+}
+
+pub type MissionStepTimestamps = BTreeMap<String, (Option<u128>, Option<u128>)>;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static MISSION_TIMING_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+use fractal_delivery::store::run_eta::step_timestamps;
+
+/// The timing history of the runs in `?1` (and only the step subjects in `?2`, when given): each
+/// current-generation step's lifecycle claims, in canonical order. It starts from the runs' own steps
+/// (`step_runs_run_index`) and seeks each step's claims by subject and kind, so its work follows the
+/// runs read, never the store's whole history of those kinds (#5108).
+pub(crate) fn mission_step_timestamps_sql() -> String {
+    format!(
+        "WITH steps AS MATERIALIZED (
+             SELECT s.subject, s.attempt
+             FROM mission_runs r JOIN step_runs s INDEXED BY step_runs_run_index
+               ON s.run_id=r.id AND s.generation_id=r.current_generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1))
+               AND (?2 IS NULL OR s.subject IN (SELECT value FROM json_each(?2))))
+         SELECT claims.subject, steps.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM steps CROSS JOIN claims INDEXED BY claims_subject_kind_index
+           ON claims.subject=steps.subject
+          AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+              'work.claimed','work.failed','work.person-done','work.person-cancelled')
+         JOIN batches ON batches.id=claims.batch_id
+         ORDER BY claims.subject, {CANONICAL_ORDER}"
+    )
+}
+
+#[test]
+fn step_timestamps_follow_execution_not_lease_intervals() {
+    let event = |kind: &str, fields: Value, at| (kind.to_owned(), json!({"fields": fields}), at);
+    let mut events = vec![
+        event("work.claimed", json!({"attempt":1,"claim_expires_at_unix_ms":15}), 10),
+        event("work.released", json!({"attempt":1}), 12),
+        event("work.claimed", json!({"attempt":1}), 20),
+        event("work.submitted", json!({"attempt":1}), 25),
+        event("step-run.state", json!({"status":"verifying"}), 26),
+    ];
+    assert_eq!(step_timestamps(&events, 1), (Some(10), None));
+    events.push(event("work.failed", json!({"attempt":1,"status":"failed"}), 30));
+    events.push(event("step-run.state", json!({"status":"completed"}), 31));
+    assert_eq!(step_timestamps(&events, 1), (Some(10), Some(30)));
 }
 
 /// The most changed items one resource-change message lists.
@@ -1301,11 +1353,11 @@ fn apply_step_states_tx(
 pub trait MissionsStore {
     /// Whether a refresher keeps the roster published, so readers must never fold it.
     fn agent_roster_refresher_running(&self) -> bool;
-    /// Rebuild only the planning tables. A planning claim written through the generic claim path
-    /// is projected by this rebuild alone; the other projections already took it at the append,
-    /// and rebuilding all of them re-derived every operation (about 240,000 rows) under the
-    /// writer for each planning write.
-    fn rebuild_planning_projection(&self) -> Result<()>;
+    /// Rebuild only the planning tables of one session. A planning claim written through the
+    /// generic claim path is projected by this rebuild alone; the other projections already took
+    /// it at the append, and rebuilding all of them re-derived every operation (about 240,000
+    /// rows) under the writer for each planning write.
+    fn rebuild_planning_projection(&self, session: &str) -> Result<()>;
     fn mission_provenance(
             &self,
             mission: &str,
@@ -1628,6 +1680,10 @@ pub trait MissionsStore {
             &self,
             subjects: Option<&[String]>,
         ) -> Result<BTreeMap<String, MissionRunStateMoment>>;
+    /// First execution opening and authoritative terminal edge of the selected attempt.
+    fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
+    /// Remaining duration from bounded, incrementally projected completed-run samples.
+    fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
     fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
@@ -1836,6 +1892,8 @@ pub trait MissionsStore {
         ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
+    /// Fill a committed work acknowledgement's wake from a reader, as of `snapshot_unix_ms`, or now.
+    fn enrich_work_wake(&self, view: &mut StepRunView, snapshot_unix_ms: Option<u128>) -> Result<()>;
     fn set_step_state(
             &self,
             subject: &str,
@@ -2085,15 +2143,19 @@ fn set_step_state_guarded(
 }
 
 impl MissionsStore for Store {
+    fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>> {
+        fractal_delivery::store::run_eta::read(&self.readers.get(), run, at_unix_ms)
+    }
+
 
     fn agent_roster_refresher_running(&self) -> bool {
         self.fractal.agent_roster_refresh.get().is_some()
     }
 
-    fn rebuild_planning_projection(&self) -> Result<()> {
+    fn rebuild_planning_projection(&self, session: &str) -> Result<()> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        rebuild_planning_tx(&transaction)?;
+        rebuild_planning_session_tx(&transaction, session)?;
         transaction.commit()?;
         Ok(())
     }
@@ -4672,7 +4734,34 @@ impl MissionsStore for Store {
             &self,
             subjects: &[String],
         ) -> Result<BTreeMap<String, MissionRunStateMoment>> {
+        if subjects.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         self.mission_run_states_among(Some(subjects))
+    }
+
+    fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps> {
+        if runs.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0793121bcb1a owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &mission_step_timestamps_sql())?;
+        let rows = statement.query_map(params![serde_json::to_string(&runs)?, subjects.map(serde_json::to_string).transpose()?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, String>(4)?))
+        })?;
+        let mut events = BTreeMap::<String, (u32, Vec<(String, Value, u128)>)>::new();
+        for row in rows {
+            let (subject, attempt, kind, body, at) = row?;
+            events.entry(subject).or_insert_with(|| (attempt, Vec::new())).1
+                .push((kind, serde_json::from_str(&body)?, at.parse()?));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        MISSION_TIMING_SUBJECTS_READ.with(|count| count.set(count.get() + events.len()));
+        Ok(events.into_iter().map(|(subject, (attempt, events))| {
+            (subject, step_timestamps(&events, attempt))
+        }).collect())
     }
 
     fn mission_run_states_among(
@@ -4712,6 +4801,8 @@ impl MissionsStore for Store {
             let at = at.parse().unwrap_or_default();
             // `mission-run.state` claims are durable, so the claim before is the state replaced.
             let previous_status = states.get(&subject).and_then(|state| state.status.clone());
+            let completed_at_unix_ms = states.get(&subject).and_then(|state| state.completed_at_unix_ms)
+                .or_else(|| (phase.as_deref() == Some("terminal")).then_some(at));
             let outcome = (phase.as_deref() == Some("terminal")
                 && previous_phase.as_deref() == Some("terminal"))
             .then(|| {
@@ -4728,6 +4819,7 @@ impl MissionsStore for Store {
                 subject,
                 MissionRunStateMoment {
                     since_unix_ms: at,
+                    completed_at_unix_ms,
                     status,
                     outcome,
                 },
@@ -5815,7 +5907,7 @@ impl MissionsStore for Store {
         // One work action in a savepoint of the writer's next batch, answered once that batch commits.
         let committed = self
             .connection
-            .batched(|transaction| -> Result<StepRunView, St3Error> {
+            .batched(|transaction| -> Result<(StepRunView, Option<u128>), St3Error> {
                 let actor = physical_actor(transaction, &actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
@@ -5824,10 +5916,13 @@ impl MissionsStore for Store {
                     if let Some(input) = handoff {
                         adhoc_work::validate_retry(transaction, &subject, input)?;
                     }
-                    return serde_json::from_str(&response).map_err(internal);
+                    return Ok((serde_json::from_str(&response).map_err(internal)?, None));
                 }
                 if action == "claim" && rollouts::intake_held(transaction, &actor, &subject)? {
                     return Err(St3Error::new("seat-rollout-draining", "the seat holds new work intake while its rollout drains; existing work may finish"));
+                }
+                if action == "claim" {
+                    fractal_store::store::refresh_intake::admit_claim_tx(transaction, &actor)?;
                 }
                 let current = transaction
                     .query_row(
@@ -6277,9 +6372,13 @@ impl MissionsStore for Store {
                      FROM step_runs WHERE subject=?1", [&subject], step_run_from_row).map_err(internal)?;
                 // A renewal only moves the lease. Its view's timing, summaries and wake fold the
                 // step's whole claim history, which would hold the writer longer the older the
-                // step grows, so a renewal's view is filled from a reader after COMMIT.
-                if action != "renew" {
-                    enrich_step_queue(transaction, &mut view).map_err(internal)?;
+                // step grows, so a renewal's view is filled from a reader after COMMIT. Every
+                // other action's wake reads every message the assignee was ever sent (#5010), so
+                // it too is filled from a reader, as of the time the rest of the view was read at.
+                let snapshot = (action != "renew").then(now_ms);
+                if let Some(snapshot) = snapshot {
+                    fractal_store::store::enrich_step_queue_but_wake_at(transaction, &mut view, snapshot)
+                        .map_err(internal)?;
                 }
                 transaction
                     .execute(
@@ -6293,20 +6392,28 @@ impl MissionsStore for Store {
                 if !publish {
                     mark_replay_safe_receipt_tx(transaction, &request.idempotency_key).map_err(internal)?;
                 }
-                Ok(view)
+                Ok((view, snapshot))
             })
             .map_err(|error| St3Error::new("internal", error))?;
-        let mut view = committed?;
-        if action == "renew" && enrich_renewal {
-            // An exact retry of a renewal also replays a view cached without these fields.
-            self.enrich_work_response(&mut view)
-                .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
-        }
+        let (mut view, snapshot) = committed?;
+        // An exact retry also replays a view cached without these fields.
+        let filled = if action == "renew" {
+            if enrich_renewal { self.enrich_work_response(&mut view) } else { Ok(()) }
+        } else {
+            self.enrich_work_wake(&mut view, snapshot)
+        };
+        filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
         Ok(view)
     }
 
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()> {
         enrich_step_queue(&self.readers.get(), view).map_err(Into::into)
+    }
+
+    fn enrich_work_wake(&self, view: &mut StepRunView, snapshot_unix_ms: Option<u128>) -> Result<()> {
+        let snapshot_unix_ms = snapshot_unix_ms.unwrap_or_else(now_ms);
+        fractal_store::store::enrich_step_wake_at(&self.readers.get(), view, snapshot_unix_ms)
+            .map_err(Into::into)
     }
 
     fn set_step_state(&self, subject: &str, status: &str, reason: Option<&str>) -> Result<bool> {
@@ -7990,28 +8097,10 @@ impl MissionsStore for Store {
         };
         smallclaims::touched::note_read(|| actor.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc471d2fc8f29 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT body FROM claims
-             WHERE subject=?1 AND kind='runtime.observed'
-             ORDER BY CANONICAL_DESC(claims)",
-        ))?;
-        let bodies = statement.query_map([actor], |row| row.get::<_, String>(0))?;
-        for body in bodies {
-            let body: Value = serde_json::from_str(&body?)?;
-            let fields = body.get("fields").unwrap_or(&body);
-            match fields.get("status").and_then(Value::as_str) {
-                Some("running") => {
-                    if let Some(current) = fields.get("incarnation_id").and_then(Value::as_str) {
-                        return Ok(current != incarnation);
-                    }
-                }
-                Some("exited" | "vanished" | "stopped" | "absent" | "failed") => {
-                    return Ok(true);
-                }
-                _ => {}
-            }
-        }
-        Ok(false)
+        Ok(matches!(
+            fractal_store::store::runtime_incarnation_state(&connection, actor, incarnation)?,
+            fractal_store::store::IncarnationRuntime::Ended
+        ))
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {

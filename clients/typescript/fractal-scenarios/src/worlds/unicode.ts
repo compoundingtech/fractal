@@ -56,6 +56,8 @@ export const unicode: WorldDefinition = {
       conversation,
       terminal: { ...base.terminal, state: { terminals: [terminalRecord(ctx, member, run, -10_000)] }, timeline: [] },
       sync: { ...sync, state: { ...sync.state, capabilities: { ...sync.state.capabilities, machine_version: `example-display-${UNICODE_TEXT}` } } },
+      objectives: { ...base.objectives!, state: { ...base.objectives!.state, list: { ...base.objectives!.state.list,
+        rows: base.objectives!.state.list.rows.map((row) => ({ ...row, about: UNICODE_TEXT, explain: `${UNICODE_LONG_NAME}: ${row.explain}` })) } } },
     }
   },
 }

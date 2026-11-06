@@ -60,6 +60,9 @@ pub fn hold_pre_boot_mail(
             && if mailbox_reads::is_stream_item(message) {
                 mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
                     .is_some_and(|(actor, at)| at >= since && actor == peer.agent)
+            } else if let Some((consumer, at)) = crate::store::message_marks::staged(&store.readers.get(), &message.subject)? {
+                // A staging this member recorded as a mark has no graph index either.
+                at >= since && consumer == peer.agent
             } else {
                 store
                     .latest_claim(&message.subject, Some("message.staged"))?
@@ -101,6 +104,46 @@ pub struct FixtureDirtyGate {
 mod tests {
     use super::*;
     use crate::api::mailbox_tests_shared::age_sent;
+
+    /// A staging recorded as a mark is a current offer like a `message.staged` claim: it keeps a
+    /// recent message open through this boot, and the next boot holds it.
+    #[test]
+    fn a_staging_mark_is_a_current_offer_until_the_next_boot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("graph.db"), "node").unwrap();
+        let seat = "agent/eval.worker";
+        let peer = NativeDeliveryPeer { agent: seat.into(), transport: "omp-channel", pid: 37, archives_inbox: true };
+        crate::store::mailbox_tests::ready(&store, "first-boot");
+        store
+            .append_claim(&ClaimInput {
+                subject: "message/fresh".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/eval".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("person/eval")),
+                    ("to".into(), json!(seat)),
+                    ("content".into(), json!("QUARTZ SIGNAL")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("send:fresh".into()),
+            })
+            .unwrap();
+        crate::store::mailbox_tests::ready(&store, "second-boot");
+        crate::store::message_marks::record(&store, "message/fresh", "message.staged", seat).unwrap();
+        let held = |store: &Store| {
+            let mut messages = store.messages(Some(seat), false).unwrap();
+            hold_pre_boot_mail(store, Some(&peer), Some(seat), &mut messages).unwrap();
+            messages.into_iter().find(|m| m.subject == "message/fresh").unwrap().status
+        };
+        assert_eq!(held(&store), "staged", "the boot's own staging mark closed its offer");
+        // A mark has no graph index: only its time places it before the next boot.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::store::mailbox_tests::ready(&store, "third-boot");
+        assert_eq!(held(&store), "closed");
+        assert!(store.claims_for("message/fresh", Some("message.staged")).unwrap().is_empty());
+    }
 
     #[test]
     fn native_poll_recovers_unoffered_preboot_mail_until_its_current_offer_finishes() {

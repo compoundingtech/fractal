@@ -5,7 +5,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod declarations;
 mod rich;
+mod notice;
+mod notice_schema;
+mod swift_notice;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -56,7 +60,7 @@ fn main() -> Result<()> {
         &swift_operation_methods(reads, actions)?,
     )?;
     let typescript_models = typescript_models(&schema, &operations, &constants)?;
-    let typescript_schema = rich::models(&schema)?;
+    let typescript_schemas = rich::partitioned_models(&schema, &operations)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
         "    // @st3-codegen:typescript-operation-methods",
@@ -69,6 +73,22 @@ fn main() -> Result<()> {
         &rust_client,
         &swift_models,
         &swift_client,
+    )?;
+    let (notice_models, notice_schema) = notice::models(&schema)?;
+    output(
+        &root.join("crates/fractal-client/src/notice_models.generated.rs"),
+        &format_rust(&notice_models)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_schema.generated.json"),
+        &notice_schema,
+        check,
+    )?;
+    output(
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift"),
+        &swift_notice::models(&schema)?,
+        check,
     )?;
     output(
         &root.join("crates/fractal-client/src/contract.rs"),
@@ -105,14 +125,21 @@ fn main() -> Result<()> {
         &typescript_models,
         check,
     )?;
-    output(
-        &root.join("clients/typescript/fractal-client/Schema.generated.ts"),
-        &typescript_schema,
-        check,
-    )?;
+    for (name, contents) in typescript_schemas {
+        output(
+            &root.join("clients/typescript/fractal-client").join(name),
+            &contents,
+            check,
+        )?;
+    }
     output(
         &root.join("clients/typescript/fractal-client/Client.generated.ts"),
         &typescript_client,
+        check,
+    )?;
+    output(
+        &root.join("clients/typescript/fractal-declarations/index.ts"),
+        &declarations::typescript(),
         check,
     )?;
     Ok(())
@@ -223,6 +250,10 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
             continue;
         }
+        if id == "device-command.get" {
+            writeln!(out, "    pub async fn device_command_get(&self, id: &str, wait: bool) -> Result<Envelope<DeviceCommand>, ClientError> {{ self.get(&format!(\"/v1/client/device-commands/{{}}?wait={{wait}}\", percent_encode(id))).await }}")?;
+            continue;
+        }
         if id == "harness-questions.list" {
             writeln!(out, "    pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/harness-questions{{suffix}}\")).await }}")?;
             continue;
@@ -246,6 +277,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    pub async fn mission_declaration_get(&self, mission: &str, revision: Option<&str>) -> Result<Envelope<MissionDeclaration>, ClientError> {{ let mut path = format!(\"/v1/client/mission-declaration?mission={{}}\", percent_encode(mission)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -430,6 +463,10 @@ fn swift_operation_methods(
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
             continue;
         }
+        if id == "device-command.get" {
+            writeln!(out, "    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> {{ let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: \"/\"))) ?? id; return try await get(\"v1/client/device-commands/\\(escaped)\", query: [.init(name: \"wait\", value: String(wait))]) }}")?;
+            continue;
+        }
         if id == "harness-questions.list" {
             writeln!(out, "    public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/harness-questions\", query: query) }}")?;
             continue;
@@ -529,6 +566,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/mission-declaration\", query: query) }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -692,14 +731,19 @@ fn validate_model(
             && (rust.contains("#[serde(tag = \"type\", content = \"body\"")
                 || (rust.contains("struct TaggedBody")
                     && rust.contains("#[serde(rename = \"type\")]")));
-        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline {
+        let command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && rust_block.contains("pub command: DeviceCommandBody")
+            && rust.contains("#[serde(tag = \"command_kind\", content = \"args\")]");
+        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline && !command_body {
             bail!("Rust `{rust_name}` does not model schema field `{property}`");
         }
         let swift_field = match property.as_str() {
             "final" => "isFinal".into(),
             other => lower_camel_snake(other),
         };
-        if !swift_block.contains(&swift_field) {
+        let swift_command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && swift_block.contains("command: PhoneCommand");
+        if !swift_block.contains(&swift_field) && !swift_command_body {
             bail!("Swift `{swift_name}` does not model schema field `{property}`");
         }
     }
@@ -731,7 +775,7 @@ fn validate_surfaces(
             schema,
             definition,
             definition,
-            &format!("{definition}Resource"),
+            &if definition == "DeviceCommand" { definition.to_owned() } else { format!("{definition}Resource") },
             rust,
             swift,
         )?;
@@ -802,6 +846,7 @@ fn validate_surfaces(
         "CanonicalNode",
         "SubjectDefinition",
         "PublicationDefinition",
+        "MissionDeclaration",
         "AgentsStatusWatermark",
         "Snapshot",
         "AgentsPublicationMetadata",
@@ -1230,9 +1275,7 @@ fn swift_contract<'a>(
     constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
-    let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n\nimport Foundation\n\n"
-    );
+    let mut out = "// @generated by st3-client-codegen; do not edit.\n\nimport Foundation\n\n".to_owned();
     writeln!(
         out,
         "public enum ActionType: String, Codable, CaseIterable, Sendable {{"
@@ -1392,6 +1435,10 @@ fn ts_object(value: &Value) -> Result<String> {
             fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
         }
     }
+    // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.
+    if fields.is_empty() && value["additionalProperties"] == false {
+        return Ok("Record<string, never>".into());
+    }
     if let Some(extra) = value.get("additionalProperties")
         && extra.is_object()
     {
@@ -1484,9 +1531,7 @@ fn ts_closed_union(definition: &Value, defs: &serde_json::Map<String, Value>) ->
 fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-    let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
-    );
+    let mut out = "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n".to_owned();
     for constant in constants {
         writeln!(
             out,
@@ -1596,6 +1641,10 @@ fn typescript_operation_methods(
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
             continue;
         }
+        if id == "device-command.get" {
+            writeln!(out, "    async deviceCommandGet(id: string, options: {{ wait?: boolean }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DeviceCommand>> {{ return this.get(`/v1/client/device-commands/${{encodeURIComponent(id)}}` + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
         let route = if path.contains("{id}") {
             path.replace("{id}", "${encodeURIComponent(routedId(id))}")
         } else {
@@ -1702,6 +1751,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MissionDeclaration>> {{ return this.get('{route}' + query({{ mission, revision }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -1776,6 +1827,35 @@ mod tests {
     use super::*;
     use anyhow::ensure;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn person_pins_identity_is_shared_by_generated_clients() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/person-pins-v2.json"
+        ))?;
+        let constants = contract_constants(&operations)?;
+        let uuid = operations["constants"]["pins_arrangement_uuid"]["value"].as_str().unwrap();
+        assert_eq!(uuid, "00000000-0000-7000-8000-000000000002");
+        assert_eq!(fixture["subject"], format!("arrangement/person/example/{uuid}"));
+        assert_eq!(fixture["create"]["version"], 2);
+        assert!(fixture["pin"]["operations"][0]["bucket"].is_null());
+        assert_eq!(fixture["unpin"]["operations"][0]["op"], "remove");
+        for (text, name) in [
+            (rust_contract(std::iter::empty(), &[], &constants)?, "PINS_ARRANGEMENT_UUID"),
+            (swift_contract(std::iter::empty(), &[], &constants)?, "st3PinsArrangementUuid"),
+            (typescript_models(&schema, &operations, &constants)?, "PINS_ARRANGEMENT_UUID"),
+        ] {
+            assert!(text.contains(name));
+            assert!(text.contains(uuid));
+        }
+        Ok(())
+    }
 
     #[test]
     fn wire_alias_types_keep_the_deployed_sender_constant() -> Result<()> {

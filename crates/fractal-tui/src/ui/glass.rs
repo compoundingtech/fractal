@@ -21,6 +21,7 @@ struct TabBadge {
     alerts: Option<usize>,
     ask: bool,
     needs_person: bool,
+    inbox: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -120,6 +121,9 @@ impl TabStatuses {
                 }
             }
         }
+        if let Some(total) = world.inbox_alerts {
+            status.inbox.alerts = total;
+        }
         status
     }
 }
@@ -133,6 +137,11 @@ impl TabBadge {
         } else {
             ""
         }
+    }
+
+    fn glyph(self) -> &'static str {
+        let attention = self.attention();
+        if attention.is_empty() { self.activity } else { attention }
     }
 
     /// Match the shared truncator without allocating a temporary title for width queries.
@@ -153,69 +162,91 @@ impl TabBadge {
 
     fn width(self, title: &str, counts: bool) -> usize {
         let attention = self.attention();
-        let count = if counts && !attention.is_empty() {
+        let count = if (counts || self.inbox) && !attention.is_empty() {
             self.alerts
-                .filter(|count| *count > 1)
+                .filter(|count| *count > usize::from(!self.inbox))
                 .map_or(0, |count| count.ilog10() as usize + 1)
         } else {
             0
         };
         let (title, truncated) = Self::title(title);
         // Preserve the existing 26-cell title budget independently of status chrome.
-        2 + text::width(self.activity)
+        2 + text::width(self.glyph())
+            + usize::from(!self.glyph().is_empty())
             + text::width(title)
             + usize::from(truncated)
-            + if attention.is_empty() { 0 } else { 2 + count }
+            + count
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
         if width == 0 {
             return String::new();
         }
-        let activity_width = text::width(self.activity);
-        if !self.activity.is_empty() && width <= activity_width {
-            return text::truncate(self.activity, width);
+        let counts = if self.inbox {
+            let digits = self.alerts.filter(|count| *count > 0)
+                .map_or(0, |count| count.ilog10() as usize + 1);
+            text::width(self.glyph()) + digits <= width
+        } else {
+            counts
+        };
+        let glyph = self.glyph();
+        let glyph_width = text::width(glyph);
+        if !glyph.is_empty() && width <= glyph_width {
+            return text::truncate(glyph, width);
         }
         let (title, truncated) = Self::title(title);
         let attention = self.attention();
         let digits = if counts && !attention.is_empty() {
             self.alerts
-                .filter(|count| *count > 1)
+                .filter(|count| *count > usize::from(!self.inbox))
                 .map_or(0, |count| count.ilog10() as usize + 1)
         } else {
             0
         };
         let capacity = 2
-            + self.activity.len()
+            + glyph.len()
+            + usize::from(!glyph.is_empty())
             + title.len()
             + if truncated { "…".len() } else { 0 }
-            + if attention.is_empty() {
-                0
-            } else {
-                1 + attention.len() + digits
-            };
+            + digits;
         let mut label = String::with_capacity(capacity);
         label.push(' ');
-        label.push_str(self.activity);
+        label.push_str(glyph);
+        if counts && !attention.is_empty()
+            && let Some(count) = self.alerts.filter(|count| *count > usize::from(!self.inbox))
+        {
+            let _ = write!(label, "{count}");
+        }
+        if !glyph.is_empty() {
+            label.push(' ');
+        }
         label.push_str(title);
         if truncated {
             label.push('…');
         }
-        if !attention.is_empty() {
-            label.push(' ');
-            label.push_str(attention);
-            if counts && let Some(count) = self.alerts.filter(|count| *count > 1) {
-                let _ = write!(label, "{count}");
-            }
-        }
+
         label.push(' ');
         if text::width(&label) > width {
+            if self.inbox && text::width(&label).saturating_sub(2) <= width {
+                label.remove(0);
+                label.pop();
+                return label;
+            }
+            if self.inbox && counts && let Some(count) = self.alerts.filter(|count| *count > 0) {
+                let mut compact = format!("{glyph}{count}");
+                let room = width.saturating_sub(text::width(&compact));
+                if room > 1 {
+                    compact.push(' ');
+                    compact.push_str(&text::truncate(title, room - 1));
+                }
+                return compact;
+            }
             use unicode_width::UnicodeWidthChar as _;
-            // Padding may disappear, but truncation never consumes the activity glyph.
-            let (prefix_bytes, prefix_width) = if self.activity.is_empty() {
+            // Padding may disappear, but truncation never consumes the status glyph.
+            let (prefix_bytes, prefix_width) = if glyph.is_empty() {
                 (0, 0)
             } else {
-                (1 + self.activity.len(), 1 + activity_width)
+                (1 + glyph.len(), 1 + glyph_width)
             };
             let room = width - prefix_width;
             let mut end = prefix_bytes;
@@ -336,6 +367,7 @@ struct TabDrag {
 enum DragFrom {
     /// A border between splits: it resizes them as it moves.
     Border(super::layout::Divider),
+    Sidebar,
     /// A tab: its group and place in the strip.
     Tab(usize, usize),
     /// A subject from the sidebar, which opens where it is let go.
@@ -424,6 +456,8 @@ pub(crate) struct Sidebar {
     pub(crate) focused: bool,
     pub(crate) section: usize,
     pub(crate) selected: [usize; 5],
+    /// A border click may be followed by a second click to reset its width.
+    last_resize: Option<std::time::Instant>,
 }
 
 impl Default for Sidebar {
@@ -434,6 +468,7 @@ impl Default for Sidebar {
             focused: false,
             section: 1,
             selected: [0; 5],
+            last_resize: None,
         }
     }
 }
@@ -642,6 +677,12 @@ impl Glass {
 }
 
 impl Glasses {
+    pub(crate) fn sidebar_resizing(&self) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|drag| matches!(drag.from, DragFrom::Sidebar))
+    }
+
     pub(crate) fn palette_open(&self) -> bool {
         self.palette.is_some()
     }
@@ -1546,6 +1587,32 @@ impl Ui {
         scored.into_iter().map(|(choice, _)| choice).collect()
     }
 
+    /// Preserve the responsive default; chosen widths keep the main pane usable.
+    fn sidebar_columns(&self, total: u16, wanted: Option<u16>) -> u16 {
+        let Some(wanted) = wanted else {
+            return if total > 40 {
+                (total / 3).clamp(28, 44)
+            } else {
+                0
+            };
+        };
+        fn terminal(layout: &Layout) -> bool {
+            match layout {
+                Layout::Group(group) => group
+                    .tabs
+                    .get(group.current)
+                    .is_some_and(|tab| tab.pane.starts_with("terminal:")),
+                Layout::Split { children, .. } => children.iter().any(terminal),
+            }
+        }
+        let terminal = terminal(&self.glasses.glass().layout);
+        let maximum = total.saturating_sub(if terminal { 83 } else { 25 });
+        if maximum < 24 {
+            return 0;
+        }
+        wanted.clamp(24, maximum)
+    }
+
     pub(crate) fn render_glass(&self, buf: &mut Buffer, area: Rect) {
         let glasses = &self.glasses;
         let glass = glasses.glass();
@@ -1557,9 +1624,17 @@ impl Ui {
             ..area
         };
         // The sidebar takes the left of the glass, beside the splits rather than over them.
-        if glasses.sidebar.shown && body.width > 40 {
-            let width = (body.width / 3).clamp(28, 44);
+        let width = self.sidebar_columns(body.width, self.sidebar_width);
+        if glasses.sidebar.shown && width > 0 {
             self.draw_sidebar(buf, Rect { width, ..body }, &glasses.sidebar);
+            self.hit(
+                Rect {
+                    x: body.x + width,
+                    width: 1,
+                    ..body
+                },
+                Hit::SidebarResize,
+            );
             for y in body.y..body.y + body.height {
                 buf[(body.x + width, y)]
                     .set_symbol("│")
@@ -1718,6 +1793,18 @@ impl Ui {
         {
             return false;
         }
+        let resized = if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+            && self
+                .glasses
+                .drag
+                .as_ref()
+                .is_some_and(|drag| matches!(drag.from, DragFrom::Sidebar))
+        {
+            let area = self.frame.borrow().area;
+            self.sidebar_columns(area.width, Some(mouse.column.saturating_sub(area.x)))
+        } else {
+            0
+        };
         let glasses = &mut self.glasses;
         let point = (mouse.column, mouse.row);
         match mouse.kind {
@@ -1736,6 +1823,23 @@ impl Ui {
                     at: point,
                     moving: false,
                 };
+                if matches!(hit, Some(Hit::SidebarResize)) {
+                    let now = std::time::Instant::now();
+                    let again = glasses
+                        .sidebar
+                        .last_resize
+                        .is_some_and(|at| now.duration_since(at).as_millis() < 400);
+                    if again {
+                        glasses.sidebar.last_resize = None;
+                        glasses.drag = None;
+                        self.sidebar_width = None;
+                        self.save_prefs();
+                    } else {
+                        glasses.sidebar.last_resize = Some(now);
+                        glasses.drag = Some(start(DragFrom::Sidebar));
+                    }
+                    return true;
+                }
                 // A border between splits: drag to resize; press twice quickly to even it out.
                 let border = self
                     .frame
@@ -1795,6 +1899,13 @@ impl Ui {
                 };
                 drag.at = point;
                 drag.moving |= point != drag.start;
+                if matches!(drag.from, DragFrom::Sidebar) {
+                    if drag.moving {
+                        glasses.sidebar.last_resize = None;
+                        self.sidebar_width = Some(resized);
+                    }
+                    return true;
+                }
                 if let DragFrom::Border(divider) = drag.from {
                     let (at, start, total) = match divider.side {
                         Side::Right => (point.0, divider.area.x, divider.area.width),
@@ -1814,6 +1925,10 @@ impl Ui {
                 let Some(drag) = glasses.drag.take() else {
                     return false;
                 };
+                if matches!(drag.from, DragFrom::Sidebar) {
+                    self.save_prefs();
+                    return true;
+                }
                 if let DragFrom::Border(_) = drag.from {
                     // Kept on this device: the graph's glass does not carry sizes yet.
                     self.glasses.save();
@@ -2076,7 +2191,7 @@ impl Ui {
         else {
             return;
         };
-        if !drag.moving || matches!(drag.from, DragFrom::Border(_)) {
+        if !drag.moving || matches!(drag.from, DragFrom::Border(_) | DragFrom::Sidebar) {
             return;
         }
         let mark = Style::default().bg(theme::SURFACE1);
@@ -2140,7 +2255,7 @@ impl Ui {
             DragFrom::Subject(id) => pane_for(id)
                 .map(|pane| self.pane_title(&pane))
                 .unwrap_or_else(|| id.clone()),
-            DragFrom::Border(_) => return,
+            DragFrom::Border(_) | DragFrom::Sidebar => return,
         };
         let label = format!(" ⇄ {name} ");
         let x = drag.at.0.saturating_add(1);
@@ -2214,6 +2329,17 @@ impl Ui {
     /// The sidebar's keys while it has them; `false` for a key it leaves to the glass.
     fn sidebar_key(&mut self, key: KeyEvent) -> bool {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Home) {
+            let total = self.frame.borrow().area.width;
+            let width = self.sidebar_columns(total, self.sidebar_width);
+            self.sidebar_width = match key.code {
+                KeyCode::Left => Some(self.sidebar_columns(total, Some(width.saturating_sub(2)))),
+                KeyCode::Right => Some(self.sidebar_columns(total, Some(width.saturating_add(2)))),
+                _ => None,
+            };
+            self.save_prefs();
+            return true;
+        }
         let section = self.glasses.sidebar.section;
         if section != 4 && self.resource_sidebar_key(key) { return true; }
         let count = self.listing_for(section, 40).ids.len();
@@ -2512,15 +2638,7 @@ impl Ui {
         spans.push(Span::styled(link_text, bar(theme::fg(color))));
         // Now opens over the glass from its count of alerts (Nathan, 2026-10-04: one way in,
         // named as `st now` is). No alert prints nothing at all (Nathan, 2026-10-10).
-        let alerts = self
-            .world
-            .attention
-            .items()
-            .iter()
-            .filter(|item| {
-                item.is_alert() && !self.snoozed.contains(&item.id) && !self.closed.contains(&item.id)
-            })
-            .count();
+        let alerts = self.tab_statuses.inbox.alerts;
         // A fresh workspace names its host and where to start instead of counting nothing.
         // Until st has sent the first real state, the bar says only how it is connected: a
         // placeholder that turns into the counts a moment later reads as flicker (Nathan, 2026-10-11).
@@ -2686,28 +2804,23 @@ impl Ui {
             (title, self.tab_badge(tab, pane.as_ref()))
         }).collect();
         self.frame.borrow_mut().glass_strips.push((area, index));
-        // `+` and the narrowest tab worth showing beside it.
-        const ADD: u16 = 3;
-        const NARROWEST: u16 = 4;
-        // A hidden-tab marker takes its count, its arrow, a space and the gap after it.
+        // The add button owns the right edge, even when no tab fits beside it.
+        let plus = area.width.min(3);
+        let plus_x = area.right() - plus;
+        let available = plus_x.saturating_sub(x);
         let marker = if tabs.len() > 1 {
             tabs.len().ilog10() as u16 + 4
         } else {
             0
         };
-        // `+` keeps its place at the end while the tab in front and both markers still have room.
-        let strip_room = area.width.saturating_sub(x - area.x);
-        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
-            ADD
-        } else {
-            0
-        };
-        let available = strip_room - plus;
-        let counts = tabs.iter().map(|(title, badge)| badge.width(title, true) + 1)
+        let strip_room = available;
+        let counts = tabs.iter().map(|(title, badge)| badge.width(title, true))
+            .sum::<usize>() <= usize::from(available);
+        let compact_fits = tabs.iter().map(|(title, badge)| badge.width(title, false))
             .sum::<usize>() <= usize::from(available);
         // Reserve both overflow markers and a tab gap before shortening any label. A selected
         // tab must never consume the space needed to reach its hidden neighbors.
-        let label_width = if counts {
+        let label_width = if compact_fits {
             usize::from(available)
         } else {
             usize::from(available.saturating_sub(2 * marker + 1))
@@ -2717,7 +2830,14 @@ impl Ui {
         let label_width = label_width.max(usize::from(available > 0));
         let mut labels: Vec<_> = tabs
             .iter()
-            .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
+            .map(|(title, badge)| {
+                let width = if badge.inbox && compact_fits {
+                    label_width.max(badge.width(title, true).min(usize::from(strip_room)))
+                } else {
+                    label_width
+                };
+                (badge.label(title, width, counts), *badge)
+            })
             .collect();
         let mut widths: Vec<u16> = labels
             .iter()
@@ -2763,9 +2883,7 @@ impl Ui {
         // Reserve only the cells actually painted after the final tab, including its gap.
         let hidden_after = labels.len().saturating_sub(last + 1);
         let mut tail = if hidden_after > 0 {
-            hidden_after.ilog10() as u16 + 4 + plus + u16::from(plus > 0)
-        } else if plus > 0 {
-            1 + plus
+            hidden_after.ilog10() as u16 + 4
         } else {
             0
         };
@@ -2774,13 +2892,19 @@ impl Ui {
         } else {
             0
         };
+        if let Some(inbox) = (first..=last).find(|at| tabs.get(*at).is_some_and(|(_, badge)| badge.inbox)) {
+            let others: u16 = widths[first..=last].iter().enumerate()
+                .filter(|(offset, _)| first + offset != inbox).map(|(_, width)| *width).sum();
+            let room = strip_room.saturating_sub(before + tail).saturating_sub(others);
+            labels[inbox].0 = tabs[inbox].1.label(&tabs[inbox].0, usize::from(room), counts);
+            widths[inbox] = text::width(&labels[inbox].0) as u16;
+        }
         let tab_cells = widths
             .iter()
             .take(last + 1)
             .skip(first)
             .map(|width| u32::from(*width))
-            .sum::<u32>()
-            + (last - first) as u32;
+            .sum::<u32>();
         let bare = !labels.is_empty()
             && u32::from(before) + tab_cells + u32::from(tail) > u32::from(strip_room);
         if bare {
@@ -2804,7 +2928,7 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
             x += width;
         }
-        let stop = (area.x + area.width).saturating_sub(tail);
+        let stop = plus_x.saturating_sub(tail);
         for (shown, (label, badge)) in labels.iter().enumerate().take(last + 1).skip(first) {
             let needs = badge.needs_person;
             let style = match (shown == group.current, focused) {
@@ -2819,22 +2943,24 @@ impl Ui {
             };
             // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
             let width = widths[shown].min(stop.saturating_sub(x));
+            if width == 0 { continue; }
             buf.set_stringn(x, area.y, label, width as usize, style);
             // What waits on the person keeps its colour on every tab, the one in front too.
             if let Some(at) = attention_at(label, badge.attention()) {
                 let offset = text::width(&label[..at]) as u16;
                 if offset < width {
+                    let status = label[at..].split(' ').next().unwrap_or(badge.attention());
                     buf.set_stringn(
                         x + offset,
                         area.y,
-                        &label[at..],
-                        usize::from(width - offset),
+                        status,
+                        text::width(status).min(usize::from(width - offset)),
                         style.fg(theme::PERSON),
                     );
                 }
             }
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
-            x += width + 1;
+            x += width;
         }
         if last + 1 < labels.len() && !bare {
             let marker = format!(" {}›", labels.len() - 1 - last);
@@ -2843,24 +2969,19 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
-        if !bare && x + 3 <= area.x + area.width {
-            buf.set_stringn(x, area.y, " + ", 3, theme::dim().bg(strip));
-            self.hit(
-                Rect {
-                    x,
-                    width: 3,
-                    ..area
-                },
-                Hit::GlassAdd(index),
-            );
-        }
+        let add = if plus == 3 { " + " } else { "+" };
+        buf.set_stringn(plus_x, area.y, add, usize::from(plus), theme::dim().bg(strip));
+        self.hit(
+            Rect { x: plus_x, width: plus, ..area },
+            Hit::GlassAdd(index),
+        );
         let zoomed = self.glasses.zoomed;
         if zoomed && focused {
             let label = " ⤢ zoomed · ctrl+o ";
             let width = text::width(label) as u16;
-            if x + width < area.x + area.width {
+            if x + width < plus_x {
                 buf.set_stringn(
-                    area.x + area.width - width,
+                    plus_x - width,
                     area.y,
                     label,
                     width as usize,
@@ -2972,6 +3093,7 @@ impl Ui {
             alerts: statuses.loaded.then_some(subject.alerts),
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
+            inbox: matches!(pane, Some(Pane::List(0))),
         }
     }
 
@@ -4861,7 +4983,7 @@ struct TabWindow {
 
 /// Where a strip shows its tabs, starting from `start`. Following, the tab in front comes on
 /// screen: the strip stays where it is until that tab passes an end, then moves just enough.
-/// Each tab takes its width and a gap; a `marker` for hidden tabs is reserved at each end.
+/// Each tab includes its own padding; hidden-tab markers are reserved at each end.
 fn visible_tabs(
     widths: &[u16],
     current: usize,
@@ -4880,7 +5002,7 @@ fn visible_tabs(
     }
     let current = current.min(count - 1);
     let fits = |first: usize, last: usize| {
-        let tabs: u16 = widths[first..=last].iter().map(|width| width + 1).sum();
+        let tabs: u16 = widths[first..=last].iter().sum();
         let before = if first > 0 { marker } else { 0 };
         let after = if last + 1 < count { marker } else { 0 };
         tabs + before + after <= room
@@ -4904,17 +5026,13 @@ fn visible_tabs(
     TabWindow { first, last, most }
 }
 
-/// Where the attention suffix (` ?2`, ` ◆`) starts in a tab's label, if the label still has it.
+/// Where the leading attention glyph starts, without mistaking title punctuation for status.
 fn attention_at(label: &str, attention: &str) -> Option<usize> {
     if attention.is_empty() {
         return None;
     }
-    let body = label
-        .trim_end_matches(' ')
-        .trim_end_matches(|c: char| c.is_ascii_digit());
-    body.strip_suffix(attention)
-        .filter(|before| before.ends_with(' '))
-        .map(str::len)
+    let body = label.trim_start_matches(' ');
+    body.starts_with(attention).then_some(label.len() - body.len())
 }
 
 /// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
@@ -5081,6 +5199,148 @@ mod tests {
         let mut ui = Ui::new(demo::test_world());
         ui.glasses.sidebar.shown = false;
         ui
+    }
+
+    #[test]
+    fn sidebar_border_drag_resizes_live_clamps_and_resets_without_dragging_rows() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut ui = glass();
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let border = |ui: &Ui| {
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches!(hit, Hit::SidebarResize).then_some(*rect))
+                .unwrap()
+        };
+        let rect = border(&ui);
+        let (x, y) = (rect.x, rect.y);
+        assert_eq!((rect.x, rect.width), (44, 1));
+        let background = terminal.backend().buffer()[(rect.x, rect.y)].bg;
+        mouse(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_ne!(terminal.backend().buffer()[(rect.x, rect.y)].bg, background);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), x, y);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 60, rect.y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(border(&ui).x, 60, "resize is visible before release");
+        assert_eq!(terminal.backend().buffer()[(60, rect.y)].symbol(), "│");
+        println!(
+            "sidebar resized to 60 columns:\n{:?}",
+            terminal.backend().buffer()
+        );
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 0, rect.y);
+        assert_eq!(ui.sidebar_width, Some(24));
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 139, y);
+        assert_eq!(ui.sidebar_width, Some(115));
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 139, rect.y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let Rect { x, y, .. } = border(&ui);
+        for _ in 0..2 {
+            mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), x, y);
+            mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), x, y);
+        }
+        assert_eq!(ui.sidebar_width, None);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(border(&ui).x, 44);
+        ui.glasses.sidebar.focused = true;
+        ui.resource_sidebar.focused = true;
+        press(&mut ui, KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(ui.sidebar_width, Some(46));
+        press(&mut ui, KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(ui.sidebar_width, Some(44));
+        press(&mut ui, KeyCode::Home, KeyModifiers::CONTROL);
+        assert_eq!(ui.sidebar_width, None);
+        assert!(ui.glasses.drag.is_none());
+    }
+
+    #[test]
+    fn sidebar_width_restores_from_preferences_and_reserves_terminal_columns() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        prefs::save(
+            &path,
+            &prefs::Prefs {
+                sidebar_width: Some(36),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut ui = terminal_details_fixture();
+        ui.apply_prefs(prefs::load(&path));
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 36);
+        let y = ui.frame.borrow().glass_sidebar.y;
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), 36, y);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 139, y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.sidebar_width, Some(57));
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 57);
+        assert_eq!(ui.frame.borrow().glass_leaves[0].width, 82);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 139, y);
+        terminal.backend_mut().resize(120, 24);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 37);
+        assert_eq!(ui.frame.borrow().glass_leaves[0].width, 82);
+        ui.sidebar_width = None;
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(
+            ui.frame.borrow().glass_sidebar.width,
+            40,
+            "reset keeps the original default"
+        );
+        for total in [0, 40, 82, 106] {
+            assert_eq!(ui.sidebar_columns(total, Some(36)), 0);
+        }
+        assert_eq!(ui.sidebar_columns(107, Some(36)), 24);
+        assert_eq!(ui.sidebar_columns(200, Some(36)), 36);
+    }
+
+    #[test]
+    fn sidebar_resize_owns_drag_and_release_over_a_mouse_enabled_terminal() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+        use std::{io::{Read as _, Write as _}, os::unix::net::UnixStream};
+        let mut ui = terminal_details_fixture();
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
+            client, "agent/example/atlas/builder", "one".into(), 24, 80,
+        ));
+        peer.write_all(&encode_packet(MessageType::Screen, b"\x1b[?1000h\x1b[?1006h")).unwrap();
+        let start = Instant::now();
+        while !ui.native_terminal().unwrap().mode()
+            .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+        {
+            assert!(start.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let body = ui.terminal_body.get().unwrap();
+        let y = body.y + 1;
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), 44, y);
+        assert!(ui.glasses.sidebar_resizing());
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 100, y);
+        assert_eq!(ui.sidebar_width, Some(57));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 100, y);
+        assert!(!ui.glasses.sidebar_resizing(), "release finishes and persists resize");
+        peer.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let mut reader = PacketReader::new();
+        let mut bytes = [0; 1024];
+        while let Ok(count) = peer.read(&mut bytes) {
+            if count == 0 { break; }
+            for packet in reader.feed(&bytes[..count]).unwrap() {
+                assert_ne!(packet.type_, MessageType::Data, "resize never reaches child");
+            }
+        }
     }
 
     fn terminal_details_fixture() -> Ui {
@@ -5448,7 +5708,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_agent_activity_states_keep_attention_on_the_right() {
+    fn tab_badge_agent_activity_states_yield_to_attention() {
         for (state, glyph, attention) in [
             (AgentState::Working, "●", false),
             (AgentState::Compacting, "●", false),
@@ -5474,7 +5734,7 @@ mod tests {
             assert_eq!(badge.activity, glyph, "{state:?}");
             assert_eq!(
                 badge.label("Atlas", 80, true),
-                format!(" {glyph}Atlas{} ", if attention { " ◆" } else { "" }),
+                format!(" {} Atlas ", if attention { "◆" } else { glyph }),
                 "{state:?}"
             );
         }
@@ -5482,15 +5742,15 @@ mod tests {
 
     #[test]
     fn tab_badge_attention_count_rules_and_display_widths() {
-        for (alerts, ask, needs_person, suffix) in [
+        for (alerts, ask, needs_person, attention) in [
             (None, false, false, ""),
             (Some(0), false, false, ""),
-            (Some(0), false, true, " ◆"),
-            (Some(1), false, true, " ◆"),
-            (Some(3), false, true, " ◆3"),
-            (Some(1), true, true, " ?"),
-            (Some(2), true, true, " ?2"),
-            (Some(12), true, true, " ?12"),
+            (Some(0), false, true, "◆"),
+            (Some(1), false, true, "◆"),
+            (Some(3), false, true, "◆3"),
+            (Some(1), true, true, "?"),
+            (Some(2), true, true, "?2"),
+            (Some(12), true, true, "?12"),
         ] {
             for activity in ["", "●", "○", "×", "!", "~"] {
                 let badge = TabBadge {
@@ -5498,10 +5758,12 @@ mod tests {
                     alerts,
                     ask,
                     needs_person,
+                    inbox: false,
                 };
+                let glyph = if attention.is_empty() { activity } else { attention };
                 assert_eq!(
                     badge.label("Atlas", 80, true),
-                    format!(" {activity}Atlas{suffix} ")
+                    format!(" {glyph}{}Atlas ", if glyph.is_empty() { "" } else { " " })
                 );
                 for title in [
                     "Atlas",
@@ -5533,7 +5795,7 @@ mod tests {
                 (1, activity.to_owned()),
                 (2, format!(" {activity}")),
                 (3, format!(" {activity}…")),
-                (4, format!(" {activity}A…")),
+                (4, format!(" {activity} …")),
             ] {
                 let label = badge.label("Atlas", width, false);
                 assert_eq!(label, expected);
@@ -5562,12 +5824,12 @@ mod tests {
                     if let Hit::GlassTab(0, index) = hit {
                         let tab = &ui.glasses.glass().layout.groups()[0].tabs[*index];
                         let badge = ui.tab_badge(tab, Pane::parse(&tab.pane).as_ref());
-                        if !badge.activity.is_empty() {
+                        if !badge.glyph().is_empty() {
                             let painted = (rect.x..rect.right())
                                 .map(|x| buffer[(x, 0)].symbol())
                                 .collect::<String>();
                             assert!(
-                                painted.contains(badge.activity),
+                                painted.contains(badge.glyph()),
                                 "{width} cells, overflow={overflow}, tab {index}: |{painted}|"
                             );
                         }
@@ -5585,16 +5847,91 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_strip_snapshot_shows_compact_activity_and_attention_suffixes() {
+    fn tab_badge_strip_snapshot_shows_one_leading_status() {
         let ui = tab_badge_world();
         assert_eq!(
             tab_badge_strip(&ui, 120),
-            "●Atlas ?2 ○Idle ×Stopped Mission ?2 Inbox ?2 +"
+            "?2 Atlas ○ Idle × Stopped ?2 Mission ?2 Inbox +"
         );
     }
 
     #[test]
-    fn tab_badge_merges_projected_attention_and_questions_into_one_suffix() {
+    fn tab_badge_inbox_counts_zero_one_many_and_live_questions() {
+        for (count, ask, expected) in [
+            (0, false, " Inbox "), (1, false, " ◆1 Inbox "),
+            (3, false, " ◆3 Inbox "), (1, true, " ?1 Inbox "),
+            (2, true, " ?2 Inbox "),
+        ] {
+            let badge = TabBadge {
+                inbox: true, alerts: Some(count), ask,
+                needs_person: count > 0, ..TabBadge::default()
+            };
+            for counts in [false, true] {
+                assert_eq!(badge.label("Inbox", 80, counts), expected);
+                assert_eq!(badge.width("Inbox", counts), text::width(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_inbox_complete_window_excludes_closed_snoozed_and_updates() {
+        let mut ui = tab_badge_world();
+        let inbox = Tab::pane("list:home");
+        ui.snoozed.insert("attention/a".into());
+        ui.refresh_tab_statuses();
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " ?1 Inbox ");
+        ui.closed.insert("attention/b".into());
+        ui.refresh_tab_statuses();
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " Inbox ");
+        ui.world.inbox_alerts = Some(251);
+        ui.refresh_tab_statuses();
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " ◆251 Inbox ");
+    }
+
+    #[test]
+    fn tab_badge_inbox_and_status_line_share_effective_alert_total() {
+        let mut ui = tab_badge_world();
+        ui.world.settled = true;
+        ui.world.agents = Load::Ready(Vec::new());
+        ui.world.attention = Load::Ready(Vec::new());
+        for total in [None, Some(0), Some(251)] {
+            ui.world.inbox_alerts = total;
+            ui.refresh_tab_statuses();
+            let area = Rect::new(0, 0, 120, 1);
+            let mut buffer = Buffer::empty(area);
+            ui.status_line(&mut buffer, area, ui.glasses.glass());
+            let row = (0..120).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+            assert_eq!(row.contains("◆ 251 alerts"), total == Some(251), "{row}");
+            assert_eq!(row.contains("nothing running yet"), total != Some(251), "{row}");
+        }
+    }
+
+    #[test]
+    fn tab_badge_inbox_keeps_digits_when_other_tabs_surrender_them() {
+        let mut ui = tab_badge_world();
+        let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+        group.tabs.retain(|tab| tab.pane == "agent:agent/a" || tab.pane == "list:home");
+        group.current = 1;
+        let atlas = ui.tab_badge(&Tab::pane("agent:agent/a"), Pane::parse("agent:agent/a").as_ref());
+        let inbox = ui.tab_badge(&Tab::pane("list:home"), Some(&Pane::List(0)));
+        // The strip reserves one leading cell and the three-cell add button.
+        let chrome = 1 + 3;
+        let compact_width = (atlas.width("Atlas", true) + inbox.width("Inbox", true) + chrome - 1) as u16;
+        let inbox_min_width = (inbox.width("Inbox", true).saturating_sub(2) + chrome) as u16;
+        for width in [40, 26, 18, 12, inbox_min_width] {
+            let row = tab_badge_strip(&ui, width);
+            println!("INBOX {width}: |{row}|");
+            assert!(row.contains("?2"), "{width}: {row}");
+        }
+        let compact = tab_badge_strip(&ui, compact_width);
+        assert!(compact.contains("?2"), "{compact}");
+        assert!(!compact.contains("?2 Atlas"), "{compact}");
+        assert_eq!(atlas.label("Atlas", 80, false), " ? Atlas ");
+        assert_eq!(inbox.label("Inbox", 2, false), "?2");
+    }
+
+    #[test]
+    fn tab_badge_merges_projected_attention_and_questions_into_one_status() {
         for state in [AgentState::NeedsYou, AgentState::NeedsLogin] {
             let mut ui = tab_badge_world();
             let mut next = ui.world.clone();
@@ -5611,20 +5948,20 @@ mod tests {
                 let badge = ui.tab_badge(&tab, Pane::parse(key).as_ref());
                 let wide = badge.label(title, 80, true);
                 assert_eq!(wide.matches('?').count(), 1, "{wide}");
-                assert!(wide.contains(&format!("{title} ?2")), "{wide}");
+                assert!(wide.contains(&format!("?2 {title}")), "{wide}");
                 assert!(!wide.contains('◆'), "{wide}");
                 let compact = badge.label(title, 80, false);
-                assert!(compact.contains(&format!("{title} ? ")), "{compact}");
+                assert!(compact.contains(&format!("? {title}")), "{compact}");
                 assert!(!compact.contains('2'), "{compact}");
             }
         }
     }
 
     #[test]
-    fn tab_badge_narrow_strip_preserves_activity_after_dropping_attention_chrome() {
+    fn tab_badge_narrow_strip_preserves_attention_after_dropping_counts() {
         let ui = tab_badge_world();
         let shown = tab_badge_strip(&ui, 18);
-        assert!(shown.starts_with('●'), "{shown}");
+        assert!(shown.starts_with('?'), "{shown}");
         assert!(!shown.contains("?2"), "{shown}");
         assert!(shown.contains('›'), "hidden tabs remain reachable: {shown}");
     }
@@ -5640,13 +5977,13 @@ mod tests {
         let badge = ui.tab_badge(&tab, pane.as_ref());
         assert_eq!(badge.alerts, Some(0));
         assert!(!badge.ask);
-        assert_eq!(badge.label("Atlas", 28, true), " ●Atlas ");
+        assert_eq!(badge.label("Atlas", 28, true), " ● Atlas ");
         let mut next = ui.world.clone();
         next.attention = Load::Loading;
         ui.set_world(next);
         assert_eq!(
             ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true),
-            " ●Atlas "
+            " ● Atlas "
         );
     }
 
@@ -5714,16 +6051,40 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_small_strips_keep_both_overflow_targets_inside_the_strip() {
+    fn tab_badge_small_strips_keep_overflow_targets_when_unpadded_inbox_fits() {
         let mut ui = tab_badge_world();
         for current in [0, 2, 4] {
             ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
             for width in [12, 14, 18] {
                 ui.frame.borrow_mut().hits.clear();
                 let shown = tab_badge_strip(&ui, width);
-                assert!(!shown.contains("?2"), "{width}: {shown}");
-                if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
-                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
+                if current == 4 {
+                    assert!(shown.contains("?2"), "{width}: {shown}");
+                }
+                // An overflow marker appears only when a tab is hidden on that side.
+                let row = tab_strip_row(&ui, width);
+                let info = ui.frame.borrow();
+                let visible: Vec<_> = info.hits.iter().filter_map(|(_, hit)| match hit {
+                    Hit::GlassTab(0, tab) => Some(*tab),
+                    _ => None,
+                }).collect();
+                let first = *visible.iter().min().expect("selected tab is visible");
+                let last = *visible.iter().max().unwrap();
+                let before = first > 0;
+                let after = last < 4;
+                assert_eq!(row.contains('‹'), before, "{width}: {row}");
+                assert_eq!(row.contains('›'), after, "{width}: {row}");
+                let targets: Vec<_> = info.hits.iter().filter_map(|(_, hit)| match hit {
+                    Hit::GlassTabMore(0, tab) => Some(*tab),
+                    _ => None,
+                }).collect();
+                let expected: Vec<_> = first.checked_sub(1).into_iter()
+                    .chain(after.then_some(last + 1)).collect();
+                assert_eq!(targets, expected, "{width}: {row}");
+                if width == 18 && current == 0 { assert!(after, "{row}"); }
+                if width == 18 && current == 4 { assert!(before, "{row}"); }
+                drop(info);
+                assert_marker_counts(&ui, &row, 5);
                 for (rect, hit) in &ui.frame.borrow().hits {
                     if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
                         assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
@@ -5950,6 +6311,7 @@ mod tests {
     fn the_top_bar_counts_alerts_and_prints_nothing_at_zero() {
         let mut ui = glass();
         ui.world.attention = Load::Ready(vec![]);
+        ui.refresh_tab_statuses();
         let none = screen(&ui);
         let first = none.lines().next().unwrap();
         assert!(!first.contains("alert") && !first.contains("need"), "{first}");
@@ -5962,15 +6324,18 @@ mod tests {
             subjects: vec![],
         };
         ui.world.attention = Load::Ready(vec![update.clone()]);
+        ui.refresh_tab_statuses();
         let first = screen(&ui).lines().next().unwrap().to_owned();
         assert!(!first.contains("alert"), "{first}");
         ui.world.attention = Load::Ready(vec![update, alert_prompt("attention/one", "agent/example/atlas/builder")]);
+        ui.refresh_tab_statuses();
         let first = screen(&ui).lines().next().unwrap().to_owned();
         assert!(first.contains("◆ 1 alert ") && !first.contains("alerts"), "{first}");
         ui.world.attention = Load::Ready(vec![
             alert_prompt("attention/one", "agent/example/atlas/builder"),
             alert_prompt("attention/two", "agent/example/docs/writer"),
         ]);
+        ui.refresh_tab_statuses();
         let first = screen(&ui).lines().next().unwrap().to_owned();
         assert!(first.contains("◆ 2 alerts"), "{first}");
     }
@@ -6155,7 +6520,7 @@ mod tests {
                 .lines()
                 .nth(2)
                 .unwrap()
-                .contains("Atlas Builder ◆"),
+                .contains("◆ Atlas Builder"),
             "it needs the person"
         );
         // Up and Down scroll the agent's pane; they never move to another agent.
@@ -6404,7 +6769,7 @@ mod tests {
 
     #[test]
     fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
-        let widths = [10u16; 8];
+        let widths = [11u16; 8];
         let window = |current, start, follow, room| {
             let window = visible_tabs(&widths, current, start, follow, 4, room);
             (window.first, window.last)
@@ -6436,6 +6801,75 @@ mod tests {
                 most: 0,
             }
         );
+    }
+
+    #[test]
+    fn selected_tab_keeps_padding_and_person_coloured_leading_count() {
+        let ui = tab_badge_world();
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buffer = Buffer::empty(area);
+        ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+        let frame = ui.frame.borrow();
+        let rect = frame.hits.iter().find_map(|(rect, hit)| {
+            (*hit == Hit::GlassTab(0, 0)).then_some(*rect)
+        }).unwrap();
+        for x in [rect.x, rect.right() - 1] {
+            assert_eq!(buffer[(x, 0)].symbol(), " ");
+            assert_eq!(buffer[(x, 0)].bg, theme::ACCENT);
+        }
+        for x in [rect.x + 1, rect.x + 2] {
+            assert_eq!(buffer[(x, 0)].fg, theme::PERSON);
+        }
+        assert_eq!(buffer[(rect.x + 4, 0)].fg, theme::CRUST);
+    }
+
+    #[test]
+    fn glyphless_tabs_have_only_their_outer_padding() {
+        let badge = TabBadge::default();
+        for title in ["Inbox", "Item", "+"] {
+            assert_eq!(badge.label(title, 80, true), format!(" {title} "));
+            assert_eq!(badge.width(title, true), text::width(title) + 2);
+        }
+        let badge = TabBadge {
+            activity: "●", needs_person: true, alerts: Some(3),
+            ..TabBadge::default()
+        };
+        assert_eq!(badge.label("Mission", 80, true), " ◆3 Mission ");
+    }
+
+    #[test]
+    fn overflow_keeps_add_pinned_and_mouse_hits_disjoint() {
+        for width in [1, 2, 3, 4, 12, 18, 40] {
+            let mut ui = tab_badge_world();
+            let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+            group.tabs = vec![group.tabs[0].clone(); 30];
+            for last in [false, true] {
+                if last {
+                    for _ in 0..30 {
+                        wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+                        tab_strip_row(&ui, width);
+                    }
+                }
+                let row = tab_strip_row(&ui, width);
+                assert!(row.ends_with('+'), "{width}: |{row}|");
+                let info = ui.frame.borrow();
+                let add = info.hits.iter().find_map(|(rect, hit)| {
+                    (*hit == Hit::GlassAdd(0)).then_some(*rect)
+                }).unwrap();
+                assert_eq!(add.right(), width);
+                assert_eq!(add.width, width.min(3));
+                for (rect, hit) in &info.hits {
+                    if let Hit::GlassTab(0, _) = hit {
+                        assert!(rect.right() <= add.x, "|{row}|");
+                    }
+                }
+                drop(info);
+                let column = if width >= 3 { width - 2 } else { width - 1 };
+                wheel(&mut ui, MouseEventKind::Down(MouseButton::Left), column);
+                assert!(ui.palette_open(), "{width}: |{row}|");
+                press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+            }
+        }
     }
 
     /// The badge strip's row as drawn, trimmed only at its end so the spacing shows.
@@ -6526,7 +6960,7 @@ mod tests {
                                 .collect::<String>();
                             assert!(rect.width > 0 && rect.right() <= width);
                             assert!(
-                                painted.contains('●'),
+                                painted.contains('?'),
                                 "{count} tabs, {width} cells, current={current}, tab {index}: |{row}|"
                             );
                             active_shown |= *index == current;
@@ -6544,7 +6978,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_strip_add_button_uses_spare_space_after_two_short_tabs() {
+    fn tab_strip_has_two_cell_gaps_and_a_right_pinned_add_button() {
         let mut ui = tab_badge_world();
         ui.world.attention = Load::Ready(Vec::new());
         ui.refresh_tab_statuses();
@@ -6553,7 +6987,7 @@ mod tests {
         group.tabs[0].title = Some("A".into());
         group.tabs[1].title = Some("B".into());
         let row = tab_strip_row(&ui, 14);
-        assert_eq!(row, "  ●A   ○B   +");
+        assert_eq!(row, "  ● A  ○ B  +");
         assert_eq!(strip_markers(&ui), (None, None));
         assert!(ui.frame.borrow().hits.iter().any(|(rect, hit)| {
             matches!(hit, Hit::GlassAdd(0)) && rect.width == 3 && rect.right() <= 14
@@ -6569,7 +7003,7 @@ mod tests {
             group.tabs = vec![group.tabs[0].clone(); count];
             // Establish the transient view once; each case supplies its own initial offset.
             tab_strip_row(&ui, 20);
-            for width in 1..=20 {
+            for width in 5..=20 {
                 for current in 0..count {
                     ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
                     for first in 0..count {
@@ -6596,7 +7030,7 @@ mod tests {
                                         row.chars()
                                             .skip(usize::from(rect.x))
                                             .take(usize::from(rect.width))
-                                            .any(|c| c == '●'),
+                                            .any(|c| c == '?'),
                                         "{count} tabs, {width} cells, first={first}, current={current}, manual={manual}: |{row}|"
                                     );
                                     active_shown |= *tab == current;

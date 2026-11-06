@@ -4,6 +4,7 @@
   scripts/evidence-gc [--repo .] [--remote origin] [--fetch] [--apply] [--main origin/main]
                       [--retention FILE] [--as-of UNIX] [--head COMMIT ...] [--heads-from FILE] [--open-heads-from FILE]
                       [--plan-out FILE] [--before-delete JSON_ARGV]
+                      [--resume-state FILE [--resume-only]]
 
 Dry run by default: it reads the records in --repo and prints the plan, changing nothing. With --fetch it first fetches
 every `refs/tags/evidence/*`, `refs/notes/evidence/*` and `refs/notes/evidence-input/*`, main's recent history and the tip
@@ -46,6 +47,13 @@ anything is deleted or migrated, with the plan file's path as its last argument,
 here (scripts/evidence-gc-timer runs `evidence-log-timer gc --plan FILE`), so the log says GC removed a tree before its records
 disappear. If it fails, nothing is deleted (`refused`, exit 1).
 
+RESUMING (--resume-state FILE, with --apply --remote): persist the complete plan before its hook can run. While that file exists,
+finish that plan before fetching or planning another; its original repository, remote and hook must still match. Each attempt
+reconfirms the hook, then lists the remote to skip deletions already completed. Every remaining operation is leased to the original
+object id, and whole-group atomic deletion is unchanged. The journal stays until remote and local cleanup finish; a failure leaves
+it for a later invocation. Protection-kept groups finish as reported outcomes, so the next run can plan again. A file lock prevents
+two runs using the same journal. --resume-only refuses to start a new plan if another run completed this one meanwhile. Neither a retry loop nor a longer unit or hook timeout is needed.
+
 OPEN PULL REQUEST HEADS (--open-heads-from FILE, one commit id a line, an empty file for none): their trees are live however old
 the head is, so a pull request that waits longer than branch_days keeps its records. With --fetch the commits are fetched by id
 (a fork's head is on no branch here). A missing FILE is refused.
@@ -59,6 +67,7 @@ command fails, --apply refuses to delete anything.
 import argparse
 import base64
 import collections
+import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -440,9 +449,11 @@ def header_for_token():
 PROTECTION_REFUSED = re.compile(r'GH013: Repository rule violations')
 
 
-def push_deletions(repo, remote, refs, header, token, atomic):
+def push_deletions(repo, remote, refs, header, token, atomic, expected=None):
     """(refs the remote deleted, error text or None) of one push deleting REFS: with `atomic`, all of them or none."""
-    done = git(repo, 'push', '--porcelain', *(['--atomic'] if atomic else []), remote, *[f':{ref}' for ref in refs], header=header, check=False)
+    leases = [f'--force-with-lease={ref}:{expected[ref]}' for ref in refs] if expected is not None else []
+    done = git(repo, 'push', '--porcelain', *(['--atomic'] if atomic else []), *leases, remote,
+               *[f':{ref}' for ref in refs], header=header, check=False)
     deleted = set()
     for line in done.stdout.decode(errors='replace').splitlines():
         parts = line.split('\t')
@@ -451,10 +462,10 @@ def push_deletions(repo, remote, refs, header, token, atomic):
     if done.returncode == 0:
         return deleted, None
     text = (done.stdout + done.stderr).decode(errors='replace')
-    return deleted, (text.replace(token, '***') if token else text).strip()[-300:]
+    return deleted, (text.replace(token, '***') if token else text).strip()
 
 
-def apply_remote(repo, remote, migrate, doomed, groups):
+def apply_remote(repo, remote, migrate, doomed, groups, expected=None, replacements=None):
     """Make the remote match the plan without ever splitting a group:
     (failures, refs gone from the remote, refs its protection kept, whether the migrations' new names exist there).
 
@@ -467,12 +478,19 @@ def apply_remote(repo, remote, migrate, doomed, groups):
     token, header = header_for_token()
     failed, deleted, protected = [], set(), set()
     listed = git(repo, 'ls-remote', remote, f'{TAGS}*', f'{NOTES}*', f'{INPUT_NOTES}*', header=header).stdout.decode().split('\n')
-    there = {line.split()[1] for line in listed if len(line.split()) == 2}
+    advertised = {line.split()[1]: line.split()[0] for line in listed if len(line.split()) == 2}
+    there = set(advertised)
+    if expected is not None:
+        changed = sorted(ref for ref, oid in expected.items() if ref in advertised and advertised[ref] != oid)
+        if changed:
+            raise Refused(f'a ref in the unfinished plan changed: {changed[0]}: nothing was deleted')
     deleted |= {ref for ref in doomed if ref not in there}  # already gone (a run stopped halfway): nothing to push, only to forget
     deleted |= {old for old, _ in migrate if old not in there}
-    creates = [f'{old}:{new}' for old, new in migrate if new not in there]
+    creates = [(f'{expected[old] if expected is not None else old}:{new}', new) for old, new in migrate if new not in there]
     for start in range(0, len(creates), BATCH):
-        done = git(repo, 'push', '--porcelain', remote, *creates[start:start + BATCH], header=header, check=False)
+        batch = creates[start:start + BATCH]
+        leases = [f'--force-with-lease={new}:' for _, new in batch] if expected is not None else []
+        done = git(repo, 'push', '--porcelain', *leases, remote, *[refspec for refspec, _ in batch], header=header, check=False)
         if done.returncode != 0:
             text = (done.stdout + done.stderr).decode(errors='replace')
             failed.append((text.replace(token, '***') if token else text).strip()[-300:])
@@ -485,10 +503,18 @@ def apply_remote(repo, remote, migrate, doomed, groups):
         redundant += [ref for ref in group if not ref.startswith(TAGS) and ref.rsplit('/', 1)[1] in tagged]
     redundant = sorted(ref for ref in set(redundant) if ref in there)
     for start in range(0, len(redundant), BATCH):
-        gone, error = push_deletions(repo, remote, redundant[start:start + BATCH], header, token, atomic=False)
+        batch = redundant[start:start + BATCH]
+        keepers = sorted({replacements[old] for old in batch if old in replacements}) if replacements else []
+        if keepers:
+            # A successful migration push is not proof that its replacement still exists when the old name is deleted.
+            lines = git(repo, 'ls-remote', remote, *keepers, header=header).stdout.decode().splitlines()
+            current = {line.split()[1]: line.split()[0] for line in lines if len(line.split()) == 2}
+            if any(current.get(ref) != expected[ref] for ref in keepers):
+                raise Refused('a live replacement is missing or changed: old names remain pending')
+        gone, error = push_deletions(repo, remote, batch, header, token, atomic=False, expected=expected)
         deleted |= gone
         if error:
-            failed.append(error)
+            failed.append(error[-300:])
     batches = []
     for tagged in (False, True):  # never in one push: a refused tag would take a tagless group down with it
         batch = []
@@ -502,12 +528,12 @@ def apply_remote(repo, remote, migrate, doomed, groups):
         if batch:
             batches.append(batch)
     for batch in batches:
-        gone, error = push_deletions(repo, remote, batch, header, token, atomic=True)
+        gone, error = push_deletions(repo, remote, batch, header, token, atomic=True, expected=expected)
         deleted |= gone
         if error and PROTECTION_REFUSED.search(error) and any(ref.startswith(TAGS) for ref in batch):
             protected |= set(batch) - gone
         elif error:
-            failed.append(error)
+            failed.append(error[-300:])
     return failed, deleted, protected, True
 
 
@@ -523,11 +549,173 @@ def before_delete(argv, plan_path, summary):
     return done.returncode == 0
 
 
-def apply_local(repo, migrate, doomed):
-    commands = ''.join(f'create {new} {git(repo, "rev-parse", old).stdout.decode().strip()}\n' for old, new in migrate)
-    commands += ''.join(f'delete {ref}\n' for ref in sorted(doomed))  # a migration's old name among them once the remote dropped it
+def apply_local(repo, migrate, doomed, expected=None):
+    current = {line.split()[1]: line.split()[0] for line in git(repo, 'for-each-ref', '--format=%(objectname) %(refname)',
+               TAGS, NOTES, INPUT_NOTES).stdout.decode().splitlines()}
+    commands = ''
+    for old, new in migrate:
+        oid = expected[old] if expected is not None else current.get(old)
+        if oid is None or (new in current and current[new] != oid):
+            raise Refused('a local migration no longer matches the plan')
+        if new not in current:
+            commands += f'create {new} {oid}\n'
+    for ref in sorted(doomed):  # replay after the local transaction committed is a no-op
+        if ref not in current:
+            continue
+        if expected is not None and current[ref] != expected[ref]:
+            raise Refused(f'a local ref in the unfinished plan changed: {ref}')
+        commands += f'delete {ref} {current[ref]}\n'
     git(repo, 'update-ref', '--stdin', stdin=f'start\n{commands}prepare\ncommit\n'.encode())
     git(repo, 'pack-refs', '--all')
+
+
+def sync_directory(path):
+    fd = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_journal(path, value):
+    """The frozen plan must be durable before its hook can publish any GC lines."""
+    value = {**value, 'sha256': digest(value)}
+    with open(path + '.new', 'w', opener=lambda name, flags: os.open(name, flags, 0o600)) as handle:
+        json.dump(value, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(path + '.new', path)
+    sync_directory(path)
+
+
+def remote_identity(args):
+    configured = git(args.repo, 'remote', 'get-url', args.remote, check=False)
+    return [args.remote, configured.stdout.decode().strip() if configured.returncode == 0 else args.remote]
+
+
+def live_replacements(plan):
+    """Names removed without retiring a record require their original tree-prefixed replacement."""
+    replacements = dict(plan['migrate'])
+    grouped = {ref for group in plan['groups'] for ref in group}
+    redundant = set(plan['delete']) - grouped
+    for ref, oid, layout, tree, _ in plan['inputs']['records']:
+        if ref in redundant and layout == 'legacy' and tree:
+            replacements[ref] = f'{NOTES}{tree}/{oid}'
+    if redundant - replacements.keys():
+        raise Refused('the unfinished plan has no replacement for a live ref')
+    return replacements
+
+
+def plan_oids(plan):
+    """Bind every planned operation to the original record object, including a migration's new name."""
+    found = {r[0]: r[1] for r in plan['inputs']['records']}
+    found.update({r[0]: r[3] for r in plan['inputs']['index']})
+    expected = {}
+    for ref in [*plan['delete'], *(old for old, _ in plan['migrate'])]:
+        oid = found.get(ref)
+        if (not isinstance(ref, str) or not isinstance(oid, str) or not OID.fullmatch(oid)
+                or not valid_evidence_ref(ref, oid)):
+            raise Refused('the unfinished plan has an invalid evidence ref')
+        expected[ref] = oid
+    for old, new in live_replacements(plan).items():
+        if old != NOTES + expected[old] or not valid_evidence_ref(new, expected[old]) or not new.startswith(NOTES) or new.count('/') != 4:
+            raise Refused('the unfinished plan has an invalid migration')
+        expected[new] = expected[old]
+    return expected
+
+
+def valid_evidence_ref(ref, oid):
+    for prefix in (INPUT_TAGS, INPUT_NOTES):
+        if ref.startswith(prefix):
+            parts = ref[len(prefix):].split('/')
+            return len(parts) == 3 and bool(CHECK.fullmatch(parts[0])) and bool(OID.fullmatch(parts[1])) and parts[2] == oid
+    for prefix in (TAGS, NOTES):
+        if ref.startswith(prefix):
+            parts = ref[len(prefix):].split('/')
+            return ((len(parts) == 1 and prefix == NOTES and parts[0] == oid)
+                    or (len(parts) == 2 and bool(OID.fullmatch(parts[0])) and parts[1] == oid))
+    return False
+
+
+def read_journal(args):
+    try:
+        with open(args.resume_state) as handle:
+            value = json.load(handle)
+        if not isinstance(value, dict):
+            raise ValueError('journal is not an object')
+        checksum = value.pop('sha256')
+        if checksum != digest(value) or value['version'] != 1:
+            raise ValueError('version or checksum differs')
+        if value['repo'] != os.path.realpath(git(args.repo, 'rev-parse', '--absolute-git-dir').stdout.decode().strip()) or value['remote'] != remote_identity(args):
+            raise ValueError('repository or remote differs')
+        plan = value['plan']
+        if not isinstance(plan['operation_id'], str) or not re.fullmatch(r'[0-9a-f]{64}', plan['operation_id']):
+            raise ValueError('operation id is invalid')
+        if (plan['inputs_sha256'] != digest(plan['inputs'])
+                or plan['plan_sha256'] != digest({k: plan[k] for k in ('delete', 'migrate', 'operation_id')})):
+            raise ValueError('plan digest differs')
+        if not isinstance(value['before'], (list, type(None))) or (value['before'] is not None and
+                (not value['before'] or not all(isinstance(a, str) for a in value['before']))):
+            raise ValueError('hook is not an argv')
+        if args.before_delete and json.loads(args.before_delete) != value['before']:
+            raise ValueError('the before-delete hook differs')
+        plan_oids(plan)
+        doomed = set(plan['delete'])
+        if not all(isinstance(g, list) and g and set(g) <= doomed for g in plan['groups']):
+            raise ValueError('deletion groups differ')
+        return value
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+        raise Refused(f'cannot resume {args.resume_state}: {error}: nothing was deleted') from error
+
+
+def execute_plan(args, plan, before, resumed=False):
+    summary = {k: v for k, v in plan.items() if k not in ('inputs', 'delete', 'migrate', 'trees', 'keys', 'groups')}
+    if args.resume_state:
+        summary['resumed'] = resumed
+    if args.plan_out:
+        with open(args.plan_out, 'w') as handle:
+            json.dump({**{k: v for k, v in plan.items() if k != 'groups'}, **summary}, handle, indent=1)
+    if summary['unresolved_heads'] and args.apply:
+        summary['refused'] = 'a live head could not be resolved to a tree: nothing was changed'
+        print(json.dumps(summary, indent=2))
+        return 1
+    doomed, migrate = plan['delete'], plan['migrate']
+    status = 0
+    if args.apply and (doomed or migrate):
+        expected = plan_oids(plan) if args.resume_state else None
+        if args.resume_state and not resumed:
+            write_journal(args.resume_state, {'version': 1, 'repo': os.path.realpath(git(args.repo, 'rev-parse', '--absolute-git-dir').stdout.decode().strip()),
+                          'remote': remote_identity(args), 'before': before, 'plan': plan})
+        if before and not before_delete(before, args.plan_out, summary):
+            summary['refused'] = 'the --before-delete command failed: nothing was changed'
+            print(json.dumps(summary, indent=2))
+            return 1
+        if args.remote:
+            failed, gone, protected, migrated = apply_remote(args.repo, args.remote, migrate, doomed, plan['groups'], expected=expected,
+                                                               replacements=live_replacements(plan) if expected is not None else None)
+        else:
+            failed, gone, protected, migrated = [], set(doomed) | {old for old, _ in migrate}, set(), True
+        if failed:
+            summary['failed'] = failed
+            status = 1
+        if protected:
+            summary['kept_by_protection'] = {'refs': len(protected), 'groups': sum(1 for g in plan['groups'] if protected & set(g)),
+                                             'why': 'the remote refused deleting their tags: they stay, each group whole'}
+            print(f'evidence-gc: the remote\'s protection kept {len(protected)} refs of dead groups whole', file=sys.stderr)
+        if migrated:
+            apply_local(args.repo, migrate, gone, expected=expected)
+            summary['applied'] = True
+        summary['deleted_refs'] = len(gone)
+        if args.resume_state:
+            summary['unfinished'] = bool(failed)  # protection-kept groups are a completed outcome, as without a journal
+            if not summary['unfinished']:
+                os.unlink(args.resume_state)
+                sync_directory(args.resume_state)
+    if status == 0 and plan['protected_records'] > plan['retention']['cap_records']:
+        summary['alert'] = f'the live set ({plan["protected_records"]} records) is over the cap ({plan["retention"]["cap_records"]}); nothing live was deleted'
+        status = 3
+    print(json.dumps(summary, indent=2))
+    return status
 
 
 def main(argv):
@@ -546,12 +734,17 @@ def main(argv):
     parser.add_argument('--policy-from', help='revision whose preferred evidence-skip-policy.json says which checks have inputs (default --main)')
     parser.add_argument('--plan-out', help='also write the plan, with its inputs digest, to this file')
     parser.add_argument('--before-delete', help='JSON argv run with the --plan-out path appended, after planning and before deleting')
+    parser.add_argument('--resume-state', help='with --apply --remote: save the plan here and finish it before planning another')
+    parser.add_argument('--resume-only', action='store_true', help='refuse a new plan if --resume-state is absent')
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return 2 if error.code else 0
+    journal_lock = None
     try:
         before = None
+        if args.resume_only and not args.resume_state:
+            raise Usage('--resume-only needs --resume-state')
         if args.before_delete:
             try:
                 before = json.loads(args.before_delete)
@@ -561,6 +754,26 @@ def main(argv):
                 raise Usage('--before-delete must be a JSON array of strings')
             if not args.plan_out:
                 raise Usage('--before-delete needs --plan-out: the command is given the plan file')
+        if args.resume_state:
+            if not args.apply or not args.remote:
+                raise Usage('--resume-state needs --apply and --remote')
+            args.resume_state = os.path.abspath(args.resume_state)
+            if args.plan_out and (os.path.realpath(args.plan_out) == os.path.realpath(args.resume_state)
+                                  or (os.path.exists(args.plan_out) and os.path.exists(args.resume_state)
+                                      and os.path.samefile(args.plan_out, args.resume_state))):
+                raise Usage('--plan-out and --resume-state must be different files')
+            journal_lock = open(args.resume_state + '.lock', 'a', opener=lambda name, flags: os.open(name, flags, 0o600))
+            try:
+                fcntl.flock(journal_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Refused('another GC run holds the unfinished-plan lock')
+            if os.path.lexists(args.resume_state):
+                saved = read_journal(args)
+                if saved['before'] and not args.plan_out:
+                    raise Usage('resuming a before-delete hook needs --plan-out')
+                return execute_plan(args, saved['plan'], saved['before'], resumed=True)
+            if args.resume_only:
+                raise Refused('the unfinished plan is gone: a new run must read the current open heads')
         open_heads = []
         if args.open_heads_from:
             try:
@@ -648,41 +861,18 @@ def main(argv):
                                   'main_window': sum(1 for r in live.values() if r == 'main-window')},
                    'crate_keys': crates, 'trees_deleted': len(plan['trees']), 'keys_deleted': len(plan['keys']),
                    **{k: v for k, v in plan.items() if k not in ('delete', 'migrate', 'trees', 'keys', 'groups')}}
-        if args.plan_out:
-            with open(args.plan_out, 'w') as handle:
-                json.dump({**summary, 'inputs': inputs, **{k: plan[k] for k in ('delete', 'migrate', 'trees', 'keys')}}, handle, indent=1)
-        status = 0
-        doomed, migrate = plan['delete'], plan['migrate']
-        if unresolved and args.apply:
-            summary['refused'] = 'a live head could not be resolved to a tree: nothing was changed'
-            status = 1
-        elif args.apply and (doomed or migrate) and before and not before_delete(before, args.plan_out, summary):
-            summary['refused'] = 'the --before-delete command failed: nothing was changed'
-            status = 1
-        elif args.apply and (doomed or migrate):
-            if args.remote:
-                failed, gone, protected, migrated = apply_remote(args.repo, args.remote, migrate, doomed, plan['groups'])
-            else:
-                failed, gone, protected, migrated = [], set(doomed) | {old for old, _ in migrate}, set(), True
-            if failed:
-                summary['failed'] = failed
-                status = 1
-            if protected:
-                summary['kept_by_protection'] = {'refs': len(protected), 'groups': sum(1 for g in plan['groups'] if protected & set(g)),
-                                                 'why': 'the remote refused deleting their tags: they stay, each group whole'}
-                print(f'evidence-gc: the remote\'s protection kept {len(protected)} refs of dead groups whole', file=sys.stderr)
-            if migrated:  # the local refs follow exactly what the remote did
-                apply_local(args.repo, migrate, gone)
-                summary['applied'] = True
-            summary['deleted_refs'] = len(gone)
-        if status == 0 and plan['protected_records'] > retention['cap_records']:
-            summary['alert'] = f'the live set ({plan["protected_records"]} records) is over the cap ({retention["cap_records"]}); nothing live was deleted'
-            status = 3
-        print(json.dumps(summary, indent=2))
-        return status
-    except Refused as error:
+        full_plan = {**summary, 'inputs': inputs, **{k: plan[k] for k in ('delete', 'migrate', 'trees', 'keys', 'groups')}}
+        if args.resume_state:
+            # Identical refs can be published again after an earlier operation finished. Its GC lines are not this run's receipt.
+            full_plan['operation_id'] = os.urandom(32).hex()
+            full_plan['plan_sha256'] = digest({k: full_plan[k] for k in ('delete', 'migrate', 'operation_id')})
+        return execute_plan(args, full_plan, before)
+    except (Refused, OSError) as error:
         print(f'evidence-gc: {error}', file=sys.stderr)
         return 2 if isinstance(error, Usage) else 1
+    finally:
+        if journal_lock is not None:
+            journal_lock.close()
 
 
 if __name__ == '__main__':

@@ -19,6 +19,14 @@ TARGETS = {("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
            ("Darwin", "arm64"): "aarch64-apple-darwin"}
 
 
+def bundle_binary(root, target):
+    package = root / f"fractal-{target}"
+    if not package.is_dir():
+        package = root / f"smalltalk-{target}"
+    legacy = package / "bin/st3"
+    return legacy if legacy.is_file() else package / "bin/fractal"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("baseline", choices=("fleet", "messaging"))
@@ -34,7 +42,7 @@ def main():
     # Each immutable archive has a separate directory. Concurrent tests may safely
     # download/extract the same archive without exposing a partial executable.
     installed = output / bundle["sha256"]
-    binary = installed / f"smalltalk-{target}/bin/st3"
+    binary = bundle_binary(installed, target)
     if not binary.is_file():
         with tempfile.TemporaryDirectory(prefix="download-", dir=output) as temporary:
             work = Path(temporary)
@@ -52,7 +60,9 @@ def main():
             extracted.mkdir()
             with tarfile.open(archive) as release:
                 release.extractall(extracted, filter="data")
-            build = json.loads((extracted / f"smalltalk-{target}/BUILD.json").read_text())
+            extracted_binary = bundle_binary(extracted, target)
+            binary = installed / extracted_binary.relative_to(extracted)
+            build = json.loads((extracted_binary.parent.parent / "BUILD.json").read_text())
             if build["source"] != pin["commit"] or build["target"] != target:
                 raise ValueError("release BUILD.json does not match the baseline source/target")
             try:

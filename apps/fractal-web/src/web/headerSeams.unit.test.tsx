@@ -53,9 +53,10 @@ describe('thread header seam', () => {
   })
   it.each([
     ['waiting', 'Native waiting for tool response', false, 'Needs you'],
-    ['errored', 'Native tool execution errored', false, 'Stale observation'],
+    ['errored', 'Native tool execution errored', false, 'Failed'],
     ['working', 'Native working before connection loss', true, 'Last verified · Working'],
-  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale, canonical) => {
+    ['idle', 'invalid-status', false, 'Idle'],
+  ] as const)('recognizes %s activity and sanitizes unrecognized native status labels through the roster projection', (activity, reported, stale, canonical) => {
     const row = sidebarRow({ agent: { ...agent, activity, status: reported }, stale })
     const output = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: row.status, statusLabel: row.statusLabel, statusSince: row.statusSince, freshness: row.freshness, now: 2000 }))
     expect(output).toContain(`aria-label="${canonical}; Status boundary unavailable; ${row.freshness} observation${stale ? '; last-observed snapshot' : ''}"`)

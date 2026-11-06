@@ -38,8 +38,7 @@ def identity():
             'platform': platform.machine(), 'nextest': output('cargo', 'nextest', '--version'),
             'rustc': output('rustc', '-vV'),
             'recipe': digest(Path('scripts/ci-nextest')),
-            'paths': digest(Path('scripts/ci-test-paths.rs')),
-            'targets': digest(Path('scripts/ci-nextest-targets'))}
+            'paths': digest(Path('scripts/ci-test-paths.rs'))}
 
 
 def validate_byte_sizes(manifest, actual):
@@ -343,9 +342,8 @@ def main():
         raise ValueError('checkout must match the workflow tested SHA')
     if args.action == 'build':
         directory.mkdir(parents=True, exist_ok=True)
-        targets = output('python3', 'scripts/ci-nextest-targets')
         subprocess.run(['cargo', 'nextest', 'archive', '--workspace', '--locked',
-                        '--profile', 'ci', '-E', targets,
+                        '--profile', 'ci', '-E', 'all()',
                         '--archive-file', str(directory / FILES[0])], check=True)
         # Keep the original no-default-features unit/integration/doc tests and dependency gate,
         # using the producer's compiler cache instead of rebuilding in the runtime consumer.

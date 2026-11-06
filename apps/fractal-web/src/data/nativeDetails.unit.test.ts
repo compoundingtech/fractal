@@ -1,5 +1,5 @@
 import * as Native from '@fractal/client/schema'
-import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createProjections } from './projections.ts'

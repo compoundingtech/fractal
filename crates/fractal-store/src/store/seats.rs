@@ -272,6 +272,18 @@ impl Store {
             .map(Option::flatten)
     }
 
+    /// Human-question authority is declaration metadata, not credential or graph ownership.
+    pub fn question_principal(&self, agent: &str) -> Result<Option<String>> {
+        let desired = self.desired_subject_with_writer(agent)?;
+        let declared = desired.as_ref().and_then(|(desired, _)| {
+            desired.desired.get("children")?.as_array()?.iter()
+                .find(|child| child["name"] == "principal")?
+                .get("arguments")?.get(0)?.as_str()
+        });
+        Ok(declared.map(str::to_owned)
+            .or_else(|| self.question_principal_default.get().cloned()))
+    }
+
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
     pub fn agent_person(&self, agent: &str) -> Result<Option<String>> {
@@ -286,6 +298,15 @@ impl Store {
                     .map(|view| view.map(|view| view.requester))
             },
         )
+    }
+
+    /// Whether `incarnation` of `subject` may act on its work (see [`work_incarnation_live`]).
+    pub fn work_incarnation_live(&self, subject: &str, incarnation: &str) -> Result<bool> {
+        // Its work claims and progress live on step subjects, written with this agent as actor.
+        smallclaims::touched::note_read(|| subject.to_owned());
+        smallclaims::touched::note_read(|| format!("actor:{subject}"));
+        let connection = self.readers.get();
+        crate::store::work_incarnation_live(&connection, subject, incarnation)
     }
 
     pub fn current_harness(

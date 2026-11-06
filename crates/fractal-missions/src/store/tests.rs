@@ -1851,6 +1851,96 @@ version 2
 }
 
 #[test]
+fn mission_preview_keeps_one_snapshot_when_a_run_is_published() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        Store::open(&directory.path().join("claims.sqlite3"), "birch").unwrap(),
+    );
+    let mission = publish_mission(
+        &store,
+        r#"version 2
+mission "example/onboarding" state="ready" {
+  concurrent-runs max=1
+  goal "Keep one onboarding run active."
+  step "work" { goal "Wait for the person." }
+}"#,
+        "onboarding-definition",
+    );
+    let source = format!(
+        concat!(
+            "version 2\nmission-run \"example/onboarding\" {{\n",
+            "  mission \"mission/example/onboarding@{}\"\n",
+            "  workspace {:?}\n  requester \"person/alex\"\n}}\n",
+        ),
+        mission.revision,
+        directory.path(),
+    );
+    let intent = parse_intent(&source, "birch").unwrap();
+    let before = store.index().unwrap();
+    let (writer_store, writer_intent, writer_source) = (store.clone(), intent.clone(), source.clone());
+    fractal_store::store::missions::MISSION_AFTER_RUN_LOOKUP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            // Commit after the preview read that the named run was absent. A separate
+            // thread writes while the preview's read transaction, if any, remains open.
+            std::thread::spawn(move || {
+                let preview = writer_store
+                    .mission(&writer_intent, IntentInput {
+                        kdl: writer_source,
+                        source_name: None,
+                    })
+                    .unwrap();
+                assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+                writer_store
+                    .apply(&writer_intent, &preview.subject_tokens, "concurrent-onboarding")
+                    .unwrap();
+            })
+            .join()
+            .unwrap();
+        }));
+    });
+    let preview = store
+        .mission(&intent, IntentInput {
+            kdl: source.clone(),
+            source_name: None,
+        })
+        .unwrap();
+    assert!(
+        store.index().unwrap() > before,
+        "the concurrent publication committed"
+    );
+    assert_eq!(preview.store_index, before);
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(preview.subject_tokens["mission-run/example/onboarding"].is_empty());
+    assert!(preview.predicted_actions.iter().any(|action| {
+        action.subject == "mission-run/example/onboarding" && action.action == "start-mission-run"
+    }));
+
+    let current = store
+        .mission(&intent, IntentInput {
+            kdl: source.clone(),
+            source_name: None,
+        })
+        .unwrap();
+    assert!(current.blockers.is_empty(), "the existing run is idempotent");
+    assert!(
+        !current.predicted_actions.iter().any(|action| action.action == "start-mission-run")
+    );
+    let other = source.replace(
+        "mission-run \"example/onboarding\"", "mission-run \"example/another\"",
+    );
+    let other_intent = parse_intent(&other, "birch").unwrap();
+    let blocked = store
+        .mission(&other_intent, IntentInput {
+            kdl: other,
+            source_name: None,
+        })
+        .unwrap();
+    assert!(
+        blocked.blockers.iter().any(|message| message.contains("active run limit"))
+    );
+}
+
+#[test]
 fn mission_run_capacity_uses_the_strictest_active_revision() {
     let store = Store::open_memory("node").unwrap();
     let first = publish_mission(
@@ -6695,10 +6785,14 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     );
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch(
-            /* sqlite-large-value: allow-for-now lv-ha3efb3788a3d owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "ROLLBACK; PRAGMA query_only=OFF; DROP INDEX claims_incarnation_accepted_index",
-        )
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb47d29970c26 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK")
         .unwrap();
+    drop(connection);
+    // File-backed readers are read-only; schema mutation belongs to the writer.
+    store.connection.write()
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h734b678e7a1c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_incarnation_accepted_index")
+        .unwrap();
+    let connection = store.readers.get();
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(connection.is_autocommit());
     connection
@@ -6707,7 +6801,7 @@ fn working_episode_reverse_fold_matches_full_canonical_history() {
     assert!(agent_working_since_at(&connection, agent, "inc-1", ids[5].store_index).is_err());
     assert!(!connection.is_autocommit());
     connection
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h0334b131dc24 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK; PRAGMA query_only=OFF")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hf4fcb241adf1 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ "ROLLBACK")
         .unwrap();
 }
 
@@ -6819,7 +6913,7 @@ fn a_planning_rebuild_leaves_the_operations_alone() {
         .unwrap();
     // A planning write rebuilds the planning tables only: it must not re-derive operations
     // (241,000 rows, 19 s on a real store).
-    store.rebuild_planning_projection().unwrap();
+    store.rebuild_planning_projection("example").unwrap();
     assert_eq!(count(&store), 0);
     // The full rebuild does, which is what the planning path used to run on every write.
     store.rebuild_claim_projections().unwrap();
@@ -6844,7 +6938,7 @@ fn a_retry_records_its_backoff_boundary() {
     };
     publish(
         r#"version 2
- mission "retry" state="ready" { goal "Run retry work."; step "work" { } } "#,
+ mission "retry" state="ready" { goal "Run retry work."; step "work" { agentless; }; step "z" { agentless; } } "#,
         "retry-mission",
     );
     let run = store
@@ -6859,6 +6953,7 @@ fn a_retry_records_its_backoff_boundary() {
         })
         .unwrap();
     let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "working", None).unwrap();
     store
         .set_step_state(subject, "failed", Some("first attempt failed"))
         .unwrap();
@@ -6867,6 +6962,92 @@ fn a_retry_records_its_backoff_boundary() {
     assert_eq!(view.status, "pending");
     assert_eq!(view.attempt, 2);
     assert!(view.not_before_unix_ms.unwrap() >= view.updated_at_unix_ms + 59_000);
+    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap()[subject];
+    assert_eq!(timing(), (None, None), "new attempt has no execution");
+    store.set_step_state(subject, "working", None).unwrap();
+    assert!(timing().0.is_some(), "real agentless retry opens");
+    assert!(store.retry_step_for_feedback(subject, 2, "revise", "person/reviewer").unwrap());
+    assert_eq!(timing(), (None, None), "review feedback selects attempt 3");
+    store.set_step_state(subject, "working", None).unwrap();
+    let opened = timing().0;
+    store.set_step_state(subject, "completed", None).unwrap();
+    assert_eq!(timing().0, opened);
+    assert!(timing().1.is_some(), "attemptless terminal state belongs to attempt 3");
+    store.set_step_state(&run.steps[1].subject, "working", None).unwrap();
+    let before = STATEMENTS_RUN.with(std::cell::Cell::get);
+    let batch = store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap();
+    assert_eq!(STATEMENTS_RUN.with(std::cell::Cell::get) - before, 1, "one history query for both steps");
+    assert_eq!(batch.len(), 2);
+    assert!(batch[&run.steps[1].subject].0.is_some());
+}
+
+/// The detail route's timing read (`mission_step_timestamps_for_runs`, with no subject filter) starts
+/// from the runs' own current steps and seeks each one's claims by subject and kind: it never scans
+/// the store's step and work claims, so its work follows the runs read, not the store (#5108).
+#[test]
+fn step_timing_reads_seek_the_runs_own_steps() {
+    let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(
+        &store,
+        &crate::store::missions::mission_step_timestamps_sql(),
+        rusqlite::params!["[\"run\"]", Option::<String>::None],
+    );
+    assert!(plan.iter().any(|row| row.contains("SEARCH claims USING INDEX claims_subject_kind_index")), "{plan:#?}");
+    assert!(plan.iter().any(|row| row.contains("USING INDEX step_runs_run_index")), "{plan:#?}");
+    assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
+}
+
+/// The run-driven timing read returns the rows the claims-driven read of #5108 returned, in the same
+/// order: across two runs, a retried step, a step never started and a subject filter.
+#[test]
+fn step_timing_reads_return_what_the_store_wide_read_returned() {
+    let store = Store::open_memory("node").unwrap();
+    let runs = ["one", "two"].map(|key| {
+        publish_mission(
+            &store,
+            &format!(r#"version 2
+ mission "timed-{key}" state="ready" {{ goal "Time work."; step "a" {{ agentless; }}; step "b" {{ agentless; }}; step "c" {{ agentless; }} }} "#),
+            &format!("timed-{key}-mission"),
+        );
+        store.create_mission_run(&MissionRunRequest {
+            mission: format!("timed-{key}"), revision: None, workspace: "/tmp".into(), requester: Some("person/test".into()),
+            mode: Some("run".into()), inputs: BTreeMap::new(), idempotency_key: format!("timed-{key}"),
+        }).unwrap()
+    });
+    for run in &runs {
+        let (a, b) = (&run.steps[0].subject, &run.steps[1].subject);
+        store.set_step_state(a, "working", None).unwrap();
+        store.set_step_state(a, "failed", Some("first attempt failed")).unwrap();
+        store.retry_step(a, "retry policy", 0).unwrap();
+        store.set_step_state(a, "working", None).unwrap();
+        store.set_step_state(a, "completed", None).unwrap();
+        store.set_step_state(b, "working", None).unwrap();
+    }
+    let before_5108 = format!(
+        "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM claims JOIN batches ON batches.id=claims.batch_id
+         JOIN step_runs s ON s.subject=claims.subject
+         JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
+         WHERE r.id IN (SELECT value FROM json_each(?1))
+           AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
+           AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+               'work.claimed','work.failed','work.person-done','work.person-cancelled')
+         ORDER BY claims.subject, {CANONICAL_ORDER}");
+    let rows = |sql: &str, runs: &[&str], subjects: Option<&[&str]>| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h297ac3fac461 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+        statement.query_map(
+            rusqlite::params![serde_json::to_string(runs).unwrap(), subjects.map(|subjects| serde_json::to_string(subjects).unwrap())],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
+        ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let ids = runs.iter().map(|run| run.subject.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+    let one_step = [runs[1].steps[0].subject.as_str()];
+    for (runs, subjects) in [(&ids[..], None), (&ids[..1], None), (&ids[..], Some(&one_step[..]))] {
+        let old = rows(&before_5108, runs, subjects);
+        assert!(!old.is_empty());
+        assert_eq!(rows(&crate::store::missions::mission_step_timestamps_sql(), runs, subjects), old, "{runs:?} {subjects:?}");
+    }
 }
 
 #[test]
@@ -6935,11 +7116,22 @@ mission "retry" state="ready" {
     store
         .work_action(subject, "claim", &request("claim-round-2"))
         .unwrap();
+    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap()[subject];
+    let first_opening = timing().0;
+    expire_work_lease_by_claim(&store, subject, "agent/node.worker", "current");
+    assert_eq!(store.step_run(subject).unwrap().unwrap().status, "ready");
+    assert_eq!(timing(), (first_opening, None), "expiry is not completion");
+    store.work_action(subject, "claim", &request("reclaim-round-2")).unwrap();
+    assert_eq!(timing(), (first_opening, None), "reclaim keeps first execution opening");
     let completed = store
         .work_action(subject, "complete", &request("complete-round-2"))
         .unwrap();
     assert_eq!(completed.status, "verifying");
     assert_eq!(completed.attempt, 2);
+    assert!(timing().0.is_some());
+    assert!(timing().1.is_none(), "submission is not terminal");
+    store.set_step_state(subject, "completed", None).unwrap();
+    assert!(timing().1.is_some(), "worker retry terminal state belongs to attempt 2");
 
     let connection = store.connection.lock().unwrap();
     let mut statement = connection
@@ -7990,6 +8182,8 @@ fn a_run_an_old_replay_ended_stays_over_with_claims_that_say_so() {
 fn a_person_sets_the_outcome_of_a_finished_run_and_every_node_shows_it() {
     let source = Store::open_memory("source").unwrap();
     let failed = failed_takeover_run(&source, &["deploy-check"]);
+    let completed_at = source.mission_run_states().unwrap()[&failed.subject].completed_at_unix_ms;
+    assert!(completed_at.is_some());
     let reason = "the deploy shipped after the check host came back";
     let completed = source
         .set_mission_run_outcome(
@@ -8029,6 +8223,7 @@ fn a_person_sets_the_outcome_of_a_finished_run_and_every_node_shows_it() {
         claim.accepted_at_unix_ms
     );
     assert_eq!(states[&failed.subject].outcome.as_ref(), Some(&outcome));
+    assert_eq!(states[&failed.subject].completed_at_unix_ms, completed_at);
     assert_eq!(
         source
             .set_mission_run_outcome(
@@ -10929,6 +11124,65 @@ fn work_orphaning_requires_terminal_or_replacement_runtime_evidence() {
     assert!(store.work_claim_is_orphaned(&work).unwrap());
 }
 
+#[test]
+fn a_host_the_seat_moved_away_from_cannot_end_its_claim() {
+    // The seat ran on birch, moved to cedar, and holds its step there; alder judges the claim.
+    let (alder, birch, cedar) = (
+        Store::open_memory("alder").unwrap(),
+        Store::open_memory("birch").unwrap(),
+        Store::open_memory("cedar").unwrap(),
+    );
+    let subject = "agent/node.worker";
+    let work: StepRunView = serde_json::from_value(serde_json::json!({
+        "subject": "step-run/run/work", "run": "mission-run/run", "generation": "run-generation/run",
+        "step": "work", "definition_hash": "definition", "status": "working", "attempt": 1,
+        "assigned_to": subject, "agentless": false, "title": null, "worker_reported": false,
+        "claimant": subject, "claim_incarnation": "on-cedar", "claim_expires_at_unix_ms": 10,
+        "execution_elapsed_ms": 0, "readiness_epoch": 1, "blocked_reason": null,
+        "not_before_unix_ms": null, "created_at_unix_ms": 1, "updated_at_unix_ms": 1
+    }))
+    .unwrap();
+    let observe = |host: &Store, status: &str, incarnation: Option<&str>, key: &str| {
+        let mut fields = BTreeMap::from([("status".into(), Value::String(status.to_owned()))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+        }
+        host.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None, fields,
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        })
+        .unwrap();
+        receive_and_project(&alder, &host.origin, &exchange_from(host, &ReplicationInventory::default()));
+    };
+
+    observe(&birch, "running", Some("on-birch"), "birch-running");
+    observe(&cedar, "running", Some("on-cedar"), "cedar-running");
+    assert!(!alder.work_claim_is_orphaned(&work).unwrap());
+    // birch comes back and records its own old runtime ending, with and without its incarnation.
+    observe(&birch, "stopped", Some("on-birch"), "birch-stopped");
+    observe(&birch, "exited", None, "birch-exited");
+    assert!(!alder.work_claim_is_orphaned(&work).unwrap());
+    // An end of the claim's own incarnation still ends it, whichever host records it.
+    observe(&birch, "exited", Some("on-cedar"), "birch-names-cedar");
+    assert!(alder.work_claim_is_orphaned(&work).unwrap());
+
+    // An end that names no incarnation counts on the host where the incarnation runs.
+    let (alder2, cedar2) = (Store::open_memory("alder").unwrap(), Store::open_memory("cedar").unwrap());
+    for (status, incarnation, key) in [("running", Some("on-cedar"), "running"), ("vanished", None, "vanished")] {
+        let mut fields = BTreeMap::from([("status".into(), Value::String(status.to_owned()))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+        }
+        cedar2.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None, fields,
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        })
+        .unwrap();
+        receive_and_project(&alder2, "cedar", &exchange_from(&cedar2, &ReplicationInventory::default()));
+        assert_eq!(alder2.work_claim_is_orphaned(&work).unwrap(), status == "vanished");
+    }
+}
+
 mod seat_queue_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-hb914ffd15eec owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("seat_queue_purity_tests.rs");
@@ -11069,4 +11323,78 @@ mission "snapshot-cutover" state="ready" {{
     assert_eq!(current.generation, cutover.generation);
     assert_eq!(current.phase, "normal");
     assert_eq!(current.steps[0].status, "pending");
+}
+
+#[test]
+fn starting_a_run_reads_no_wake_history_and_shows_the_wake_a_read_shows() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(
+        &store,
+        r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "wake-history" state="ready" {
+  goal "Start a run whose assignee already has wake history."
+  concurrent-runs max=2
+  step "first" { assigned-to "agent/node.worker" }
+  step "second" { assigned-to "agent/node.worker" }
+}"#,
+        "wake-history-publish",
+    );
+    let request = |key: &str| MissionRunRequest {
+        mission: "wake-history".into(),
+        revision: None,
+        workspace: "/tmp".into(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: key.into(),
+    };
+    let append = |subject: &str, kind: &str, fields: Value, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    append("agent/node.worker", "runtime.observed",
+        json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "worker-current"}), "runtime");
+    append("agent/node.worker", "harness.observed",
+        json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-current"}), "harness");
+    // The assignee's history: a wake for an earlier run's step and an exhausted-wake diagnostic.
+    let earlier = store.create_mission_run(&request("wake-history-earlier")).unwrap();
+    let step = &earlier.steps[0];
+    append("message/earlier-wake", "message.sent", json!({
+        "from": "daemon/runtime", "to": "agent/node.worker", "content": "A mission step is ready.",
+        "status": "sent", "in_reply_to": null,
+        "tags": [format!("st3-work:{}@{}@{}@worker", step.subject, step.attempt, step.readiness_epoch)],
+    }), "earlier-wake");
+    append("agent/node.worker", "harness.diagnostic", json!({
+        "code": "work-wake-exhausted", "status": "failed", "incarnation_id": "worker-current",
+        "step_run": step.subject, "attempt": step.attempt, "readiness_epoch": step.readiness_epoch,
+        "reason": "the earlier wake went unanswered",
+    }), "earlier-diagnostic");
+    assert_eq!(store.mission_run(&earlier.id).unwrap().unwrap().steps[0].wake.as_ref().map(|wake| wake.attempts), Some(1));
+
+    WAKE_HISTORY_READS.with(|reads| reads.set(0));
+    let run = store.create_mission_run(&request("wake-history-run")).unwrap();
+    assert_eq!(WAKE_HISTORY_READS.with(std::cell::Cell::get), 0, "a new run's steps have no wake history to read");
+    let read = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(WAKE_HISTORY_READS.with(std::cell::Cell::get), 2, "a read of the same run scans each step's history");
+    assert_eq!(run.steps.len(), 2);
+    assert_eq!(serde_json::to_value(&run.steps).unwrap(), serde_json::to_value(&read.steps).unwrap());
+
+    // A ready step's wake, built without its history, is the one a read finds.
+    for step in &run.steps {
+        store.set_step_state(&step.subject, "ready", None).unwrap();
+    }
+    let ready = store.mission_run(&run.id).unwrap().unwrap();
+    let created = fractal_store::store::created_mission_run_view_tx(&store.readers.get(), &run.id).unwrap();
+    for (created, read) in created.steps.iter().zip(&ready.steps) {
+        assert!(created.wake.is_some());
+        assert_eq!(created.wake, read.wake);
+    }
 }

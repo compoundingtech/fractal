@@ -82,6 +82,8 @@ thread_local! {
     pub static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Pinned mission definitions a read parsed, so a test can see one parse serve a whole run.
     pub static DEFINITIONS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Steps whose wake history (their assignee's messages) a read scanned.
+    pub static WAKE_HISTORY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(any(test, feature = "test-support"))]

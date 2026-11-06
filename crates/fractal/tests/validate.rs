@@ -19,6 +19,20 @@ fn declaration_mission_revision_is_pinned() {
     );
 }
 
+#[test]
+fn typescript_declarations_match_the_pinned_rust_fixture() {
+    let source = include_str!(
+        "../../../clients/typescript/fractal-declarations/fixtures/daily-review.kdl"
+    );
+    let actual = fractal_store::graph::parse_intent(source, "local").unwrap();
+    let expected = fractal_store::graph::parse_intent(FIXTURE, "local").unwrap();
+
+    // Compare parsed declarations, not source hashes or formatting-sensitive provenance.
+    assert_eq!(actual.subjects, expected.subjects);
+    assert_eq!(actual.missions, expected.missions);
+    assert_eq!(actual.missions["docs/daily-review"].revision, PINNED_REVISION);
+}
+
 #[tokio::test]
 async fn validate_reads_files_without_a_daemon_or_configuration() {
     let scratch = tempfile::tempdir().unwrap();

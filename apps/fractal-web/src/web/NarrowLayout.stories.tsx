@@ -4,7 +4,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as Atom from 'effect/reactivity/Atom'
 import { RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { decodeResourceRows, openAgent } from '@fractal/sdk/effect'
+import { decodeResourceRows, openAgent } from '@fractal/sdk/read'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
@@ -443,7 +443,7 @@ export const DrawersFlow: Story = { parameters: { scenario: { _tag: 'contract-fi
   await waitFor(() => expect(chevron).toHaveFocus())
   // Choosing an agent closes the sheet on its thread.
   await userEvent.keyboard('{Enter}')
-  await userEvent.click(within(await canvas.findByRole('dialog', { name: 'Agents' })).getByRole('row', { name: /^MissionsUi,/ }))
+  await userEvent.click(await within(await canvas.findByRole('dialog', { name: 'Agents' })).findByRole('row', { name: /^MissionsUi,/ }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
   await waitFor(() => expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('MissionsUi'))
   // Agent details, from the right.

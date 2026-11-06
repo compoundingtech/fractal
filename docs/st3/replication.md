@@ -66,7 +66,7 @@ endpoints describe routes, not grants or live reachability. This endpoint remain
 a read-only membership projection and does not start or renew leave grace.
 
 On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
-`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
+`/v1/internal/seat-freshness/reads`, `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
 Unix connector's kernel-observed process generation with the replication worker.
 Services use the supervisor-observed worker; foreground operation uses the explicitly
 enrolled process. An unrelated unbound process is not a worker.
@@ -384,6 +384,21 @@ A member that doesn't advertise the feature is never pushed to, and it keeps rea
 re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
 route records nothing. Its peers read the replicated report, as before.
 
+Reads on the same relay, `POST /v1/peer/seat-freshness/reads`, go the other way: a member asks a
+seat's host how far its seats got with some messages, and the host answers. A consumer's
+delivery, read and close of a message stay on its host and never replicate (`local_message_marks`
+for graph mail, `stream_lifecycle` for a stream item), so this is how another member learns them.
+- A read is one tagged operation, `{"op":"message_marks","messages":[…]}`, naming up to 512
+  messages. A later operation joins the same route.
+- A member asks only a host whose own newest `daemon.started` advertises
+  `features.seat_freshness_reads = 1`. That's a key of its own: released members push seat
+  freshness only to `seat_freshness = 1`.
+- The host answers each message in order: whether it holds it, and the marks of the seats its
+  declarations place on it. The asker drops any mark for a seat it doesn't place on that host.
+- Nothing is pushed or kept. A host that doesn't answer within the asker's deadline reads as
+  unknown, never as sent.
+- A bound harness is refused on the daemon's `/v1/internal/seat-freshness/reads`, as on the push.
+
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the
 gateway version that generated them. The reader derives the root routing session from
@@ -404,12 +419,40 @@ exchange names it with `shard_id = "messages"`; the default store's exchanges om
 - **Authority.** The shard holds no fleet claims. It takes its fleet id and membership from
   the graph. Its envelopes sign `st3-shard-envelope-v1` over the shard ID, so a signature made
   for the graph never counts in the shard or the other way round. A keyed member's shard
-  envelope needs a signature in that domain by a key of one of its non-removed incarnations; a
+  envelope needs a signature in that domain by a key that counts at its sequence (below); a
   writer without membership is judged as the graph judges it.
+- **Shard bounds.** Graph windows count graph sequences, so a shard judges keys by its own
+  rule. An envelope is named by its writer, sequence and hash, so two keys' envelopes at one
+  sequence are distinct and both can count. The key of a writer's latest incarnation counts at
+  every shard sequence while it has not ended. Before a member's leave, it writes
+  `fleet.shard-bounds` (`member_key`, `shard_high_water: {"messages": N}`) with its own last
+  shard sequence, signed by its own key, as `fleet.member-left` is, and only when N > 0. A key
+  that left counts at or below its N, and at none without bounds. Bounds count only at a
+  writer sequence at or below the key's `fleet.member-left` (the two can share an envelope), so
+  bounds the key signs after it left, or that whoever holds it later signs, raise nothing. A
+  key superseded without a leave, or removed, never counts. An older build holds the bounds as `unknown-claim-kind`
+  (one record per leave attempt), fences that key at every shard sequence until it upgrades,
+  and then admits the bounds on retry. The graph admits membership on its own schedule (at
+  startup after the shard, and as its claims replicate), so the shard records the graph's fleet
+  generation at each admission pass and passes over its held envelopes again once it moves: at
+  startup after the graph's pass, and at the next shard exchange even when that brings nothing
+  new. The leave seals the shard's local batches before it reads its bound; a message written
+  after that read and before the leave is above the bound and fenced, so the first release that
+  writes the shard sends a leaving member's mail as graph claims. A reset that loses the old
+  key without a leave strands the old key's shard envelopes that no peer holds yet, as before.
 - **Contents.** One immutable `message.sent` per message, written by an agent or the daemon.
   A person's device-signed message and an external assistant's message stay graph claims.
 - **No checkpoint.** Nothing in the shard is superseded, so it is never sealed or trimmed and
   has no checkpoint or answers routes.
+- **The outbox.** SQLite commits one database file at a time, so a message sent inside a graph
+  transaction is queued in the graph's member-local `local_message_outbox` in that transaction,
+  and the daemon writes it to the shard after the commit (at startup, then after each commit
+  that leaves one there), exactly once by subject. A message the shard refuses three times, and
+  every message on a member whose shard did not open, is appended to the graph as a legacy
+  claim, so none is lost. In this build nothing queues messages and the drainer is idle; a
+  later release queues them, and a rollback from it to this build still drains what it left.
+- **Backups.** A claim backup carries the shard once it holds a stream item or a lifecycle
+  row, as archive version `5`; see [claim backups](backups.md#the-messages-shard).
 
 ## Rolling upgrades and waiting claims
 
@@ -1360,6 +1403,33 @@ repair "record/HASH" {
 ```
 
 A replacement must already be a valid admitted claim. The original record remains visible with state `repaired`.
+
+### After a start
+
+This is off unless the member's `config.toml` has `wait_for_peers_after_start = true`. Without it, a member acts on its seats at once after a start, as it always has.
+
+**What waits.** A member that starts again may hold desired state its peers have since replaced: a seat it ran may have moved to another host while it was away. With the setting on, until it has caught up with a peer, the member takes no action that assumes a seat is placed on it:
+- it starts, restarts or retires no seat;
+- it records no seat's runtime as ended.
+
+**What still runs.** It adopts and records runtimes that are alive, which is true wherever a seat is placed.
+
+**Caught up.** The condition is the one schedules use after a cold start:
+- no deferred projection, catch-up or first sync;
+- for a member with peers, at least one peer measured since this start with nothing the member lacks;
+- no live peer that holds envelopes the member has not received.
+
+A single member, or a member without peers, is admitted at once.
+
+**Alerts and the override.** A member that has waited five minutes raises an operational alert naming its peers. If a peer cannot be reached, a person or an agent records an override on the waiting member itself:
+
+```sh
+st fleet admit-without --peer NAME --reason "why the member may go on" --as ACTOR
+```
+
+The override is a `member.admission-override` claim on `host/<member>`. It names the member's current `daemon.started` claim, the peers it releases and a required reason. Only the named member reads it, and only for that start: the next start waits again. A released peer that is back and measured since the start counts again.
+
+**Rollout.** An older member keeps the unknown kind retryable until it upgrades, as for any unknown kind. Nothing older reads it.
 
 ## Checkpoints
 

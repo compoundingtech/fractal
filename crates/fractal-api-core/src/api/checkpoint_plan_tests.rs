@@ -1,19 +1,24 @@
 use super::*;
 use smallclaims::store::checkpoint::hold_checkpoint_proof_lock_for_test;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn checkpoint_plan_refuses_retryably_while_a_proof_holds_the_lock_for_the_whole_wait() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     let proof = hold_checkpoint_proof_lock_for_test(&root.path().join("checkpoint")).unwrap();
     let mut refusals = 0;
+    let wait = Duration::from_millis(600);
+    // Advance the async wait clock only while idle; host scheduling and blocking store work
+    // must not consume the poll intervals this test is checking.
+    let started = tokio::time::Instant::now();
     let error = replication::plan_waiting_for_proof(
-        &state, client_now_ms() + 1_000, Duration::from_millis(600), || refusals += 1,
+        &state, client_now_ms() + 1_000, wait, || refusals += 1,
     ).await.unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.code, "checkpoint-proof-in-progress");
     assert_eq!(error.message, "a checkpoint proof is running; retry shortly");
     assert!(refusals >= 2, "the plan polled the held lock, {refusals} retries");
+    assert_eq!(started.elapsed(), wait);
     drop(proof);
 }
 

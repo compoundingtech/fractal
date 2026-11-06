@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Regenerate stale live-integrator dependency metadata instead of failing every tick on a cached patch that no longer applies.",
+  "replay": {"status": "none", "detail": "No event replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination changes."},
+  "compatibility": {"status": "changed", "detail": "The web integrator checks cached metadata patches without changing the index or worktree, treats inapplicable patches as cache misses, and atomically replaces entries after successful regeneration. Valid and empty entries retain their existing behavior."},
+  "downtime": {"status": "none", "detail": "No service interruption is required; the currently published immutable build remains served."},
+  "manual": {"status": "changed", "detail": "Deploy the updated integrator helper. Stale metadata entries recover automatically without operator deletion; real generator failures still fail the tick."},
+  "recovery": {"status": "changed", "detail": "Roll forward with this helper to repair stale cache entries on the next tick. Rolling back the helper preserves the cache format, but may require deleting a stale metadata entry if generated outputs change independently of generator inputs."}
+}

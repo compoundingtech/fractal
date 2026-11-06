@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fix revoked legacy runtime-start repair to distinguish successor seats and ignore unrelated non-dumpable processes while retaining fail-closed candidate checks.",
+  "replay": {"status": "none", "detail": "No claim replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Linux scope-isolated legacy closure checks use exact generated unit identities and readable cgroup membership before inspecting candidate environments. Unreadable candidate processes and hidden procfs mounts still refuse repair. Candidate regression fixtures inject procfs visibility independently of the host mount. Refusals include stage and process or unit identity and are logged at warn level."},
+  "downtime": {"status": "none", "detail": "No additional downtime required."},
+  "manual": {"status": "none", "detail": "Existing repair dry-run and apply commands are unchanged."},
+  "recovery": {"status": "changed", "detail": "Retry legacy-start repair dry-run after updating the daemon; inspect refusal stage and PID or unit when closure cannot be proved."}
+}

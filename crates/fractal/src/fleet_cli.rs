@@ -124,7 +124,7 @@ fn read_code_without_echo() -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need st-fabric-adapter installed and \
+const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need fractal-fabric-adapter installed and \
      Fabric running with --runtime-peers; use --via tailscale for a Tailscale-only invitation";
 
 /// A configured path that is not a file counts as no helper, so `auto` invitations
@@ -471,13 +471,13 @@ async fn bootstrap_fabric_invite(
     {
         return Ok(());
     }
-    let Endpoint::Unix(socket) = endpoint else {
+    let Some(socket) = endpoint.unix_socket() else {
         anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
     };
     let helper = adapter.context(FABRIC_PAIRING_UNAVAILABLE)?;
     let mut child = tokio::process::Command::new(helper)
         .arg("--st-socket")
-        .arg(socket)
+        .arg(socket.as_ref())
         .arg("pairing-invite")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -497,7 +497,7 @@ async fn bootstrap_fabric_invite(
     let output = child.wait_with_output().await?;
     anyhow::ensure!(
         output.status.success(),
-        "Fabric pairing failed; it needs st-fabric-adapter running on this machine and Fabric \
+        "Fabric pairing failed; it needs fractal-fabric-adapter running on this machine and Fabric \
          running with --runtime-peers"
     );
     #[derive(serde::Deserialize)]
@@ -517,6 +517,13 @@ async fn bootstrap_fabric_invite(
 }
 
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
+    // Recording an override only asks this member's daemon; it reads no fleet configuration.
+    let command = match command {
+        FleetCommand::AdmitWithout { peers, reason, actor } => {
+            return admit_without(endpoint, peers, reason, actor, json_output).await;
+        }
+        command => command,
+    };
     let manages_services = match &command {
         FleetCommand::Create(args) => !args.no_service,
         FleetCommand::Join(args) => !args.no_service,
@@ -743,6 +750,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 Ok(())
             }
         },
+        FleetCommand::AdmitWithout { .. } => unreachable!("handled before configuration is read"),
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
                 let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
@@ -1094,6 +1102,7 @@ async fn save_and_publish_fleet_settings(
     config: &Config,
     file: &fractal_daemon::config::FleetFile,
     mut endpoints: Vec<Value>,
+    actor: Option<&str>,
 ) -> Result<()> {
     if file.mode == fractal_daemon::config::FleetMode::DialOut {
         endpoints.clear();
@@ -1111,17 +1120,32 @@ async fn save_and_publish_fleet_settings(
             _ => false,
         });
     }
+    let pending = actor.map(|_| fractal_daemon::config::FleetFile::path(&config.state_dir).with_extension("transport-change.json"));
+    let mut announcement = json!({"mode": file.mode.as_str(), "endpoints": endpoints});
+    let published: Result<Value> = if let Some(path) = &pending {
+        let settings = serde_json::to_value(file)?;
+        let base = serde_json::to_value(fractal_daemon::config::FleetFile::load(&config.state_dir)?)?;
+        let intent: Value = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(error) => return Err(error.into()),
+        };
+        let request = if intent["base"] == base && intent["actor"].as_str() == actor && intent["target"] == settings {
+            intent["request"].as_str().context("pending transport change needs its request")?.to_owned()
+        } else {
+            announcement["actor"] = json!(actor);
+            announcement["mutation_id"] = json!(format!("fleet-transports:{}", uuid::Uuid::now_v7()));
+            let request = serde_json::to_string(&announcement)?;
+            fractal_daemon::fleet::join::write_private(path, &serde_json::to_vec(&json!({"base": base, "actor": actor, "target": settings, "request": request}))?)?;
+            request
+        };
+        let raw: &serde_json::value::RawValue = serde_json::from_str(&request)?;
+        client.post("/v1/fleet/transports", &raw).await
+    } else {
+        client.post("/v1/internal/fleet/endpoints", &announcement).await
+    };
+    published.context("endpoint publication did not complete; fleet.toml is unchanged")?;
     file.save(&config.state_dir)?;
-    let _: Value = client
-        .post(
-            "/v1/internal/fleet/endpoints",
-            &fractal_daemon::api::FleetEndpointsRequest {
-                mode: file.mode.as_str().into(),
-                endpoints,
-            },
-        )
-        .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart fractal daemon and fractal replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
@@ -1134,13 +1158,24 @@ fn refresh_fleet_services(no_service: bool, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_fleet_transports(
+pub(super) async fn run_fleet_transports(
     client: &Client,
     config: &Config,
-    command: FleetTransportsCommand,
+    mut command: FleetTransportsCommand,
     json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    let actor = match &mut command {
+        FleetTransportsCommand::Add { actor, .. }
+        | FleetTransportsCommand::Remove { actor, .. }
+        | FleetTransportsCommand::Prefer { actor, .. } => actor.take(),
+    };
+    if let Some(actor) = actor.as_deref() {
+        let _: Value = client.post("/v1/fleet/transports", &json!({
+            "actor": actor, "mutation_id": "authorization", "dry_run": true,
+            "mode": "dial-out", "endpoints": [],
+        })).await?;
+    }
     let lock = lock_fleet_settings(&config.state_dir).await?;
     let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
         .context("this machine is not a fleet member")?;
@@ -1176,7 +1211,8 @@ async fn run_fleet_transports(
         if *prefer && file.transports.first() != Some(transport) {
             file.transports.retain(|configured| configured != transport);
             file.transports.insert(0, transport.clone());
-            file.save(&config.state_dir)?;
+            let endpoints = member_endpoints(client, &config.node).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             drop(lock);
             println!("Fabric is now preferred; its existing protocol is unchanged.");
             return refresh_fleet_services(*no_service, json_output);
@@ -1202,6 +1238,7 @@ async fn run_fleet_transports(
         FleetTransportsCommand::Prefer {
             transport,
             no_service,
+            ..
         } => {
             let index = file
                 .transports
@@ -1209,7 +1246,7 @@ async fn run_fleet_transports(
                 .position(|configured| configured == &transport)
                 .expect("preferred transport was checked as enabled");
             file.transports[..=index].rotate_right(1);
-            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             println!("{transport} is now preferred; transport exposure is unchanged.");
             no_service
         }
@@ -1257,7 +1294,7 @@ async fn run_fleet_transports(
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
             // A lost publication response can follow a committed claim. Keep the exposure
             // reachable and report the incomplete operation rather than undoing that route.
-            save_and_publish_fleet_settings(client, config, &file, endpoints)
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref())
                 .await
                 .with_context(|| format!("Fabric remains exposed as {protocol}"))?;
             println!("Fabric enabled with protocol {protocol}.");
@@ -1297,7 +1334,7 @@ async fn run_fleet_transports(
             );
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
-            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            save_and_publish_fleet_settings(client, config, &file, endpoints, actor.as_deref()).await?;
             let result = match resolve_tool(file.fabric.as_deref(), "fabric") {
                 Some(program) => Fabric::new(program).unexpose(&protocol).await,
                 None => Err(anyhow::anyhow!("fabric is not installed")),
@@ -1336,6 +1373,7 @@ fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon
 
 async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs, json_output: bool) -> Result<()> {
     if args.finish || args.unfinish {
+        let _lock = lock_fleet_settings(&config.state_dir).await?;
         let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
         if args.finish {
@@ -1824,4 +1862,32 @@ mod invite_route_tests {
         let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
         assert!(error.to_string().contains("stopped"), "{error:#}");
     }
+}
+
+/// Let this member act on its seats' placement without `peers`, for its current daemon start.
+async fn admit_without(
+    endpoint: &Endpoint,
+    peers: Vec<String>,
+    reason: String,
+    actor: String,
+    json_output: bool,
+) -> Result<()> {
+    reject_foreign_agent_actor(&actor)?;
+    let claim: fractal_daemon::model::ClaimRecord = Client::new(endpoint.clone())
+        .post(
+            "/v1/fleet/admission-override",
+            &json!({
+                "actor": actor,
+                "peers": peers,
+                "reason": reason,
+                "idempotency_key": format!("admission-override:{}", uuid::Uuid::now_v7()),
+            }),
+        )
+        .await?;
+    if json_output {
+        println!("{}", serde_json::to_string(&claim)?);
+    } else {
+        println!("admitted without\t{}", peers.join(","));
+    }
+    Ok(())
 }

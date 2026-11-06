@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Adapt decoded attention prompt calls to the existing served-prompt view without copying their inputs.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No wire schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "Readonly decoded calls and nullable wire calls share the served presentation reader; no delivery changes." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Use the terminal if prompt data is unavailable; no stored state is changed." }
+}

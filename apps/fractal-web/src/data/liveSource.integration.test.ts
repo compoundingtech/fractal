@@ -350,7 +350,9 @@ class Gateway {
   }
 
   /** `terminalId` defaults to the subject-shaped id; the daemon itself publishes `terminal/<agent id>`. */
-  screen(id: string, name: string, text: string, terminalId = `terminal/${name}`) {
+  async screen(id: string, name: string, text: string, terminalId = `terminal/${name}`) {
+    // Admission is already asserted by the caller; decoding may legitimately await a cold chunk.
+    await import('@fractal/client/schema')
     const value: TerminalScreen = {
       kind: 'terminal-screen',
       terminal_id: terminalId,
@@ -406,8 +408,8 @@ const settle = Effect.promise(async () => {
   }
 })
 
-const withGateway = (
-  test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void>,
+const withGateway = <E,>(
+  test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void, E>,
   { maxFollows = 2, sessionTraceLayer }: {
     readonly maxFollows?: number
     readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider>
@@ -949,7 +951,7 @@ describe('terminal dependent-read authority', () => {
       const leave = live.registry.mount(live.source.terminalInterest!(ref))
       const stopReading = live.registry.mount(live.source.terminal(ref))
       yield* settle
-      gateway.screen(gateway.subscription('terminal').id, 'old', 'Retained output')
+      yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Retained output'))
       yield* settle
       expect(live.registry.get(live.source.terminal(ref))).toMatchObject({ _tag: 'Observed' })
       stopReading()
@@ -1051,7 +1053,7 @@ describe('terminal dependent-read authority', () => {
         expect(gateway.runtimeReads).toHaveLength(refusal.expectedRetryable ? 2 : 1)
         expect(gateway.terminalActions).toHaveLength(refusal.expectedRetryable ? 1 : 0)
         if (refusal.expectedRetryable) {
-          gateway.screen(gateway.subscription('terminal').id, 'old', 'Recovered screen')
+          yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Recovered screen'))
           yield* settle
           expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
           live.source.retryTerminal?.(ref)
@@ -1170,7 +1172,7 @@ describe('terminal dependent-read authority', () => {
       const ref = 'terminal/example'
       live.registry.mount(live.source.terminalInterest!(ref))
       yield* settle
-      gateway.screen(gateway.subscription('terminal').id, 'old', 'Previous screen')
+      yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Previous screen'))
       yield* settle
       expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
       gateway.fleet([{ ...agent, revision: '2', runtime_ids: [] }])
@@ -1275,7 +1277,7 @@ describe('terminal dependent-read authority', () => {
           const ref = 'terminal/example'
           live.registry.mount(live.source.terminalInterest!(ref))
           yield* settle
-          gateway.screen(gateway.subscription('terminal').id, 'old', 'Trusted previous screen')
+          yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Trusted previous screen'))
           yield* settle
           expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
           gateway.runtimeRefusalStatus = status
@@ -1304,7 +1306,7 @@ describe('terminal dependent-read authority', () => {
         const ref = 'terminal/example'
         live.registry.mount(live.source.terminalInterest!(ref))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'old', 'Previously authorized screen')
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Previously authorized screen'))
         yield* settle
         expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
         gateway.send({ kind: 'error', id: gateway.subscription('agents').id, collection: 'agents', code: 'forbidden', message: 'Roster read revoked', retryable: false })
@@ -1470,7 +1472,7 @@ describe('terminal input', () => {
         yield* settle
         live.registry.mount(live.source.terminalInterest!('terminal/example'))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$')
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$'))
         yield* settle
         const port = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-example', registry: live.registry }))
         port.open()
@@ -1505,7 +1507,7 @@ describe('terminal input', () => {
         const subject = 'terminal/example/input-subject'
         live.registry.mount(live.source.terminalInterest!(subject))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$', `terminal/${seat.id}`)
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$', `terminal/${seat.id}`))
         yield* settle
         const shown = live.registry.get(live.source.terminal(subject))
         if (shown._tag !== 'Observed') return yield* Effect.die(`terminal ${subject} was not observed`)
@@ -1540,7 +1542,7 @@ describe('terminal input', () => {
         yield* settle
         live.registry.mount(live.source.terminalInterest!('terminal/example'))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$')
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$'))
         yield* settle
         expect(live.registry.get(live.source.grants).terminalInput).toBe('ungranted')
         const port = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-example', registry: live.registry }))

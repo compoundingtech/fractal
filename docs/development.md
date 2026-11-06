@@ -7,8 +7,8 @@ Use invented people, host names, and paths in this public repository. Run
 `python3 scripts/check-public-repo` before opening a pull request.
 
 For Fractal claims, missions, replication, runtime ownership, or recovery, start with the
-[documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
-read and preserve the proofs in [st2 invariants](st2/invariants.md).
+[documentation index](st3/README.md) and preserve the applicable proofs in
+[native runtime invariants](st3/invariants.md).
 
 ## CLI actor contract
 
@@ -20,6 +20,19 @@ the SHA-256 of compact JSON for `contract`, not of the formatted output. The
 printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
+
+Operational reads accept optional leading `--as ACTOR` immediately after these
+leaf paths: `actor-contract`, `agents lane`,
+`agents rename-id proof verify`, `changes list`, `changes show`, `conversations export`,
+`fleet anchor show`, `gate ci-passed`, `gate merged`,
+`missions blocked`, `missions waiting-on`,
+`missions rename-id proof verify`, `recorder report`,
+`subject history`, `terminals peek`, `trace show`, and `validate`.
+The CLI emits a stderr read-attribution record with the actor and canonical command
+path; stdout, queried subjects, filters, and daemon authorization are unchanged.
+An agent caller must supply its literal environment identity; a different explicit
+actor or an empty/conflicting agent identity fails before the read, including offline
+commands. Omitting `--as` preserves the existing read behavior.
 
 Version policy:
 
@@ -295,7 +308,7 @@ domain must belong to a zone in the configured Cloudflare account.
 
 Materialize the pinned `effect-utils` member before installing dependencies,
 as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
-Use the web shell's pnpm 12.15.0, not a separate global install:
+Use the web shell's pnpm 12.17.0, not a separate global install:
 
 ```sh
 mr apply --worktree-mode commit
@@ -498,7 +511,6 @@ wording consistent when both describe the same change.
 | `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
 | `crates/fractal-migrate` | Migration tooling. |
-| `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
 | `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |

@@ -169,6 +169,10 @@ pub async fn list_work(
             step.under = agents.get(actor).cloned().unwrap_or_default();
         }
     }
+    // A seat whose host keeps its receipts acknowledges a wake on that host.
+    super::message_reads::read_work_wakes(&state, work.iter_mut())
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(work))
 }
 
@@ -181,12 +185,16 @@ pub async fn get_work(
     } else {
         format!("step-run/{subject}")
     };
-    state
+    let mut step = state
         .store
         .step_run(&subject)
         .map_err(ApiError::internal)?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))
+        .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
+    // A seat whose host keeps its receipts acknowledges a wake on that host.
+    super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(step))
 }
 
 pub async fn wake_work(

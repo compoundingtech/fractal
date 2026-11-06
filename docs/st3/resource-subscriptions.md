@@ -439,6 +439,21 @@ observations back off to six then ten minutes; any changed observed fact resets 
 After a daemon restart the first poll is immediate again. The host stops the observer once no
 running subscription uses it. No issue or pull request has a poller of its own.
 
+To move polling to another member, for example when the polling member cannot be reached, a
+person on that member stops the observer:
+
+```kdl
+version 2
+stop "observer/github/OWNER/REPO"
+```
+
+`st apply FILE --as person/NAME` declares the observer stopped, as a host does when nothing uses
+it. The member's next pass, for any watch it holds, declares the observer again there, with the
+same resource. That member then polls on from the cursor in the observer's newest
+`observer.observed` claim (below), so it delivers what changed in between once and nothing twice.
+The stop takes no reason, and only a person may write it: an agent's is refused with
+`observer-stop-person-only`.
+
 The standing observer records into `resource/github/OWNER/REPO`, unless another observer of the
 repository runs: then it records into that observer's resource and keeps that resource from then
 on. Subscriptions are grouped by resource, so a poll by either observer delivers to the

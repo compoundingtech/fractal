@@ -83,6 +83,24 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Carried-step review fixture inventory (PR #5343)
+
+The `fractal_store::references::step_review::tests` maintainer owns both
+exceptions reviewed for [PR #5343](https://github.com/compoundingtech/fractal/pull/5343).
+`lv-hf97024592eee` deletes one in-memory fixture step by its variable subject
+key to prove missing carried history fails closed. Existing step columns and
+index keys remain inline; its reclamation TODO must preserve the missing-source
+regression when the store representation changes.
+`lv-hdc4eec22f34b` inserts a pending naming record using fixture record/writer/hash,
+raw JSON, subject, kind and timestamp TEXT values and their index keys. Inline
+storage matches the existing identity fixture; its exact-wire TODO must preserve
+pending-replica semantics through any reference/chunk conversion.
+Neither exception creates a production writer or proves encoded byte/cost bounds.
+
+`fractal_missions::store::missions::run_review` owns reader `lv-hed575cdba946`; its `tests` module owns deletion fixture `lv-he933d1015ed6`.
+Existing inline run/step keys and creation-claim JSON detect missing projections. Reference/chunk and reclamation changes must preserve these fail-closed regressions.
+Neither exception adds a production writer or size/cost guarantee.
+
 ### Cold runtime reduction inventory (PR #1706)
 
 The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
@@ -363,11 +381,32 @@ transitional exceptions do not prove byte-size or execution-cost bounds.
   owns `bound-or-reference-values-and-reclamation`: carry those assertions to
   the bounded membership/state representation and its cleanup semantics.
 
+## Native question lifecycle inventory review (PR #4191)
+
+`fractal_store::store` owns schema site `lv-h77b21804192f`, combining lifecycle
+site `lv-h0113908d5df7` with receipt-index site `lv-h806ead738248`. It adds
+`local_harness_question_generations` and the receipt actor/key index; all other
+schema declarations are unchanged. The new primary key is the derived
+question subject; its inline JSON value holds authenticated process birth,
+provider ownership and native-session witnesses, never question or option text.
+The schema maintainer retains `chunk-or-reference-variable-columns`; the local
+classification is not a SQLite value-size proof.
+
+`fractal_seats::store::harness_questions` owns `lv-h984ca628442d` (register)
+and `lv-h2b3b6ffb021b` (exact-generation delete). The former serializes the
+admitted witness before publishing an open; the latter compares that same
+generation and deletes it only after durable resolution. Inline evidence
+preserves restart recovery and prevents a foreign generation from deleting a
+lease. The maintainer retains `bound-or-reference-values-and-reclamation`:
+establish the complete serialized witness/key bounds or a bounded reference
+representation, preserving compare-and-delete and crash-recovery semantics.
+These exceptions do not claim a storage-size bound or change admission.
+
 ## Harness receipt lookup inventory review (PR #3916)
 
-`fractal_store::store` owns schema site `lv-h806ead738248`, replacing
-`lv-h82624af80f95` solely for the additive receipt actor/key index. The index
-extracts the existing receipt digest and retains existing origin/subject TEXT
+`fractal_store::store` owns the combined schema site `lv-h77b21804192f`.
+The additive receipt actor/key index from `lv-h806ead738248` extracts the
+existing receipt digest and retains existing origin/subject TEXT
 keys; it stores no new question content. Canonical first-resolution and local
 owner checks remain authoritative after the indexed candidate lookup. Existing
 declaration metadata and the producer's `chunk-or-reference-variable-columns`
@@ -377,3 +416,21 @@ Fixture-only `lv-hc58fa3f9b3bb`, owned by `fractal::main_tests`, includes the
 existing client capability envelope to prove CLI answer fences come from the
 caller, not a new question read. It adds no production writer or SQL value.
 Its `trace-statement-and-value-representation` work remains with that module.
+
+## Owned WAL fixture inventory review
+
+`fractal_missions::store::tests` owns fixture-only sites `lv-h734b678e7a1c`,
+`lv-hb47d29970c26` and `lv-hf4fcb241adf1`. The existing working-episode fixture
+now ends its read transaction before dropping its fixed incarnation index through
+the writer. These are fixed `ROLLBACK` and `DROP INDEX` statements without bound
+values, new columns or a production value producer. Splitting the old batch keeps
+readers read-only and preserves both missing-index error assertions. The module
+retains its statement-tracing and cleanup TODOs; the lexical unresolved-sink
+classification is not a claim that these fixed statements produce variable data.
+
+The replaced batch exceptions `lv-ha3efb3788a3d` and `lv-h0334b131dc24` are removed.
+Fixture schema site `lv-hdf54adb9112e` and its duplicate declaration are also
+removed: the page-cost test uses the empty replay-order table already created by
+normal file-backed initialization. The production table and its existing inline
+claim-ID representation are unchanged; their producer's representation work stays
+with `fractal_store::store`.

@@ -43,8 +43,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -60,7 +61,7 @@ jobs:
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
-          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: steps.credentials.outputs.enabled == 'true'
       - name: Install the standalone deployment stack

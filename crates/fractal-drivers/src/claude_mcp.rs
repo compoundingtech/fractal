@@ -27,54 +27,32 @@ use crate::reexec::{self, StdinChunk};
 const POLL: Duration = Duration::from_millis(250);
 const PRESENCE_REFRESH: Duration = Duration::from_secs(1);
 const REPLACEMENT_CHECK: Duration = Duration::from_secs(1);
-const LEGACY_SERVER_NAME: &str = "st2";
 const FRACTAL_SERVER_NAME: &str = "st3";
-
-pub fn run(catalog_root: &Path, identity: &str) -> Result<()> {
-    run_named(catalog_root, identity, LEGACY_SERVER_NAME, false)
-}
 
 /// Run the ST3-owned public channel.
 ///
-/// The protocol body is shared with the legacy channel, but its MCP identity and readiness edge
-/// belong to ST3. Claude starting the stdio server is the first positive proof that an interactive
+/// Claude starting the stdio server is the first positive proof that an interactive
 /// session made it past startup dialogs and actually loaded the channel; mere Claude child
 /// liveness is not that proof.
 pub fn run_fractal(catalog_root: &Path, identity: &str) -> Result<()> {
-    run_named(catalog_root, identity, FRACTAL_SERVER_NAME, true)
-}
-
-fn run_named(
-    catalog_root: &Path,
-    identity: &str,
-    server_name: &'static str,
-    observe_initialized: bool,
-) -> Result<()> {
+    let server_name = FRACTAL_SERVER_NAME;
     let agent_dir =
         message::resolve_declared_dir(catalog_root, identity, &crate::run::detect_host())?
             .with_context(|| format!("Claude MCP agent '{identity}' is not declared"))?;
-    // Only the st3 channel follows a replaced binary: st3 answers the resume probe and owns the
-    // daemon a deploy restarts.
-    let resumed = if observe_initialized {
-        match reexec::resume_path(reexec::CHANNEL_RESUME_ENV) {
-            Some(path) => {
-                let state = reexec::read_state::<ChannelResume>(&path);
-                reexec::unblock_stop_signals();
-                Some(state.context("resuming the Claude channel after a binary replacement")?)
-            }
-            None => None,
+    let resumed = match reexec::resume_path(reexec::CHANNEL_RESUME_ENV) {
+        Some(path) => {
+            let state = reexec::read_state::<ChannelResume>(&path);
+            reexec::unblock_stop_signals();
+            Some(state.context("resuming the Claude channel after a binary replacement")?)
         }
-    } else {
-        None
+        None => None,
     };
-    let mut watch = observe_initialized
-        .then(reexec::ReplacementWatch::for_current_process)
-        .flatten();
+    let mut watch = reexec::ReplacementWatch::for_current_process();
     let (mut delivered, mut initialized, mut lines) = match resumed {
         Some(state) => (state.delivered, state.initialized, state.lines),
         None => (HashSet::new(), false, reexec::LineBuffer::default()),
     };
-    let mut initialized_writer = (observe_initialized && !initialized)
+    let mut initialized_writer = (!initialized)
         .then(|| fractal_initialized_writer(&agent_dir, identity))
         .flatten();
     let inbox = message::inbox_dir(&agent_dir);
@@ -160,7 +138,7 @@ fn run_named(
         }
         stdout.flush()?;
         let now = Instant::now();
-        if observe_initialized && now >= next_presence {
+        if now >= next_presence {
             let _ = write_presence(&agent_dir);
             next_presence = now + PRESENCE_REFRESH;
         }
@@ -350,12 +328,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_and_fractal_channels_report_their_own_public_mcp_identity() {
+    fn fractal_channel_reports_its_public_mcp_identity() {
         let request = json!({"jsonrpc":"2.0","id":7,"method":"initialize"});
-        assert_eq!(
-            initialize_response(&request, LEGACY_SERVER_NAME)["result"]["serverInfo"]["name"],
-            "st2"
-        );
         assert_eq!(
             initialize_response(&request, FRACTAL_SERVER_NAME)["result"]["serverInfo"]["name"],
             "st3"
@@ -363,17 +337,16 @@ mod tests {
     }
 
     #[test]
-    fn both_channels_tell_the_agent_to_answer_a_person_in_the_conversation() {
+    fn fractal_channel_tells_the_agent_to_answer_a_person_in_the_conversation() {
         let request = json!({"jsonrpc":"2.0","id":7,"method":"initialize"});
-        for name in [LEGACY_SERVER_NAME, FRACTAL_SERVER_NAME] {
-            let instructions = initialize_response(&request, name)["result"]["instructions"]
+        let instructions =
+            initialize_response(&request, FRACTAL_SERVER_NAME)["result"]["instructions"]
                 .as_str()
                 .unwrap()
                 .to_owned();
-            assert!(instructions.contains("answered in this conversation"));
-            assert!(instructions.contains("people have no inbox, so do not reply with st"));
-            assert!(instructions.contains("conversations reply"));
-        }
+        assert!(instructions.contains("answered in this conversation"));
+        assert!(instructions.contains("people have no inbox, so do not reply with st"));
+        assert!(instructions.contains("conversations reply"));
     }
 
     #[test]

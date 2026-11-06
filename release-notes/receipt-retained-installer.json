@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The downloader refreshes script-owned installation receipts after retained macOS installers replace the signed fixed application.",
+  "replay": { "status": "none", "detail": "No claim replay or projection changes." },
+  "schema": { "status": "none", "detail": "The schema-1 ownership receipt format is unchanged." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet rules change." },
+  "compatibility": { "status": "changed", "detail": "A verified script-owned receipt is refreshed only after this downloader successfully delegates to a retained macOS installer, with no pending intent, the same physical app target, and both aliases resolving to that target. The refreshed digest covers the installed signed bytes; identity comes from the verified archive payload. Existing invalid receipts, unknown replacement bytes, and cross-installer mismatches still fail closed." },
+  "downtime": { "status": "none", "detail": "No additional service restart requirement." },
+  "manual": { "status": "none", "detail": "Downgrading through the downloader to a pre-receipt macOS installer no longer requires repairing the ownership receipt before the next installation." },
+  "recovery": { "status": "changed", "detail": "Retained installer compatibility is limited to a successful invocation in the current downloader run; it does not re-adopt an executable whose receipt already mismatches at startup. Restore a matching receipt and executable together after an interrupted retained installation." }
+}
