@@ -67,7 +67,9 @@ impl Quota {
                 })
             });
             let line = format!("{label}{padding} {meter}{percent:>5} {reset:>6} {status}");
-            doc.lines.extend(super::text::wrap(&super::text::inline(&line, theme::label()), width, &[], &[], None));
+            let body = line.trim_start_matches(' ');
+            let prefix = [super::text::run(" ".repeat(line.len() - body.len()), theme::label())];
+            doc.lines.extend(super::text::wrap(&super::text::inline(body, theme::label()), width, &prefix, &[], None));
         };
         let heading = format!("{:<label_width$} {:meter_width$} {:>5} {:>6} state", "Account (gov%) / window", "", "used", "reset");
         doc.lines.extend(super::text::wrap(&super::text::inline(&heading, theme::dim()), width, &[], &[], None));
