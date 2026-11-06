@@ -68,7 +68,7 @@ mod tests {
 
     pub(super) fn indexed(connection: &Connection, sql: &str, index: &str) {
         let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-        let plan = statement.query_map(params!["step-run/test", "person/alice", "request"],
+        let plan = statement.query_map(params!["step-run/test", "person/ada", "request"],
             |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert!(plan.iter().any(|line| line.contains(index)), "{plan:?}");
         for line in &plan {
@@ -81,19 +81,19 @@ mod tests {
     fn gate_exact_recipient_episode_and_canonical_actor() {
         let connection = database();
         insert(&connection, "request", "review/test", "gate.requested", "agent/requester", 1,
-            json!({"owner":"step-run/test","reviewer":"person/alice"}));
-        insert(&connection, "wrong", "review/test", "gate.result", "person/bob", 2,
+            json!({"owner":"step-run/test","reviewer":"person/ada"}));
+        insert(&connection, "wrong", "review/test", "gate.result", "person/blair", 2,
             json!({"request":"request","verdict":"pass"}));
         insert(&connection, "winner", "review/test", "gate.result", "agent/delegate", 3,
-            json!({"request":"request","verdict":"pass","acted_for":"person/alice",
+            json!({"request":"request","verdict":"pass","acted_for":"person/ada",
                 "delegation":{"episode":"request"}}));
-        insert(&connection, "later", "review/test", "gate.result", "person/alice", 4,
+        insert(&connection, "later", "review/test", "gate.result", "person/ada", 4,
             json!({"request":"request","verdict":"fail"}));
-        let result = human_gate_resolution_at(&connection, "step-run/test", "person/alice", "request").unwrap().unwrap();
+        let result = human_gate_resolution_at(&connection, "step-run/test", "person/ada", "request").unwrap().unwrap();
         assert_eq!((result.claim_id.as_str(), result.resolved_by.as_str()), ("winner", "agent/delegate"));
-        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/bob", "request").unwrap().is_none());
-        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/alice", "stale").unwrap().is_none());
-        assert!(human_gate_resolution_at(&connection, "step-run/other", "person/alice", "request").unwrap().is_none());
+        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/blair", "request").unwrap().is_none());
+        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/ada", "stale").unwrap().is_none());
+        assert!(human_gate_resolution_at(&connection, "step-run/other", "person/ada", "request").unwrap().is_none());
         indexed(&connection, &gate_sql(), "claims_human_gate_answer_request_index");
     }
 }
