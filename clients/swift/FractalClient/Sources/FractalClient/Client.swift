@@ -306,6 +306,7 @@ public actor FractalClient {
     public func devicesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("devices", cursor: cursor, limit: limit, history: history) }
     public func attentionList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("attention", cursor: cursor, limit: limit, history: history) }
     public func attentionGet(id: String) async throws -> Envelope<Resource> { try await resource("attention", id: id) }
+    public func attentionResolutionsGet(id: String, sourceID: String, attentionKind: String, episode: String) async throws -> Envelope<AttentionResolution> { try await get("v1/client/attention-resolutions/\(id)", query: [.init(name: "source_id", value: sourceID), .init(name: "attention_kind", value: attentionKind), .init(name: "episode", value: episode)]) }
     public func messagesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("messages", cursor: cursor, limit: limit, history: history) }
     public func messagesGet(id: String) async throws -> Envelope<Resource> { try await resource("messages", id: id) }
     public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> { try await get("v1/client/message-bodies/\(id)") }

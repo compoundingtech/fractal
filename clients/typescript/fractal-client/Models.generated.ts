@@ -1119,6 +1119,13 @@ export type AttentionPromptCall = {
   tool: string;
 };
 
+export type AttentionResolution = {
+  claim_id: Id;
+  person_id: Id;
+  resolved_at: string;
+  resolved_by: Id;
+};
+
 export type AttentionRevision = {
   from_revision: string;
   lines: Array<AttentionRevisionLine>;

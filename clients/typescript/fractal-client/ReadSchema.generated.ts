@@ -1476,6 +1476,15 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
 export type Attention = typeof Attention.Type
 export type AttentionEncoded = typeof Attention.Encoded
 
+export const AttentionResolution = /*#__PURE__*/ (() => Schema.Struct({
+  "claim_id": Id,
+  "person_id": Id,
+  "resolved_at": Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })),
+  "resolved_by": Id
+}).annotate({ identifier: "AttentionResolution" }))()
+export type AttentionResolution = typeof AttentionResolution.Type
+export type AttentionResolutionEncoded = typeof AttentionResolution.Encoded
+
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
   "data": Schema.String.annotate({ description: "Base64 of up to 512 KiB starting at offset." }),
