@@ -818,6 +818,15 @@ pub fn authenticate(
         return Err(forbidden("the client credential is unknown or expired"));
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
+    // Transfer artifacts contain complete batches/state, not recipient-authorized views.
+    // Never redact their wire contents; refuse generic paired access to the whole artifact.
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+        || request.uri().path().starts_with(super::INTERNAL_ROUTE_PREFIX)
+    {
+        return Err(super::custom::notices_unavailable());
+    }
     session.conversation_blocks = conversation_blocks;
     session.conversation_delivery_links = conversation_delivery_links;
     session.conversation_message_participants = conversation_message_participants;
@@ -4149,7 +4158,7 @@ pub async fn events(
         }
     };
     let has_more = query.after.is_some() && records.len() > limit;
-    let records = records.into_iter().take(limit).collect::<Vec<_>>();
+    let mut records = records.into_iter().take(limit).collect::<Vec<_>>();
     let mut resume = records
         .last()
         .map(|(record, local)| EventCursor {
@@ -4165,6 +4174,11 @@ pub async fn events(
             local: None,
         };
     }
+    // Advance through hidden records without exposing their subjects, kinds or payloads.
+    records.retain(|(record, _)| {
+        !fractal_schema::notice::is_reserved_subject(&record.subject)
+            && !fractal_schema::notice::is_reserved_kind(&record.kind)
+    });
     // The projection enrichment reads the store (mission attribution, snapshot ids), so it
     // takes one admitted query scope; the wait above held no reader.
     let items = super::read_deadline::query(&state.store, "/v1/client/events", || {

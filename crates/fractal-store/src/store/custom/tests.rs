@@ -18,6 +18,46 @@ fn audit_custom_dirty(store: &Store) {
 }
 
 #[test]
+fn notice_upgrade_revalidates_quiet_legacy_registration_like_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "example").unwrap();
+    let reviewed = fractal_schema::notice::manifests()[0].clone();
+    let mut substitute = reviewed.clone();
+    substitute.claims.get_mut(&substitute.creation_kind).unwrap().additional_fields = true;
+    let bytes = serde_json::to_vec(&substitute).unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let name = format!("doc/custom-kinds/{hash}");
+    store.put_document_as(&name, &bytes, &None, "legacy-manifest", Some("person/example")).unwrap();
+    let claim = store.append_claim(&ClaimInput {
+        subject: substitute.subject(), kind: schema::REGISTERED.into(), actor: Some("person/example".into()),
+        fields: BTreeMap::from([("document".into(), json!(format!("{name}@{hash}")))]),
+        ..empty_input()
+    }).unwrap();
+    // Emulate a quiet pre-reservation projection, including its old version marker.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hb426ee0c141e owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO custom_registrations VALUES(?1,?2,?3,?4,?5,?6,?7,'ready',NULL)",
+            params![substitute.subject(),substitute.kind,substitute.version,substitute.subject_prefix,
+                hash,canonical_serialized_json_text(&substitute)?,claim.id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h105a7bf3df39 owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='1' WHERE key='custom_projections_version'", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h946810538d0c owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_custom_dirty", [])?;
+        Ok(())
+    }).unwrap().unwrap();
+    drop(store);
+    let upgraded = Store::open(&path, "example").unwrap();
+    upgraded.connection.batched(|tx| -> Result<()> {
+        let incremental = registration_rows(tx)?;
+        assert!(!incremental.contains_key(&reviewed.subject()));
+        rebuild(tx)?;
+        assert_eq!(registration_rows(tx)?, incremental);
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(upgraded.register_custom_kind(&RegistrationRequest {
+        manifest: reviewed, actor: "person/example".into(),
+    }).unwrap()["state"], "ready");
+}
+
+#[test]
 fn custom_ordinary_claim_append_and_seal_never_enqueue_dirty_subjects() {
     let store = Store::open_memory("example").unwrap();
     audit_custom_dirty(&store);
@@ -451,7 +491,7 @@ fn notice_reserved_roots_and_legacy_attention_preserve_unrelated_items() {
     store.connection.batched(|tx| -> Result<()> {
         for subject in ["custom", "custom/attention", "custom/attention/source",
             "custom/attention/snapshot", "custom/attention/control", "custom/attention/source/legacy"] {
-            tx.execute("INSERT INTO custom_sources SELECT ?1,registration,kind,revision,state,
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he9d908465c99 owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO custom_sources SELECT ?1,registration,kind,revision,state,
                 json_set(body,'$.id',?1),person,episode,active,requested_at FROM custom_sources WHERE subject=?2",
                 params![subject, ordinary])?;
         }
