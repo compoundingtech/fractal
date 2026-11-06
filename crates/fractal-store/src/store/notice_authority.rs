@@ -129,7 +129,11 @@ fn runtime(connection: &Connection) -> Result<String, FractalError> {
 /// Compare the resolver's actual outcome, not a duplicated identity/lifecycle watch list.
 /// Identity heads and pending records can fence a holder without changing desired at all.
 pub(super) fn refresh_binding(tx: &Transaction<'_>) -> Result<()> {
-    let current = serde_json::to_string(&runtime(tx))?;
+    let outcome = match runtime(tx) {
+        Ok(actor) => json!({"runtime":actor}),
+        Err(error) => json!({"unavailable":{"code":error.code,"message":error.message,"details":error.details}}),
+    };
+    let current = canonical_json_text(&outcome)?;
     let previous: Option<String> = tx.query_row(
         "SELECT value FROM meta WHERE key='notice_runtime_binding'", [], |row| row.get(0),
     ).optional()?;
