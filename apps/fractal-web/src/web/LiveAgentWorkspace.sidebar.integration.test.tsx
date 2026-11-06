@@ -172,7 +172,7 @@ it('draws harness, observed model, declared effort and exact open asks under the
   // Two asks to the person; a gate, a resolved ask and another agent's ask are not this row's asks.
   const cards = [card('attention/a'), card('attention/b'), card('attention/gate', { attention_kind: 'human-gate', actions: ['review.approve'] }),
     card('attention/resolved', { state: 'resolved' }), card('attention/other', { conversation_id: 'agent/example-elsewhere', requester_id: 'agent/example-elsewhere' })]
-  const attention = Atom.make<Feed<readonly Attention[]>>({ ...observed({ value: cards }), coverage: { _tag: 'Complete' } }).pipe(Atom.keepAlive)
+  const attention = Atom.make<Feed<readonly Attention[]>>({ _tag: 'Observed', value: cards, freshness: 'live', coverage: { _tag: 'Complete' } }).pipe(Atom.keepAlive)
   const declared = new Map<string, Atom.Writable<Feed<NativeDeclarations>>>()
   const declarations = vi.fn(({ agentRef, revision }: { readonly agentRef: string; readonly revision: string }) => {
     const key = `${agentRef}\n${revision}`
