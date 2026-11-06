@@ -427,6 +427,35 @@ export const AgentTodo = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentTodo = typeof AgentTodo.Type
 export type AgentTodoEncoded = typeof AgentTodo.Encoded
 
+/** Declared CPU seconds and input-plus-output tokens per seat incarnation or mission run, and peak memory/disk footprints. Scope labels create no counters, resets, aggregation, reservations or enforcement. */
+export const DeclaredBudgets = /*#__PURE__*/ (() => Schema.Struct({
+  "cpu_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991))),
+  "disk_max": optionalKey(Schema.String),
+  "memory_max": optionalKey(Schema.String),
+  "token_budget": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)))
+}).annotate({ identifier: "DeclaredBudgets", description: "Declared CPU seconds and input-plus-output tokens per seat incarnation or mission run, and peak memory/disk footprints. Scope labels create no counters, resets, aggregation, reservations or enforcement." }))()
+export type DeclaredBudgets = typeof DeclaredBudgets.Type
+export type DeclaredBudgetsEncoded = typeof DeclaredBudgets.Encoded
+
+/** Unordered declared lane. Readers retain future values as Unknown. */
+export const DeclaredLane = /*#__PURE__*/ (() => openEnum(["check","build"]).annotate({ identifier: "DeclaredLane", description: "Unordered declared lane. Readers retain future values as Unknown." }))()
+export type DeclaredLane = typeof DeclaredLane.Type
+export type DeclaredLaneEncoded = typeof DeclaredLane.Encoded
+
+/** Declared priority, not process priority. Readers retain future values as Unknown. */
+export const DeclaredPriority = /*#__PURE__*/ (() => openEnum(["background","normal"]).annotate({ identifier: "DeclaredPriority", description: "Declared priority, not process priority. Readers retain future values as Unknown." }))()
+export type DeclaredPriority = typeof DeclaredPriority.Type
+export type DeclaredPriorityEncoded = typeof DeclaredPriority.Encoded
+
+/** Declared admission — declared, not enforced. st stores and returns these values. They do not change scheduling, admission, process priority or resource limits. Empty budgets and the empty group are omitted. */
+export const DeclaredAdmission = /*#__PURE__*/ (() => Schema.Struct({
+  "budgets": optionalKey(DeclaredBudgets),
+  "lane": optionalKey(DeclaredLane),
+  "priority": optionalKey(DeclaredPriority)
+}).annotate({ identifier: "DeclaredAdmission", description: "Declared admission — declared, not enforced. st stores and returns these values. They do not change scheduling, admission, process priority or resource limits. Empty budgets and the empty group are omitted." }))()
+export type DeclaredAdmission = typeof DeclaredAdmission.Type
+export type DeclaredAdmissionEncoded = typeof DeclaredAdmission.Encoded
+
 /** A named edge from a seat or mission declaration to an ordinary resource subject in the graph. */
 export const DeclaredResource = /*#__PURE__*/ (() => Schema.Struct({
   /** Whether the edge was authored with uri= or subject=. */
@@ -544,6 +573,7 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** current_work_ids named for display, in the same order. */
   "current_work": optionalKey(Schema.Array(WorkLabel)).annotate({ description: "current_work_ids named for display, in the same order." }),
   "current_work_ids": optionalKey(Schema.Array(StepRunId)),
+  "declared_admission": optionalKey(DeclaredAdmission),
   /** Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`. */
   "delivery": Schema.OptionFromOptionalNullOr(AgentDelivery, NULL_NONE).annotate({ description: "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." }),
   /** When a `down` seat began waiting for a session; null in every other state. */
@@ -612,6 +642,7 @@ export type AgentEncoded = typeof Agent.Encoded
 
 export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
   "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
+  "declared_admission": optionalKey(DeclaredAdmission),
   "id": Id,
   "kdl": Schema.String,
   "revision": Schema.String,
@@ -2384,6 +2415,7 @@ export type MissionStateEncoded = typeof MissionState.Encoded
 /** A mission: a reusable definition plus its runs. */
 export const Mission = /*#__PURE__*/ (() => Schema.Struct({
   "active_runs": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "declared_admission": optionalKey(DeclaredAdmission),
   "id": MissionId,
   "kind": Schema.Literal("mission"),
   "mission_revision": Revision,

@@ -218,7 +218,7 @@ pub struct OperationalRepairQuery {
 
 fn repair_filter_values(value: Option<String>) -> Result<Vec<String>, ApiError> {
     value.map(|value| serde_json::from_str(&value)
-        .map_err(|_| ApiError::bad(St3Error::new("invalid-repair-filter", "repair filters must be JSON string arrays"))))
+        .map_err(|_| ApiError::bad(FractalError::new("invalid-repair-filter", "repair filters must be JSON string arrays"))))
         .transpose().map(Option::unwrap_or_default)
 }
 
@@ -237,7 +237,7 @@ pub async fn apply_operational_repair(
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     if bound.is_some() || request.actor.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             "the legacy repair route accepts only unbound token-only callers",
         )));
@@ -252,7 +252,7 @@ pub async fn apply_attributed_operational_repair(
     bound: Option<Extension<BoundAgent>>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
-    let bound = bound.ok_or_else(|| ApiError::bad(St3Error::new(
+    let bound = bound.ok_or_else(|| ApiError::bad(FractalError::new(
         "foreign-agent-actor",
         "attributed repair apply requires an authenticated harness binding",
     )))?;
@@ -291,8 +291,8 @@ fn owner_operational_repair_plan_with_filter(
     state.store.operational_repair_plan_with_legacy_starts_and_filter(&evidence, subjects, classes)
 }
 
-fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
-    let mut refusal = St3Error::new(
+fn legacy_start_proof_error(error: anyhow::Error) -> FractalError {
+    let mut refusal = FractalError::new(
         "legacy-start-proof-unavailable",
         "could not prove the legacy runtime start is closed",
     );
@@ -343,7 +343,7 @@ pub(super) fn operational_repair_check(
             ),
         }),
         Err(error) => {
-            if let Some(refusal) = error.downcast_ref::<St3Error>()
+            if let Some(refusal) = error.downcast_ref::<FractalError>()
                 && refusal.code == "legacy-start-proof-unavailable"
             {
                 return Err(ApiError::internal(error));
@@ -422,7 +422,7 @@ pub async fn get_coordination_counts(
     let until = query.until_ms.unwrap_or(client_now_ms() as u64);
     let since = query.since_ms.unwrap_or(until.saturating_sub(86_400_000));
     if since > until {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -441,7 +441,7 @@ pub async fn get_usage(
         .since_ms
         .unwrap_or(until_ms.saturating_sub(86_400_000));
     if since_ms > until_ms {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -562,7 +562,7 @@ pub async fn get_slo_history(
         .unwrap_or(until_ms.saturating_sub(crate::slo_history::RETENTION_MS / 7));
     let steps = query.steps.unwrap_or(120);
     if since_ms >= until_ms || until_ms - since_ms > crate::slo_history::RETENTION_MS || !(1..=1_000).contains(&steps) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-slo-period",
             "the period must end after it starts, span at most 7 days, and use 1 to 1000 steps",
         )));
@@ -571,8 +571,8 @@ pub async fn get_slo_history(
     let id = query.id.clone();
     let points = tokio::task::spawn_blocking(move || crate::slo_history::read(&dir, &id, since_ms, until_ms))
         .await
-        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?
-        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?;
+        .map_err(|error| ApiError::bad(FractalError::new("slo-history-unavailable", error.to_string())))?
+        .map_err(|error| ApiError::bad(FractalError::new("slo-history-unavailable", error.to_string())))?;
     Ok(Json(json!({
         "id": query.id, "since_ms": since_ms, "until_ms": until_ms, "samples": points.len(),
         "steps": crate::slo_history::buckets(&points, since_ms, until_ms, steps),
@@ -599,19 +599,19 @@ pub async fn post_harness_diagnostic(
     } else if !request.actor.contains('/') && !request.actor.trim().is_empty() {
         format!("agent/{}", request.actor)
     } else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-diagnostic-actor",
             "a harness diagnostic requires one concrete agent subject",
         )));
     };
     if !matches!(request.severity.as_str(), "warning" | "error") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-diagnostic-severity",
             "a harness diagnostic severity must be warning or error",
         )));
     }
     if request.code.trim().is_empty() || request.reason.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-harness-diagnostic",
             "a harness diagnostic requires a nonempty code and reason",
         )));
@@ -740,7 +740,7 @@ pub async fn events(
     // The old array shape has no continuation field. Keep its bounded answer and expose
     // truncation explicitly in headers; owner traversal requires the new page envelope.
     if query.owner_run.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "event-pagination-required",
             "update the st CLI to this daemon version; owner-filtered traversal uses /v1/events/page",
         )));
@@ -748,7 +748,7 @@ pub async fn events(
     if query.subject.is_some() {
         let store = state.store.clone();
         if blocking_store(move || store.event_payload_migration_pending()).await? {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "event-pagination-required",
                 "update the st CLI to this daemon version; subject-filtered traversal during migration uses /v1/events/page",
             )));
@@ -822,7 +822,7 @@ mod legacy_proof_refusal_tests {
     }
 
 
-    fn capture_error() -> St3Error {
+    fn capture_error() -> FractalError {
         legacy_start_proof_error(anyhow::Error::new(
             fractal_runtime::LegacyStartProofUnavailable {
                 stage: "proc-environ",

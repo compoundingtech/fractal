@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A trim's run refreshes the resource projection of the subjects its deletes touch inside its own paced chunks, instead of leaving them queued for whichever write projects next, which refreshed them all while it held the writer and stalled replication and other writes for seconds",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table, trigger or index change: the delete trigger still queues each subject, and the trim's chunk takes back the ones its deletes leave as they were."},
+  "rules": {"status": "none", "detail": "No retention change. The trim deletes what it deleted before."},
+  "compatibility": {"status": "none", "detail": "No API, wire or config change. The resource projection is what a rebuild answers, as before."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build as usual. An older build leaves the trim's subjects queued for the next write, as it did."}
+}

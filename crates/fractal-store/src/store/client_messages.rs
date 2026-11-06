@@ -1148,8 +1148,8 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
     format!("SELECT subject,created_index,current,closed FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
 }
 
-fn selectors_not_ready() -> St3Error {
-    St3Error::new("message-selectors-not-ready", "message selector initialization is still in progress")
+fn selectors_not_ready() -> FractalError {
+    FractalError::new("message-selectors-not-ready", "message selector initialization is still in progress")
 }
 
 /// Owns checkpoint policy across initial backfill loans and interleaved writes.
