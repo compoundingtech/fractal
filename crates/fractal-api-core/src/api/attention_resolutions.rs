@@ -39,7 +39,7 @@ mod tests {
         let mut opening = tests_shared::probe_claim("resolution-opening", "working");
         opening.subject = source.into();
         opening.actor = Some(source.into());
-        let observation = state.store.claim(opening).unwrap();
+        let observation = state.store.append_claim(&opening).unwrap();
         let episode = observation.id.as_str();
         let person = "person/receiver";
         let id = client_attention_id(source, person, episode).unwrap();
@@ -47,7 +47,7 @@ mod tests {
             Extension(client_v0::ClientSession::local(Some(person)).unwrap()), AxumPath(id.into()),
             Query(Locator { source_id: source.into(), attention_kind: "harness-prompt".into(), episode: episode.into() }));
         assert_eq!(lookup(person, &id).await.unwrap_err().code, "not-found");
-        state.store.claim(ClaimInput { subject: source.into(), kind: "harness.diagnostic".into(),
+        state.store.append_claim(&ClaimInput { subject: source.into(), kind: "harness.diagnostic".into(),
             actor: Some(person.into()), fields: serde_json::from_value(json!({"code":"native-prompt-answered","status":"allow","driver":"claude"})).unwrap(),
             evidence: vec![episode.into()], expected_subject: None,
             idempotency_key: Some(format!("native-prompt-answer:{episode}")),
