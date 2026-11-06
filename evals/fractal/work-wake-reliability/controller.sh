@@ -15,7 +15,7 @@ revisable_run=""
 
 cleanup() {
   if [[ -n "$revisable_run" ]]; then
-    st3 missions cancel "$revisable_run" \
+    fractal missions cancel "$revisable_run" \
       --reason "the reliability controller is cleaning up after an early exit" \
       --as "$REQUESTER" >/dev/null 2>&1 || true
   fi
@@ -31,7 +31,7 @@ persist_state() {
 persist_state
 
 agent_json() {
-  st3 agents show "$WORKER" --all --json 2>/dev/null
+  fractal agents show "$WORKER" --all --json 2>/dev/null
 }
 
 wait_for_worker() {
@@ -62,10 +62,10 @@ render_fixture() {
 
 record_completed_step() {
   local scenario=$1 subject=$2 work_snapshot run snapshot
-  st3 trace wait "$subject" --for completed --timeout 5m >/dev/null
-  work_snapshot="$(st3 work show "$subject" --json)"
+  fractal trace wait "$subject" --for completed --timeout 5m >/dev/null
+  work_snapshot="$(fractal work show "$subject" --json)"
   run="$(jq -er '.value.mission_run_id' <<<"$work_snapshot")"
-  snapshot="$(st3 missions show "$run" --json \
+  snapshot="$(fractal missions show "$run" --json \
     | jq -e --arg subject "$subject" '.steps[] | select(.subject == $subject)')"
   jq -e '
     .status == "completed"
@@ -93,7 +93,7 @@ start_fresh() {
   run="$(jq -er '.mission_run.subject' <<<"$output")"
   step="$(jq -er '.mission_run.steps[] | select(.step == "respond") | .subject' <<<"$output")"
   record_completed_step "fresh-$label" "$step"
-  st3 trace wait "$run" --for completed --timeout 2m >/dev/null
+  fractal trace wait "$run" --for completed --timeout 2m >/dev/null
   state="$(jq --arg label "$label" --arg run "$run" \
     '.scenarios += [{kind: "fresh", label: $label, run: $run, status: "completed"}]' <<<"$state")"
   persist_state
@@ -112,11 +112,11 @@ first_incarnation="$(wait_for_worker)"
 state="$(jq --arg incarnation "$first_incarnation" '.incarnations += [$incarnation]' <<<"$state")"
 persist_state
 
-st3 apply "$fresh_file" --as "$REQUESTER" >/dev/null
+fractal apply "$fresh_file" --as "$REQUESTER" >/dev/null
 start_fresh one
 start_fresh two
 
-st3 apply "$revisable_v1" --as "$REQUESTER" >/dev/null
+fractal apply "$revisable_v1" --as "$REQUESTER" >/dev/null
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 revisable_output="$(st3 missions start eval/work-wake-reliability/revisable \
   --id "revisable-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
@@ -127,7 +127,7 @@ revisable_run="$(jq -er '.mission_run.subject' <<<"$revisable_output")"
 initial_step="$(jq -er '.mission_run.steps[] | select(.step == "initial") | .subject' <<<"$revisable_output")"
 record_completed_step revision-initial "$initial_step"
 
-revision_one="$(st3 work revise "$revisable_run" "$revisable_v2" \
+revision_one="$(fractal work revise "$revisable_run" "$revisable_v2" \
   --as "$REQUESTER" \
   --reason "exercise the first ordinary live revision wake" \
   --json)"
@@ -135,7 +135,7 @@ jq -e '.status == "applied"' <<<"$revision_one" >/dev/null
 revision_one_step="$(jq -er '.mission_run.steps[] | select(.step == "revision-one") | .subject' <<<"$revision_one")"
 record_completed_step revision-one "$revision_one_step"
 
-revision_two="$(st3 work revise "$revisable_run" "$revisable_v3" \
+revision_two="$(fractal work revise "$revisable_run" "$revisable_v3" \
   --as "$REQUESTER" \
   --reason "exercise the second ordinary live revision wake" \
   --json)"
@@ -143,18 +143,18 @@ jq -e '.status == "applied"' <<<"$revision_two" >/dev/null
 revision_two_step="$(jq -er '.mission_run.steps[] | select(.step == "revision-two") | .subject' <<<"$revision_two")"
 record_completed_step revision-two "$revision_two_step"
 
-st3 terminals signal "$WORKER" hangup >/dev/null
+fractal terminals signal "$WORKER" hangup >/dev/null
 second_incarnation="$(wait_for_worker "$first_incarnation")"
 state="$(jq --arg incarnation "$second_incarnation" '.incarnations += [$incarnation]' <<<"$state")"
 persist_state
 
 start_fresh after-restart
 
-st3 missions cancel "$revisable_run" \
+fractal missions cancel "$revisable_run" \
   --reason "the revision wake scenarios completed" \
   --as "$REQUESTER" >/dev/null
-st3 trace wait "$revisable_run" --for cancelled --timeout 2m >/dev/null
-st3 missions show "$revisable_run" --json >"$GENERATED/cancelled.json"
+fractal trace wait "$revisable_run" --for cancelled --timeout 2m >/dev/null
+fractal missions show "$revisable_run" --json >"$GENERATED/cancelled.json"
 jq -e '
   .status == "cancelled"
   and (.steps[] | select(.step == "finalize") | .status) == "completed"

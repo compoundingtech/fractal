@@ -2,6 +2,9 @@ import { Effect, Schema } from 'effect'
 import type * as Pty from '@fractal/sdk/pty'
 import type * as Mutations from '@fractal/sdk/mutations'
 import { createLazyChunk } from '@fractal/ui/lazy-chunk'
+import type * as AttachmentSchema from './attachmentSchema.ts'
+import type * as TerminalSchema from '../terminal/terminalSchema.ts'
+import type * as ArrangementSchema from '../folders/arrangementSchema.ts'
 
 /** A failed import is forgotten so the existing action/pane retry can acquire it again. */
 export class SdkChunkFailure extends Schema.TaggedError<SdkChunkFailure>()('SdkChunkFailure', {
@@ -24,3 +27,6 @@ export const retryableImport = <T>(load: () => Promise<T>, label: string): Effec
 
 export const loadPty = retryableImport<typeof Pty>(() => import('@fractal/sdk/pty'), 'terminal services')
 export const loadMutations = retryableImport<typeof Mutations>(() => import('@fractal/sdk/mutations'), 'editing services')
+export const loadAttachmentSchema = retryableImport<typeof AttachmentSchema>(() => import('./attachmentSchema.ts'), 'attachment services')
+export const loadTerminalSchema = retryableImport<typeof TerminalSchema>(() => import('../terminal/terminalSchema.ts'), 'terminal contracts')
+export const loadArrangementSchema = retryableImport<typeof ArrangementSchema>(() => import('../folders/arrangementSchema.ts'), 'arrangement contracts')
