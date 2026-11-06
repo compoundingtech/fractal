@@ -1204,6 +1204,8 @@ person and replaces `eta`; finished rows have no ETA. `late` means the run deadl
 `urgency_rank` orders person holds (0), late runs (1), stalled runs (2), other active runs (3),
 then finished runs (4); deadline and run ID break active ties. `as_of`, `work_cut`, and
 `missions_cut` identify the clock and published inputs. Clients draw these facts without joins.
+Responses contain at most 100 rows after urgency sorting; `total_rows` and `truncated` make the
+bound explicit. Individual offers seek the recipient's indexed singleton offer, not fleet history.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run
