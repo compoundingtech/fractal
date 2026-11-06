@@ -64,8 +64,8 @@ export type Feed<A> =
       readonly readAt?: number
       /** Producer snapshot time, not the client's receipt or display clock. */
       readonly snapshotCreatedAt?: Timestamp
-      /** Explicitly bounded published evidence; absence makes no completeness claim. */
-      readonly coverage?: { readonly _tag: 'Partial' }
+      /** Explicit completeness evidence; absence makes no completeness claim. */
+      readonly coverage?: { readonly _tag: 'Partial' | 'Complete' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
       readonly error?: {
         readonly reason: 'ungranted' | 'unsupported' | 'failed'

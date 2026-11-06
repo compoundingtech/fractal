@@ -17,7 +17,7 @@ export const isOpenPersonAsk = ({ item, agentRef }: { readonly item: Attention; 
 export const openPersonAskCount = ({ feed, agentRef }: {
   readonly feed: Feed<readonly Attention[]>; readonly agentRef: string
 }): Option.Option<number> =>
-  feed._tag === 'Observed' && feed.coverage === undefined
+  feed._tag === 'Observed' && feed.coverage?._tag === 'Complete'
     ? Option.some(feed.value.filter(item => isOpenPersonAsk({ item, agentRef })).length)
     : Option.none()
 

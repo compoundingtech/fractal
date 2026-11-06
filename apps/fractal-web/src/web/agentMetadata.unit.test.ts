@@ -38,9 +38,10 @@ describe('open person asks', () => {
   })
   it('is exact over complete attention and none otherwise, never a lower bound', () => {
     const items = [card({ id: 'attention/a' }), card({ id: 'attention/b' }), card({ id: 'attention/c', state: 'resolved' })]
-    expect(openPersonAskCount({ feed: observed({ value: items }), agentRef })).toEqual(Option.some(2))
-    expect(openPersonAskCount({ feed: observed({ value: [] }), agentRef })).toEqual(Option.some(0))
-    expect(openPersonAskCount({ feed: observed({ value: items, freshness: 'stale' }), agentRef })).toEqual(Option.some(2))
+    expect(openPersonAskCount({ feed: { ...observed({ value: items }), coverage: { _tag: 'Complete' } }, agentRef })).toEqual(Option.some(2))
+    expect(openPersonAskCount({ feed: { ...observed({ value: [] }), coverage: { _tag: 'Complete' } }, agentRef })).toEqual(Option.some(0))
+    expect(openPersonAskCount({ feed: { ...observed({ value: items, freshness: 'stale' }), coverage: { _tag: 'Complete' } }, agentRef })).toEqual(Option.some(2))
+    expect(openPersonAskCount({ feed: observed({ value: items }), agentRef })).toEqual(Option.none())
     expect(openPersonAskCount({ feed: { ...observed({ value: items }), coverage: { _tag: 'Partial' } }, agentRef })).toEqual(Option.none())
     expect(openPersonAskCount({ feed: waiting, agentRef })).toEqual(Option.none())
     expect(openPersonAskCount({ feed: unavailable({ reason: 'ungranted', detail: 'Example refusal' }), agentRef })).toEqual(Option.none())
