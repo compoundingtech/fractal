@@ -408,7 +408,7 @@ mod tests {
             assert!(page["next_cursor"].is_null());
         }
         for claim in &hidden {
-            let (status, _) = client_json(app.clone(), &format!("/v1/claims/by-id/{}", claim.id)).await;
+            let (status, _) = client_json(app.clone(), &format!("/v1/claims/by-id/{}", urlencoding::encode(&claim.id))).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             let (status, page) = client_json(app.clone(), &format!(
                 "/v1/claims?subject={}", urlencoding::encode(&claim.subject),
