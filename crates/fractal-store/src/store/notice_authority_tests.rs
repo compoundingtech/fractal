@@ -111,3 +111,40 @@ fn notice_source_payload_cannot_forge_authenticated_producer() {
     assert!(store.append_claim(&ClaimInput { subject: format!("{}other", notice::SOURCE_PREFIX), fields,
         ..input(SOURCE, &source.kind, "agent/example/producer", json!({})) }).is_err());
 }
+
+#[test]
+fn notice_later_replicated_source_conflict_invalidates_links_like_rebuild() {
+    let (store, source) = setup();
+    for (subject, kind, actor, control) in [
+        (SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, false),
+        (CONTROL, "custom.attention.control-created", "person/example", true),
+    ] {
+        store.append_claim(&input(subject, kind, actor, linked(&source, control))).unwrap();
+        let connection = store.readers.get();
+        assert_eq!(custom::source(&connection, subject).unwrap().unwrap()["state"], "ready");
+        let edges: i64 = connection.query_row(
+            "SELECT count(*) FROM custom_dependencies WHERE source=?1 AND dependency IN (?2,?3)",
+            params![subject, SOURCE, source.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(edges, 2);
+    }
+    let remote = Store::open_memory("remote").unwrap();
+    custom::tests_shared_delivery::legacy_sync(&store, &remote);
+    // Model a mixed-version member admitting a competing creation in a later batch.
+    let mut fields = custom::fields(&source); fields.insert("summary".into(), json!("Competing input"));
+    remote.connection.batched(|tx| append_claim_tx(tx, &remote.origin, SOURCE,
+        &source.kind, source.actor.as_deref(), &json!({"fields":fields}), &[], None)).unwrap().unwrap();
+    custom::tests_shared_delivery::legacy_sync(&remote, &store);
+    store.connection.batched(|tx| -> Result<()> {
+        let incremental = [SNAPSHOT, CONTROL].map(|subject| custom::source(tx, subject).unwrap().unwrap());
+        for row in &incremental {
+            assert_eq!(row["state"], "invalid");
+            assert!(row["error"].as_str().unwrap().contains("conflicting or ineligible source creation"));
+        }
+        custom::rebuild(tx)?;
+        for (subject, before) in [SNAPSHOT, CONTROL].iter().zip(incremental) {
+            assert_eq!(custom::source(tx, subject)?.unwrap(), before);
+        }
+        Ok(())
+    }).unwrap().unwrap();
+}

@@ -3,6 +3,27 @@
 use super::*;
 use fractal_schema::{custom::Manifest, notice};
 
+/// Authority dependencies are invalidation edges, not optional projection `_basis` inputs.
+/// Retain links from all facts, including unpinned, pending and invalid facts, so a later
+/// source arrival, repair or competing creation revalidates every linked row.
+pub(super) fn record_dependencies(tx: &Transaction<'_>, subject: &str, history: &[ClaimRecord]) -> Result<()> {
+    if !subject.starts_with(notice::SNAPSHOT_PREFIX) && !subject.starts_with(notice::CONTROL_PREFIX) {
+        return Ok(());
+    }
+    let mut insert = tx.prepare_cached(
+        "INSERT OR IGNORE INTO custom_dependencies VALUES(?1,?2,'[]','')",
+    )?;
+    for claim in history {
+        let fields = custom::fields(claim);
+        for field in ["source_id", "creation_claim"] {
+            if let Some(dependency) = fields.get(field).and_then(Value::as_str) {
+                insert.execute(params![subject, dependency])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn unavailable(reason: impl Into<String>) -> FractalError {
     FractalError::new("notices-unavailable", format!("notices unavailable: {}", reason.into()))
 }

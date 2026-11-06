@@ -554,6 +554,9 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
     Ok(false)
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
+    let history = claims(tx, subject)?;
+    tx.execute("DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
+    notice_authority::record_dependencies(tx, subject, &history)?;
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
         if fractal_schema::notice::is_reserved_subject(subject) {
             let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});
@@ -561,7 +564,6 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
                 params![subject, canonical_json_text(&body)?])?;
             return Ok(());
         }
-        let history = claims(tx, subject)?;
         if let Some(c) = history
             .iter()
             .find(|c| fields(c).contains_key("_registration"))
@@ -577,10 +579,8 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
             return Ok(());
         }
         tx.execute(/* sqlite-large-value: allow-for-now lv-hb864ed6dba28 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_sources WHERE subject=?1", [subject])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
         return Ok(());
     };
-    let history = claims(tx, subject)?;
     let pinned = history
         .iter()
         .filter(|c| fields(c).get("_registration") == Some(&json!(hash)))
@@ -629,7 +629,6 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
             basis.extend(b);
         }
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hddc3e119ea62 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
     if basis.len() > 256 {
         state = "invalid";
         error = Some("selected slots exceed 256 basis dependencies".into());
