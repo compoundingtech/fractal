@@ -3313,6 +3313,12 @@ pub enum ActionType {
     ArrangementEdit,
     #[serde(rename = "arrangement.membership.edit")]
     ArrangementMembershipEdit,
+    #[serde(rename = "attention.dismiss")]
+    AttentionDismiss,
+    #[serde(rename = "attention.restore")]
+    AttentionRestore,
+    #[serde(rename = "attention.snooze")]
+    AttentionSnooze,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -3579,6 +3585,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn attention_dismiss(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionControlParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AttentionDismiss,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn attention_resolve(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -3588,6 +3608,34 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::AttentionResolve,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn attention_restore(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionControlParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AttentionRestore,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn attention_snooze(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AttentionSnooze,
             idempotency_key,
             fence,
             &parameters,
@@ -4275,6 +4323,26 @@ impl ActionRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AttentionControlParameters {
+    pub target_id: String,
+    pub source_id: String,
+    pub attention_kind: String,
+    pub episode: String,
+    pub source_revision: String,
+    pub expected_control_revision: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AttentionSnoozeParameters {
+    pub target_id: String,
+    pub source_id: String,
+    pub attention_kind: String,
+    pub episode: String,
+    pub source_revision: String,
+    pub expected_control_revision: Option<String>,
+    pub until: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PersonAskParameters {
     pub person_id: String,
@@ -4714,6 +4782,8 @@ pub struct ActionResult {
     pub harness_answer: Option<HarnessAnswerResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

@@ -25,6 +25,9 @@ export type ActionCommon = {
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
+  | "attention.dismiss"
+  | "attention.restore"
+  | "attention.snooze"
   | "attention.resolve"
   | "review.approve"
   | "review.reject"
@@ -85,6 +88,7 @@ export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  control_revision?: string | null;
   harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   membership_revision?: Revision;
@@ -1024,6 +1028,15 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionControlParameters = {
+  attention_kind: string;
+  episode: string;
+  expected_control_revision: string | null;
+  source_id: Id;
+  source_revision: string;
+  target_id: Id;
+};
+
 export type AttentionLaunchAgent = {
   harness: string | null;
   host: string | null;
@@ -1116,6 +1129,16 @@ export type AttentionRevision = {
 export type AttentionRevisionLine = {
   op: "+" | "-" | "~";
   text: string;
+};
+
+export type AttentionSnoozeParameters = {
+  attention_kind: string;
+  episode: string;
+  expected_control_revision: string | null;
+  source_id: Id;
+  source_revision: string;
+  target_id: Id;
+  until: (NoticeTimestamp | null);
 };
 
 export type AttentionTargetState = {
@@ -4387,11 +4410,14 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.dismiss'; parameters: AttentionControlParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;
   reason?: string;
 }; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.restore'; parameters: AttentionControlParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.snooze'; parameters: AttentionSnoozeParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
