@@ -2067,6 +2067,9 @@ fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), S
     let mut rewritten = BTreeMap::new();
     for (id, mut step) in old {
         step.path = format!("{parent}/{}/{}", mission.id, step.id);
+        if let Some(loop_spec) = step.loop_spec.as_mut() {
+            loop_spec.path.clone_from(&step.path);
+        }
         if let Some(nested) = step.nested_mission.as_mut() {
             rewrite_nested_paths(nested, &step.path)?;
         }
@@ -3092,6 +3095,56 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_loop_paths_follow_their_distinct_owning_steps() {
+        let source = r#"mission "collision" state="ready" { goal "Keep nested histories separate.";
+          step "left" { mission "left-inner" { goal "Left."; loop "repeat" { max-rounds 2;
+            round { goal "Left round."; completion { when "all-steps-exhausted"; }; }; }; }; }
+          step "right" { mission "right-inner" { goal "Right."; loop "repeat" { max-rounds 2;
+            round { goal "Right round."; completion { when "all-steps-exhausted"; }; }; }; }; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "node").unwrap();
+        let mission = &missions["collision"];
+        let left = &mission.steps["left"].nested_mission.as_ref().unwrap().steps["repeat"];
+        let right = &mission.steps["right"]
+            .nested_mission
+            .as_ref()
+            .unwrap()
+            .steps["repeat"];
+        for (step, expected) in [
+            (left, "left/left-inner/repeat"),
+            (right, "right/right-inner/repeat"),
+        ] {
+            assert_eq!(step.path, expected);
+            assert_eq!(step.loop_spec.as_ref().unwrap().path, step.path);
+        }
+        assert_ne!(
+            left.loop_spec.as_ref().unwrap().path,
+            right.loop_spec.as_ref().unwrap().path
+        );
+    }
+
+    #[test]
+    fn top_level_loop_retains_local_path_and_legacy_publication_hashes() {
+        let source = r#"mission "top" state="ready" { goal "Top.";
+          loop "repeat" { max-rounds 2; round { goal "Round."; completion { when "all-steps-exhausted"; }; }; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "node").unwrap();
+        let mission = &missions["top"];
+        let step = &mission.steps["repeat"];
+        assert_eq!(step.path, "repeat");
+        assert_eq!(step.loop_spec.as_ref().unwrap().path, "repeat");
+        // Printed once by the unchanged parser at base 3f95623569.
+        assert_eq!(
+            step.definition_hash,
+            "c77a085e3e729ffeb6e106eded2eee52a66d27390fe475e8354f27a01872a6f5"
+        );
+        assert_eq!(
+            mission.revision,
+            "e867b568e11cd2a92d96a96ec2f941d9b886a4f3bc4b8c74301bb896540a05fe"
+        );
+    }
+
     #[test]
     fn kdl_interpolation_preserves_arbitrary_text_input() {
         let source = r#"version 2

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Inline nested loops now have unique history subjects based on their owning step paths, so same-named loops no longer share round results or feedback",
+  "replay": {"status": "none", "detail": "Existing claims are not rewritten. New nested-loop revisions derive distinct loop history subjects."},
+  "schema": {"status": "none", "detail": "No claim kind, field or subject pattern changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Publication hashes change for missions containing inline nested loops on the next source apply or sync. Top-level loop hashes and subjects are unchanged. Runs in progress keep their pinned revision and existing history subjects, including any existing collisions, unless a new revision is explicitly adopted."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No migration required; newly published revisions use the corrected paths."},
+  "recovery": {"status": "none", "detail": "Revert the commit; runs retain their pinned revision bodies."}
+}
