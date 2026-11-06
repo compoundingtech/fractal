@@ -177,7 +177,7 @@ export function applyWindow(window: CollectionWindow<{ id: string }> | undefined
 }
 
 type MembershipFrontier = { scope: string; index: number; count: number };
-export type MembershipPageResult = { kind: 'continue' | 'restart' } | { kind: 'complete'; items: readonly OrderedMembership[] };
+export type MembershipPageResult = { kind: 'continue' | 'restart' | 'ignored' } | { kind: 'complete'; items: readonly OrderedMembership[] };
 /** Subscribe with collection-v1 before beginning an attempt. Feed every received metadata frame
  * and page here; restart means discard the attempt, never retry its continuation cursor. */
 export class MembershipPaging {
@@ -186,8 +186,24 @@ export class MembershipPaging {
     private accepted?: MembershipFrontier;
     private rows: OrderedMembership[] = [];
     private ids = new Set<string>();
+    private generation = Symbol();
+    private encoder = new TextEncoder();
+    private precedes(left: OrderedMembership, right: OrderedMembership): boolean {
+        const a = [left.position.bucket ?? '', left.position.key, left.member], b = [right.position.bucket ?? '', right.position.key, right.member];
+        for (let field = 0; field < a.length; field++) {
+            if (a[field] === b[field]) continue;
+            const x = this.encoder.encode(a[field]), y = this.encoder.encode(b[field]);
+            for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] < y[i];
+            return x.length < y.length;
+        }
+        return false;
+    }
     constructor(readonly person: string, readonly container: ArrangementId) {}
-    begin(): void { this.attempt = undefined; this.rows = []; this.ids.clear(); }
+    begin(): symbol { this.generation = Symbol(); this.attempt = undefined; this.rows = []; this.ids.clear(); return this.generation; }
+    reject(code: string): 'restart' | 'refused' {
+        this.begin();
+        return code === 'membership-collection-changed' || code === 'membership-frontier-reset' ? 'restart' : 'refused';
+    }
     private frontier(snapshot: Snapshot, contract: unknown, membership?: OrderedMembershipState): MembershipFrontier {
         if (contract !== 'collection-v1' || !membership?.epoch || membership.container !== this.container
             || !Number.isSafeInteger(membership.changed_index) || membership.changed_index < 0
@@ -202,6 +218,9 @@ export class MembershipPaging {
         if (a.index === b.index && a.count !== b.count) throw new Error('membership-frontier-inconsistent');
     }
     observeStream(frame: OrderedMembershipFrame): 'current' | 'ignored' | 'restart' {
+        try { return this.observe(frame); } catch (error) { this.begin(); throw error; }
+    }
+    private observe(frame: OrderedMembershipFrame): 'current' | 'ignored' | 'restart' {
         const next = this.frontier(frame.snapshot, frame.paging_contract, frame.membership);
         const current = this.attempt ?? this.accepted;
         if (current?.scope === next.scope) {
@@ -218,9 +237,21 @@ export class MembershipPaging {
         }
         return 'current';
     }
-    acceptPage(snapshot: Snapshot, page: OrderedMembershipPage): MembershipPageResult {
+    acceptPage(snapshot: Snapshot, page: OrderedMembershipPage, generation: symbol): MembershipPageResult {
+        if (generation !== this.generation) return { kind: 'ignored' };
+        try { return this.stage(snapshot, page); } catch (error) { this.begin(); throw error; }
+    }
+    private stage(snapshot: Snapshot, page: OrderedMembershipPage): MembershipPageResult {
         const next = this.frontier(snapshot, page.paging_contract, page.membership);
-        if (this.accepted?.scope === next.scope && this.accepted.index > next.index) return { kind: 'restart' };
+        if ((page.filters.person !== undefined && page.filters.person !== this.person)
+            || (page.filters.subject !== undefined && page.filters.subject !== this.container)) {
+            this.begin(); return { kind: 'restart' };
+        }
+        if (this.accepted?.scope === next.scope) {
+            this.equalCount(this.accepted, next);
+            if (this.accepted.index > next.index) { this.begin(); return { kind: 'restart' }; }
+        }
+        else if (this.accepted) { this.accepted = undefined; this.begin(); return { kind: 'restart' }; }
         if (this.attempt) {
             if (this.attempt.scope !== next.scope || this.attempt.index !== next.index) {
                 this.begin(); return { kind: 'restart' };
@@ -236,7 +267,8 @@ export class MembershipPaging {
         }
         this.attempt = next;
         for (const row of page.items) {
-            if (row.container !== this.container || row.id !== row.member || this.ids.has(row.member)) {
+            if (row.container !== this.container || row.id !== row.member || this.ids.has(row.member)
+                || (this.rows.length > 0 && !this.precedes(this.rows[this.rows.length - 1], row))) {
                 throw new Error('membership-frontier-inconsistent');
             }
             this.ids.add(row.member); this.rows.push(row);
@@ -248,7 +280,8 @@ export class MembershipPaging {
         }
         if (this.rows.length !== next.count) throw new Error('membership-frontier-inconsistent');
         this.accepted = next;
-        return { kind: 'complete', items: [...this.rows] };
+        const items = [...this.rows]; this.begin();
+        return { kind: 'complete', items };
     }
 }
 
