@@ -1,11 +1,32 @@
 {
   "version": 1,
   "summary": "A Claude subagent's permission prompt that nobody answers within 2 minutes is now denied by st's permission hook, with a message saying the call was not run and how to remove files by literal absolute path. Before, the hook said nothing, and a background subagent waited on Claude's dialog until someone happened on the seat's terminal: Claude itself times out such a prompt only at the top level. The seat's own prompts are unchanged. The st skill also says to remove files by literal absolute path after cd.",
-  "replay": {"status": "none", "detail": "No graph replay."},
-  "schema": {"status": "none", "detail": "No schema change. The hook prints an ordinary PermissionRequest decision, the same shape it prints for a person's deny from st."},
-  "rules": {"status": "changed", "detail": "A subagent's prompt (the hook payload names an agent_id) waits 2 minutes for a person's answer from st instead of 10, and is denied when that wait runs out unanswered. A person's answer within those 2 minutes, or an answer in the terminal, wins as before. The prompt leaves the person's home when the denied subagent's next event closes it, as for any answered prompt."},
-  "compatibility": {"status": "none", "detail": "Mixed-version fleets with the previous release interoperate. Only the hook process changes: it runs from the seat's own host's st binary and writes nothing new to the store or the wire. A seat on a previous-release host keeps the 10-minute silent wait. The embedded hook scripts and their registration are unchanged, so no seat restarts for this."},
-  "downtime": {"status": "none", "detail": "No downtime."},
-  "manual": {"status": "none", "detail": "No step is required."},
-  "recovery": {"status": "none", "detail": "Rolling back restores the silent 10-minute wait for subagent prompts."}
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change. The hook prints an ordinary PermissionRequest decision, the same shape it prints for a person's deny from st."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "A subagent's prompt (the hook payload names an agent_id) waits 2 minutes for a person's answer from st instead of 10, and is denied when that wait runs out unanswered. A person's answer within those 2 minutes, from st or in the terminal, wins as before. The prompt leaves the person's home when the denied subagent's next event closes it, as for any answered prompt. The deny keys on agent_id alone, so it also applies to a foreground subagent, and to a subagent's question or a prompt still queued behind an older one. When the hook cannot reach the daemon for those 2 minutes it also denies, where it said nothing before. Each of these fails closed: the call does not run, and the subagent reads why."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version fleets with the previous release interoperate. Only the hook process changes: it runs from the seat's own host's st binary and writes nothing new to the store or the wire. A seat on a previous-release host keeps the 10-minute silent wait. The embedded hook scripts and their registration are unchanged, so no seat restarts for this."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No step is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back restores the silent 10-minute wait for subagent prompts."
+  }
 }
