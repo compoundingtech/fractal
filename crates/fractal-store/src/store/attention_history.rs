@@ -2,6 +2,15 @@
 //! Reads use the caller's pinned snapshot and never repair or populate a projection.
 use super::*;
 
+/// An accepted source claim, authorized against its addressed episode, not current ownership.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SourceResolution {
+    pub claim_id: String,
+    pub resolved_by: String,
+    pub person: String,
+    pub resolved_at_unix_ms: u128,
+}
+
 pub const MAX_CANDIDATES: usize = 32;
 const MAX_BODY_BYTES: usize = 1_048_576;
 const MAX_DECODE_BYTES: usize = 2_097_152;

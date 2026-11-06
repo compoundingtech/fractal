@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add authenticated exact native attention control reads for dismiss and snooze reconciliation",
+  "replay": { "status": "none", "detail": "Reads do not append claims or synthesize action receipts." },
+  "schema": { "status": "additive", "detail": "Add AttentionControl and attention-controls.get to the generated Rust, TypeScript and Swift client contract." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "The authenticated person supplies the original locator and source revision. Identity mismatch is validation-failed; unavailable exact sources are not-found. Authorization and indexed control reduction share one SQLite read snapshot, including for hidden open sources." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "Read after ACK and reconnect, never poll or infer application from bounded feed omission." },
+  "recovery": { "status": "none", "detail": "Nullable control revision and snooze deadline are authoritative point-read values, not receipt echoes." }
+}

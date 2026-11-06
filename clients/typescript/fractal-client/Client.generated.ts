@@ -7,6 +7,7 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    AttentionControl,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -699,6 +700,8 @@ export class FractalClient {
     async devicesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/devices' + query(options), undefined, requestOptions); }
     async attentionList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/attention' + query(options), undefined, requestOptions); }
     async attentionGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/attention/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async attentionControlsGet(id: string, options: { source_id: string; attention_kind: string; episode: string; source_revision: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AttentionControl>> { return this.get(`/v1/client/attention-controls/${encodeURIComponent(id)}` + query(options), undefined, requestOptions); }
+    async attentionResolutionsGet(id: string, locator: { source_id: string; attention_kind: string; episode: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AttentionResolution>> { return this.get(`/v1/client/attention-resolutions/${encodeURIComponent(routedId(id))}` + query(locator), undefined, requestOptions); }
     async messagesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/messages' + query(options), undefined, requestOptions); }
     async messagesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/messages/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async messageBodyGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MessageBody>> { return this.get(`/v1/client/message-bodies/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
