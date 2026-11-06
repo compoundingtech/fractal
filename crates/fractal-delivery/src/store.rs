@@ -30,7 +30,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
-use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus, SubscriptionRequestDecision, SubscriptionRequestView, UsageSummary, WorkRequest, WorkSelector, WorkWakeView};
+use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus, SubscriptionRequestDecision, SubscriptionRequestView, UsageSummary, WorkRequest, WorkSelector, WorkWakeView};
 #[cfg(test)]
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory, ReplicationReceipt};
 #[cfg(any(test, feature = "test-support"))]
@@ -272,12 +272,12 @@ pub trait DeliveryStoreCore {
             &self,
             input: &ClaimInput,
             authorization: &assistant_write::AssistantWriteAuthorization,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     fn append_claim_fenced_outcome(
             &self,
             input: &ClaimInput,
             fence: Option<&crate::mailbox::Fence>,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     fn unread_mail_count_before(&self, before_unix_ms: u128) -> Result<u64>;
     /// Each seat's unread held mail sent before the cutoff: its count and oldest send time.
     /// A read: it never folds the unread queue, and reads the queued subjects as they stand.
@@ -290,12 +290,12 @@ impl DeliveryStoreCore for Store {
             &self,
             input: &ClaimInput,
             authorization: &assistant_write::AssistantWriteAuthorization,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
             || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
             || input.actor.as_deref() != Some("assistant/chatgpt")
             || input.fields.get("from").and_then(Value::as_str) != Some("assistant/chatgpt")
-        { return Err(St3Error::new("forbidden", "assistant authorization does not bind this message")); }
+        { return Err(FractalError::new("forbidden", "assistant authorization does not bind this message")); }
         #[cfg(feature = "test-support")]
         let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;
         append_claim_with_commit_context(&self.graph, input, None, None, None, None,
@@ -306,7 +306,7 @@ impl DeliveryStoreCore for Store {
             &self,
             input: &ClaimInput,
             fence: Option<&crate::mailbox::Fence>,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         append_claim_fenced_outcome(&self.graph, input, fence)
     }
 

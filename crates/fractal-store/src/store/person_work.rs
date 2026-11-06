@@ -12,7 +12,7 @@ mod revision_provenance_tests;
 
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
-pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>, St3Error> {
+pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>, FractalError> {
     let Some(request) = ask.body["fields"].get("request").filter(|r| !r.is_null()) else {
         return Ok(None);
     };
@@ -21,7 +21,7 @@ pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>
         .filter(|request| request.version == crate::person_request::REQUEST_VERSION)
         .map(Some)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "unsupported-person-request",
                 "this ask's request needs a newer st to answer",
             )
@@ -182,21 +182,21 @@ impl Store {
 pub fn validate_delegated_answer(
     ask: &ClaimRecord,
     fields: &BTreeMap<String, Value>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if fields.get("status").and_then(Value::as_str) != Some("completed")
         || fields
             .get("summary")
             .and_then(Value::as_str)
             .is_none_or(|summary| summary.trim().is_empty())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "delegation-refused",
             "a completion needs completed status and a summary",
         ));
     }
     if let Some(request) = structured_request(ask)? {
         let submitted = fields.get("answer").ok_or_else(|| {
-            St3Error::new("delegation-refused", "the structured answer is missing")
+            FractalError::new("delegation-refused", "the structured answer is missing")
         })?;
         let input = crate::person_request::AnswerInput {
             id: submitted
@@ -209,13 +209,13 @@ pub fn validate_delegated_answer(
                 .map(str::to_owned),
         };
         if request.answer(Some(&input), fields["summary"].as_str().unwrap())? != *submitted {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "delegation-refused",
                 "the answer does not match the offered structured answer",
             ));
         }
     } else if fields.contains_key("answer") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "delegation-refused",
             "a free-text ask has no named answer",
         ));
@@ -373,8 +373,25 @@ pub fn declaration_live(connection: &Connection, subject: &str) -> Result<bool> 
 }
 
 fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<bool> {
-    let row = desired_row(connection, subject)?;
-    let Some(row) = row else { return Ok(false) };
+    let Some(row) = desired_row(connection, subject)? else { return Ok(false) };
+    if !declaration_present(&row)? {
+        return Ok(false);
+    }
+    if let Some(run) = row.owner_run.as_deref() {
+        if !run_live(connection, run, row.owner_generation.as_deref(), false)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A declared requester still exists even when its owning work has ended.
+pub fn requester_declared(connection: &Connection, subject: &str) -> Result<bool> {
+    let Some(row) = desired_row(connection, subject)? else { return Ok(false) };
+    declaration_present(&row)
+}
+
+fn declaration_present(row: &DesiredRow) -> Result<bool> {
     let body: Value = serde_json::from_str(&row.body)?;
     if row.kind == "stop"
         || body
@@ -383,11 +400,6 @@ fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<b
             .is_some_and(|children| children.len() == 1 && children[0]["name"] == "stop")
     {
         return Ok(false);
-    }
-    if let Some(run) = row.owner_run.as_deref() {
-        if !run_live(connection, run, row.owner_generation.as_deref(), false)? {
-            return Ok(false);
-        }
     }
     Ok(true)
 }
@@ -531,17 +543,33 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     let Some(view) = step(connection, &ask.subject)? else {
         return Ok(false);
     };
+    // Resolution claims are terminal authority, even if a stale projection looks open.
+    let resolved: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1
+         AND kind IN ('work.person-done','work.person-cancelled')
+         AND CAST(accepted_at_unix_ms AS INTEGER)<=?2)",
+        params![ask.subject, as_of as i64], |row| row.get(0))?;
+    if resolved {
+        return Ok(false);
+    }
     let requester = ask.actor.as_deref().unwrap_or_default();
+    // Independent asks belong to the agent, not its current work or runtime turn.
+    // This also preserves asks written before owner-run fencing was removed.
+    let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
     // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
     // waits for nobody, so it stays until the person reads it, even after its poster stops.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
-        || !run_live(connection, &view.run, Some(&view.generation), false)?
+        || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)
     {
         return Ok(false);
     }
-    let requester_live = unfenced || declaration_live(connection, requester)?;
-    let retiring = !requester_live && super::rollouts::retiring_ask_live(connection, ask)?;
+    let requester_live = unfenced || if independent {
+        requester_declared(connection, requester)?
+    } else {
+        declaration_live(connection, requester)?
+    };
+    let retiring = !independent && !requester_live && super::rollouts::retiring_ask_live(connection, ask)?;
     if !requester_live && !retiring {
         return Ok(false);
     }
@@ -564,6 +592,9 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         {
             return Ok(false);
         }
+    }
+    if independent {
+        return Ok(true);
     }
     // A top-level seat's ask outlives its restarts and harness changes: only stopping or retiring
     // the seat (above) or cancelling the ask ends it, so a person never loses it to a restart. A
@@ -738,7 +769,7 @@ pub(super) fn reassign_person_steps_tx(
     tx: &Transaction<'_>,
     origin: &str,
     input: &PersonRenameRequest,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let as_of = now_ms();
     let mut query = tx.prepare(
         "SELECT subject FROM step_runs WHERE assignee=?1 AND status IN ('ready','pending') ORDER BY subject",
@@ -783,7 +814,7 @@ pub fn project_minimal_run(
     generation: &str,
     root: &str,
     reason: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let at = claim.accepted_at_unix_ms.to_string();
     tx.execute(/* sqlite-large-value: allow-for-now lv-hca41158cfea1 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
                 VALUES(?1,?2,'ready',?3,?4,?5)", params![mission.id, mission.revision, serde_json::to_string(&mission).map_err(internal)?, claim.id, claim.store_index]).map_err(internal)?;
@@ -844,7 +875,7 @@ pub fn project_minimal_run(
     Ok(())
 }
 
-pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Error> {
+pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, FractalError> {
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-reassigned" {
         let accepted: bool = tx.query_row(

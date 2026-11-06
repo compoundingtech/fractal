@@ -1499,6 +1499,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-socket-discovery",
  "fractal-store",
  "fractal-terminal-direct",
  "fractal-tui",
@@ -1750,6 +1751,7 @@ dependencies = [
  "ciborium",
  "crossterm",
  "fractal-schema",
+ "fractal-socket-discovery",
  "futures-util",
  "hex",
  "http-body-util",
@@ -2140,6 +2142,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-socket-discovery",
  "fractal-terminal-direct",
  "getrandom 0.3.4",
  "hex",
@@ -2475,6 +2478,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-socket-discovery"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "fractal-storage-version"
 version = "0.1.0"
 
@@ -2636,6 +2646,7 @@ version = "0.1.0"
 dependencies = [
  "fractal-client",
  "fractal-schema",
+ "jsonschema",
  "serde",
  "serde_json",
 ]

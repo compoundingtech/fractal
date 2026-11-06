@@ -40,6 +40,11 @@ the original validated RFC3339 spelling and an `Option<DateTime.Utc>` millisecon
 projection (`None` for leap seconds). Encoding reproduces `wire` exactly, including
 microseconds and finer fractions, and refuses inconsistent projections. Only
 `NoticeTimestamp` opts in; the existing `timestamp` codec remains `DateTime.Utc`.
+Schema-root `x-st-internal-resources` generates private descriptor/decoder insertion
+content in `notice_descriptors.generated.rs`, compiled by conformance tests. Model
+kind and ID references come from the same notice closure; decoding goes directly
+from bytes to the native model, never through `Resource::Unknown` serialization.
+This metadata does not register a collection, Resource arm, capability or action.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
@@ -1193,6 +1198,20 @@ waiting step IDs, and then the recent moves, newest first, with `move_count` for
 Each move names its run, placement, optional anchor run, actor, optional reason, and time. A run
 joins the queue when it first has a step assigned to the seat and leaves when it is terminal. An
 unknown agent returns `not-found`.
+
+`GET /v1/client/agent-related-runs/{agent_id}` returns `AgentRelatedRuns` sidebar rows.
+Relationships include the run requester, supervising report-to agent, step claimant, a specifically
+assigned or individually offered agent, and the recipient of an open ask on a step. Pool offers
+do not make every pool member related. Active rows precede folded finished rows, retained for 24 h
+after completion. The server resolves `status_chip`, done/total `progress`, `current_step`, and
+`waits_on` using the waiting-on projection. `waiting_on_you` is relative to the authenticated
+person and replaces `eta`; finished rows have no ETA. `late` means the run deadline has passed.
+`urgency_rank` orders person holds (0), late runs (1), stalled runs (2), other active runs (3),
+then finished runs (4); deadline and run ID break active ties. `as_of`, `work_cut`, and
+`missions_cut` identify the clock and published inputs. Clients draw these facts without joins.
+Responses contain at most 100 rows after urgency sorting; `total_rows` and `truncated` make the
+bound explicit. Individual offers seek the recipient's indexed singleton offer, not fleet history.
+The singleton-only index cannot replace the general seat-offer index; daemon cost probes cover this route.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run
@@ -2410,9 +2429,10 @@ immutable person in the subject. Operations are tagged by `op`:
 | `folder.move` | `id`, `parent: null \| folder ID`, `key` |
 | `folder.delete` | `id` |
 | `subject.place` | `subject`, `folder: null \| folder ID`, `key` |
+| `membership.migrate` | none (existing identity, sole operation) |
 | `retire` | none |
 
-Each atomic edit may touch a register at most once; retirement must be its only operation.
+Each atomic edit may touch a register at most once; retirement or migration must be its only operation.
 
 Creation declares the name and may atomically include folders and placements. Null
 placement folders unfile subjects; changing the key reorders them. Include any necessary
@@ -2521,10 +2541,44 @@ when importing its custom sidebar history into arrangements.
 New arrangements opt into a folder-only body with `arrangement.edit` parameters
 `{subject, owner, version: 2, operations: [{op: "create", name}]}`. Version is accepted only
 on creation; omission creates v1. A v2 body retains the versioned name and folder registers
-but has no `placements`. Existing v1 bodies and `subject.place` behavior remain supported:
-this primitive does not migrate historical winners or convert an existing arrangement.
-If offline v1 and v2 creates collide on one identity, retained unrepaired v1 creation or
-placement authority preserves the v1 layout; the v2 pair records remain retained but inactive.
+but has no `placements`. Unmigrated v1 bodies and `subject.place` remain supported.
+If offline v1 and v2 creates collide on one unmigrated identity, retained unrepaired v1
+creation or placement authority preserves v1; v2 pairs remain retained but inactive.
+
+#### Migrating existing placement authority
+
+Discover granted capability `arrangement-placement-migration` version 1. Select the
+existing canonical arrangement identity before migrating (migration never creates or
+reselects an arrangement). Submit `arrangement.edit` with
+`{subject, owner, operations: [{op: "membership.migrate"}]}` and no `version` field.
+Migration must be the sole operation. Observe the same arrangement resource with
+`body.version: 2`; its owner, name, folder IDs, parents, keys and tombstones are unchanged.
+Each historical placement becomes a pair retaining the original claim revision,
+canonical winner and actor provenance, including retired and not-yet-known members.
+Migration writes a retained authority marker, not fresh placement winners.
+
+The marker and backfill commit in one writer transaction: an interrupted request leaves
+v1 intact or v2 fully active. Retry the exact action ID/idempotency key for its receipt.
+Independent migration reruns are harmless and do not overwrite subsequent pair edits.
+After cutover all placement readers/streams use the membership API below. V1-only
+strict readers receive an explicit v2 body without `placements`, not an empty v1 fallback.
+Local `subject.place` actions are refused with `invalid-arrangement-operations`.
+A racing local action either commits before cutover and is included, or is refused.
+Late replicated/offline v1 placement claims remain decodable and are routed into the
+same ordered pair LWW reducer using their original winners; they cannot revert to v1.
+Retained historical placement registers are replay-boundary sources only, never
+an active v2 read/write authority. Existing membership writes compete in that same reducer.
+
+Checkpoint rules advance from 25 to 26. Shared projection identity
+`st3.shared-projections.slo-breach-episodes-declared-resource-edges-arrangement-placement-migration.v1`
+distinguishes migration-aware peers/checkpoint witnesses. The retained `st3` digest
+namespace is a compatibility identity, not a package name: the operation contract lives
+in `fractal-schema`, projection/replay in `fractal-store`, and arrangement admission in
+`fractal-seats`. Upgrade participating Fractal daemons before migrating or sealing
+new checkpoints; older daemons may quarantine the new operation. There is no new drop
+rule, irreversible claim rewrite or automatic binary rollback. Keep a pre-upgrade backup.
+
+#### Membership pages and actions
 
 **Lock-step reader rollout:** upgrade every client that reads an owner's arrangement list
 or collection stream to a version-2-aware decoder **before creating that owner's first v2
