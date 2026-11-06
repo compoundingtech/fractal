@@ -6626,9 +6626,11 @@ const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
 
 /// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
-/// twice the refresh's own length. A host whose seats write a stream of claims the roster reads
-/// cuts nearly every pause, so this sets its folding rate: a fold about every 400 ms plus the
-/// fold, or a third of a core for a costly fold, rather than one back to back with the last.
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
 const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
@@ -6714,9 +6716,10 @@ struct AgentRosterLook {
 /// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
 /// fold, so a person waiting to see their own write is not left waiting up to a second for the
 /// next timed fold, while a stream of local writes folds no more than about twice a second and
-/// a costly fold takes at most a third of a core. Commits that hold only claims other nodes wrote,
-/// or only local claims no card reads, keep the full pause, so a busy replication stream or a
-/// node's other writes do not fold the roster any more often.
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often.
 async fn agent_roster_pause(
     store: &Arc<Store>,
     commits: &tokio::sync::Notify,

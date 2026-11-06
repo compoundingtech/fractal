@@ -551,7 +551,8 @@ async fn a_cut_of_only_replicated_claims_keeps_the_full_agents_roster_pause() {
 
 /// However fast this node writes, the refresher pauses at least its local floor, and at least
 /// twice as long as the last fold took, so a stream of local writes folds about twice a second
-/// and a costly fold takes at most a third of a core.
+/// and a fold of up to half a second takes at most a third of a core. A longer fold's floor is
+/// the full pause, which it keeps whatever this node writes: the cut never lengthens a pause.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_floor() {
     let root = tempfile::tempdir().unwrap();
@@ -573,13 +574,16 @@ async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_
     });
     let mut look = AgentRosterLook::default();
     let mut last_started = Instant::now();
-    for folded in [Duration::ZERO, Duration::ZERO, Duration::from_millis(250), Duration::ZERO] {
+    for folded in [0, 0, 250, 750, 1200, 0].map(Duration::from_millis) {
         let started = Instant::now();
         last_started = started;
         let through = store.index().unwrap();
-        assert_eq!(agent_roster_pause(&store, &commits, &mut look, folded, through).await, AgentRosterPauseEnd::LocalClaim);
+        let full = folded.max(AGENT_ROSTER_REFRESH_PAUSE);
+        let floor = (folded * 2).max(AGENT_ROSTER_LOCAL_PAUSE).min(full);
+        let end = agent_roster_pause(&store, &commits, &mut look, folded, through).await;
         let paused = started.elapsed();
-        let floor = (folded * 2).max(AGENT_ROSTER_LOCAL_PAUSE).min(folded.max(AGENT_ROSTER_REFRESH_PAUSE));
+        let expected = if floor < full { AgentRosterPauseEnd::LocalClaim } else { AgentRosterPauseEnd::Full };
+        assert_eq!(end, expected, "{folded:?}: {paused:?}");
         assert!(paused >= floor, "{folded:?}: {paused:?}");
         assert!(paused < floor + Duration::from_millis(200), "{folded:?}: {paused:?}");
     }
