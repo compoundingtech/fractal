@@ -10,7 +10,7 @@ export interface EditJob {
   readonly sidebar?: string
   readonly id: string
   readonly key: string
-  readonly done: PromiseWithResolvers<EditOutcome>
+  done: PromiseWithResolvers<EditOutcome>
   request?: ActionOf<'arrangement.edit'>
   /** The last submitted request was authoritatively refused, not transport-uncertain. */
   requestRefused?: boolean

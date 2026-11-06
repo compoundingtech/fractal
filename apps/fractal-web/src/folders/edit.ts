@@ -2,9 +2,10 @@ import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from 
 import { ErrorCode, decodeUnknownSync, type ActionResult } from '@fractal/client/schema'
 import type { ActionFailure } from '@fractal/sdk/mutations'
 import type { SdkChunkFailure } from '../data/lazySdk.ts'
-import { Effect } from 'effect'
+import { Deferred, Effect, Fiber, Semaphore, SubscriptionRef } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
 import { prepareArrangementRetry, stageArrangementEdit, type EditJob } from './editRequest.ts'
+import { makeOptimisticMutations, MutationRefused } from '../data/optimisticMutation.ts'
 
 /** Loading errors are refused before submission, and the existing edit retry reacquires the chunk. */
 export interface ArrangementActionPort {
@@ -159,7 +160,19 @@ export interface ArrangementEditor {
   readonly close: () => void
 }
 
-/** One owner, one serialized queue, one reserved creation subject. No client persistence. */
+type MutationJob = EditJob & {
+  abandon: Deferred.Deferred<void>
+  sent?: boolean
+  fiber?: Fiber.Fiber<void>
+  entered?: boolean
+  outcome?: EditOutcome
+  revision?: string
+  satisfied?: boolean
+  base?: Arrangement
+  snapshot?: string
+}
+
+/** One owner, shared optimistic state, serialized transport, one reserved creation subject. */
 export const createArrangementEditor = ({ owner, actions, read, onState }: {
   readonly owner: string
   readonly actions: ArrangementActionPort
@@ -174,11 +187,47 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
   let closed = false
   let running = false
   let refusal: ArrangementRefusal | undefined
-  let failed: EditJob | undefined
+  let failedKey: string | undefined
   let retryReady = false
-  const prepareRetry = (job: EditJob): EditJob =>
-    prepareArrangementRetry(job, inventory === undefined ? undefined : sidebarWinner(inventory.items, owner), reservation)
-  const queue: EditJob[] = []
+  const transport = Semaphore.makeUnsafe(1)
+  const mutations = Effect.runSync(makeOptimisticMutations<Arrangement | undefined, MutationJob>({
+    initial: undefined, nextKey: () => crypto.randomUUID(),
+    send: ({ action: job }) => Effect.raceFirst(transport.withPermit(Effect.promise(async () => {
+      job.entered = true
+      job.outcome = await perform(job)
+      return job.outcome
+    }).pipe(Effect.flatMap((outcome) => outcome._tag === 'Success' ? Effect.void : Effect.fail(new MutationRefused({
+      message: outcome.detail,
+      nonApplication: !job.sent ? { _tag: 'NeverSent' } : job.requestRefused && outcome.error !== undefined ? { _tag: 'Refused', code: outcome.error.code } : undefined,
+    }))))), Deferred.await(job.abandon).pipe(Effect.andThen(Effect.fail(new MutationRefused({
+      message: 'Not submitted because an earlier arrangement edit failed.', nonApplication: { _tag: 'NeverSent' },
+    }))))),
+    project: (frame, entry) => entry.phase === 'failed' ? frame : optimisticArrangement(frame ?? entry.action.base ?? emptyArrangement(owner, reservation), entry.action.operations),
+    reconcile: (frame, { action: job }) => job.satisfied || (job.revision !== undefined && frame?.id === job.request?.parameters.subject && frame?.revision === job.revision) ? 'applied' : 'pending',
+  }))
+  const pending = () => Effect.runSync(SubscriptionRef.get(mutations.state)).pending
+  const submit = (job: MutationJob, retry = false) => {
+    job.fiber = Effect.runFork((retry ? mutations.retry(job.key) : mutations.submit({ key: job.key, action: job, refusal: 'retain' })).pipe(
+      Effect.andThen(Effect.promise(async () => {
+        publish() // Roll back failed projections before a stale-fence refresh.
+        const reason = job.outcome?._tag === 'Refused' ? job.outcome : undefined
+        if (reason?.error?.code !== 'stale-fence' && reason?.error?.code !== 'arrangement-exists') return
+        running = true
+        try {
+          const refreshed = await refresh()
+          if (refreshed._tag === 'Success' && reason.error.code === 'arrangement-exists' &&
+            sidebarWinner(inventory?.items ?? [], owner) === undefined && refusal !== undefined)
+            refusal = { ...refusal, awaitingVisibility: true }
+          retryReady = refreshed._tag === 'Success' && !reservedRetired
+        } catch { /* A failed refresh keeps retry disabled until an explicit refresh succeeds. */ }
+        finally { running = false }
+      })),
+      Effect.ensuring(Effect.sync(() => {
+        publish()
+        if (job.outcome !== undefined) job.done.resolve(job.outcome)
+      })),
+    ))
+  }
   const abort = new AbortController()
   const targets = (job: EditJob) => [...new Set(job.operations.flatMap((operation) => operation.op === 'subject.place'
     ? [operation.subject, ...(operation.folder === null ? [] : [operation.folder])]
@@ -186,18 +235,15 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
   const unknown = (detail: string, job: EditJob): ArrangementRefusal => ({ reason: { _tag: 'Unknown' }, detail, targets: targets(job) })
   const publish = () => {
     if (closed) return
-    let arrangement = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)
-    for (const job of queue) {
-      arrangement ??= emptyArrangement(owner, reservation)
-      arrangement = optimisticArrangement(arrangement, job.operations)
-    }
+    const arrangement = Effect.runSync(mutations.view)
+    const active = [...pending().values()].filter((entry) => entry.phase !== 'failed')
     const candidates = inventory === undefined || arrangement?.id === reservation ? [] : sidebarCandidates(inventory.items, owner)
     const selection = {
       ...(candidates.length > 1 ? { sidebarCandidates: candidates.map((item) => ({ id: item.id, label: `${item.body.name.value} (${item.id})` })) } : {}),
       ...(arrangement === undefined && !reservedRetired ? {} : { sidebarSubject: arrangement?.id ?? reservation }),
       ...(reservedRetired && arrangement === undefined ? { restoreUnavailable: true } : {}),
     }
-    onState({ ...selection, ...(arrangement === undefined ? {} : { arrangement }), phase: queue.length > 0 ? 'pending' : refusal === undefined ? 'synced' : 'refused', pendingTargets: [...new Set(queue.flatMap(targets))], ...(refusal === undefined ? {} : { refusal }), retryReady: !selection.restoreUnavailable && retryReady })
+    onState({ ...selection, ...(arrangement === undefined ? {} : { arrangement }), phase: active.length > 0 ? 'pending' : refusal === undefined ? 'synced' : 'refused', pendingTargets: [...new Set(active.flatMap((entry) => targets(entry.action)))], ...(refusal === undefined ? {} : { refusal }), retryReady: !selection.restoreUnavailable && retryReady })
   }
   const accept = (next: ArrangementInventory) => {
     if (closed || next.owner !== owner) return
@@ -209,7 +255,7 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
     const reserved = next.items.find((item) => item.id === reservation)
     if (reserved !== undefined && !reserved.deleted) { reservedObserved = true; reservedRetired = false }
     else if (reservedObserved || reserved?.deleted) reservedRetired = true
-    for (const job of failed === undefined ? queue : [failed, ...queue]) {
+    for (const { action: job } of pending().values()) {
       if (job.request?.parameters.operations.some((operation) => operation.op === 'create') &&
         next.items.some((item) => item.id === job.request?.parameters.subject)) job.creationObserved = true
     }
@@ -223,10 +269,14 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
       }
     }
     inventory = next
+    const before = pending()
+    Effect.runSync(mutations.accept(sidebarWinner(next.items, owner)))
+    if (failedKey !== undefined && !pending().has(failedKey)) { failedKey = undefined; refusal = undefined; retryReady = false }
+    for (const [key, { action: job }] of before) if (!pending().has(key)) job.intent?.onApplied?.()
     publish()
   }
-  const fail = (job: EditJob, reason: ArrangementRefusal, waitForRefresh = false) => {
-    failed = reason.restageRefusal === undefined ? job : undefined
+  const fail = async (job: MutationJob, reason: ArrangementRefusal): Promise<EditOutcome> => {
+    failedKey = reason.restageRefusal === undefined ? job.key : undefined
     const winner = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)
     const attempts = job.operations.map((operation): ArrangementAttempt => operation.op === 'subject.place'
       ? { id: operation.subject, label: operation.subject, kind: 'agent' }
@@ -237,11 +287,13 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
       })
     refusal = { ...reason, attemptedTargets: [...new Map(attempts.map((attempt) => [attempt.id, attempt])).values()] }
     retryReady = reason.restageRefusal === undefined && reason.error?.code !== 'stale-fence' && reason.error?.code !== 'arrangement-exists'
-    const abandoned = queue.splice(0)
-    publish() // Remove every optimistic edit before returning the refusal.
-    if (!waitForRefresh) job.done.resolve({ _tag: 'Refused', ...reason })
-    for (const later of abandoned) if (later !== job)
-      later.done.resolve({ _tag: 'Refused', ...unknown('Not submitted because an earlier arrangement edit failed.', later) })
+    for (const { action: later } of pending().values()) if (later !== job && !later.entered && later.fiber !== undefined) {
+      later.outcome = { _tag: 'Refused', ...unknown('Not submitted because an earlier arrangement edit failed.', later) }
+      Effect.runSync(Deferred.succeed(later.abandon, undefined))
+      await Effect.runPromise(Fiber.join(later.fiber))
+      Effect.runSync(mutations.discardFailed(later.key))
+    }
+    return { _tag: 'Refused', ...reason }
   }
   const refresh = async () => {
     const snapshot = await Effect.runPromise(Effect.result(actions.snapshot), { signal: abort.signal })
@@ -249,118 +301,102 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
     accept(await read(abort.signal))
     return snapshot
   }
-  const drain = async () => {
-    if (running || closed || failed !== undefined) return
+  const perform = async (job: MutationJob): Promise<EditOutcome> => {
     running = true
     try {
-      while (queue.length > 0 && !closed) {
-        let job = queue[0]!
-        const fresh = await refresh()
-        if (closed) return
-        if (fresh._tag === 'Failure') { fail(job, arrangementRefusal(fresh.failure, targets(job))); return }
-        const winner = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)
-        if (winner === undefined && reservedRetired) {
-          fail(job, unknown('Restoring a removed Sidebar is not available yet.', job))
-          return
-        }
-        // Retarget only a definitive non-applied refusal, after the fresh inventory is accepted.
-        if (job.requestRefused) { job = prepareRetry(job); queue[0] = job }
-        const staged = stageArrangementEdit(job, owner, winner, reservation, fresh.success, creation?.phase === 'acknowledged')
-        if (staged._tag === 'Refused') {
-          fail(job, { ...unknown(staged.detail, job), ...(staged.restageRefusal === undefined ? {} : { restageRefusal: staged.restageRefusal }) })
-          return
-        }
-        if (staged._tag === 'Satisfied') {
-          queue.shift()
-          publish()
-          job.done.resolve({ _tag: 'Success' })
-          job.intent?.onApplied?.()
-          continue
-        }
-        const request = staged.request
-        job.requestRefused = false
-        const result = await Effect.runPromise(Effect.result(actions.submitAction(request)), { signal: abort.signal })
-        if (closed) return
-        if (result._tag === 'Failure') {
-          job.requestRefused = result.failure._tag === 'ActionRefused'
-          const reason = arrangementRefusal(result.failure, targets(job))
-          if (reason.error?.code === 'arrangement-retired' && request.parameters.subject === reservation) reservedRetired = true
-          const refreshRequired = reason.error?.code === 'stale-fence' || reason.error?.code === 'arrangement-exists'
-          fail(job, reason, refreshRequired)
-          if (refreshRequired) {
-            // Refetch, but NEVER automatically replay a refused edit.
-            try {
-              const refreshed = await refresh()
-              if (refreshed._tag === 'Success' && reason.error?.code === 'arrangement-exists' &&
-                sidebarWinner(inventory?.items ?? [], owner) === undefined && refusal !== undefined)
-                refusal = { ...refusal, awaitingVisibility: true }
-              retryReady = refreshed._tag === 'Success' && !reservedRetired
-              if (retryReady) failed = prepareRetry(job)
-              publish()
-            } finally { job.done.resolve({ _tag: 'Refused', ...reason }) }
-          }
-          return
-        }
-        if (result.success.status === 'rejected') {
-          job.requestRefused = true
-          fail(job, unknown('The action result was rejected without a refusal reason.', job))
-          return
-        }
-        if (request.parameters.operations.some((operation) => operation.op === 'create'))
-          creation = { subject: request.parameters.subject, phase: 'acknowledged' }
-        // Replace optimism only with a complete inventory read, not an assumed register winner.
-        accept(await read(abort.signal))
-        queue.shift()
-        publish()
-        job.done.resolve({ _tag: 'Success' })
-        job.intent?.onApplied?.()
+      const fresh = job.snapshot === undefined ? await refresh() : { _tag: 'Success' as const, success: job.snapshot }
+      job.snapshot = undefined
+      if (closed) return { _tag: 'Refused', ...unknown('The arrangement editor is closed.', job) }
+      if (fresh._tag === 'Failure') return await fail(job, arrangementRefusal(fresh.failure, targets(job)))
+      const winner = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)
+      job.base = winner ?? job.base
+      if (winner === undefined && reservedRetired)
+        return await fail(job, unknown('Restoring a removed Sidebar is not available yet.', job))
+      const staged = stageArrangementEdit(job, owner, winner, reservation, fresh.success, creation?.phase === 'acknowledged')
+      if (staged._tag === 'Refused')
+        return await fail(job, { ...unknown(staged.detail, job), ...(staged.restageRefusal === undefined ? {} : { restageRefusal: staged.restageRefusal }) })
+      if (staged._tag === 'Satisfied') {
+        job.satisfied = true // The fresh authoritative inventory already satisfies this structural intent.
+        accept(inventory!)
+        return { _tag: 'Success' }
       }
+      const request = staged.request
+      job.requestRefused = false
+      job.sent = true
+      const result = await Effect.runPromise(Effect.result(actions.submitAction(request)), { signal: abort.signal })
+      if (closed) return { _tag: 'Refused', ...unknown('The arrangement editor is closed.', job) }
+      if (result._tag === 'Failure') {
+        const reason = arrangementRefusal(result.failure, targets(job))
+        job.requestRefused = reason.reason._tag === 'Known' && refusalSentences[reason.reason.code] !== undefined &&
+          reason.error?.applied !== 'unknown' && reason.error?.details.applied !== 'unknown'
+        if (reason.error?.code === 'arrangement-retired' && request.parameters.subject === reservation) reservedRetired = true
+        return await fail(job, reason)
+      }
+      if (result.success.status === 'rejected') {
+        return await fail(job, unknown('The action result was rejected without a refusal reason.', job))
+      }
+      if (request.parameters.operations.some((operation) => operation.op === 'create'))
+        creation = { subject: request.parameters.subject, phase: 'acknowledged' }
+      if (typeof result.success.arrangement_revision === 'string') job.revision = result.success.arrangement_revision
+      if (inventory !== undefined) accept(inventory)
+      // Only the returned authoritative revision can settle the accepted overlay.
+      accept(await read(abort.signal))
+      return { _tag: 'Success' }
     } catch (cause) {
-      if (!closed && queue[0] !== undefined) fail(queue[0], unknown(cause instanceof Error ? cause.message : String(cause), queue[0]))
-      // A failed stale-fence refresh keeps retry disabled until an explicit refresh succeeds.
+      return await fail(job, unknown(cause instanceof Error ? cause.message : String(cause), job))
     } finally { running = false }
   }
   const edit = (operations: readonly SidebarOperation[], intent?: StructuralIntent): Promise<EditOutcome> => {
     const sidebar = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)?.id
-    const job: EditJob = { operations: structuredClone(operations), ...(intent === undefined ? {} : { intent }), ...(sidebar === undefined ? {} : { sidebar }), id: `action/${crypto.randomUUID()}`, key: crypto.randomUUID(), done: Promise.withResolvers<EditOutcome>() }
+    const job: MutationJob = { operations: structuredClone(operations), ...(intent === undefined ? {} : { intent }), ...(sidebar === undefined ? {} : { sidebar }), id: `action/${crypto.randomUUID()}`, key: crypto.randomUUID(), done: Promise.withResolvers<EditOutcome>(), abandon: Deferred.makeUnsafe<void>() }
+    job.base = inventory === undefined ? undefined : sidebarWinner(inventory.items, owner)
     if (reservedRetired && sidebarWinner(inventory?.items ?? [], owner) === undefined)
       return Promise.resolve({ _tag: 'Refused', ...unknown('Restoring a removed Sidebar is not available yet.', job) })
-    if (!running) failed = undefined // A new explicit edit is not a replay of the failed request.
-    if (closed || inventory === undefined || failed !== undefined) {
+    if (!running) failedKey = undefined // A new explicit edit is not a replay of the failed request.
+    if (closed || inventory === undefined || failedKey !== undefined) {
       const reason = unknown(closed ? 'The arrangement editor is closed.' : inventory === undefined ? 'A complete owner inventory is required before editing.' : 'Retry or refresh the refused edit before submitting another edit.', job)
       return Promise.resolve({ _tag: 'Refused', ...reason })
     }
-    queue.push(job)
     refusal = undefined
+    submit(job)
     publish() // Synchronous paint, before snapshot or HTTP work.
-    void drain()
     return job.done.promise
   }
   const retryEdit = async (): Promise<EditOutcome> => {
-    let job = failed
+    let job = failedKey === undefined ? undefined : pending().get(failedKey)?.action
     if (job === undefined) return { _tag: 'Success' }
     if (reservedRetired && sidebarWinner(inventory?.items ?? [], owner) === undefined)
       return { _tag: 'Refused', ...(refusal ?? unknown('Restoring a removed Sidebar is not available yet.', job)) }
     if (running) return { _tag: 'Refused', ...(refusal ?? unknown('The arrangement snapshot is still refreshing.', job)) }
-    if (!retryReady) {
-      try {
-        const fresh = await refresh()
-        if (fresh._tag === 'Failure') return { _tag: 'Refused', ...arrangementRefusal(fresh.failure, targets(job)) }
-        retryReady = true
-        if (job.requestRefused) job = prepareRetry(job)
-      } catch (cause) { return { _tag: 'Refused', ...unknown(cause instanceof Error ? cause.message : String(cause), job) } }
-    }
-    failed = undefined
-    refusal = undefined
-    const retried = { ...job, done: Promise.withResolvers<EditOutcome>() }
-    queue.push(retried)
-    publish()
-    void drain()
-    return retried.done.promise
+    running = true
+    try {
+      const fresh = await refresh()
+      if (fresh._tag === 'Failure') { running = false; return { _tag: 'Refused', ...arrangementRefusal(fresh.failure, targets(job)) } }
+      if (!pending().has(job.key)) { running = false; return { _tag: 'Success' } }
+      retryReady = true
+      const prepared = job.requestRefused ? prepareArrangementRetry(job, inventory === undefined ? undefined : sidebarWinner(inventory.items, owner), reservation) : job
+      if (prepared.key !== job.key) {
+        Effect.runSync(mutations.discardFailed(job.key))
+        job = { ...prepared, abandon: Deferred.makeUnsafe<void>(), base: job.base }
+      }
+      job.done = Promise.withResolvers<EditOutcome>()
+      job.entered = false
+      job.outcome = undefined
+      job.snapshot = fresh.success
+      failedKey = undefined
+      refusal = undefined
+      running = false
+      submit(job, pending().has(job.key))
+      publish()
+    } catch (cause) { running = false; return { _tag: 'Refused', ...unknown(cause instanceof Error ? cause.message : String(cause), job) } }
+    return job.done.promise
   }
   return { accept, edit, retryEdit, close: () => {
     closed = true
     abort.abort()
-    for (const job of queue.splice(0)) job.done.resolve({ _tag: 'Refused', ...unknown('The arrangement editor is closed.', job) })
+    for (const { action: job } of pending().values()) {
+      job.done.resolve({ _tag: 'Refused', ...unknown('The arrangement editor is closed.', job) })
+      if (job.fiber !== undefined) Effect.runFork(Fiber.interrupt(job.fiber))
+    }
   } }
 }
