@@ -29,14 +29,18 @@ available.
 
 The managed seat enters the shared `omp_session::run_native` launcher in process.
 The in-process OMP extension starts `driver omp-channel` on the executable named by
-`ST_OMP_CHANNEL_BIN`. The shared wrapper uses
-`ST_OMP_CHANNEL_{BIN,CATALOG,IDENTITY,RUNTIME_ID,SESSION,SEQ}` for its channel
-configuration; `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
-`ST_OMP_CHANNEL_RESUME_GENERATION` fence a cold residency resume.
+`ST_OMP_CHANNEL_BIN`. The shared wrapper supplies
+`ST_OMP_CHANNEL_{BIN,IDENTITY,RUNTIME_ID,SESSION,SEQ}` and the explicit native
+`ST_DRIVER_{ROOT,AGENT_DIR,SESSION_DIR,IDENTITY}` contract. Native launch omits
+`ST_OMP_CHANNEL_CATALOG` and removes inherited catalog environment values. Ordinary
+native launches also clear inherited `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
+`ST_OMP_CHANNEL_RESUME_GENERATION`; channel readers retain these two fields as a
+paired native-session and residency-generation fence when explicitly supplied.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
-The provider wrapper also sets matching `FRACTAL_OMP_CHANNEL_*` names. Shared Rust
-channel readers prefer those names, retain the `ST_*` fallback, and reject conflicting
+For supplied channel fields, the provider wrapper also sets matching
+`FRACTAL_OMP_CHANNEL_*` names. Shared Rust channel readers prefer those names, retain
+the `ST_*` fallback, and reject conflicting
 ownership values. The existing `ST_*` names remain available to hooks and agent policy.
 Daemon-launched seats also receive matching `FRACTAL_*` aliases for the launch
 environment, including `FRACTAL_AGENT` and `FRACTAL_SUBJECT`. CLI identity defaults
@@ -44,19 +48,21 @@ accept either spelling; shell and TypeScript hooks can continue to use the old n
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 
 `session_start` sends the native OMP session ID before accepting Rust's hello.
-A matching ready frame completes the two-way exchange. A cold resume must prove the
-expected native ID, wrapper incarnation and residency generation before its candidate
-binding becomes authoritative. A later in-process session switch replaces the named
-predecessor and binds the new session. When OMP exposes its session-file getter, the
-session and ready frames also carry that exact JSONL path for transcript readers.
+A matching ready frame completes the two-way exchange. When the cold-resume fence
+pair is supplied, the channel must prove the expected native ID, wrapper incarnation
+and residency generation before its candidate binding becomes authoritative. A later
+in-process session switch replaces the named predecessor and binds the new session.
+When OMP exposes its session-file getter, the session and ready frames also carry that exact JSONL path for transcript readers.
 
 ## Exact-build admission
 
 An ordinary launch parses OMP's own unambiguous `MAJOR.MINOR.PATCH` release and measures
 its exact executable, interpreter, installation metadata and shipped extension identity.
-A residency resume validates its native checkpoint before even starting the version child;
-a missing, stale, foreign or changed binding refuses the launch. There is no minor-version
-allowlist. A prerelease or build-metadata banner is not admitted as its base release.
+Native launch performs admission before claiming live session ownership. Admission
+measures the producer and extension; it does not run residency-checkpoint validation.
+The retained checkpoint and binding readers separately validate resume evidence,
+including its identity and generation. There is no minor-version allowlist. A prerelease
+or build-metadata banner is not admitted as its base release.
 
 Every unseen identity must pass five checks in a disposable RPC session:
 
