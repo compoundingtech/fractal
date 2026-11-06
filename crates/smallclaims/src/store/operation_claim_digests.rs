@@ -6,9 +6,10 @@
 //! Nothing here runs during Store::open. The first page installs the table and its triggers;
 //! from then on every claim write keeps it exact, under whichever binary makes the write, since
 //! the triggers are part of the schema. The pages after it copy the claims already stored, in
-//! the audit's own order. Each page reads its claims on a reader and gives the writer only the
-//! copied keys to insert, so a page never holds the writer to read a body. The audit reads the
-//! table only once the last page has marked it ready.
+//! the audit's own order. Each page reads its claims on a reader. The writer then re-reads only
+//! those few bodies, which the reader has just brought into cache, to check that each claim
+//! still holds the keys it read. The audit reads the table only once the last page has marked
+//! it ready.
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
