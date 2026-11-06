@@ -79,6 +79,19 @@ pub struct AttentionControlSource<'a> {
 }
 
 impl Store {
+    /// Authorize the original locator and reduce its controls in one SQLite read snapshot.
+    pub fn read_attention_control(
+        &self, source: &AttentionControlSource<'_>, person: &str,
+        attention_id: &str, revision: &str, now: u128,
+    ) -> Result<AttentionControlState, St3Error> {
+        let connection = self.readers.get();
+        let transaction = connection.unchecked_transaction().map_err(internal)?;
+        self.validate_attention_control_source(&transaction, source, person, attention_id, revision, now)?;
+        let controls = current(&transaction, person, attention_id, revision).map_err(internal)?;
+        transaction.commit().map_err(internal)?;
+        Ok(controls)
+    }
+
     /// Rebuild the exact native source under writer admission, never through a pooled reader.
     pub fn validate_attention_control_source(
         &self, connection: &Connection, source: &AttentionControlSource<'_>,
@@ -150,6 +163,17 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn control_reduction_uses_point_index_without_claims_scan() {
+        let store = Store::open_memory("member").unwrap();
+        let connection = store.readers.get();
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", &*CURRENT)).unwrap()
+            .query_map(params![PERSON, ITEM, "dismiss", "restore", "source/one"], |row| row.get::<_, String>(3))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|line| line.contains("SEARCH claims USING INDEX claims_attention_control_index")), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("SCAN claims")), "{plan:?}");
+    }
+
     const PERSON: &str = "person/example";
     const ITEM: &str = "attention/0123456789abcdef0123456789abcdef";
     fn write(store: &Store, change: AttentionControlChange, key: &str) -> ClaimRecord {

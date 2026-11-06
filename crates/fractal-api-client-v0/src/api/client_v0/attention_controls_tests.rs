@@ -6,6 +6,16 @@ async fn control(state: &AppState, actor: &str, request: ActionRequest) -> Resul
     action_inner(State(state.clone()), Extension(new_client_snapshot(state)), Extension(session), Json(request), None).await
 }
 
+async fn read_control(state: &AppState, actor: &str, original: &Value, id: &str) -> Result<Value, ApiError> {
+    let query = serde_json::from_value(json!({
+        "source_id": original["source_id"], "attention_kind": original["attention_kind"],
+        "episode": original["episode"], "source_revision": original["presentation_control"]["source_revision"],
+    })).unwrap();
+    attention_controls::read(State(state.clone()),
+        Extension(ClientSession::for_tests_scoped("client/attention-fixture", actor, &["read.projections"])),
+        AxumPath(id.into()), Query(query)).await.map(|value| value.0)
+}
+
 #[tokio::test]
 async fn native_attention_controls_are_person_scoped_fenced_and_replay_the_original_revision() {
     let root = tempfile::tempdir().unwrap();
@@ -22,6 +32,17 @@ async fn native_attention_controls_are_person_scoped_fenced_and_replay_the_origi
     let now = client_now_ms();
     let rows = |at| crate::api::client_attention_resources_at(&state.store, Some("person/example"), false, at).unwrap();
     let original = rows(now).remove(0);
+    let id = original["id"].as_str().unwrap();
+    let empty = read_control(&state, "person/example", &original, id).await.unwrap();
+    assert_eq!(empty, json!({"id": id, "source_revision": original["presentation_control"]["source_revision"],
+        "revision": null, "dismissed": false, "snoozed_until": null}));
+    assert_eq!(read_control(&state, "person/other", &original, id).await.unwrap_err().code, "validation-failed");
+    let foreign_id = crate::client_values::client_attention_id(
+        original["source_id"].as_str().unwrap(), "person/other", original["episode"].as_str().unwrap(),
+    ).unwrap();
+    let refused = read_control(&state, "person/other", &original, &foreign_id).await.unwrap_err();
+    assert_eq!(refused.code, "not-found");
+    assert_eq!(refused.status, StatusCode::NOT_FOUND);
     let request = |kind: &str, key: &str, revision: Value| ActionRequest {
         api_version: CLIENT_API_VERSION.into(), id: format!("action/{key}"),
         action_type: format!("attention.{kind}"), idempotency_key: format!("attention-controls-{key}"),
@@ -53,6 +74,9 @@ async fn native_attention_controls_are_person_scoped_fenced_and_replay_the_origi
     let revision = dismissed["control_revision"].clone();
     assert!(revision.is_string());
     assert!(rows(now).is_empty());
+    let hidden = read_control(&state, "person/example", &original, id).await.unwrap();
+    assert_eq!(hidden["dismissed"], true);
+    assert_eq!(hidden["revision"], revision);
     assert_eq!(state.store.attention_snapshot(Some("person/example"), now).unwrap().len(), 1);
     state.store.start_attention_list_refresher().unwrap();
     crate::api::refresh_attention_list(&state.store).unwrap();
@@ -76,6 +100,9 @@ async fn native_attention_controls_are_person_scoped_fenced_and_replay_the_origi
     snooze.parameters["until"] = json!(crate::api::client_timestamp(until));
     let snoozed = control(&state, "person/example", snooze).await.unwrap().0;
     assert!(snoozed["control_revision"].is_string());
+    let hidden = read_control(&state, "person/example", &original, id).await.unwrap();
+    assert_eq!(hidden["revision"], snoozed["control_revision"]);
+    assert_eq!(hidden["snoozed_until"], crate::api::client_timestamp(until));
     assert!(rows(until - 1).is_empty());
     assert_eq!(rows(until).len(), 1, "expiry reveals the unresolved source");
     assert_eq!(state.store.attention_snapshot(Some("person/example"), now).unwrap().len(), 1);
