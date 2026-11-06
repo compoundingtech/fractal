@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share connection-qualified mission review source derivation between list reads and writer admission",
+  "replay": { "status": "none", "detail": "No claim or replay changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "Existing mission attention rows retain their ownership, episode, requested time, generation, approval and run-liveness semantics. Source point reads can now derive human-gate, launch-approval and revision-approval items on the writer connection without acquiring a pooled reader." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No new public mutation is advertised by this internal source-qualification change." },
+  "recovery": { "status": "none", "detail": "Stored work and approvals are unchanged." }
+}

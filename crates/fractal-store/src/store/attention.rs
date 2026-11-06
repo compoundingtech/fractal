@@ -378,26 +378,7 @@ impl Store {
         {
             let connection = self.readers.get();
             for review in reviews {
-                // The gate's owner is the step whose work it reviews, a loop whose step runs
-                // it, or its run.
-                let step = if review.owner.starts_with("step-run/") {
-                    Some(review.owner.clone())
-                } else if review.owner.starts_with("loop-run/") {
-                    loop_step_tx(&connection, &review.owner)?.map(|step| step.subject)
-                } else {
-                    None
-                };
-                let conversation = attention_snapshot::conversation_agent(
-                    &connection,
-                    step.as_deref(),
-                    Some(&review.mission_run),
-                )?;
-                items.push(AttentionItemView {
-                    deadline_unix_ms: None,
-                    default_answer: None,
-                    conversation,
-                    ..attention_item_from_review(review)
-                });
+                items.push(review_attention_item_tx(&connection, review)?);
             }
         }
 
@@ -415,31 +396,9 @@ impl Store {
                 let Some(session) = planning_session_view_tx(&connection, &id)? else {
                     continue;
                 };
-                let (Some(candidate), Some(preview)) = (&session.candidate, &session.preview)
-                else {
-                    continue;
-                };
-                if preview.candidate_revision != candidate.revision
-                    || !preview.mission.blockers.is_empty()
-                {
-                    continue;
+                if let Some(item) = planning_attention_item_tx(&connection, &session, u128::MAX)? {
+                    items.push(item);
                 }
-                if let Some(run) = &session.target_mission_run {
-                    let Some(run) = mission_run_header_tx(
-                        &connection,
-                        run.strip_prefix("mission-run/").unwrap_or(run),
-                    )
-                    .optional()?
-                    else {
-                        continue;
-                    };
-                    if session.source_generation.as_deref() != Some(run.generation.as_str())
-                        || is_terminal_run_state(&run.status)
-                    {
-                        continue;
-                    }
-                }
-                items.push(attention_item_from_planning(&session, candidate, preview));
             }
         }
 
@@ -455,20 +414,7 @@ impl Store {
                 .collect::<Result<Vec<_>, _>>()?;
             for id in ids {
                 let proposal = revision_proposal_view_tx(&connection, &id)?;
-                let run = mission_run_header_tx(
-                    &connection,
-                    proposal
-                        .run
-                        .strip_prefix("mission-run/")
-                        .unwrap_or(&proposal.run),
-                )
-                .optional()?;
-                let Some(run) = run else {
-                    continue;
-                };
-                if run.generation != proposal.source_generation
-                    || is_terminal_run_state(&run.status)
-                {
+                if proposal.status != "pending-approval" {
                     continue;
                 }
                 for reviewer in proposal
@@ -477,7 +423,9 @@ impl Store {
                     .filter(|reviewer| !proposal.approvals.contains(*reviewer))
                     .filter(|reviewer| person.is_none_or(|person| person == reviewer.as_str()))
                 {
-                    items.push(attention_item_from_revision(&proposal, &run, reviewer));
+                    if let Some(item) = revision_attention_item_tx(&connection, &proposal, reviewer, u128::MAX)? {
+                        items.push(item);
+                    }
                 }
             }
         }
@@ -513,32 +461,15 @@ impl Store {
     /// Keep the items requested by `as_of` whose run is still current, then order them.
     pub fn current_attention(
         &self,
-        mut items: Vec<AttentionItemView>,
+        items: Vec<AttentionItemView>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
-        items.retain(|item| item.requested_at_unix_ms <= as_of);
         let mut live = Vec::new();
-        for mut item in items {
-            if let Some(run) = item.mission_run.as_deref() {
-                if !person_work::run_live(&connection, run, None, item.kind == "fault")? {
-                    continue;
-                }
+        for item in items {
+            if let Some(item) = current_attention_item_tx(&connection, item, as_of)? {
+                live.push(item);
             }
-            if item.episode.is_empty() {
-                item.episode = connection
-                    .query_row(
-                        /* sqlite-large-value: allow-for-now lv-hea46ba6e1e15 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
-                            "SELECT id FROM claims WHERE subject=?1
-                    ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-                        ),
-                        [&item.subject],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .unwrap_or_else(|| item.subject.clone());
-            }
-            live.push(item);
         }
         let priority = |item: &AttentionItemView| match item.priority.as_str() {
             "critical" => 0,
@@ -1093,6 +1024,121 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
 }
 
+fn current_attention_item_tx(
+    connection: &Connection,
+    mut item: AttentionItemView,
+    as_of: u128,
+) -> Result<Option<AttentionItemView>> {
+    if item.requested_at_unix_ms > as_of {
+        return Ok(None);
+    }
+    if let Some(run) = item.mission_run.as_deref() {
+        if !person_work::run_live(connection, run, None, item.kind == "fault")? {
+            return Ok(None);
+        }
+    }
+    if item.episode.is_empty() {
+        item.episode = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-hea46ba6e1e15 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT id FROM claims WHERE subject=?1
+                    ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+            ),
+            [&item.subject], |row| row.get::<_, String>(0),
+        ).optional()?.unwrap_or_else(|| item.subject.clone());
+    }
+    Ok(Some(item))
+}
+
+/// Re-derive a native mission review on the caller's connection, including ownership,
+/// currency and public episode enrichment. Safe to call from writer admission.
+pub fn mission_run_attention_item_tx(
+    connection: &Connection,
+    kind: &str,
+    subject: &str,
+    person: &str,
+    episode: &str,
+    now: u128,
+) -> Result<Option<AttentionItemView>> {
+    let item = match kind {
+        "human-gate" => {
+            let Some(review) = pending_human_review_tx(connection, episode)? else {
+                return Ok(None);
+            };
+            Some(review_attention_item_tx(connection, review)?)
+        }
+        "launch-approval" => {
+            let Some(id) = subject.strip_prefix("planning-session/") else { return Ok(None); };
+            let Some(session) = planning_session_view_tx(connection, id)? else { return Ok(None); };
+            planning_attention_item_tx(connection, &session, now)?
+        }
+        "revision-approval" => {
+            let Some(id) = subject.strip_prefix("revision-proposal/") else { return Ok(None); };
+            let Some(proposal) = revision_proposal_view_tx(connection, id).optional()? else {
+                return Ok(None);
+            };
+            revision_attention_item_tx(connection, &proposal, person, now)?
+        }
+        _ => return Ok(None),
+    };
+    let Some(item) = item else { return Ok(None); };
+    Ok(current_attention_item_tx(connection, item, now)?
+        .filter(|item| item.subject == subject && item.person == person && item.episode == episode))
+}
+
+fn review_attention_item_tx(
+    connection: &Connection,
+    review: HumanReviewView,
+) -> Result<AttentionItemView> {
+    // The owner is the reviewed step, a loop whose step runs it, or its run.
+    let step = if review.owner.starts_with("step-run/") {
+        Some(review.owner.clone())
+    } else if review.owner.starts_with("loop-run/") {
+        loop_step_tx(connection, &review.owner)?.map(|step| step.subject)
+    } else {
+        None
+    };
+    let conversation = attention_snapshot::conversation_agent(
+        connection, step.as_deref(), Some(&review.mission_run),
+    )?;
+    Ok(AttentionItemView { conversation, ..attention_item_from_review(review) })
+}
+
+fn pending_human_review_tx(connection: &Connection, episode: &str) -> Result<Option<HumanReviewView>> {
+    let Some(request) = claim_by_id_tx(connection, episode)?
+        .filter(|claim| claim.kind == "gate.requested"
+            && claim.body.pointer("/fields/reviewer").and_then(Value::as_str).is_some())
+    else { return Ok(None); };
+    if human_review_answer_tx(connection, episode)?.is_some() {
+        return Ok(None);
+    }
+    // Match the list's immutable episode key, supersession and first-request timestamp.
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let same_episode = |alias: &str| ["owner", "reviewer", "attempt", "mission_revision", "step_definition"]
+            .map(|field| format!("json_extract({alias}.body, '$.fields.{field}')=json_extract(request.body, '$.fields.{field}')"))
+            .join(" AND ");
+        canonical_sql(&format!(
+            "SELECT earliest.accepted_at_unix_ms FROM claims request
+             JOIN claims earliest INDEXED BY claims_human_gate_episode_index
+               ON earliest.kind='gate.requested'
+              AND json_extract(earliest.body, '$.fields.reviewer') IS NOT NULL AND {}
+             WHERE request.id=?1 AND NOT EXISTS (
+                 SELECT 1 FROM claims newer INDEXED BY claims_human_gate_episode_index
+                 WHERE newer.kind='gate.requested'
+                   AND json_extract(newer.body, '$.fields.reviewer') IS NOT NULL AND {} AND {})
+             ORDER BY CANONICAL_ASC(earliest) LIMIT 1",
+            same_episode("earliest"), same_episode("newer"), canonical::after_sql("newer", "request"),
+        ))
+    });
+    let first: Option<String> = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h73b2441e4382 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &*QUERY,
+        [episode], |row| row.get(0),
+    ).optional()?;
+    let Some(first) = first else { return Ok(None); };
+    let Some(mut review) = current_human_review(connection, request)? else { return Ok(None); };
+    review.requested_at_unix_ms = first.parse()?;
+    Ok(Some(review))
+}
+
 fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
     AttentionItemView {
         deadline_unix_ms: None,
@@ -1152,6 +1198,54 @@ fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
         ],
         request: None,
     }
+}
+
+fn planning_attention_item_tx(
+    connection: &Connection,
+    session: &PlanningSessionView,
+    now: u128,
+) -> Result<Option<AttentionItemView>> {
+    let (Some(candidate), Some(preview)) = (&session.candidate, &session.preview) else {
+        return Ok(None);
+    };
+    if session.status != "review" || preview.created_at_unix_ms > now
+        || preview.candidate_revision != candidate.revision || !preview.mission.blockers.is_empty()
+    {
+        return Ok(None);
+    }
+    if let Some(run) = &session.target_mission_run {
+        let Some(run) = mission_run_header_tx(
+            connection, run.strip_prefix("mission-run/").unwrap_or(run),
+        ).optional()? else { return Ok(None); };
+        if session.source_generation.as_deref() != Some(run.generation.as_str())
+            || is_terminal_run_state(&run.status)
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some(attention_item_from_planning(session, candidate, preview)))
+}
+
+fn revision_attention_item_tx(
+    connection: &Connection,
+    proposal: &RevisionProposalView,
+    reviewer: &str,
+    now: u128,
+) -> Result<Option<AttentionItemView>> {
+    if proposal.status != "pending-approval" || proposal.created_at_unix_ms > now
+        || !proposal.reviewers.iter().any(|person| person == reviewer)
+        || proposal.approvals.iter().any(|person| person == reviewer)
+    {
+        return Ok(None);
+    }
+    let Some(run) = mission_run_header_tx(
+        connection, proposal.run.strip_prefix("mission-run/").unwrap_or(&proposal.run),
+    ).optional()? else { return Ok(None); };
+    if run.generation != proposal.source_generation || is_terminal_run_state(&run.status)
+    {
+        return Ok(None);
+    }
+    Ok(Some(attention_item_from_revision(proposal, &run, reviewer)))
 }
 
 fn attention_item_from_planning(
