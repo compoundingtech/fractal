@@ -34,6 +34,32 @@ const CLAIM_NEXT_PAGE: &str =
        AND json_type(body,'$._operation.request_digest')='text'
        AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
      ORDER BY json_extract(body,'$._operation.id'),rowid LIMIT 128";
+// The same two seeks through each claim's operation and digest copied out of its body, once
+// `operation_claim_digests` is ready: they read that table's index and never a claim row.
+const DIGEST_REMAINDER_PAGE: &str =
+    "SELECT operation_id, request_digest, claim_id, store_index
+     FROM operation_claim_digests INDEXED BY operation_claim_digests_operation
+     WHERE operation_id=?1 AND store_index>?2 AND store_index<=?3
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claim_id)
+     ORDER BY store_index LIMIT 128";
+const DIGEST_NEXT_PAGE: &str =
+    "SELECT operation_id, request_digest, claim_id, store_index
+     FROM operation_claim_digests INDEXED BY operation_claim_digests_operation
+     WHERE operation_id>?1 AND ?2 IS NOT NULL AND store_index<=?3
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claim_id)
+     ORDER BY operation_id, store_index LIMIT 128";
+/// Whether a tombstone's claim is still stored and counted, so the tombstone is not counted
+/// again: from its body, or from its copied keys.
+const TOMBSTONE_STORED: &str =
+    "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)
+     OR EXISTS(SELECT 1 FROM claims WHERE id=?1
+       AND json_type(body,'$._operation.id')='text'
+       AND json_type(body,'$._operation.request_digest')='text'
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))";
+const DIGEST_TOMBSTONE_STORED: &str =
+    "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)
+     OR EXISTS(SELECT 1 FROM claims CROSS JOIN operation_claim_digests AS digests
+       ON digests.store_index=claims.store_index WHERE claims.id=?1)";
 const CHECKPOINT_PAGE: &str =
     "SELECT rowid,operation_id,request_digest,id FROM checkpoint_claims
      WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 128";
@@ -169,6 +195,9 @@ impl Store {
         if let Some(snapshots) = snapshots.as_mut() {
             snapshots("frontiers", _frontier_rows);
         }
+        // One pass reads one source throughout: the copied keys once their backfill is done,
+        // else every operation claim's body.
+        let digests = smallclaims::store::operation_claim_digests::ready(&connection)?;
         let mut expected = BTreeMap::<String, OperationMetadata>::new();
         let mut operation = String::new();
         let mut claim_rowid = 0_i64;
@@ -178,10 +207,11 @@ impl Store {
             let rowid = claim_rowid;
             // Separate seeks avoid a row-value SCAN and a UNION merge's unbounded
             // temporary sort for a single operation with many claims.
-            let sql = if remainder {
-                CLAIM_REMAINDER_PAGE
-            } else {
-                CLAIM_NEXT_PAGE
+            let sql = match (digests, remainder) {
+                (true, true) => DIGEST_REMAINDER_PAGE,
+                (true, false) => DIGEST_NEXT_PAGE,
+                (false, true) => CLAIM_REMAINDER_PAGE,
+                (false, false) => CLAIM_NEXT_PAGE,
             };
             let count = page(
                 &connection,
@@ -222,13 +252,10 @@ impl Store {
                         && let Some(reduction) = expected.get_mut(&operation)
                     {
                         let id: String = row.get(3)?;
-                        let excluded: bool = connection.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)
-                             OR EXISTS(SELECT 1 FROM claims WHERE id=?1
-                               AND json_type(body,'$._operation.id')='text'
-                               AND json_type(body,'$._operation.request_digest')='text'
-                               AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
-                            [&id], |row| row.get(0))?;
+                        let stored = if digests { DIGEST_TOMBSTONE_STORED } else { TOMBSTONE_STORED };
+                        let excluded: bool = connection
+                            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3cd65d87b958 owner=fractal_store::store::operation_audit TODO=trace-statement-and-value-representation */ stored)?
+                            .query_row(/* sqlite-large-value: allow-for-now lv-h563f317eb739 owner=fractal_store::store::operation_audit TODO=trace-statement-and-value-representation */ [&id], |row| row.get(0))?;
                         if !excluded { reduction.include(digest, id, false); }
                     }
                     tombstone_rowid = row.get(0)?;
@@ -405,6 +432,34 @@ mod tests {
         assert_eq!(slices, 4);
         assert!(connection.is_autocommit());
         assert_eq!(connection.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn digest_pages_read_only_the_digest_index_and_never_a_claim_row() {
+        let store = Store::open_memory("node").unwrap();
+        smallclaims::store::operation_claim_digests::advance(&store.readers, &store.connection).unwrap();
+        let connection = store.readers.get();
+        let cursor = "";
+        let rowid = 0_i64;
+        let cut = i64::MAX;
+        let id = "claim/example";
+        let cases: [(&str, &[&dyn rusqlite::ToSql], &str); 3] = [
+            (DIGEST_REMAINDER_PAGE, &[&cursor, &rowid, &cut],
+                "SEARCH operation_claim_digests USING COVERING INDEX operation_claim_digests_operation"),
+            (DIGEST_NEXT_PAGE, &[&cursor, &rowid, &cut],
+                "SEARCH operation_claim_digests USING COVERING INDEX operation_claim_digests_operation"),
+            (DIGEST_TOMBSTONE_STORED, &[&id], "SEARCH claims USING COVERING INDEX sqlite_autoindex_claims_1"),
+        ];
+        for (sql, parameters, index) in cases {
+            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+                .query_map(parameters, |row| row.get::<_, String>(3)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
+            assert!(plan.contains(index), "{plan}");
+            // The tombstone probe's outer SELECT scans its one constant row.
+            assert!(!plan.replace("SCAN CONSTANT ROW", "").contains("SCAN "), "{plan}");
+            assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+            assert!(!plan.contains("SEARCH claims USING INDEX"), "{plan}");
+        }
     }
 
     #[test]

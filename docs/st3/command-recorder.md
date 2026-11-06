@@ -5,7 +5,7 @@ recorder observes. It does not enforce, block, or change a command.
 
 ## What goes through it
 
-`st up` puts `<state>/recorder/bin` first on the `PATH` of everything it runs:
+`fractal up` puts `<state>/recorder/bin` first on the `PATH` of everything it runs:
 
 - the daemon's own commands, such as checkout and resource observation;
 - every member it starts: agent seats, terminal (PTY) sessions, gates, and exec steps.
@@ -53,7 +53,7 @@ Each call appends one line after the real program exits:
 | `time` | When the call started, RFC 3339 UTC with milliseconds |
 | `host` | The daemon's node name |
 | `actor` | `ST_AGENT`, else `ST3_SUBJECT`, else `daemon` |
-| `subject` | `ST3_SUBJECT`, the st member that ran the call, or `null` |
+| `subject` | `ST3_SUBJECT`, the Fractal member that ran the call, or `null` |
 | `step_run` | `ST_STEP_RUN`, or `null` |
 | `cwd` | The working directory |
 | `program` | `git` or `gh` |
@@ -78,20 +78,20 @@ jq -c 'select(.exit_code != 0) | {time, actor, program, args, exit_code, signal}
 jq -r '[.actor, .program, (.args | join(" "))] | @tsv' "$log"
 ```
 
-`st doctor` includes a `command-recorder` check. It warns when the recorder directory, its links,
+`fractal doctor` includes a `command-recorder` check. It warns when the recorder directory, its links,
 or an appendable log is missing.
 
 ## Summarize calls
 
-`st recorder report` summarizes the last 24 hours of the local log. `--hours` changes the window,
+`fractal recorder report` summarizes the last 24 hours of the local log. `--hours` changes the window,
 `--top` changes the number of slow calls, and `--json` produces structured output. To summarize
 several hosts, copy their private logs to the machine running the report and pass each one with
 `--log`:
 
 ```sh
-st recorder report --hours 24
-st recorder report --hours 24 --log ./host-a.jsonl --log ./host-b.jsonl
-st --json recorder report --hours 168 --log ./host-a.jsonl --log ./host-b.jsonl
+fractal recorder report --hours 24
+fractal recorder report --hours 24 --log ./host-a.jsonl --log ./host-b.jsonl
+fractal --json recorder report --hours 168 --log ./host-a.jsonl --log ./host-b.jsonl
 ```
 
 The report groups calls and failures by host, agent, and command; lists the slowest calls; and

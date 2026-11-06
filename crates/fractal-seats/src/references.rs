@@ -3,7 +3,7 @@
 use crate::SeatsStoreCore;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec,
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
     WorkSelector,
 };
 pub use fractal_missions::references::*;

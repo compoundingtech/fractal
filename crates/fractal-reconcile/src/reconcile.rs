@@ -543,7 +543,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
         desired: &DesiredSubject,
         launch: &MemberSpec,
     ) -> Result<crate::launch_contract::Contract> {
-        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true)
+        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true).map(|(contract, _)| contract)
     }
     /// Proof for the operation in this prepared launch: no operation-owned runtime
     /// remains and no producer can launch later. A returned error or absence alone
@@ -1406,6 +1406,8 @@ pub struct Reconciler<R = NativeRuntime> {
     file_subscriptions: std::sync::OnceLock<Arc<file_subscriptions::Pool>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
+    file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
+    launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1618,6 +1620,8 @@ impl Reconciler<NativeRuntime> {
             file_subscriptions: Default::default(),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
+            file_watch_revision: Default::default(),
+            launch_input_wake: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1819,6 +1823,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_subscriptions: Default::default(),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
+            file_watch_revision: Default::default(),
+            launch_input_wake: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -2957,6 +2963,11 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn reconcile_pass(&self) -> Result<()> {
         self.refresh_seat_admission();
+        // Before any room is judged: the raised slices a restart left (lane_bursts.rs).
+        if let Err(error) = self.find_raised_lanes() {
+            eprintln!("st3: WARN reading this host's lanes for raises: {error:#}");
+            smallclaims::touched::note_due(now_ms() + 5_000);
+        }
         self.observe_member_admission()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
@@ -4030,6 +4041,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        for subject in desired.iter().filter(|subject| subject.kind == "agent"
+            && subject.member.as_ref().is_some_and(|member| member.host == self.host)) {
+            self.isolate(&format!("stage/launch-inputs/{}", subject.subject), &daemon, || self.watch_launch_inputs(subject));
+        }
         self.isolate("stage/missions", &daemon, || self.evaluate_mission_runs());
         self.release_unused_file_watchers();
 
@@ -8686,6 +8701,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     .filter(|reason| !reason.is_empty())
                                     .map(str::to_owned)
                             }) {
+                            // The driver stopped a provider it could no longer serve: the
+                            // harness refused nothing (#4743).
+                            Some(reason)
+                                if reason == fractal_drivers::provider_session::DRIVER_STOPPED =>
+                            {
+                                (
+                                    "resume-exited".into(),
+                                    "the driver stopped the resumed provider before it bound its native session"
+                                        .into(),
+                                )
+                            }
                             Some(reason) => (
                                 "harness-refused".into(),
                                 format!("the harness ended before it bound the session: {reason}"),
@@ -12524,6 +12550,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("loop-metric".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         self.perform_start(
             &DesiredSubject {
@@ -14594,7 +14623,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && current.owner_generation.as_deref() == Some(run.generation.as_str())
                 && current.owner_step.as_deref() != owner_step
             {
-                return Err(crate::model::St3Error::new(
+                return Err(crate::model::FractalError::new(
                     "duplicate-runtime-subject",
                     format!(
                         "mission run `{}` declares runtime `{}` in more than one mission or step",
@@ -16030,7 +16059,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_schedule_work_with_start(
         &self, schedule: &DesiredSubject,
         mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, u64)
-            -> Result<MissionRunView, crate::model::St3Error>,
+            -> Result<MissionRunView, crate::model::FractalError>,
     ) -> Result<()> {
         self.store
             .owned_desired_guard(schedule)
@@ -16348,7 +16377,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_subscription_mission_with_start(
         &self, item: &DesiredSubject, held: &[crate::model::AttentionRequestView],
         mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, &str, &str)
-            -> Result<MissionRunView, crate::model::St3Error>,
+            -> Result<MissionRunView, crate::model::FractalError>,
     ) -> Result<()> {
         let Some(spec) = crate::graph::subscription_spec(&item.desired) else {
             return Ok(());
@@ -18208,6 +18237,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("mechanical-gate".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -18760,6 +18792,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("llm-gate".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -18966,6 +19001,44 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
+        let item = format!("launch-inputs:{}", subject.subject);
+        if !self.incremental.needs(&item, now_ms()) {
+            for key in self.incremental.reads_of(&item).into_iter().filter(|key| key.starts_with("launch-input/")) {
+                self.file_watchers_used.lock().unwrap_or_else(PoisonError::into_inner).insert(key);
+            }
+            return Ok(());
+        }
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        });
+        let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
+        let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
+        let (result, reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::note_read(|| "launch-identity".into());
+            smallclaims::touched::note_read(|| "kind:intent.desired".into());
+            crate::contract::declared_ready_inputs(&self.store, subject, &|path| {
+                let key = format!("launch-input/{}", path.display());
+                smallclaims::touched::note_read(|| key.clone());
+                self.ensure_file_watch(&key, path).inspect_err(|error| if !error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) { *watch_error.borrow_mut() = Some(error.to_string()); })
+            })
+        });
+        self.incremental.evaluated(&item, reads, None);
+        if watch_error.borrow().is_some() || matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
+            self.incremental.touch("launch-identity");
+        }
+        watch_error.into_inner().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
+    }
+
     fn ensure_file_watch(&self, subject: &str, path: &Path) -> Result<()> {
         self.file_watchers_used
             .lock()
@@ -19011,6 +19084,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
+        let revision = self.file_watch_revision.clone();
         let watched_subject = subject.to_owned();
         if self.file_subscriptions.get().is_none() {
             let _ = self.file_subscriptions.set(file_subscriptions::Pool::new()?);
@@ -19031,6 +19105,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &watched_directory,
                     watched_referent.as_deref(),
                 ) {
+                    revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
                         | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
                         changed_watch.store(true, std::sync::atomic::Ordering::Release);
@@ -19695,7 +19770,7 @@ fn step_path_of_subject(subject: &str) -> Option<&str> {
 /// Whether a mission run could not start only because this host lacks a claim that replication
 /// can still deliver, such as a mission revision, an owner run, or an input's claim published on
 /// another host, or because transient SQLite contention prevented the start.
-fn start_waits_for_replication(error: &crate::model::St3Error) -> bool {
+fn start_waits_for_replication(error: &crate::model::FractalError) -> bool {
     matches!(
         error.code,
         "missing-mission" | "missing-mission-run" | "missing-resource-input-version" | "internal"
@@ -20776,6 +20851,8 @@ pub fn now_ms() -> u128 {
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     #![cfg_attr(not(test), allow(unused, dead_code))]
+    mod agent_review_loop_branches;
+
     #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
@@ -20846,6 +20923,7 @@ pub mod tests {
     mod helper_launcher;
     mod bounded_loop_reads;
     mod incremental_deadlines;
+    mod resume_harness_end;
     #[cfg(test)]
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
@@ -26874,6 +26952,41 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn launch_input_watchers_recover_missing_and_retargeted_interpreters() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for retarget in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let interpreter = root.path().join("interpreter");
+            let target = root.path().join("target");
+            let provider = root.path().join("provider");
+            std::fs::write(&provider, format!("#!{}\n", interpreter.display())).unwrap();
+            std::fs::write(&target, "interpreter bytes").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if retarget { std::os::unix::fs::symlink(&target, &interpreter).unwrap(); }
+            let notify = Arc::new(Notify::new());
+            let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+                Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+            let result = fractal_drivers::harness_admission::executable_identity_ready_observed(
+                &provider, &|_| unreachable!(), &|path| reconciler.ensure_file_watch(
+                    &format!("launch-input/{}", path.display()), path));
+            assert_eq!(result.is_ok(), retarget);
+            if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
+                &format!("launch-input/{}", target.display()))); }
+            reconciler.incremental.evaluated("probe", BTreeSet::from([format!("launch-input/{}", interpreter.display())]), None);
+            if retarget {
+                let replacement = root.path().join("replacement");
+                std::os::unix::fs::symlink(&provider, &replacement).unwrap();
+                std::fs::rename(replacement, &interpreter).unwrap();
+            } else {
+                std::fs::rename(&target, &interpreter).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            assert!(reconciler.incremental.needs("probe", now_ms()));
+            fractal_drivers::harness_admission::identity_measurements_settled();
+        }
     }
 
     #[tokio::test]
@@ -49599,7 +49712,7 @@ mission "fresh" state="ready" {
             anchor: Option<&str>,
             actor: &str,
             key: &str,
-        ) -> Result<crate::model::ClaimRecord, crate::model::St3Error> {
+        ) -> Result<crate::model::ClaimRecord, crate::model::FractalError> {
             self.store
                 .move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
                     agent: SEAT.into(),
@@ -49612,7 +49725,7 @@ mission "fresh" state="ready" {
                 })
         }
 
-        fn work(&self, step: &str, action: &str, key: &str) -> Result<(), crate::model::St3Error> {
+        fn work(&self, step: &str, action: &str, key: &str) -> Result<(), crate::model::FractalError> {
             self.store
                 .work_action(
                     step,

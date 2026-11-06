@@ -430,7 +430,7 @@ impl Runtime for FractalRuntime {
         _connection: &Connection,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Result<ReplicatedClaimAdmission, St3Error> {
+    ) -> Result<ReplicatedClaimAdmission, FractalError> {
         classify_replicated_claim_with_registry(claim, self.claim_registry())
     }
 
@@ -438,7 +438,7 @@ impl Runtime for FractalRuntime {
         &self,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Option<Result<ReplicatedClaimAdmission, St3Error>> {
+    ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
         // The registry is this build's schema, fixed for the process.
         Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
@@ -447,7 +447,7 @@ impl Runtime for FractalRuntime {
         &self,
         store: &GraphStore,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         append_claim_fenced_outcome(store, input, None)
     }
 
@@ -506,11 +506,11 @@ impl Runtime for FractalRuntime {
         transaction: &Transaction<'_>,
         origin: &str,
         through: u64,
-    ) -> Result<IncrementalProjection, St3Error> {
+    ) -> Result<IncrementalProjection, FractalError> {
         try_project_simple_replication_tx(transaction, origin, through)
     }
 
-    fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         replay_graph_from_nothing_tx(transaction)
     }
 
@@ -518,11 +518,11 @@ impl Runtime for FractalRuntime {
         &self,
         transaction: &Transaction<'_>,
         progress: &mut dyn FnMut(ReplayProgress),
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         replay_graph_from_nothing_with_progress_tx(transaction, progress)
     }
 
-    fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         projectors::run_hooks(projectors::FLUSH, transaction).map_err(internal)?;
         holds::stage("lease-renewals", || reapply_local_work_lease_renewals_tx(transaction))
     }
@@ -707,7 +707,7 @@ impl Runtime for FractalRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.slo-breach-episodes-declared-resource-edges-ordered-membership.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges-arrangement-placement-migration.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {

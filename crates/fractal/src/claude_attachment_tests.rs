@@ -221,7 +221,8 @@ impl Fixture {
             .route("/v1/mailbox", get(mailbox_reports))
             .route("/v1/claims", post(publication))
             .with_state(control.clone());
-        let root = tempfile::tempdir().unwrap();
+        // macOS TMPDIR can exceed the Unix socket path limit.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("api.sock");
         let client = Client::unix(&socket);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

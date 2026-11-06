@@ -527,6 +527,61 @@ async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_burst_cli_renews_as_held_and_says_lost_gives_back_and_fails_once_a_grant_is_not_renewed() {
+    use std::sync::Mutex;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    // A daemon that grants with a 3 s lease, then answers the holder's renewal as a new ask, as a
+    // daemon that restarted and no longer finds the burst in the seat's slice does.
+    let asks = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let released = Arc::new(Mutex::new(0));
+    let (posted, deleted) = (asks.clone(), released.clone());
+    let router = axum::Router::new().route("/v1/agents/lane/burst", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let asks = posted.clone();
+        async move {
+            let mut asks = asks.lock().unwrap();
+            asks.push(body);
+            let value = if asks.len() == 1 {
+                serde_json::json!({"state": "granted", "lease_secs": 3})
+            } else {
+                serde_json::json!({"state": "waiting", "why": "burst lane for agent/garden/builder waits behind agent/garden/other", "lease_secs": 3})
+            };
+            axum::Json(serde_json::json!({"api_version": "st3.v1", "value": value}))
+        }
+    }).delete(move || {
+        let released = deleted.clone();
+        async move {
+            *released.lock().unwrap() += 1;
+            axum::Json(serde_json::json!({"api_version": "st3.v1", "value": {"released": true}}))
+        }
+    }));
+    let server = serve_for_test(&socket, router).await;
+    let binary = test_bin!("fractal-fixture").to_path_buf();
+    let holder = tokio::task::spawn_blocking(move || {
+        let mut command = fractal_daemon::test_support::command(binary);
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+            .arg("--endpoint").arg(&socket)
+            .args(["agents", "burst", "garden/builder", "--cores", "8", "--memory", "24G", "--reason", "st-test", "--as", "agent/garden/builder"])
+            // Its stdin stays open, as st-test's does while the run holds the burst.
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let output = child.wait_with_output().unwrap();
+        drop(stdin);
+        output
+    });
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), holder).await.expect("the holder ends by itself").unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout),
+        "granted 8 24G\nlost burst lane for agent/garden/builder waits behind agent/garden/other\n", "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lane burst lost"), "{output:?}");
+    let asks = asks.lock().unwrap();
+    assert_eq!(asks.iter().map(|ask| ask["held"].clone()).collect::<Vec<_>>(), [Value::Bool(false), Value::Bool(true)]);
+    assert_eq!(*released.lock().unwrap(), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_workspace_cli_and_client_read_the_same_declaration_even_after_retirement() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
@@ -3773,13 +3828,44 @@ async fn serve_creation_api(
     root: &Path,
     harness_state: Option<&'static str>,
 ) -> (PathBuf, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
+    serve_creation_api_with_read_gate(root, harness_state, None).await
+}
+
+#[derive(Default)]
+struct CreationReadGate {
+    created: std::sync::atomic::AtomicBool,
+    reads: std::sync::atomic::AtomicUsize,
+    event_waits: std::sync::atomic::AtomicUsize,
+    entered: Notify,
+    release: Notify,
+}
+
+async fn serve_creation_api_with_read_gate(
+    root: &Path,
+    harness_state: Option<&'static str>,
+    gate: Option<Arc<CreationReadGate>>,
+) -> (PathBuf, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
     let socket = root.join("st3.sock");
     let state = test_state(root);
     let store = state.store.clone();
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let store = store.clone();
+            let gate = gate.clone();
             async move {
+                use std::sync::atomic::Ordering;
+                if let Some(gate) = &gate {
+                    if request.uri().path().starts_with("/v1/client/agents/")
+                        && gate.created.load(Ordering::SeqCst)
+                        && gate.reads.fetch_add(1, Ordering::SeqCst) == 0
+                    {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                    if request.uri().path() == "/v1/events/page" {
+                        gate.event_waits.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 // This fixture supplies provider observations without launching a binary.
                 if request.uri().path() == "/v1/harnesses" {
                     return axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({
@@ -3823,6 +3909,11 @@ async fn serve_creation_api(
                             })
                             .unwrap();
                     }
+                }
+                if applied && response.status().is_success()
+                    && let Some(gate) = &gate
+                {
+                    gate.created.store(true, Ordering::SeqCst);
                 }
                 response
             }
@@ -4197,6 +4288,98 @@ async fn new_agent_explains_ready_starting_and_waiting_states_and_preserves_json
             }
         }
         server.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_agent_observes_its_state_when_the_first_read_outlasts_the_ready_wait() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    for (harness, json) in [(Some("ready"), true), (Some("blocked"), false), (None, false)] {
+        let root = fractal_daemon::test_support::canonical_tempdir();
+        let gate = Arc::new(CreationReadGate::default());
+        let (socket, server) = serve_creation_api_with_read_gate(
+            root.path(), harness, Some(gate.clone()),
+        ).await;
+        let workspace = root.path().display().to_string();
+        let command = tokio::spawn(async move {
+            run_cli_mode(&socket, json, &[
+                "agents", "new", "demo", "--harness", "omp", "--model", "example-model",
+                "--workspace", &workspace, "--as", "person/avery", "--timeout", "100ms",
+            ]).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await.expect("the CLI did not start its first post-create agent read");
+        // The request has begun inside the 100 ms readiness wait. Keep it pending until
+        // that budget is certainly spent; the agent observations already exist in the store.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        gate.release.notify_one();
+        let output = tokio::time::timeout(Duration::from_secs(5), command)
+            .await.expect("the CLI did not finish after its current state was released")
+            .unwrap();
+        server.abort();
+        assert_eq!(gate.reads.load(Ordering::SeqCst), 1, "do not retry the cancelled read");
+        assert_eq!(gate.event_waits.load(Ordering::SeqCst), 0,
+            "an elapsed readiness budget must not start another event wait");
+        match harness {
+            Some("ready") => assert_eq!(value(&output)["harness_state"], "ready"),
+            Some("blocked") => {
+                assert!(!output.status.success());
+                assert!(String::from_utf8_lossy(&output.stdout).contains("Waiting for you"));
+                assert!(String::from_utf8_lossy(&output.stderr).contains("waiting for your input"));
+            }
+            None => {
+                assert!(!output.status.success());
+                assert!(String::from_utf8_lossy(&output.stdout).contains("Still starting"));
+                assert!(String::from_utf8_lossy(&output.stderr).contains("not ready after 100ms"));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_agent_reports_unknown_when_its_state_read_outlasts_the_grace() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    for json in [false, true] {
+        let root = fractal_daemon::test_support::canonical_tempdir();
+        let gate = Arc::new(CreationReadGate::default());
+        let (socket, server) = serve_creation_api_with_read_gate(
+            root.path(), Some("ready"), Some(gate.clone()),
+        ).await;
+        let workspace = root.path().display().to_string();
+        let started = std::time::Instant::now();
+        let command = tokio::spawn(async move {
+            run_cli_mode(&socket, json, &[
+                "agents", "new", "demo", "--harness", "omp", "--model", "example-model",
+                "--workspace", &workspace, "--as", "person/avery", "--timeout", "100ms",
+            ]).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await.expect("the CLI did not start its state read");
+        // Hold the read until the CLI itself ends its grace, without releasing or retrying it.
+        let output = tokio::time::timeout(Duration::from_secs(5), command)
+            .await.expect("the state read did not stop at its grace limit")
+            .unwrap();
+        gate.release.notify_one();
+        server.abort();
+        assert!(started.elapsed() >= Duration::from_secs(2), "the read lost its grace early");
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("current state is unknown"), "{error}");
+        assert!(error.contains("100ms plus a 2s state-read grace"), "{error}");
+        let rendered = String::from_utf8_lossy(&output.stdout);
+        if json {
+            assert!(rendered.is_empty(), "do not publish an invented agent state: {rendered}");
+        } else {
+            assert!(rendered.contains("Unknown"), "{rendered}");
+            assert!(!rendered.contains("Still starting"), "{rendered}");
+        }
+        assert_eq!(gate.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.event_waits.load(Ordering::SeqCst), 0);
     }
 }
 
