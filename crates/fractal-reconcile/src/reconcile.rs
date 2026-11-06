@@ -20785,6 +20785,8 @@ pub fn now_ms() -> u128 {
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     #![cfg_attr(not(test), allow(unused, dead_code))]
+    mod agent_review_loop_branches;
+
     #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;

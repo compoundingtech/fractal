@@ -443,3 +443,13 @@ The read-only sink binds a loop subject TEXT key and reads existing claim-kind/b
 TEXT values. It adds no writer; inline history remains necessary to validate all
 round references. Its maintainer must trace these keys and bodies into the eventual
 bounded/reference representation; this exception proves neither size nor cost.
+
+## Historical collection review fixture
+
+For [agent-review preparation #4850](https://github.com/compoundingtech/fractal/issues/4850),
+`fractal_reconcile::reconcile::tests::agent_review_loop_branches` owns
+`lv-h71aa3a6171e0`. This in-memory fixture restores legacy mission JSON because
+current publication rejects for-each syntax. The UPDATE binds body, mission-ID
+and revision TEXT values; no production writer changes. The maintainer must
+preserve this historical regression through referenced storage/reclamation work.
+Inline storage here proves neither encoded size nor execution-cost bounds.
