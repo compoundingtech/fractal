@@ -10,6 +10,7 @@
     "./tokens.css": "./src/tokens.css",
     "./assistant-ui": "./src/assistant-ui/index.ts",
     "./assistant-ui/shell": "./src/assistant-ui/shell.ts",
+    "./assistant-ui/related-runs": "./src/assistant-ui/sidebar/SidebarRelatedRuns.tsx",
     "./assistant-ui/transcript-skeleton": "./src/assistant-ui/composition/TranscriptSkeleton.tsx",
     "./assistant-ui/resources": "./src/assistant-ui/resources/index.ts",
     "./assistant-ui/work-log": "./src/assistant-ui/taste/work-log.ts",
