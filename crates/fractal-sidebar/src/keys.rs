@@ -1,4 +1,6 @@
 //! Canonical base-62 position keys for local insertions into arrangement registers.
+mod capacity;
+pub use capacity::spread;
 const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 fn integer_length(key: &str) -> usize {
     let head = key.as_bytes()[0];
