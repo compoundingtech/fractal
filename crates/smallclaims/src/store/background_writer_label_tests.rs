@@ -69,9 +69,21 @@ fn background_writer_pages_are_named_operations_in_the_profile() {
     }
     assert_eq!(records.iter().filter(|record| record["label"] == DIGESTS).count(), 2);
 
-    // Inside the daemon's fold task (task metrics on), a page is part of that task, not another.
-    let before = records.iter().filter(|record| record["label"] == FOLD).count();
-    crate::profile::task(FOLD, || store.fold_claim_ranges().unwrap());
-    let after = slow_records().iter().filter(|record| record["label"] == FOLD).count();
-    assert_eq!(after, before + 1);
+    // Inside the daemon's fold task (task metrics on), a page is part of that task: one profile
+    // operation and one invocation in the performance meter, not one more per page.
+    let invocations = || {
+        crate::performance::snapshot()["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == FOLD)
+            .map_or(0, |row| row["count"].as_u64().unwrap())
+    };
+    let before = (records.iter().filter(|record| record["label"] == FOLD).count(), invocations());
+    crate::profile::task(FOLD, || {
+        store.fold_claim_ranges().unwrap();
+        store.fold_claim_ranges().unwrap();
+    });
+    let after = (slow_records().iter().filter(|record| record["label"] == FOLD).count(), invocations());
+    assert_eq!(after, (before.0 + 1, before.1 + 1));
 }
