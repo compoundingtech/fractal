@@ -91,6 +91,13 @@ it replaces one local scalar, never replicated input or a growing result.
 The lexical inventory supports only transitional exceptions, not bounded-value exemptions.
 Keep this site registered while the producer owns the metadata representation and reclamation review.
 
+### Selector fold budget test seam inventory
+
+`fractal_store::store::client_messages` owns `lv-h888b095a594c`, compiled only with test support.
+The upsert binds one fixed metadata key and a decimal microsecond count from a `Duration`;
+it replaces one local scalar that pins a test store's fold budget, never replicated input or a growing result.
+Release builds neither write nor read the key. Keep this site registered while the module owns the metadata representation.
+
 ### Carried-step review fixture inventory (PR #5343)
 
 The `fractal_store::references::step_review::tests` maintainer owns both

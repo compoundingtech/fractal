@@ -13,17 +13,21 @@
       "required": ["name", "initial", "catalog", "events", "identities", "checkpoints"],
       "properties": {
         "name": {"type": "string", "minLength": 1},
-        "initial": {"type": "object", "additionalProperties": false, "required": ["arrangement", "memberships", "journal"], "properties": {"arrangement": {"$ref": "#/$defs/arrangement"}, "memberships": {"$ref": "#/$defs/empty"}, "journal": {"$ref": "#/$defs/empty"}}},
+        "initial": {"type": "object", "additionalProperties": false, "required": ["arrangement", "memberships", "journal"], "properties": {"arrangement": {"$ref": "#/$defs/arrangement"}, "memberships": {"type": "array", "items": {"$ref": "#/$defs/membership"}}, "journal": {"$ref": "#/$defs/empty"}}},
         "catalog": {"$ref": "#/$defs/strings"},
         "identities": {"type": "object", "additionalProperties": false},
         "events": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/event"}},
         "checkpoints": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/checkpoint"}}
-      }
+      },
+      "oneOf": [
+        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 1}}}}}, "memberships": {"$ref": "#/$defs/empty"}}}, "events": {"items": {"properties": {"type": {"const": "ProjectAndPlanV1"}}}}}},
+        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 2}}}}}}}, "events": {"items": {"properties": {"type": {"const": "ProjectV2"}, "moves": {"$ref": "#/$defs/empty"}}}}, "checkpoints": {"items": {"properties": {"moves": {"$ref": "#/$defs/empty"}}}}}}
+      ]
     },
     "event": {
-      "description": "Pure v1 projection, independent move plans against that tree, then rollup; no clock, allocation identities, persistence or wire dispatch is used.",
+      "description": "Pure v1 projection and move plans, or v2 complete live membership projection, then rollup; neither dispatches effects or wire actions.",
       "type": "object", "additionalProperties": false, "required": ["type", "moves", "needsYou"],
-      "properties": {"type": {"const": "ProjectAndPlanV1"}, "moves": {"type": "array", "items": {"$ref": "#/$defs/intent"}}, "needsYou": {"$ref": "#/$defs/strings"}}
+      "properties": {"type": {"enum": ["ProjectAndPlanV1", "ProjectV2"]}, "moves": {"type": "array", "items": {"$ref": "#/$defs/intent"}}, "needsYou": {"$ref": "#/$defs/strings"}}
     },
     "checkpoint": {
       "type": "object", "additionalProperties": false, "required": ["tree", "moves", "rollup", "effects", "wireActions"],
@@ -33,7 +37,10 @@
       "type": "object", "additionalProperties": false, "required": ["id", "kind", "owner", "revision", "updated_at", "deleted", "body", "resolved"],
       "properties": {"id": {"$ref": "#/$defs/string"}, "kind": {"const": "arrangement"}, "owner": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}, "updated_at": {"$ref": "#/$defs/string"}, "deleted": {"type": "boolean"}, "body": {"$ref": "#/$defs/body"}, "resolved": {"$ref": "#/$defs/resolved"}}
     },
-    "body": {
+    "membership": {"type": "object", "additionalProperties": false, "required": ["container", "member", "revision", "position"], "properties": {"container": {"$ref": "#/$defs/string"}, "member": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}, "position": {"type": "object", "additionalProperties": false, "required": ["bucket", "key"], "properties": {"bucket": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}}},
+    "body": {"oneOf": [{"$ref": "#/$defs/bodyV1"}, {"$ref": "#/$defs/bodyV2"}]},
+    "bodyV2": {"type": "object", "additionalProperties": false, "required": ["version", "name", "folders"], "properties": {"version": {"const": 2}, "name": {"$ref": "#/$defs/stringRegister"}, "folders": {"type": "object", "additionalProperties": {"$ref": "#/$defs/folder"}}}},
+    "bodyV1": {
       "type": "object", "additionalProperties": false, "required": ["version", "name", "folders", "placements"],
       "properties": {"version": {"const": 1}, "name": {"$ref": "#/$defs/stringRegister"}, "folders": {"type": "object", "additionalProperties": {"$ref": "#/$defs/folder"}}, "placements": {"type": "object", "additionalProperties": {"$ref": "#/$defs/placementRegister"}}}
     },

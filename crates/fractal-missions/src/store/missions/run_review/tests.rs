@@ -37,12 +37,12 @@ agent "example/child" { command "true"; workspace "/tmp" }
 agent "example/requester" { command "true"; workspace "/tmp" }
 agent "example/originator" { command "true"; workspace "/tmp" }
 mission "parent" state="ready" { goal "Check the complete run boundary."
-  step "start" { assigned-to "agent/example/parent" }; step "other" { agentless } }
+  step "start" { assigned-to "agent/example/parent" }; step "other" {} }
 mission "child" state="ready" { goal "Check child responsibility."
   step "work" { assigned-to "agent/example/child" } }
 mission "pool" state="ready" { goal "Keep raw responsibility."
   step "work" { available-to "agent/example/requester"; available-to "agent/example/free" } }
-mission "source" state="ready" { goal "Keep carried requesters."; step "work" { agentless } }
+mission "source" state="ready" { goal "Keep carried requesters."; step "work" {} }
 mission "looping" state="ready" { goal "Review every round."
   loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } } }
 mission "nested-loop" state="ready" { goal "Review nested loop history."
@@ -438,15 +438,29 @@ fn agent_review_owner_snapshot_step_children_not_siblings() {
 }
 
 #[test]
-fn agent_review_owner_snapshot_pinned_agentless_and_unknown_owner() {
+fn agent_review_owner_snapshot_default_agentless_and_unknown_owner() {
     let (store, parent, _) = fixture();
     let other = &step(&parent, "other").subject;
     assert!(snapshot(&store, other, FREE).unwrap().agentless);
-    assert!(
-        !snapshot(&store, &step(&parent, "start").subject, FREE)
-            .unwrap()
-            .agentless
-    );
+    for s in [
+        WorkSelector::Assigned {
+            agent: PARENT.into(),
+        },
+        WorkSelector::Available {
+            agents: vec![PARENT.into()],
+        },
+    ] {
+        let (store, parent, _) = fixture();
+        let other = &step(&parent, "other").subject;
+        let req = request("source");
+        let run = store
+            .create_child_mission_run(&req, &parent, other, Some(&s))
+            .unwrap();
+        let inherited = &step(&run, "work").subject;
+        assert!(!snapshot(&store, inherited, FREE).unwrap().agentless);
+    }
+    let assigned = &step(&parent, "start").subject;
+    assert!(!snapshot(&store, assigned, FREE).unwrap().agentless);
     for owner in [
         "step-run/missing/work",
         "loop-run/missing/work",

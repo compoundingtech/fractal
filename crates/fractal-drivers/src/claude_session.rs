@@ -809,33 +809,6 @@ fn load_binding(
     load_binding_file(&state_dir.join(BINDING_FILE), agent, runtime_id)
 }
 
-/// The verified transcript of this wrapper session. Channel receipts observe native user
-/// records directly; they never depend on a UserPromptSubmit marker or hook receipt.
-pub fn channel_transcript(
-    catalog_root: &Path,
-    identity: &str,
-    runtime_id: &str,
-    incarnation: &str,
-) -> Result<Option<PathBuf>> {
-    channel_transcript_paths(
-        &state_dir(catalog_root, identity),
-        identity,
-        runtime_id,
-        incarnation,
-    )
-}
-
-pub fn channel_transcript_paths(
-    session_dir: &Path,
-    identity: &str,
-    runtime_id: &str,
-    incarnation: &str,
-) -> Result<Option<PathBuf>> {
-    Ok(load_binding(session_dir, identity, runtime_id)?
-        .filter(|binding| binding.runtime_incarnation == incarnation)
-        .map(|binding| binding.transcript_path))
-}
-
 /// A receipt may name a native user record only in the same verified binding that
 /// supplied the channel's transcript. This accessor grants no new binding authority.
 pub fn channel_receipt_session(
