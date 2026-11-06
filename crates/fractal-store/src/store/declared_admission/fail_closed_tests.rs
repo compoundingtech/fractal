@@ -37,15 +37,15 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
             );
             assert!(
                 store
-                    .selected_desired_token("agent/plain")
+                    .selected_desired_token("agent/alder.plain")
                     .unwrap()
                     .is_none()
             );
 
             let intent = crate::graph::parse_intent(&source, "alder").unwrap();
-            let (subject, kind, mut body) = if let Some(desired) = intent.subjects.get("agent/new") {
+            let (subject, kind, mut body) = if let Some(desired) = intent.subjects.get("agent/alder.new") {
                 (
-                    "agent/new",
+                    "agent/alder.new",
                     "intent.desired",
                     serde_json::to_value(desired).unwrap(),
                 )
@@ -91,7 +91,7 @@ fn publications_without_declared_admission_children_are_unchanged() {
     ).unwrap();
     assert!(
         store
-            .selected_desired_token("agent/plain")
+            .selected_desired_token("agent/alder.plain")
             .unwrap()
             .is_some()
     );
