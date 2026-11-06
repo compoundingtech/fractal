@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fleet compatibility tests wait for both an empty outbox and visible shard items before asserting that startup drain completed.",
+  "summary": "Fleet compatibility tests check committed shard claims after outbox drain, independently of when replication seals local batches.",
   "replay": {"status": "none", "detail": "Test synchronization only; daemon replay behavior is unchanged."},
   "schema": {"status": "none", "detail": "No database schema or migration changes."},
   "rules": {"status": "none", "detail": "No checkpoint rule or fleet coordination changes."},
