@@ -1154,8 +1154,9 @@ Mailbox streams count why each full read happens as notes on `task mailbox-updat
 `mailbox full read: no previous snapshot` (the stream's first read, or the one after a repair),
 `mailbox full read: resync` and `mailbox full read: held refill`. `task mailbox-fence` counts
 `mailbox repaired: snapshot restarts`, and `task mailbox-loss` counts
-`mailbox loss: channel-lost fault filed`. Compare their counts across the first minute and a
-steady one.
+`mailbox loss: channel-lost fault filed`; with task metrics on, both run inside
+`mailbox.write`, which then carries these two notes. Compare their counts across the first
+minute and a steady one.
 
 ## Reproduce a mailbox-wake comparison
 
