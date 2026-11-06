@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Save the replication inventory at a clean shutdown and extend it at the next start instead of reading every envelope",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes. The first replication snapshot after a start extends the saved inventory by the envelopes appended since; without a valid saved inventory it reads the store as before."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "New triggers, no schema-version change: replica_envelopes, checkpoint_envelopes and retired_envelopes delete meta key replication_inventory_epoch on any change but an append (envelope deletes and rewrites, inserts below the tail, every tombstone and retired-ledger change). Each open writes a fresh epoch. A new file, <database>.replication-inventory, is written at a clean daemon stop (305 MB and 0.8 s for 4.5M identities) and removed by the next start's first snapshot."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes; the inventory, its digests and the wire format are unchanged. Mixed-version safe: the file is local to one member; peers on any build exchange as before. An older binary never reads the file, and its writes fire the triggers, which live in the database, so a change it makes ends the epoch and the next start of this build reads the store."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, protocol or pairing changes."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "A clean stop takes about 1 s longer on a store with millions of envelopes while it writes the file. The first snapshot after a start reads the file (1.0 s, plus 0.5 s of hashing, for 4.5M identities, measured in a release build) instead of the inventory query (19.9 s on a busy member's store at its latest restart, which replication export and receive waited for). A start after a crash, a forced stop, or a run that trimmed or checkpointed reads the store as before."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes; identity and stored state are preserved. The stop log says whether each store's inventory was saved and, when not, why."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back is supported: an older build ignores the file and keeps the triggers, whose cost is one meta probe per changed inventory row. Deleting the file is always safe."
+  }
+}

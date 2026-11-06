@@ -81,6 +81,9 @@ mod binary_payloads;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
+pub mod saved_inventory;
+#[cfg(test)]
+mod saved_inventory_tests;
 mod checkpoint_capture_epoch;
 mod checkpoint_space;
 pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
@@ -848,6 +851,12 @@ pub struct Store {
     /// Held while one thread builds the next replication snapshot, so concurrent callers reuse
     /// it instead of building their own.
     pub replication_snapshot_build: Mutex<()>,
+    /// The epoch this open wrote, which any change to the inventory but an append deletes. A
+    /// shutdown saves the inventory only while it is still there. See `saved_inventory`.
+    inventory_epoch: String,
+    /// The epoch the last open had written, if a change has not ended it, until the first
+    /// snapshot build compares it with the saved inventory's and takes it.
+    saved_inventory_epoch: Mutex<Option<Option<String>>>,
     pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
     /// Serializes endpoint refreshes and signed Fabric rekey transitions.
     fleet_endpoints_publication: Mutex<()>,
@@ -1204,7 +1213,8 @@ impl Store {
         install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
-            inventory_generation::initialize(connection)
+            inventory_generation::initialize(connection)?;
+            saved_inventory::initialize(connection)
         })?;
         principals::initialize_schema(connection)?;
         principals::initialize_held_index(connection, fresh)?;
@@ -1272,6 +1282,8 @@ impl Store {
             [stored_cursor.to_string()],
         )?;
         let seeded_batch_rowid = stored_cursor;
+        // After the inventory triggers: from here any change but an append ends this epoch.
+        let (saved_inventory_epoch, inventory_epoch) = saved_inventory::rotate_epoch(&transaction)?;
         transaction.commit()?;
         let index = current_index(&connection)?;
         // Older stores have no admission watermark. Startup recovery projects this index
@@ -1316,6 +1328,8 @@ impl Store {
             replica_generation: AtomicU64::new(0),
             replication_snapshot: Mutex::new(None),
             replication_snapshot_build: Mutex::new(()),
+            inventory_epoch,
+            saved_inventory_epoch: Mutex::new(Some(saved_inventory_epoch)),
             replication_sync: Mutex::new(BTreeMap::new()),
             fleet_endpoints_publication: Mutex::new(()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
@@ -7232,6 +7246,12 @@ impl Store {
     ) -> Result<Arc<ReplicationSnapshot>> {
         let reading = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotInventory);
         let previous = crate::read_budget::lock_sync(&self.replication_snapshot)?.take();
+        // A fresh process extends the inventory its last clean shutdown saved, when that still
+        // describes this store, instead of reading every envelope again.
+        let previous = match previous {
+            Some(previous) => Some(previous),
+            None => self.saved_replication_snapshot(connection)?.map(Arc::new),
+        };
         // The six-table digest stays on the legacy peer wire format. Its generation lets us
         // retain compatibility without rescanning those tables for unrelated source changes.
         let graph_generation = graph_generation(connection)?;

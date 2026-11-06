@@ -57,7 +57,14 @@ pub fn stored(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
                     .collect::<Result<Vec<_>, _>>()
             })
             .unwrap()
-            .map(|row| format!("{table}: {}", row.unwrap().join(", ")))
+            .map(|row| {
+                let mut row = row.unwrap();
+                // Each open draws a fresh replication inventory epoch.
+                if table == "meta" && row.first().is_some_and(|key| key == "Text(\"replication_inventory_epoch\")") {
+                    row[1] = "epoch".to_owned();
+                }
+                format!("{table}: {}", row.join(", "))
+            })
             .collect::<Vec<_>>();
         table_rows.sort();
         rows.extend(table_rows);
