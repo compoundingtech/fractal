@@ -12630,9 +12630,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<String> {
         let name = format!(
             "doc/loop-feedback/{}/{round}/outcome",
-            loop_subject
-                .strip_prefix("loop-run/")
-                .unwrap_or(loop_subject),
+            loop_feedback_document_path(loop_subject),
         );
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "decision": if keep { "keep" } else { "discard" },
@@ -12665,9 +12663,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let suffix = candidate.map_or_else(String::new, |value| format!("/candidate-{value}"));
         let name = format!(
             "doc/loop-feedback/{}/{round}{suffix}",
-            loop_subject
-                .strip_prefix("loop-run/")
-                .unwrap_or(loop_subject),
+            loop_feedback_document_path(loop_subject),
         );
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "loop": loop_subject,
@@ -20283,6 +20279,28 @@ fn with_failing_gates(reason: &str, failing: &str) -> String {
     } else {
         format!("{reason}; failing exit gates: {failing}")
     }
+}
+
+fn loop_feedback_document_path(subject: &str) -> std::borrow::Cow<'_, str> {
+    let path = subject.strip_prefix("loop-run/").unwrap_or(subject);
+    let extra = path.matches('@').count() * 4 + path.matches("..").count() * 5;
+    if extra == 0 {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    // IDs cannot contain `//`, so these escapes cannot collide with an unescaped path.
+    let mut escaped = String::with_capacity(path.len() + extra);
+    let mut chars = path.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '@' => escaped.push_str("//40/"),
+            '.' if chars.peek() == Some(&'.') => {
+                chars.next();
+                escaped.push_str("//2e2e/");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    std::borrow::Cow::Owned(escaped)
 }
 
 /// The document name and content hash of a round's outcome document reference.
@@ -34602,6 +34620,33 @@ version 2
     }
 
     #[test]
+    fn loop_document_paths_escape_only_invalid_names_without_collisions() {
+        let paths = [
+            "g/repeat",
+            "g/a@b",
+            "g/a..b",
+            "g/a...b",
+            "g/a....b",
+            "g/a/40/b",
+            "g/a/2e2e/b",
+            "g/a%40b",
+            "g/a/@/../b",
+        ];
+        let mut names = BTreeSet::new();
+        for path in paths {
+            let subject = format!("loop-run/{path}");
+            let encoded = loop_feedback_document_path(&subject);
+            if !path.contains('@') && !path.contains("..") {
+                assert_eq!(encoded, path);
+                assert!(matches!(encoded, std::borrow::Cow::Borrowed(_)));
+            }
+            let name = format!("doc/loop-feedback/{encoded}/1/outcome");
+            smallclaims::store::validate_document_name(&name).unwrap();
+            assert!(names.insert(name));
+        }
+    }
+
+    #[test]
     fn nested_loops_keep_round_results_and_feedback_separate() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(
@@ -34612,7 +34657,7 @@ resource "right-result" { kind "custom.test.loop-result"; }
 mission "collision" state="ready" {
   goal "Keep nested histories separate."
   completion { when "all-steps-exhausted"; }
-  step "left" { mission "left-inner" {
+  step "left@v1" { mission "left-inner" {
     goal "Left."; completion { when "all-steps-exhausted"; }
     loop "repeat" {
       max-rounds 2
@@ -34622,7 +34667,7 @@ mission "collision" state="ready" {
       }
     }
   }; }
-  step "right" { mission "right-inner" {
+  step "right..v1" { mission "right-inner" {
     goal "Right."; completion { when "all-steps-exhausted"; }
     loop "repeat" {
       max-rounds 2
@@ -34658,8 +34703,8 @@ mission "collision" state="ready" {
         let generation = run.generation.strip_prefix("run-generation/").unwrap();
         let mut feedbacks = Vec::new();
         for (path, own_gate, other_gate) in [
-            ("left/left-inner/repeat", "left-ready", "right-ready"),
-            ("right/right-inner/repeat", "right-ready", "left-ready"),
+            ("left@v1/left-inner/repeat", "left-ready", "right-ready"),
+            ("right..v1/right-inner/repeat", "right-ready", "left-ready"),
         ] {
             let subject = format!("loop-run/{generation}/{path}");
             let results = store
@@ -34696,7 +34741,14 @@ mission "collision" state="ready" {
             assert!(!body.contains(other_gate), "{body}");
             assert_eq!(
                 name,
-                format!("doc/loop-feedback/{generation}/{path}/1/outcome")
+                format!(
+                    "doc/loop-feedback/{generation}/{}/1/outcome",
+                    if own_gate == "left-ready" {
+                        "left//40/v1/left-inner/repeat"
+                    } else {
+                        "right//2e2e/v1/right-inner/repeat"
+                    }
+                )
             );
             feedbacks.push(feedback.clone());
         }
@@ -34794,6 +34846,10 @@ mission "loop" state="ready" {
         assert_eq!(completed.loops[0].status, "completed");
         assert_eq!(completed.loops[0].round, 2);
         assert_eq!(completed.loops[0].results.len(), 2);
+        let reference = completed.loops[0].results[0].feedback.as_ref().unwrap();
+        let (name, _) = reference.rsplit_once('@').unwrap();
+        let generation = run.generation.strip_prefix("run-generation/").unwrap();
+        assert_eq!(name, format!("doc/loop-feedback/{generation}/improve/1"));
     }
 
     #[test]

@@ -3143,15 +3143,15 @@ mod tests {
         let step = &mission.steps["repeat"];
         assert_eq!(step.path, "repeat");
         assert_eq!(step.loop_spec.as_ref().unwrap().path, "repeat");
-        // Reconstruct the pre-fix hash inputs: local loop path, empty hash fields.
-        let mut legacy = mission.clone();
-        let legacy_step = legacy.steps.get_mut("repeat").unwrap();
-        legacy_step.loop_spec.as_mut().unwrap().path = "repeat".into();
-        legacy_step.definition_hash.clear();
-        legacy_step.definition_hash = super::hash(legacy_step).unwrap();
-        assert_eq!(step.definition_hash, legacy_step.definition_hash);
-        legacy.revision.clear();
-        assert_eq!(mission.revision, super::hash(&legacy).unwrap());
+        // Printed once by the unchanged parser at base 3f95623569.
+        assert_eq!(
+            step.definition_hash,
+            "c77a085e3e729ffeb6e106eded2eee52a66d27390fe475e8354f27a01872a6f5"
+        );
+        assert_eq!(
+            mission.revision,
+            "e867b568e11cd2a92d96a96ec2f941d9b886a4f3bc4b8c74301bb896540a05fe"
+        );
     }
 
     #[test]
