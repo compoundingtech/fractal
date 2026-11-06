@@ -1476,6 +1476,7 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
 export type Attention = typeof Attention.Type
 export type AttentionEncoded = typeof Attention.Encoded
 
+<<<<<<< HEAD
 export const AttentionControl = /*#__PURE__*/ (() => Schema.Struct({
   "dismissed": Schema.Boolean,
   "id": Id,
@@ -1487,6 +1488,8 @@ export const AttentionControl = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionControl = typeof AttentionControl.Type
 export type AttentionControlEncoded = typeof AttentionControl.Encoded
 
+=======
+>>>>>>> schickling-assistant/2026-11-06-attention-resolution-lookup
 export const AttentionResolution = /*#__PURE__*/ (() => Schema.Struct({
   "claim_id": Id,
   "person_id": Id,
