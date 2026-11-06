@@ -250,10 +250,10 @@ mod tests {
         let native = identity(&root);
         let root = admit(&root, &native).unwrap();
         let parent = root.parent().unwrap();
-        std::fs::rename(&parent, base.path().join("original")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+        std::fs::rename(parent, base.path().join("original")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), parent).unwrap();
         assert!(matches!(list(&root, &native, "", ""), Err(Error::Io(_))));
-        std::fs::remove_file(&parent).unwrap();
+        std::fs::remove_file(parent).unwrap();
         std::fs::create_dir_all(&root).unwrap();
         assert!(matches!(list(&root, &native, "", ""), Err(Error::Changed)));
     }
