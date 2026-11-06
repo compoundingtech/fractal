@@ -9,7 +9,7 @@ const alert: AlertAnswered = { id: 'attention/original', revision: 'claim/episod
 const refused = (code: string) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
   request_id: 'request/test', code, message: 'The source is no longer waiting.', retryable: false, details: {} }, 409)
 const proof = () => ({ value: { claim_id: 'claim/accepted', resolved_by: 'agent/delegate',
-  person_id: 'person/reader', resolved_at: '2026-11-01T12:00:00.000Z' } })
+  person_id: 'person/receiver', resolved_at: '2026-11-01T12:00:00.000Z' } })
 const answer = { type: 'work.done' as const, summary: 'My local answer' }
 
 describe('original attention resolution transport', () => {
