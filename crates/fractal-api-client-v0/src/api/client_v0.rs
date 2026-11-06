@@ -10112,11 +10112,16 @@ mod tests {
         let clean = new_client_snapshot(&state);
         let session = ClientSession::local(Some("person/operator")).unwrap();
         assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
-        let hidden = state.store.connection.batched(|tx| crate::store::append_claim_tx(
-            tx, state.store.origin(), owner, "custom.attention.notice-created", None,
-            &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret",
-                "reason":"notice-secret","terminal":true,"status":"running"}}), &[], None,
-        )).unwrap().unwrap();
+        // Seed an old-peer-shaped row below current custom-subject admission.
+        let hidden = state.store.connection.batched(|tx| -> anyhow::Result<_> {
+            let hidden = crate::store::append_claim_tx(
+                tx, state.store.origin(), owner, "runtime.observed", None,
+                &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret",
+                    "reason":"notice-secret","terminal":true,"status":"running"}}), &[], None,
+            )?;
+            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+            Ok(hidden)
+        }).unwrap().unwrap();
         state.store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
         let snapshot = new_client_snapshot(&state);
         for history in [false, true] {

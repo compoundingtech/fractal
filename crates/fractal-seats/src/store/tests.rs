@@ -1184,11 +1184,16 @@ fn notice_terminal_resources_exclude_contaminated_ordinary_owners_before_reducti
     let subject = "agent/notice-terminal";
     observe_runtime(&store, subject, "running", "one");
     let clean_cut = store.index().unwrap();
-    let hidden = store.connection.batched(|tx| append_claim_tx(
-        tx, store.origin(), subject, "custom.attention.notice-created", None,
-        &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret"}}),
-        &[], None,
-    )).unwrap().unwrap();
+    // Seed an old-peer-shaped row below current custom-subject admission.
+    let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+        let hidden = append_claim_tx(
+            tx, store.origin(), subject, "runtime.observed", None,
+            &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret"}}),
+            &[], None,
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9e9e37dcf663 owner=fractal_seats::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+        Ok(hidden)
+    }).unwrap().unwrap();
     store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
     let cut = store.index().unwrap();
     SUBJECT_REDUCTIONS.with(|count| count.set(0));
