@@ -20,6 +20,8 @@ mod identities;
 pub use identities::*;
 
 use bytes::Bytes;
+use fractal_socket_discovery::UnixSocketDiscovery;
+#[cfg(test)]
 use fractal_socket_discovery::default_unix_socket;
 #[cfg(test)]
 use fractal_socket_discovery::{
@@ -68,27 +70,6 @@ const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
 const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
-
-/// A trusted local control socket's discovery identity, retained across daemon outages.
-/// Explicit and configured paths are exact; only defaults use published/legacy discovery.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UnixSocketDiscovery {
-    Explicit(PathBuf),
-    Defaults {
-        runtime: PathBuf,
-        published: PathBuf,
-    },
-}
-
-impl UnixSocketDiscovery {
-    /// Resolve the currently available daemon without freezing a default's selected path.
-    pub fn resolve(&self) -> PathBuf {
-        match self {
-            Self::Explicit(path) => path.clone(),
-            Self::Defaults { runtime, published } => default_unix_socket(runtime, published),
-        }
-    }
-}
 
 /// Resolve a snapshot of the local daemon socket in the same order as the `st3` CLI.
 /// Use [`discover_unix_identity`] with [`Client::discovered_unix`] to follow daemon restarts.

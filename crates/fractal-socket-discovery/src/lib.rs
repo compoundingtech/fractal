@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnixSocketDiscovery {
     Explicit(PathBuf),
-    Defaults { runtime: PathBuf, published: PathBuf },
+    Defaults {
+        runtime: PathBuf,
+        published: PathBuf,
+    },
 }
 
 impl UnixSocketDiscovery {
@@ -150,13 +153,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let runtime = root.path().join("fractal.sock");
         let published = root.path().join("published.sock");
-        let discovery = UnixSocketDiscovery::Defaults { runtime: runtime.clone(), published: published.clone() };
+        let discovery = UnixSocketDiscovery::Defaults {
+            runtime: runtime.clone(),
+            published: published.clone(),
+        };
         assert_eq!(discovery.resolve(), runtime);
         let target = root.path().join("daemon.sock");
         let listener = UnixListener::bind(&target).unwrap();
         symlink(&target, &published).unwrap();
         assert_eq!(discovery.resolve(), target.canonicalize().unwrap());
-        assert_eq!(UnixSocketDiscovery::Explicit(runtime.clone()).resolve(), runtime);
+        assert_eq!(
+            UnixSocketDiscovery::Explicit(runtime.clone()).resolve(),
+            runtime
+        );
         drop(listener);
         assert_eq!(discovery.resolve(), runtime);
     }

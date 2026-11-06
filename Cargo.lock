@@ -1939,6 +1939,7 @@ dependencies = [
  "fractal-delivery-base",
  "fractal-drivers",
  "fractal-secrets",
+ "fractal-socket-discovery",
  "futures-util",
  "hex",
  "serde",
@@ -2453,6 +2454,7 @@ dependencies = [
  "fractal-kernel",
  "fractal-schema",
  "fractal-secrets",
+ "fractal-socket-discovery",
  "fractal-telemetry",
  "fractal-terminal-direct",
  "fractal-tiles-registry",
@@ -2482,6 +2484,7 @@ name = "fractal-socket-discovery"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "tempfile",
 ]
 
 [[package]]
