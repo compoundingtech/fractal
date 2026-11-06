@@ -6369,6 +6369,49 @@ mission "work" state="ready" {
     );
 }
 
+#[test]
+fn launch_resolution_evidence_uses_real_claim_references_without_new_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let input = |kind: &str, fields: Value, evidence: Vec<String>, key: &str| ClaimInput {
+        subject: "planning-session/evidence-proof".into(), kind: kind.into(),
+        actor: Some("person/operator".into()),
+        fields: fields.as_object().unwrap().iter().map(|(key,value)| (key.clone(),value.clone())).collect(),
+        evidence, expected_subject: None, idempotency_key: Some(key.into()),
+    };
+    let preview = state.store.append_claim(&input("planning-session.previewed", json!({
+        "preview_hash":"preview-1","candidate_revision":1,"store_index":0,
+        "graph":"graph","diff":"diff","mission":{}
+    }), vec![], "planning-preview:evidence-proof:preview-1")).unwrap();
+    let reference = state.store.planning_preview_claim_id("evidence-proof", "preview-1").unwrap().unwrap();
+    assert_eq!(reference, preview.id);
+    assert!(state.store.evidence_exists(&reference).unwrap());
+    assert!(state.store.planning_preview_claim_id("evidence-proof", "stale").unwrap().is_none());
+    for (kind, fields) in [
+        ("planning-session.revision-requested", json!({"feedback":"doc/feedback@hash"})),
+        ("planning-session.cancelled", json!({"reason":"cancel","requester":"person/operator"})),
+    ] {
+        let arbitrary = input(kind, fields.clone(), vec!["planning-preview:evidence-proof:preview-1".into()], kind);
+        assert_eq!(state.store.append_claim(&arbitrary).unwrap_err().code, "missing-evidence");
+        let request = input(kind, fields.clone(), vec![reference.clone()], kind);
+        // Existing replicated field vocabulary is unchanged; evidence is the existing envelope.
+        fractal_schema::registry().validate_replicated_claim(&request.subject, kind, &request.fields).unwrap();
+        let roundtrip: ClaimInput = serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(roundtrip.evidence, vec![reference.clone()]);
+        assert_eq!(serde_json::to_value(&roundtrip.fields).unwrap(), fields);
+        let accepted = state.store.append_claim(&roundtrip).unwrap();
+        let target = Store::open_memory("other").unwrap();
+        target.import_replication("node", &state.store.export_replication(0).unwrap()).unwrap();
+        assert_eq!(target.claim_by_id(&accepted.id).unwrap().unwrap().body["evidence"], json!([reference]));
+        assert!(target.claim_by_id(&preview.id).unwrap().is_some());
+        assert!(target.evidence_exists(&reference).unwrap());
+    }
+    state.store.operational_repair_plan_with_legacy_starts(&[]).unwrap();
+    let report = doctor_report(&state).unwrap().0;
+    let references = report.checks.iter().find(|check| check.name=="graph-references").unwrap();
+    assert_eq!(references.status, "pass", "{references:?}");
+}
+
 #[tokio::test]
 async fn preview_and_publish_reject_invalid_nested_declarations_without_a_write() {
     let root = tempfile::tempdir().unwrap();
