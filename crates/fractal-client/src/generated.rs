@@ -1161,10 +1161,33 @@ pub struct AgentWorkspace {
     pub desired_token: String,
     pub declaration_token: String,
 }
+/// Declared admission — declared, not enforced.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeclaredBudgets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeclaredAdmission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<DeclaredBudgets>,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accountable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_admission: Option<DeclaredAdmission>,
     pub id: String,
     pub revision: String,
     pub tree: Value,
@@ -1483,6 +1506,8 @@ pub struct Mission {
     pub title: String,
     pub state: String,
     pub mission_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_admission: Option<DeclaredAdmission>,
     /// st's own plumbing or a standing observer; false from older daemons.
     #[serde(default)]
     pub system: bool,
@@ -1753,6 +1778,8 @@ pub struct Agent {
     pub name: String,
     pub state: String,
     pub reachability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_admission: Option<DeclaredAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail_custody: Option<AgentMailCustody>,
     #[serde(default)]

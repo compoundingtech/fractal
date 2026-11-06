@@ -491,6 +491,7 @@ pub fn loss_if_current(
             })).map_err(internal)?, evidence: vec![], expected_subject: None,
             idempotency_key: Some(format!("{key}:lost:{}", previous.as_ref().map(|(request, _)| request.as_str()).unwrap_or("first"))),
         }, false)?;
+        crate::profile::note("mailbox loss: channel-lost fault filed");
         signal_changed(state);
         Ok(())
     }).map_err(|error| error.downcast::<St3Error>().unwrap_or_else(|error| refused(error.to_string())))

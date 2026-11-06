@@ -6,7 +6,7 @@ use fractal_store::store::identities::resolve_reference_conn;
 
 mod run_review;
 #[doc(hidden)]
-pub use run_review::validate_run_reviewer;
+pub use run_review::{validate_run_reviewer, validate_run_reviewer_assignment};
 
 /// The batches one resource observation seals its claims in. A claim whose retention class
 /// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
@@ -1063,6 +1063,18 @@ fn run_generation_view_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<RunGenerationView> {
+    let mut view = run_generation_rows_tx(connection, generation_id)?;
+    let mut definitions = PinnedDefinitions::default();
+    for step in &mut view.steps {
+        enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
+    }
+    Ok(view)
+}
+
+fn run_generation_rows_tx(
+    connection: &Connection,
+    generation_id: &str,
+) -> rusqlite::Result<RunGenerationView> {
     let mut view = connection.query_row(
         "SELECT id, run_id, revision, predecessor_id, status, actor, reason,
                 created_at_unix_ms, updated_at_unix_ms
@@ -1097,10 +1109,6 @@ fn run_generation_view_tx(
     view.steps = statement
         .query_map([generation_id], step_run_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut definitions = PinnedDefinitions::default();
-    for step in &mut view.steps {
-        enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
-    }
     Ok(view)
 }
 
