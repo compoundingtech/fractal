@@ -155,6 +155,15 @@ impl ProofVfs {
         {
             bail!("checkpoint proof VFS unavailable: incomplete default VFS methods");
         }
+        // The Unix VFS resolves symlinks in xFullPathname before xOpen. Compare its
+        // filenames with physical admission roots too (not /tmp versus /private/tmp).
+        let mut normalized = guard.clone();
+        normalized.live = guard.live.canonicalize()?;
+        normalized.scratch = guard.scratch.canonicalize()?;
+        normalized.temp = guard.temp.canonicalize()?;
+        let mut wal = normalized.live.as_os_str().to_owned();
+        wal.push("-wal");
+        normalized.live_wal = wal.into();
         // SQLite allocates file storage aligned for its default VFS. Our header is followed by
         // the default VFS file, aligned to max_align_t, within the advertised size.
         let name = CString::new(format!(
@@ -170,7 +179,7 @@ impl ProofVfs {
             vfs,
             base,
             name,
-            guard: guard.clone(),
+            guard: normalized,
             files: AtomicUsize::new(0),
             self_test_refuse: AtomicBool::new(false),
             self_test_hits: AtomicUsize::new(0),
@@ -269,16 +278,17 @@ impl ProofVfs {
         })();
         data.self_test_refuse.store(false, Ordering::Release);
         let hits = data.self_test_hits.load(Ordering::Acquire);
-        *data
+        let refusal = data
             .guard
             .failure
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         let cleanup = owner.finish(path);
         cleanup?;
         if hits == 0 || attempt.is_ok() {
             bail!(
-                "checkpoint proof VFS self-test failed before copy at {}: over-budget SQLite write was not refused",
+                "checkpoint proof VFS self-test failed before copy at {}: over-budget SQLite write was not refused (write hits={hits}, attempt={attempt:?}, refusal={refusal:?})",
                 path.display()
             );
         }
@@ -1030,6 +1040,26 @@ mod tests {
     }
 
     #[test]
+    fn symlinked_admission_roots_still_reach_the_write_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let physical = dir.path().join("physical");
+        fs::create_dir(&physical).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let live = alias.join("live.sqlite3");
+        fs::write(&live, [0; 4096]).unwrap();
+        let scratch = alias.join("scratch");
+        let owner = ProofOwnership::acquire(&scratch).unwrap();
+        let vfs = ProofVfs::register(&guard(&live, &scratch, 1024 * 1024)).unwrap();
+        let probe = scratch.join("proof-vfs-test.sqlite3");
+        vfs.self_test(&owner, &probe).unwrap();
+        assert!(vfs.data.as_ref().unwrap().self_test_hits.load(Ordering::Acquire) > 0);
+        vfs.check_closed().unwrap();
+        assert!(!probe.exists());
+        assert!(!PathBuf::from(format!("{}.owner", probe.display())).exists());
+    }
+
+    #[test]
     fn unavailable_write_guard_refuses_the_proof_before_copy() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
@@ -1404,7 +1434,9 @@ mod tests {
         let vfs = ProofVfs::register(&guard).unwrap();
         let copy = scratch.join("proof-mmap-control.sqlite3");
         owner.mark(&copy).unwrap();
-        let name = CString::new(copy.as_os_str().as_bytes()).unwrap();
+        // Direct xOpen callers must provide the resolved name SQLite normally supplies.
+        let resolved = scratch.canonicalize().unwrap().join(copy.file_name().unwrap());
+        let name = CString::new(resolved.as_os_str().as_bytes()).unwrap();
         let data = vfs.data.as_ref().unwrap();
         // SAFETY: SQLite's allocator supplies an aligned szOsFile allocation. The wrapped
         // xOpen initializes it; xClose runs before sqlite3_free.
