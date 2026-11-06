@@ -396,6 +396,8 @@ describe('shared optimistic answers', () => {
     expect(requests[1]?.action).toEqual(action)
     expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(1)
     await Effect.runPromise(inbox.accept([]))
+    expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(1)
+    await Effect.runPromise(inbox.acceptResolution(alert, { _tag: 'Resolved', by: 'agent/delegate' }))
     expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
     expect(forget).toHaveBeenCalledWith(requests[0]?.key)
   })

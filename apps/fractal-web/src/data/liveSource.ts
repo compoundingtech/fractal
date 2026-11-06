@@ -764,7 +764,7 @@ export const liveSource = ({
   })
   const missions = missionsRetained.atom
   const inboxActions = optimisticAlertActions(gatewayAlertActions(client))
-  reconnectReaders.add(() => { runtime.runFork(inboxActions.refreshControls) })
+  reconnectReaders.add(() => { runtime.runFork(inboxActions.refreshProofs) })
   const inboxState = Atom.subscriptionRef(inboxActions.state)
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
@@ -1288,7 +1288,7 @@ export const liveSource = ({
       },
       terminalResize: gatewayTerminalResize(client),
       agentControls: gatewayAgentControls(client),
-      prompts: { respond: ({ alert, answer }) => inboxActions.port.act({ alert,
+      prompts: { respond: ({ alert, answer }) => inboxActions.port.act({ alert: { ...alert, attention_kind: 'harness-prompt' },
         action: { type: 'prompt.respond', target_id: alert.target_id, episode: alert.episode, answer } }) },
       alertActions: inboxActions.port,
       documents: gatewayDocuments(client),

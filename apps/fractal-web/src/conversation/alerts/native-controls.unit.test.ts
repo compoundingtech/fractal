@@ -153,12 +153,12 @@ describe('native attention controls', () => {
     const pending = Effect.runSync(SubscriptionRef.get(inbox.state)).pending
     expect([...pending.values()][0]?.phase).toBe('accepted')
     expect(readControl).toHaveBeenCalledTimes(1)
-    if (trigger === 'reconnect') await Effect.runPromise(inbox.refreshControls)
+    if (trigger === 'reconnect') await Effect.runPromise(inbox.refreshProofs)
     else await inbox.port.act({ alert, action: { type: 'attention.dismiss' } })
     expect(readControl).toHaveBeenCalledTimes(2)
     expect(act).toHaveBeenCalledTimes(1)
     expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
-    await Effect.runPromise(inbox.refreshControls)
+    await Effect.runPromise(inbox.refreshProofs)
     expect(readControl).toHaveBeenCalledTimes(2)
   })
 
