@@ -111,8 +111,18 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
     for (const entry of pending.values()) frame = options.project(frame, entry)
     return frame
   }))
+  // Only abandon an intent the caller has proven was not applied (for example a refused
+  // request being restaged). Unknown in-flight outcomes must remain recoverable by retry.
+  const discardFailed = Effect.fn('OptimisticMutation.discardFailed')((key: string) =>
+    SubscriptionRef.modify(state, (current) => {
+      if (current.pending.get(key)?.phase !== 'failed') return [false, current] as const
+      const pending = new Map(current.pending)
+      pending.delete(key)
+      return [true, { ...current, pending }] as const
+    }),
+  )
   const dismissNotice = Effect.fn('OptimisticMutation.dismissNotice')((key: string) =>
     SubscriptionRef.update(state, (current) => ({ ...current, notices: current.notices.filter((notice) => notice.key !== key) })),
   )
-  return { state, view, submit, retry, accept, undo, dismissNotice } as const
+  return { state, view, submit, retry, accept, undo, discardFailed, dismissNotice } as const
 }).pipe(Effect.withSpan('OptimisticMutation.make'))
