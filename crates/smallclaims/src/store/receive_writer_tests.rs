@@ -684,6 +684,61 @@ fn an_old_sealing_frontier_recovers_skipped_batches_once_after_reopen() {
     assert_eq!(reopened.seeded_batch_rowid.load(Ordering::Acquire), cursor);
 }
 
+/// The daemon's deferred pass only logs a failed search. The search stays due, so the next
+/// checkpoint, backup or proof that seals runs it again, and the skipped batch is not left
+/// unoffered until the next restart.
+#[test]
+fn a_failed_recovery_search_is_run_again_by_the_next_seal() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: "note/skipped-before-upgrade".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        store
+            .connection
+            .write()
+            .execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hbfab6aec8e39 owner=smallclaims::store::receive_writer_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='batch_rowid_high_water';
+                 UPDATE meta SET value='8' WHERE key='seeded_batch_rowid';",
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    let observer = node("elm");
+    // The search finds the skipped batch, and its frontier write fails.
+    store
+        .connection
+        .write()
+        .execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hf34b402ef773 owner=smallclaims::store::receive_writer_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER refuse_frontier BEFORE INSERT ON main.meta
+             WHEN NEW.key='seeded_batch_rowid' BEGIN SELECT RAISE(ABORT, 'invented failure'); END;",
+        )
+        .unwrap();
+    assert!(store.seal_local_batches().is_err());
+    let exported = store
+        .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
+        .unwrap();
+    assert!(exported.envelopes.is_empty());
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hc37f5c2feb24 owner=smallclaims::store::receive_writer_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER temp.refuse_frontier;").unwrap();
+    store.seal_local_batches().unwrap();
+    let exported = store
+        .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
+        .unwrap();
+    assert_eq!(exported.envelopes.len(), 1, "the next seal did not search again");
+}
+
 /// The daemon validates the backlog before it serves. A fresh process has no replication
 /// snapshot, and building one, with the sealing recovery search, reads every envelope and batch:
 /// fifteen seconds of restart on a two-million-envelope store. Admission needs neither.
