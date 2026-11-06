@@ -2957,6 +2957,11 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn reconcile_pass(&self) -> Result<()> {
         self.refresh_seat_admission();
+        // Before any room is judged: the raised slices a restart left (lane_bursts.rs).
+        if let Err(error) = self.find_raised_lanes() {
+            eprintln!("st3: WARN reading this host's lanes for raises: {error:#}");
+            smallclaims::touched::note_due(now_ms() + 5_000);
+        }
         self.observe_member_admission()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
@@ -12524,6 +12529,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("loop-metric".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         self.perform_start(
             &DesiredSubject {
@@ -18208,6 +18216,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("mechanical-gate".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -18760,6 +18771,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("llm-gate".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         let desired = DesiredSubject {
             accountable: None,
