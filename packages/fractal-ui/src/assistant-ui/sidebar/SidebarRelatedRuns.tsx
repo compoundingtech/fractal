@@ -5,8 +5,8 @@
  * replace `state` when a push invalidates the read and keep the previous Loaded value while they refetch. Rows are the
  * decoded Native DTO, so nullable wire fields arrive as `Option`.
  *
- * Line 1: status chip, mission, done/total bar, then "waiting on you" or the served ETA (danger ink when late).
- * Line 2: the current step and who it waits on.
+ * Line 1: status chip, mission, fixed done/total cluster. Line 2: "waiting on you", or the served ETA after the word
+ * "late" in danger ink, then one phrase, who the run waits on else its current step; only that phrase truncates.
  */
 import * as stylex from '@stylexjs/stylex'
 import { Option } from 'effect'
@@ -48,22 +48,24 @@ export const relatedRunText = (run: SidebarRelatedRun): string => [
 function RunRow({ run, now }: { readonly run: SidebarRelatedRun; readonly now: number | undefined }) {
   const { done, total } = run.progress
   const waits = run.waits_on.map(waitName).join(', ')
+  const eta = Option.getOrUndefined(run.eta)
+  const status = run.waiting_on_you
+    ? <span data-waiting-on-you {...stylex.props(styles.metric, styles.attention)}>waiting on you</span>
+    : run.late || eta !== undefined
+      ? <span data-late={run.late || undefined} {...stylex.props(styles.metric)}>{run.late ? <span {...stylex.props(styles.late)}>late</span> : null}
+        {run.late && eta !== undefined ? ' · ' : null}{eta === undefined ? null : <MissionEtaLabel eta={eta} now={now} />}</span>
+      : null
   return <>
     <span {...stylex.props(styles.line)}>
       <span data-chip={run.status_chip} {...stylex.props(styles.chip, chipTone[run.status_chip])}>{chipLabel[run.status_chip]}</span>
       <span {...stylex.props(styles.ellipsis, styles.mission)}>{refName(run.mission_id)}</span>
-      <span aria-hidden="true" {...stylex.props(styles.track)}><span {...stylex.props(styles.fill(total === 0 ? '0%' : `${Math.min(100, (done / total) * 100)}%`))} /></span>
-      <span {...stylex.props(styles.metric)}>{done}/{total}</span>
-      {run.waiting_on_you
-        ? <span data-waiting-on-you {...stylex.props(styles.metric, styles.attention)}>waiting on you</span>
-        : Option.match(run.eta, {
-          onSome: eta => <span data-late={run.late || undefined} {...stylex.props(styles.metric, run.late && styles.late)}><MissionEtaLabel eta={eta} now={now} /></span>,
-          onNone: () => run.late ? <span data-late {...stylex.props(styles.metric, styles.late)}>late</span> : null,
-        })}
+      <span aria-hidden="true" {...stylex.props(styles.track)}><span {...stylex.props(styles.fill(total === 0 ? '0%' : `${Math.min(100, (done / total) * 100)}%`), run.folded && styles.mutedFill)} /></span>
+      <span {...stylex.props(styles.metric, styles.count)}>{done}/{total}</span>
     </span>
     <span {...stylex.props(styles.line, styles.detail)}>
-      <span {...stylex.props(styles.ellipsis)}>{Option.match(run.current_step, { onSome: stepName, onNone: () => run.status })}</span>
-      {waits === '' ? null : <><span aria-hidden="true">·</span><span {...stylex.props(styles.ellipsis)}>waits on {waits}</span></>}
+      {status}
+      {status === null ? null : <span aria-hidden="true">·</span>}
+      <span {...stylex.props(styles.ellipsis)}>{waits === '' ? Option.match(run.current_step, { onSome: stepName, onNone: () => run.status }) : `waits on ${waits}`}</span>
     </span>
   </>
 }
@@ -117,7 +119,9 @@ const styles = stylex.create({
   chip: { flexShrink: 0, paddingInline: s.xs, borderRadius: r.full, fontSize: t.denseSize, lineHeight: '16px', fontWeight: t.weightMedium, whiteSpace: 'nowrap' },
   track: { flex: '0 0 28px', height: '4px', overflow: 'hidden', borderRadius: r.full, backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 28%, transparent)` },
   fill: (width: string) => ({ display: 'block', width, height: '100%', backgroundColor: ink.fgSoft }),
+  mutedFill: { backgroundColor: ink.fgMuted },
   metric: { flexShrink: 0, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  count: { minWidth: '4ch', textAlign: 'end' },
   attention: { color: tone.attention },
   late: { color: tone.dangerFg },
   note: { margin: 0, paddingInline: s.sm, color: ink.fgMuted },
