@@ -17,7 +17,7 @@ fn unresolved(subject: &str) -> FractalError {
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
 /// Includes local responsibility, every carried source step and cross-run source requesters.
 /// Run hierarchy validation lives in fractal-missions' `store::missions::validate_run_reviewer`.
-/// Loops and the start/reassignment boundary still require the later run-policy slice.
+/// Concrete start/reassignment validation uses that module's `validate_run_reviewer_assignment`.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
     scope: &Scope<'_>,

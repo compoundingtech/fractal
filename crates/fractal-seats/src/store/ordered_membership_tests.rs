@@ -113,6 +113,100 @@ fn sync(source: &Store, target: &Store) {
     receive_and_project(target, &source.origin, &exchange_from(source, &ReplicationInventory::default()));
 }
 #[test]
+fn membership_page_frontier_ignores_unreferenced_writes() {
+    let store = Store::open_memory("membership-page-scope").unwrap();
+    create(&store);
+    declare(&store, SEAT_A, "true", "page-a");
+    declare(&store, SEAT_B, "true", "page-b");
+    edit(&store, json!([place(SEAT_B, None, "a0"), place(SEAT_A, None, "a0")]));
+    let first = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(first.state.live_count, 2);
+    assert_eq!(first.items[0]["member"], SEAT_A);
+    declare(&store, SEAT_C, "true", "page-unreferenced");
+    let last = store.ordered_membership_page(CONTAINER, Some(("", "a0", SEAT_A)), 2).unwrap();
+    assert!(last.store_index > first.store_index);
+    assert_eq!(last.state, first.state);
+    assert_eq!(last.generation, first.generation);
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0]["member"], SEAT_B);
+    let terminal = store.ordered_membership_page(CONTAINER, Some(("", "a0", SEAT_B)), 2).unwrap();
+    assert!(terminal.items.is_empty());
+    assert_eq!(terminal.state, first.state);
+    edit(&store, json!([place(SEAT_B, None, "a1")]));
+    let changed = store.ordered_membership_page(CONTAINER, None, 2).unwrap();
+    assert_eq!(changed.state.live_count, first.state.live_count);
+    assert!(changed.state.changed_index > first.state.changed_index);
+    assert!(store.ordered_membership_page(CONTAINER, None, 1002).is_err());
+}
+
+#[test]
+fn membership_page_joins_metadata_snapshot_across_barrier_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("claims.sqlite3"), "membership-page-cut").unwrap();
+    create(&store);
+    declare(&store, SEAT_A, "true", "cut-a");
+    declare(&store, SEAT_B, "true", "cut-b");
+    edit(&store, json!([place(SEAT_A, None, "a0")]));
+    std::thread::scope(|scope| {
+        let (start, started) = std::sync::mpsc::sync_channel(0);
+        let (done, committed) = std::sync::mpsc::sync_channel(0);
+        let writer = &store;
+        scope.spawn(move || {
+            started.recv().unwrap();
+            edit(writer, json!([place(SEAT_B, None, "a1")]));
+            done.send(()).unwrap();
+        });
+        store.read_snapshot(|index| {
+            let metadata = store.ordered_membership_state(CONTAINER)?;
+            start.send(()).unwrap();
+            committed.recv().unwrap();
+            let page = store.ordered_membership_page(CONTAINER, None, 2)?;
+            assert_eq!(page.store_index, index);
+            assert_eq!(page.state, metadata);
+            assert_eq!(page.items.len() as u64, metadata.live_count);
+            assert_eq!(page.items[0]["member"], SEAT_A);
+            Ok(())
+        }).unwrap();
+    });
+    let current = store.ordered_membership_page(CONTAINER, None, 2).unwrap();
+    assert_eq!(current.state.live_count, 2);
+    assert_eq!(current.items.len(), 2);
+}
+
+#[test]
+fn membership_page_generation_is_transactional_and_survives_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let store = Store::open(&path, "membership-page-generation").unwrap();
+    create(&store);
+    let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert!(before.items.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        repair_frontier(&transaction, CONTAINER).unwrap();
+        transaction.rollback().unwrap();
+    }
+    assert_eq!(store.ordered_membership_page(CONTAINER, None, 1).unwrap().generation, before.generation);
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        repair_frontier(&transaction, CONTAINER).unwrap();
+        transaction.commit().unwrap();
+    }
+    let repaired = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(repaired.store_index, before.store_index);
+    assert!(repaired.generation > before.generation);
+    store.rebuild_claim_projections().unwrap();
+    let rebuilt = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(rebuilt.store_index, before.store_index);
+    assert!(rebuilt.generation > repaired.generation);
+    drop(store);
+    let reopened = Store::open(&path, "membership-page-generation").unwrap();
+    assert_eq!(reopened.ordered_membership_page(CONTAINER, None, 1).unwrap().generation, rebuilt.generation);
+}
+
+#[test]
 fn membership_state_tracks_same_count_edits_and_is_not_checkpoint_authority() {
     let store = Store::open_memory("membership-state").unwrap();
     assert_eq!(store.ordered_membership_state(CONTAINER).unwrap(),
