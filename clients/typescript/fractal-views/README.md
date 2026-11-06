@@ -96,23 +96,6 @@ rollup remains covered by the shared-view runner, not the web adapter.
 Run the focused web suite in the web dev shell with
 `CI=1 pnpm --dir apps/fractal-web exec vitest run src/folders/sidebarBehavior.unit.test.ts`.
 
-The unwired web `folders/memberships.ts` reducer stages complete membership reads
-under scoped generation/attempt tokens. Its read port installs the metadata
-subscription before requesting pages; only `PersistBase` publishes a complete
-set. Epoch/index/count conflicts, cursor resets and transport errors retain a
-matching-scope last-complete base as stale, with at most three automatic attempts.
-HTTP 404 or 422 `unsupported-membership-paging-contract` produces `Unsupported`
-for needs-newer-daemon presentation. HTTP 422 `invalid-membership-cursor` and
-500 `membership-frontier-inconsistent` produce `InvalidCursor` and
-`FrontierInconsistent`, retaining stale data without automatic retries.
-Only HTTP 409 `membership-collection-changed` / `membership-frontier-reset`
-discard the whole staged attempt and resubscribe from page one; legacy 410 is refused.
-The adapter requires explicit authoritative page/frame epochs and refuses the
-current epoch-free wire shape; it never derives collection frontiers from host
-snapshots. Hosts own subscription cancellation and execute effects serially.
-`CI=1 pnpm --dir apps/fractal-web exec vitest run src/folders/memberships.unit.test.ts`
-exercises this contract without activating it in the existing sidebar.
-
 From the repository root with Node 24 and Corepack (or `nix develop .#web`):
 
 ```sh
