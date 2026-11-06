@@ -2006,7 +2006,8 @@ is signed like any other since 2026-10-26 (the base's `evidence-wrap` records th
 and the pre-push hook refuses that row like a missing note. Unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
 It asks the base's verifier about every check, and the per-crate members, in one `--batch`. A base whose verifier has no `--batch` is asked one
-process per check, as before.
+process per check, as before. A batch that fails or answers in another shape is every check's answer, so each reads as a
+verifier that gave no answer (not covered); nothing is then asked one process per check to hide it.
 
 **An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
 `scripts/fractal-test --push origin`, which signs what it ran. When `ST_AGENT` is set and this machine's signer is listed in `.st/evidence-keys` on

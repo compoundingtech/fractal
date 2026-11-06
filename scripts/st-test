@@ -2535,19 +2535,25 @@ def run_verifier(command):
 def ask_verifier_batch(verifier, commands):
     """Ask the base's verifier these commands in one process (its `--batch`), so a record's signature is checked once for them all, not once
     per check: about 2 minutes of --status on a busy host. Each answer is what its own run gives, and run_verifier hands it out. A base whose
-    verifier has no batch, or a batch that gives no answer, leaves every command to a run of its own, as before."""
+    verifier has no batch is asked one process per command, as before. A batch that fails, or answers in any other shape, is every command's
+    answer: each reads as a verifier that gave no answer, never as a run of its own that would hide it."""
     if len(commands) < 2 or b'def run_batch(' not in Path(verifier).read_bytes():
         return
     done = subprocess.run([sys.executable, verifier, '--batch'], input=json.dumps([command[2:] for command in commands]),
                           capture_output=True, text=True)
     try:
-        answers = json.loads(done.stdout) if done.returncode == 0 else None
+        answers = json.loads(done.stdout)
     except ValueError:
         answers = None
-    if not isinstance(answers, list) or len(answers) != len(commands):
-        return
+    valid = (done.returncode == 0 and isinstance(answers, list) and len(answers) == len(commands)
+             and all(isinstance(answer, dict) and set(answer) == {'exit', 'stdout', 'stderr'} and type(answer['exit']) is int
+                     and isinstance(answer['stdout'], str) and isinstance(answer['stderr'], str) for answer in answers))
+    if not valid:
+        why = (done.stderr.strip().splitlines() or [f'exit {done.returncode}, no valid answer'])[-1][:200]
+        answers = [{'exit': 2, 'stdout': '', 'stderr': f'the verifier\'s --batch failed: {why}\n'}] * len(commands)
     for command, answer in zip(commands, answers):
-        VERIFIER_ANSWERS[tuple(command)] = subprocess.CompletedProcess(command, answer['exit'], answer['stdout'], answer['stderr'])
+        VERIFIER_ANSWERS[tuple(command)] = answered = subprocess.CompletedProcess(command, answer['exit'], answer['stdout'], answer['stderr'])
+        answered.batch_failed = None if valid else f'the verifier\'s --batch failed: {why}'
 
 
 def verifier_command(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
@@ -2776,8 +2782,11 @@ def members_verify_command(verifier, directory, tree, base, repository, lane_bas
 
 def members_missing(verifier, directory, tree, base, repository, lane_base):
     """{crate: reason} for the workspace members with no satisfying note, from ONE verifier run (`--members`: one process reads each record once,
-    where 52 `--crate-key` runs each read all 52 of the tree's records); None when the verifier cannot say (the caller asks crate by crate)."""
+    where 52 `--crate-key` runs each read all 52 of the tree's records); None when the verifier cannot say (the caller asks crate by crate).
+    When the batch that asked it failed, why, as text: every crate reads it, and nothing is asked crate by crate to hide it."""
     done = run_verifier(members_verify_command(verifier, directory, tree, base, repository, lane_base))
+    if getattr(done, 'batch_failed', None):
+        return done.batch_failed
     try:
         result = json.loads(done.stdout)
     except ValueError:
@@ -2792,6 +2801,8 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
     missing, have = [], 0
     if repository and keys and all(keys.values()):
         batched = members_missing(verifier, directory, tree, base, repository, lane_base)
+        if isinstance(batched, str):
+            return [(crate, batched) for crate in sorted(keys)], 0
         if batched is not None:
             # --members judges every workspace member; `keys` may be narrowed to some of them (--crate).
             missing = [(crate, batched[crate]) for crate in sorted(keys) if crate in batched]
