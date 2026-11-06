@@ -17,6 +17,7 @@ use crate::SeatStatusStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::SubagentsStore;
+use crate::StopDeferralStore;
 use crate::EvidenceStore;
 use crate::OwnedSetsStore;
 use crate::PublicationFactsStore;
@@ -3948,6 +3949,20 @@ fn client_agent_cards_presented(
             let state = if terminal_subjects.contains(&subject.subject) {
                 "retired"
             } else { state };
+            // A stop is declared but the process still runs: it ends once the mail and other
+            // runs' work it held at the stop are gone (#4500). Say why it is still running.
+            let stopping = (subject.kind.as_deref() == Some("stop")
+                && matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| -> anyhow::Result<Value> {
+                let incarnation = fields.and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+                let held = store.latest_stop_deferral(&subject.subject)?.filter(|diagnostic| {
+                    diagnostic.body["fields"]["code"] == "stop-deferred"
+                        && diagnostic.body["evidence"][0].as_str() == subject.desired_token.as_deref()
+                        && diagnostic.body["fields"]["incarnation_id"].as_str() == incarnation
+                }).and_then(|diagnostic| diagnostic.body["fields"]["reason"].as_str().map(str::to_owned));
+                Ok(json!({"held": held}))
+            })
+            .transpose()?;
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -4063,6 +4078,7 @@ fn client_agent_cards_presented(
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
+                "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
                     crate::rollout::status(store, &subject.subject)?
                 } else {
@@ -6617,14 +6633,21 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster, or a claim this node commits, cuts it short to the
-/// refresh's own length.
+/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
+/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster, or a claim this node commits, can cut
-/// the refresher's pause to, so that a very cheap fold cannot turn fresh reads or a burst of
-/// local writes into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
+/// a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
+const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
@@ -6702,13 +6725,17 @@ struct AgentRosterLook {
 }
 
 /// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
-/// however often readers ask or this node writes, and at least the minimum pause; then the rest
-/// of the full pause, unless a reader waits for a fresh roster or this node commits a claim after
+/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
+/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
 /// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
-/// one more fold at the minimum pause, never a missed one). Either then waits for one fold, not
-/// the rest of the pause: a person waiting to see their own write is not left waiting up to a
-/// second for the next timed fold. Commits that hold only claims other nodes wrote keep the full
-/// pause, so a busy replication stream does not fold the roster any more often.
+/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
+/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
+/// fold, so a person waiting to see their own write is not left waiting up to a second for the
+/// next timed fold, while a stream of local writes folds no more than about twice a second and
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often.
 async fn agent_roster_pause(
     store: &Arc<Store>,
     commits: &tokio::sync::Notify,
@@ -6741,26 +6768,33 @@ async fn agent_roster_pause_scanning(
             if upto <= through {
                 return anyhow::Ok((through, false, false));
             }
-            Ok((upto, reader.first_local_commit_after(through, upto)?.is_some(), upto < index))
+            Ok((upto, reader.local_agent_card_input_after(through, upto)?, upto < index))
         }));
     };
+    let started = tokio::time::Instant::now();
     let pause = folded.max(AGENT_ROSTER_FRESH_PAUSE);
+    // The full pause stays max(fold, 1 s), whatever this node writes: a local claim only ever
+    // shortens it, so a fold over half a second keeps the pause, and the half-core bound, it had
+    // before. Whether costly folds need a lower bound of their own is #5517.
+    let local_floor = started + (folded * 2).max(AGENT_ROSTER_LOCAL_PAUSE);
     tokio::time::sleep(pause).await;
     let rest = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause));
     tokio::pin!(rest);
+    let mut local_found = false;
     loop {
         tokio::select! {
             () = &mut rest => return AgentRosterPauseEnd::Full,
             () = store.fresh_agent_roster_wanted() => return AgentRosterPauseEnd::FreshRead,
+            () = tokio::time::sleep_until(local_floor), if local_found => return AgentRosterPauseEnd::LocalClaim,
             // A commit during the refresh or the minimum pause left its wake: it is read here.
-            () = commits.notified(), if look.running.is_none() => start(look, through),
+            () = commits.notified(), if look.running.is_none() && !local_found => start(look, through),
             read = async { look.running.as_mut().expect("polled only while looking").await },
                 if look.running.is_some() => {
                 look.running = None;
                 match read {
                     // A look carried over from an earlier pause may end at or before `through`:
                     // what it found, the refresh since has folded.
-                    Ok(Ok((upto, true, _))) if upto > through => return AgentRosterPauseEnd::LocalClaim,
+                    Ok(Ok((upto, true, _))) if upto > through => local_found = true,
                     Ok(Ok((upto, _, more))) if upto > through => {
                         through = upto;
                         // The rest of a long run is read at once, with no commit to wait for.
@@ -8128,8 +8162,10 @@ pub fn relayed_held_mail(
             .get()
             .prepare_cached(
                 "SELECT held.subject, held.sent_ms FROM coordination_sends held
-                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
-                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
                  LIMIT ?3",
             )?
             .query_map(

@@ -14,6 +14,8 @@ pub const BACKFILL_CLEAR_ROWS: usize = 64;
 pub const FOLD_CLAIMS: usize = 64;
 pub const PRUNE_ROWS: usize = 64;
 const BACKFILL_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
+#[cfg(any(test, feature = "test-support"))]
+const TEST_FOLD_BUDGET_MARKER: &str = "client_message_selectors_v1_test_fold_budget_us";
 const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb72fc75f85f1 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_selectors_v1(
  subject TEXT NOT NULL,born_index INTEGER NOT NULL,retired_index INTEGER,
@@ -422,8 +424,25 @@ fn bounded_position(transaction: &Transaction<'_>, row: &SelectionRow, budget: &
     Ok((through == row.index).then(|| count.saturating_sub(1)))
 }
 
-fn scan_selection(transaction: &Transaction<'_>, work: &mut FoldWork, budget: &mut FoldBudget, started: std::time::Instant) -> Result<bool> {
-    while budget.claims < FOLD_CLAIMS && started.elapsed() < BACKFILL_WORK_BUDGET {
+/// The wall time one pass folds for. A test pins a store's own (Store::set_client_message_fold_budget);
+/// builds without test support never read it.
+fn fold_work_budget(_transaction: &Transaction<'_>) -> Result<std::time::Duration> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(micros) = _transaction.query_row("SELECT value FROM meta WHERE key=?1", [TEST_FOLD_BUDGET_MARKER], |row| row.get::<_, String>(0)).optional()? {
+        return Ok(std::time::Duration::from_micros(micros.parse()?));
+    }
+    Ok(BACKFILL_WORK_BUDGET)
+}
+
+/// A pass stops at its time budget only once it has done some work. On a loaded host a loan's own
+/// reads can outlast the budget, and a pass that then stopped before its first row would save the
+/// same place every loan and never finish.
+fn spent(budget: &FoldBudget, started: std::time::Instant, limit: std::time::Duration) -> bool {
+    (budget.claims > 0 || budget.subjects > 0 || budget.scratch_rows > 0) && started.elapsed() >= limit
+}
+
+fn scan_selection(transaction: &Transaction<'_>, work: &mut FoldWork, budget: &mut FoldBudget, started: std::time::Instant, limit: std::time::Duration) -> Result<bool> {
+    while budget.claims < FOLD_CLAIMS && !spent(budget, started, limit) {
         let Some(row) = next_selection_row(transaction, work)? else { return Ok(true); };
         budget.claims += 1;
         let Some(position) = bounded_position(transaction, &row, budget)? else { return Ok(false); };
@@ -971,9 +990,10 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
     let started = std::time::Instant::now();
     let mut budget = FoldBudget::default();
     if projection_blocks_selectors(transaction, None)? { return Ok(budget); }
+    let limit = fold_work_budget(transaction)?;
     let saved: Option<String> = transaction.query_row("SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0)).optional()?;
     let mut active = saved.map(|saved| serde_json::from_str::<FoldWork>(&saved)).transpose()?;
-    while budget.subjects < BACKFILL_SUBJECTS && budget.claims < FOLD_CLAIMS && started.elapsed() < BACKFILL_WORK_BUDGET {
+    while budget.subjects < BACKFILL_SUBJECTS && budget.claims < FOLD_CLAIMS && !spent(&budget, started, limit) {
         if projection_blocks_selectors(transaction, active.as_ref().map(|work| work.subject.as_str()))? { break; }
         let pending: Option<(String,u8,u64,Option<String>,String)> = if let Some(work) = &active {
             transaction.prepare_cached("SELECT subject,dirty_flags,created_index,reminder,recipient FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1")?
@@ -1000,7 +1020,7 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
             work.phase = FoldPhase::Scan;
         }
         if matches!(work.phase, FoldPhase::Scan) {
-            if !scan_selection(transaction, &mut work, &mut budget, started)? {
+            if !scan_selection(transaction, &mut work, &mut budget, started, limit)? {
                 save_fold_work(transaction, &work)?;
                 break;
             }
@@ -1189,6 +1209,16 @@ impl Store {
         let published: String = connection.query_row("SELECT value FROM meta WHERE key=?1", [MARKER], |row| row.get(0))
             .optional()?.ok_or_else(selectors_not_ready)?;
         Ok(if has_pending(&connection)? { through.min(published.parse()?) } else { through })
+    }
+
+    /// Pins how long each of this store's fold passes runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_client_message_fold_budget(&self, budget: std::time::Duration) -> Result<()> {
+        self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h888b095a594c owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![TEST_FOLD_BUDGET_MARKER, budget.as_micros().to_string()],
+        )?;
+        Ok(())
     }
 
     pub fn client_message_selectors_pending(&self) -> Result<bool> {
@@ -1570,6 +1600,36 @@ mod tests {
         send(&store,"message/new","agent/rival","+18446744073709551615");send(&store,"message/z-overflow","agent/rival","18446744073709551616");
         store.read_snapshot(|through| {let current=store.client_messages_page(Some("person/recipient"),Some("agent/filtered"),false,through,None,1)?;assert!(current.is_empty());
             let history=store.client_messages_page(Some("person/recipient"),Some("agent/filtered"),true,through,None,1)?;assert_eq!(history.len(),1);assert!(!history[0].2);Ok(())}).unwrap();
+    }
+
+    #[test]
+    fn a_fold_pass_moves_forward_when_its_own_reads_outlast_the_budget() {
+        let store = Store::open_memory("node").unwrap();
+        // A zero budget is spent before a pass reaches its first row, as a loan's own reads can
+        // spend the real one on a loaded host.
+        store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+        for index in 0..BACKFILL_SUBJECTS {
+            store.append_claim(&ClaimInput {
+                subject: format!("message/outlasted-{index:02}"), kind: "message.sent".into(),
+                actor: Some("agent/sender".into()), fields: BTreeMap::from([
+                    ("from".into(), json!("agent/sender")), ("to".into(), json!("person/recipient")),
+                    ("content".into(), json!(format!("body {index}"))),
+                    ("status".into(), json!("sent")), ("tags".into(), json!([])),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        assert!(store.client_message_selectors_pending().unwrap(), "every commit's fold stopped after its first row");
+        let mut loans = 0;
+        while store.maintain_client_message_selectors().unwrap() {
+            loans += 1;
+            assert!(loans < 1_000, "{loans} loans left the fold where it was");
+        }
+        assert!(!store.client_message_selectors_pending().unwrap());
+        let headers: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(headers, BACKFILL_SUBJECTS);
     }
 
     fn seed_backfill(store: &Store, count: usize) {
