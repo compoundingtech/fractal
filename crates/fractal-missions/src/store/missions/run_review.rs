@@ -8,7 +8,7 @@ use fractal_store::store::{
 
 /// Caller-owned snapshot of every generation, descendant and starting parent step, not siblings.
 /// Includes strict loop-round history; public parsers still reject agent-review.
-/// Loops with keep/discard branches or nested loops sharing a loop path currently fail closed
+/// Nested loops sharing a loop path currently fail closed
 /// with `reviewer-owner-unresolved` until a later slice.
 #[doc(hidden)]
 pub fn validate_run_reviewer(
@@ -120,6 +120,14 @@ fn validate_loop_history(
             .filter(|round| *round > 0)
             .ok_or_else(unresolved)?;
         if header.mission != format!("mission/{}", spec.round.id) {
+            if spec
+                .on_keep
+                .iter()
+                .chain(&spec.on_discard)
+                .any(|branch| header.mission.strip_prefix("mission/") == Some(branch.id.as_str()))
+            {
+                continue;
+            }
             return Err(unresolved());
         }
         rounds.insert(round);
@@ -132,6 +140,7 @@ fn validate_loop_history(
     let mut rows = history.query([&subject]).map_err(internal)?;
     let mut required = 0;
     let mut seen = false;
+    let mut item_count = None;
     while let Some(row) = rows.next().map_err(internal)? {
         let kind: String = row.get(0).map_err(internal)?;
         seen |= kind == "loop.state";
@@ -148,7 +157,21 @@ fn validate_loop_history(
             .and_then(Value::as_u64)
             .and_then(|round| u32::try_from(round).ok())
             .ok_or_else(unresolved)?;
-        required = required.max(round);
+        if let Some(items) = fields.get("items").and_then(Value::as_array) {
+            let count = u32::try_from(items.len()).map_err(|_| unresolved())?;
+            if item_count.replace(count).is_some_and(|old| old != count) {
+                return Err(unresolved());
+            }
+        }
+        // The for-each evaluator enters attempt 1 before it snapshots even an empty list.
+        let entry = spec.for_each.is_some()
+            && kind == "loop.state"
+            && round == 1
+            && fields.get("status").and_then(Value::as_str) == Some("running")
+            && !fields.contains_key("items");
+        if !entry {
+            required = required.max(round);
+        }
         if kind != "loop.state" {
             let child = fields
                 .get("mission_run")
@@ -158,6 +181,9 @@ fn validate_loop_history(
                 return Err(unresolved());
             }
         }
+    }
+    if spec.for_each.is_some() {
+        required = required.max(item_count.ok_or_else(unresolved)?);
     }
     if !seen
         || rounds.range(..=required).count() != required as usize
@@ -169,8 +195,8 @@ fn validate_loop_history(
 }
 
 /// Validate an existing run plus the concrete requester and proposed assignment, without writing.
-/// Loops with keep/discard branches or nested loops sharing a loop path currently fail closed
-/// with `reviewer-owner-unresolved` until a later slice.
+/// Nested loops sharing a loop path currently fail closed with
+/// `reviewer-owner-unresolved` until a later slice.
 #[doc(hidden)]
 pub fn validate_run_reviewer_assignment(
     scope: &Scope<'_>,
