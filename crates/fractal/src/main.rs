@@ -20583,8 +20583,8 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                         if !fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_retire", || worker.retire_legacy_signature_page())? { break; }
                         std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                     }
-                    // A resume or a trust-root change can leave a large verdict backlog. Ordinary
-                    // passes take only a slice of it; this job drains the rest at the same duty.
+                    // A resume or trust-root change can leave a large historical verdict
+                    // backlog. Ordinary passes judge fresh claims; this job drains the rest.
                     // Each seal hands its claims here too, so a drain of a few verdicts is
                     // ordinary work: only a backlog worth reporting is logged.
                     let pending = || fractal_daemon::task_cpu::profiled_blocking("maintenance.signature_bootstrap_verdicts_pending", || worker.verdicts_pending());
