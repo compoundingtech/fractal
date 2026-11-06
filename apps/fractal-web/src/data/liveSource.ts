@@ -36,7 +36,6 @@ import { unavailableTerminalHistory } from '../terminal/historySource.ts'
 import { gatewayTerminalInput } from '../terminal/terminal-input-port.ts'
 import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
 import { gatewayAgentControls } from '../agents/agent-control-port.ts'
-import { gatewayPromptAnswers } from '../conversation/alerts/prompt-answer-port.ts'
 import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts'
 import { optimisticAlertActions } from '../conversation/alerts/optimistic-alert-actions.ts'
 import { gatewayDocuments } from '../documents/document-port.ts'
@@ -1256,7 +1255,8 @@ export const liveSource = ({
       },
       terminalResize: gatewayTerminalResize(client),
       agentControls: gatewayAgentControls(client),
-      prompts: gatewayPromptAnswers(client),
+      prompts: { respond: ({ alert, answer }) => inboxActions.port.act({ alert,
+        action: { type: 'prompt.respond', target_id: alert.target_id, episode: alert.episode, answer } }) },
       alertActions: inboxActions.port,
       documents: gatewayDocuments(client),
       // Same origin and transport as `client`; the gateway injects the credential and keeps the

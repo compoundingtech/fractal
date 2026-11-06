@@ -38,8 +38,8 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
       const previous = [...current.pending.values()].find((entry) => entry.action.alert.id === request.alert.id)
       const key = previous?.key ?? `action/${crypto.randomUUID()}`
       if (previous !== undefined) yield* mutations.retry(key)
-      else yield* mutations.submit({ key, action: request, refusal: request.action.type === 'work.done' &&
-        ['dismiss', 'read'].includes(request.action.answer?.id ?? '') ? 'rollback' : 'retain' })
+      else yield* mutations.submit({ key, action: request, refusal: request.action.type === 'message.read' ||
+        (request.action.type === 'work.done' && ['dismiss', 'read'].includes(request.action.answer?.id ?? '')) ? 'rollback' : 'retain' })
       const state = yield* SubscriptionRef.get(mutations.state)
       const failure = state.pending.get(key)?.failure ?? state.notices.find((notice) => notice.key === key)?.failure
       const result: AlertActionResult = failure === undefined ? { _tag: 'Sent' } : {

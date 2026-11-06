@@ -24,6 +24,7 @@ import { AlertButton } from './AlertButton.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { AnswerAlert } from './AnswerAlert.tsx'
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
+import type { OptimisticAttention } from './optimistic-alert-actions.ts'
 
 const styles = stylex.create({
   pinned: { width: '100%', minWidth: 0, boxSizing: 'border-box', paddingInline: s.section, flexShrink: 0 },
@@ -123,7 +124,7 @@ const PromptAlert = ({
   alert,
   onAnswer,
 }: {
-  readonly alert: Native.Attention
+  readonly alert: OptimisticAttention
   readonly onAnswer?: Answer
 }): React.ReactNode => {
   const prompt = promptAnswers(alert)
@@ -133,6 +134,10 @@ const PromptAlert = ({
   const [chosen, setChosen] = React.useState<number[][]>([])
   const [status, setStatus] = React.useState<string>()
   const [sending, setSending] = React.useState(false)
+  const optimistic = alert.optimisticAnswer
+  const held = sending || optimistic !== undefined
+  const note = optimistic?.phase === 'sending' ? 'Sending answer…' : optimistic?.phase === 'accepted'
+    ? 'Answered. The alert clears once the harness moves on.' : status
   const offered = prompt === null || onAnswer === undefined ? [] : servedAnswers(prompt, served)
   const questions = pendingQuestions(shown.filter(call => call.complete === true))
   const gated = prompt?.answers.find((answer) => answer === 'allow' || answer === 'approve' || answer === 'answer')
@@ -146,8 +151,8 @@ const PromptAlert = ({
         : [option]
       return next
     })
-  const send = (answer: string) => {
-    const sent = answer === 'answer' ? sendable : answer
+  const send = (answer: string, original?: string) => {
+    const sent = original ?? (answer === 'answer' ? sendable : answer)
     if (sent === null || onAnswer === undefined) return
     setSending(true)
     setStatus(`Answering ${answerLabel(answer).toLowerCase()}…`)
@@ -174,7 +179,7 @@ const PromptAlert = ({
               {question.options.map((option, choice) => {
                 const on = (chosen[index] ?? []).includes(choice)
                 return (
-                  <AlertButton key={choice} tone={on ? 'primary' : 'secondary'} aria-pressed={on} isDisabled={sending}
+                  <AlertButton key={choice} tone={on ? 'primary' : 'secondary'} aria-pressed={on} isDisabled={held}
                     onPress={() => choose(index, choice, question.multiSelect)}>
                     {on ? `✓ ${option.label}` : option.label}
                   </AlertButton>
@@ -199,13 +204,18 @@ const PromptAlert = ({
         <div {...stylex.props(styles.answers)}>
           {offered.map((answer) => (
             <AlertButton key={answer} tone={answer === 'deny' ? 'danger' : answer === gated ? 'primary' : 'secondary'}
-              isDisabled={sending || (answer === 'answer' && sendable === null)} onPress={() => send(answer)}>
+              isDisabled={held || (answer === 'answer' && sendable === null)} onPress={() => send(answer)}>
               {answer === 'deny' && gated === 'answer' ? 'Decline' : answerLabel(answer)}
             </AlertButton>
           ))}
         </div>
       ) : null}
-      {status ? <div role="status" {...stylex.props(styles.note)}>{status}</div> : null}
+      {optimistic?.phase === 'failed' && optimistic.action.type === 'prompt.respond' ? (
+        <div role="status" {...stylex.props(styles.note)}>
+          {optimistic.detail} <AlertButton tone="secondary" isDisabled={sending || onAnswer === undefined}
+            onPress={() => { if (optimistic.action.type === 'prompt.respond') send('Retry', optimistic.action.answer) }}>Retry</AlertButton>
+        </div>
+      ) : note ? <div role="status" {...stylex.props(styles.note)}>{note}</div> : null}
     </section>
   )
 }

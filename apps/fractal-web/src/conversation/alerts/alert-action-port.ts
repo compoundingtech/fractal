@@ -1,5 +1,6 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
+import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
 export type AlertActionResult =
@@ -28,6 +29,8 @@ export type AlertAction =
     }
   | { readonly type: 'launch.approve' | 'launch.cancel' }
   | { readonly type: 'launch.revise'; readonly feedback: string }
+  | { readonly type: 'prompt.respond'; readonly target_id: string; readonly episode: string; readonly answer: string }
+  | { readonly type: 'message.read' }
 
 export type AlertActionRequest = { readonly alert: AlertAnswered; readonly action: AlertAction; readonly key?: string }
 export interface AlertActionPort {
@@ -78,6 +81,7 @@ const shownVariant = (items: readonly unknown[], item: AttentionRead): VariantRe
  * that changed since it was read. Explicit same-key retries replay the prepared request unchanged.
  */
 export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
+  const prompts = gatewayPromptAnswers(client)
   const attempts = new Map<string, () => Promise<{ readonly value: unknown }>>()
   const outcome = (response: { readonly value: unknown }): AlertActionResult =>
     (typeof response.value === 'object' && response.value !== null && 'status' in response.value && response.value.status === 'rejected')
@@ -88,6 +92,9 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
       return send()
     }
     try {
+      if (action.type === 'prompt.respond') return await prompts.respond({
+        alert: { ...alert, target_id: action.target_id, episode: action.episode }, answer: action.answer, key,
+      })
       const retry = key === undefined ? undefined : attempts.get(key)
       if (retry !== undefined) return outcome(await retry())
       let current
@@ -109,6 +116,9 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
       const seen = { [alert.id]: alert.revision }
       const response = await (async () => {
         switch (action.type) {
+          case 'message.read':
+            return remember(() => client.messageRead({ id, idempotency_key: id,
+              fence: { snapshot_id: current.snapshot.id, subject_revisions: seen }, parameters: { target_id: alert.source_id } }))
           case 'work.done':
             return remember(() => client.workDone({
               id,
@@ -182,5 +192,5 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
       )
     }
   }
-  return { act, forget: (key) => { attempts.delete(key) } }
+  return { act, forget: (key) => { attempts.delete(key); prompts.forget?.(key) } }
 }

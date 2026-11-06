@@ -444,3 +444,31 @@ it('shows the pending answer in another view before the transport responds', asy
   await sending
   expect(inbox.project([alert], Effect.runSync(SubscriptionRef.get(inbox.state)).pending)[0]?.optimisticAnswer?.phase).toBe('accepted')
 })
+
+it('shares native prompt failures and replays the prepared prompt answer unchanged', async () => {
+  const capabilities = vi.fn(async () => ({ snapshot: { id: 'snapshot/prompt' },
+    value: { capabilities: [{ id: 'prompt.respond', state: 'granted' }] } }))
+  const promptRespond = vi.fn(async (_request: unknown) => {
+    if (promptRespond.mock.calls.length === 1) throw new TypeError('network')
+    return { value: { status: 'completed' } }
+  })
+  const transport = gatewayAlertActions({ capabilities, promptRespond } as unknown as FractalClient)
+  const inbox = optimisticAlertActions(transport)
+  const alert = item({ attention_kind: 'harness-prompt', actions: ['prompt.respond'] })
+  const action = { type: 'prompt.respond', target_id: seat, episode: 'prompt/one', answer: 'allow' } as const
+  await Effect.runPromise(inbox.accept([alert]))
+  expect((await inbox.port.act({ alert, action }))._tag).toBe('Refused')
+  const projected = inbox.project([alert], Effect.runSync(SubscriptionRef.get(inbox.state)).pending)[0]!
+  const html = renderToStaticMarkup(<AgentAlerts alerts={[projected]} onAnswer={async () => ({ _tag: 'Sent' })} />)
+  expect(html).toContain('Retry')
+  expect((await inbox.port.act({ alert, action }))._tag).toBe('Sent')
+  expect(capabilities).toHaveBeenCalledTimes(1)
+  expect(promptRespond.mock.calls[1]?.[0]).toEqual(promptRespond.mock.calls[0]?.[0])
+})
+
+it('rolls back refused message-read actions', async () => {
+  const inbox = optimisticAlertActions({ act: async () => ({ _tag: 'Refused', detail: 'Not permitted' }) })
+  expect(await inbox.port.act({ alert: item({}), action: { type: 'message.read' } }))
+    .toEqual({ _tag: 'Refused', detail: 'Not permitted' })
+  expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
+})
