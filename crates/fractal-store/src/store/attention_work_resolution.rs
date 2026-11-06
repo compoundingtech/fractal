@@ -37,8 +37,7 @@ fn proof(row: &rusqlite::Row<'_>, person: &str) -> rusqlite::Result<Option<Sourc
 pub fn human_gate_resolution_at(
     connection: &Connection, source_id: &str, person: &str, episode: &str,
 ) -> Result<Option<SourceResolution>, St3Error> {
-    /* sqlite-large-value: allow-for-now lv-hbcfc69b2343b owner=fractal_store::store::attention_work_resolution TODO=trace-statement-and-value-representation */
-    connection.query_row(&gate_sql(), params![source_id, person, episode], |row| proof(row, person))
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-hbcfc69b2343b owner=fractal_store::store::attention_work_resolution TODO=trace-statement-and-value-representation */ &gate_sql(), params![source_id, person, episode], |row| proof(row, person))
         .optional().map(Option::flatten).map_err(internal)
 }
 
