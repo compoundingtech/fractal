@@ -1456,6 +1456,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "request": optionalKey(StructuredRequest),
   "requested_at": Timestamp,
   "requester_id": optionalKey(Id),
+  /** The actor of the accepted claim that resolved this item. Absent when no attributed resolution is retained; never inferred from the recipient. */
+  "resolved_by": optionalKey(Id),
   "review_mode": optionalKey(Schema.Literals(["approve","feedback"])),
   "revision": Revision,
   "source_id": Id,
