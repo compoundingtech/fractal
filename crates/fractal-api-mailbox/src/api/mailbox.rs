@@ -526,7 +526,8 @@ fn raw_snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
             .next();
         let messages = if binding.component == "delivery" {
             // The graph's mail is pinned at `through`; the seat's open stream items follow it.
-            let mut messages = store.messages_for_delivery_through(&binding.subject, through)?;
+            // Read mail is never offered, so its views are not built.
+            let mut messages = store.offerable_messages_for_delivery_through(&binding.subject, through)?;
             messages.extend(crate::store::messages_shard::mailbox_reads::delivery_items(
                 store,
                 &binding.subject,

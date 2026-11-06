@@ -40,6 +40,11 @@ the original validated RFC3339 spelling and an `Option<DateTime.Utc>` millisecon
 projection (`None` for leap seconds). Encoding reproduces `wire` exactly, including
 microseconds and finer fractions, and refuses inconsistent projections. Only
 `NoticeTimestamp` opts in; the existing `timestamp` codec remains `DateTime.Utc`.
+Schema-root `x-st-internal-resources` generates private descriptor/decoder insertion
+content in `notice_descriptors.generated.rs`, compiled by conformance tests. Model
+kind and ID references come from the same notice closure; decoding goes directly
+from bytes to the native model, never through `Resource::Unknown` serialization.
+This metadata does not register a collection, Resource arm, capability or action.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
@@ -1193,6 +1198,20 @@ waiting step IDs, and then the recent moves, newest first, with `move_count` for
 Each move names its run, placement, optional anchor run, actor, optional reason, and time. A run
 joins the queue when it first has a step assigned to the seat and leaves when it is terminal. An
 unknown agent returns `not-found`.
+
+`GET /v1/client/agent-related-runs/{agent_id}` returns `AgentRelatedRuns` sidebar rows.
+Relationships include the run requester, supervising report-to agent, step claimant, a specifically
+assigned or individually offered agent, and the recipient of an open ask on a step. Pool offers
+do not make every pool member related. Active rows precede folded finished rows, retained for 24 h
+after completion. The server resolves `status_chip`, done/total `progress`, `current_step`, and
+`waits_on` using the waiting-on projection. `waiting_on_you` is relative to the authenticated
+person and replaces `eta`; finished rows have no ETA. `late` means the run deadline has passed.
+`urgency_rank` orders person holds (0), late runs (1), stalled runs (2), other active runs (3),
+then finished runs (4); deadline and run ID break active ties. `as_of`, `work_cut`, and
+`missions_cut` identify the clock and published inputs. Clients draw these facts without joins.
+Responses contain at most 100 rows after urgency sorting; `total_rows` and `truncated` make the
+bound explicit. Individual offers seek the recipient's indexed singleton offer, not fleet history.
+The singleton-only index cannot replace the general seat-offer index; daemon cost probes cover this route.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run

@@ -2478,6 +2478,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-sidebar"
+version = "0.1.0"
+dependencies = [
+ "fractal-schema",
+ "jsonschema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fractal-socket-discovery"
 version = "0.1.0"
 dependencies = [
@@ -2646,7 +2656,6 @@ version = "0.1.0"
 dependencies = [
  "fractal-client",
  "fractal-schema",
- "jsonschema",
  "serde",
  "serde_json",
 ]
