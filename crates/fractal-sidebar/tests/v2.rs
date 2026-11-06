@@ -85,3 +85,28 @@ fn explicit_body_versions_never_fall_back() {
         assert!(fractal_schema::arrangements::body_for_read(&json!({"version":version,"name":{"value":"Sidebar","revision":"r1"},"folders":{}})).is_err());
     }
 }
+
+#[test]
+fn live_member_move_and_removal_reproject_without_stale_rows_or_rollups() {
+    let (a, mut members) = input(&fixture()["cases"][0]);
+    let outer = "00000000-0000-7000-8000-00000000000a";
+    let inner = "00000000-0000-7000-8000-00000000000b";
+    let marked = ["agent/test/a".into(), "agent/test/b".into()].into_iter().collect();
+    for (step, expected) in [[2, 2], [2, 1], [1, 1]].into_iter().enumerate() {
+        let tree = build_v2(&a, &members).unwrap();
+        let counts = rollup(&tree, &marked);
+        assert_eq!([counts[&format!("folder:{outer}")].needs_you, counts[&format!("folder:{inner}")].needs_you], expected);
+        let row = tree.nodes.get("subject:agent/test/a");
+        if step == 2 { assert!(row.is_none()); }
+        else {
+            let row = row.unwrap();
+            assert_eq!(row.shown_under, fractal_sidebar::model::Parent::Folder { id: if step == 0 { inner } else { outer }.into() });
+            assert_eq!(row.revision.as_deref(), Some(if step == 0 { "claim/test-1" } else { "claim/test-4" }));
+        }
+        if step == 0 {
+            let member = members.iter_mut().find(|m| m.member == "agent/test/a").unwrap();
+            member.position.bucket = Some(outer.into());
+            member.revision = "claim/test-4".into();
+        } else { members.retain(|m| m.member != "agent/test/a"); }
+    }
+}
