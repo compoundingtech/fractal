@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve original launch and revision attention locators from accepted decision actors",
+  "replay": {"status": "none", "detail": "No backfill or historical inference. Launch cancellation and revision-requested events now cite the exact existing pre-action preview claim in the existing evidence envelope; older unstamped events cannot provide a proof."},
+  "schema": {"status": "none", "detail": "No tables, indexes, claim kinds or replicated fields added. Main approved existing subject/kind and operation/claim primary-key lookups under fractal_store::store::attention_launch_resolution: one subject, 1 MiB JSON parse cap, scalar-only output bounded to 4096-byte identity and 40-byte timestamp. Inventoried sinks: lv-h86dfd7785502 and lv-h58c727aba21e."},
+  "rules": {"status": "none", "detail": "Launch approval binds recorded requester and preview hash. Cancel/revise binds accepted actor to the original person and verifies the explicitly referenced preview claim's subject, actor and hash. Revision approval binds original reviewer, generation and preview. Missing proofs return None."},
+  "compatibility": {"status": "none", "detail": "Per docs/st3/compatibility.md additive-claim rules, existing event fields remain unchanged. Arbitrary evidence tokens were rejected because append_claim requires a stored claim/tombstone (store.rs missing-evidence admission); writers instead cite an actual planning-session.previewed claim. Tests exercise append, registry validation, evidence round-trip, replication import, repair and doctor graph references. Parent integrates shared type/module/API dispatch."},
+  "downtime": {"status": "none", "detail": "Normal deployment; no migration."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "Read-only change; rollback does not change stored claims."}
+}
