@@ -181,9 +181,9 @@ export type MembershipPageResult = { kind: 'continue' | 'restart' | 'ignored' } 
 /** Subscribe with collection-v1 before beginning an attempt. Feed every received metadata frame
  * and page here; restart means discard the attempt, never retry its continuation cursor. */
 export class MembershipPaging {
-    private stream?: MembershipFrontier;
-    private attempt?: MembershipFrontier;
-    private accepted?: MembershipFrontier;
+    private stream: MembershipFrontier | undefined;
+    private attempt: MembershipFrontier | undefined;
+    private accepted: MembershipFrontier | undefined;
     private rows: OrderedMembership[] = [];
     private ids = new Set<string>();
     private generation = Symbol();
@@ -198,7 +198,9 @@ export class MembershipPaging {
         }
         return false;
     }
-    constructor(readonly person: string, readonly container: ArrangementId) {}
+    readonly person: string;
+    readonly container: ArrangementId;
+    constructor(person: string, container: ArrangementId) { this.person = person; this.container = container; }
     begin(): symbol { this.generation = Symbol(); this.attempt = undefined; this.rows = []; this.ids.clear(); return this.generation; }
     reject(code: string): 'restart' | 'refused' {
         this.begin();
