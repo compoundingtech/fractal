@@ -43,30 +43,36 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
             );
 
             let intent = crate::graph::parse_intent(&source, "alder").unwrap();
-            let (subject, kind, mut body) = if let Some(desired) = intent.subjects.get("agent/alder.new") {
-                (
-                    "agent/alder.new",
-                    "intent.desired",
-                    serde_json::to_value(desired).unwrap(),
-                )
-            } else {
-                (
-                    "mission/new",
-                    "mission.published",
-                    serde_json::to_value(&intent.missions["new"]).unwrap(),
-                )
-            };
+            let (subject, kind, mut body) =
+                if let Some(desired) = intent.subjects.get("agent/alder.new") {
+                    (
+                        "agent/alder.new",
+                        "intent.desired",
+                        serde_json::to_value(desired).unwrap(),
+                    )
+                } else {
+                    (
+                        "mission/new",
+                        "mission.published",
+                        serde_json::to_value(&intent.missions["new"]).unwrap(),
+                    )
+                };
             // Canonical mission serialization omits empty budgets; direct authors can
             // still submit that field explicitly, and it must count as authored.
             if kind == "mission.published" && child == "declared-budgets {}" {
                 body["declared_budgets"] = json!({});
             }
+            let fields = if kind == "intent.desired" {
+                json!({"kind": "agent", "desired": body["desired"]})
+            } else {
+                json!({"body": body})
+            };
             let error = store
                 .append_claim(&ClaimInput {
                     subject: subject.into(),
                     kind: kind.into(),
                     actor: Some("person/avery".into()),
-                    fields: serde_json::from_value(json!({"body": body})).unwrap(),
+                    fields: serde_json::from_value(fields).unwrap(),
                     evidence: Vec::new(),
                     expected_subject: None,
                     idempotency_key: None,
