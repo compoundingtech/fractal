@@ -169,7 +169,7 @@ describe('native attention controls', () => {
     await inbox.port.act({ alert: { ...alert, id: 'attention/source-answer' }, action: { type: 'work.done', summary: 'Done' } })
     const proof = { id: alert.id, ...alert.presentation_control!, revision: Option.some('control/r1'), dismissed: true }
     for (const invalid of [{ ...proof, id: 'attention/other' }, { ...proof, source_revision: 'semantic/other' },
-      { ...proof, revision: Option.some('control/other') }, { ...proof, dismissed: false }]) {
+      { ...proof, revision: Option.some('control/other') }, { ...proof, dismissed: false }] satisfies readonly Native.AttentionControl[]) {
       await Effect.runPromise(inbox.acceptControl(invalid))
       expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(2)
     }
