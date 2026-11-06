@@ -117,3 +117,27 @@ it('sends a request for changes only with the person\'s words', async () => {
   await act(async () => button(container, 'Send')!.click())
   expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Rename the flag.', answer: { id: 'change', text: 'Rename the flag.' } })
 })
+
+it('discards the local draft and confirmation only after a proven answering actor arrives', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  cleanup = () => { act(() => root.unmount()); container.remove() }
+  const onAct = vi.fn(async () => ({ _tag: 'Sent' as const }))
+  await act(async () => root.render(<AnswerAlert alert={alert} onAct={onAct} />))
+  const words = container.querySelector('textarea')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(words, 'My unsent answer')
+    words.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await act(async () => button(container, 'Merge')!.click())
+  expect(container.querySelector('[aria-label="Confirm your answer"]')).not.toBeNull()
+  const resolved = { ...alert, optimisticResolvedBy: 'agent/delegate', optimisticNote: 'Already answered by agent/delegate.' }
+  await act(async () => root.render(<AnswerAlert alert={resolved} onAct={onAct} />))
+  expect(container.querySelector('textarea')!.value).toBe('')
+  expect(container.querySelector('[aria-label="Confirm your answer"]')).toBeNull()
+  expect(button(container, 'Merge')!.disabled).toBe(true)
+  expect(container.textContent).toContain('Already answered by agent/delegate.')
+  expect(onAct).not.toHaveBeenCalled()
+})
