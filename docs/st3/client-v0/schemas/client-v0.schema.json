@@ -428,6 +428,18 @@
     "DelegationProof": {"type": "object", "additionalProperties": false, "required": ["person", "policy", "message", "quote", "episode"], "properties": {"person": {"type": "string"}, "policy": {"type": "string"}, "message": {"type": "string"}, "quote": {"type": "string"}, "episode": {"type": "string"}}},
     "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor.", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}, "delegation": {"$ref": "#/$defs/DelegationProof"}}},
     "CustomReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "registration", "revision", "episode", "fields"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "registration": {"type": "string"}, "revision": {"type": "string"}, "episode": {"type": "string"}, "fields": {"type": "object"}}},
+    "AttentionControlParameters": {
+      "type": "object", "additionalProperties": false,
+      "description": "Person-scoped presentation only; person comes from the authenticated session. Source and control revisions are checked atomically, including hidden rows.",
+      "required": ["target_id", "source_id", "attention_kind", "episode", "source_revision", "expected_control_revision"],
+      "properties": { "target_id": {"$ref": "#/$defs/Id"}, "source_id": {"$ref": "#/$defs/Id"}, "attention_kind": {"type": "string"}, "episode": {"type": "string"}, "source_revision": {"type": "string"}, "expected_control_revision": {"type": ["string", "null"]} }
+    },
+    "AttentionSnoozeParameters": {
+      "type": "object", "additionalProperties": false,
+      "description": "Same source/control CAS as dismiss/restore; until null clears the snooze.",
+      "required": ["target_id", "source_id", "attention_kind", "episode", "source_revision", "expected_control_revision", "until"],
+      "properties": { "target_id": {"$ref": "#/$defs/Id"}, "source_id": {"$ref": "#/$defs/Id"}, "attention_kind": {"type": "string"}, "episode": {"type": "string"}, "source_revision": {"type": "string"}, "expected_control_revision": {"type": ["string", "null"]}, "until": {"oneOf": [{"$ref": "#/$defs/NoticeTimestamp"}, {"type": "null"}]} }
+    },
     "ConversationSearchHit": {"type": "object", "additionalProperties": false, "required": ["conversation_id", "entry_id", "agent_id", "timestamp", "entry_type", "excerpt"], "properties": {"conversation_id": {"$ref": "#/$defs/Id"}, "entry_id": {"$ref": "#/$defs/Id"}, "agent_id": {"type": ["string", "null"]}, "timestamp": {"$ref": "#/$defs/Timestamp"}, "entry_type": {"type": "string"}, "excerpt": {"type": "string", "maxLength": 512}}},
     "ConversationSearch": {"type": "object", "additionalProperties": false, "required": ["kind", "items", "page", "indexed_at", "host_id", "incomplete_sources", "refreshing"], "properties": {"kind": {"const": "conversation-search"}, "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/ConversationSearchHit"}}, "page": {"$ref": "#/$defs/PageInfo"}, "indexed_at": {"$ref": "#/$defs/Timestamp"}, "host_id": {"$ref": "#/$defs/Id"}, "incomplete_sources": {"type": "array", "items": {"type": "string"}}, "refreshing": {"type": "boolean"}}},
 
@@ -3281,6 +3293,9 @@
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
+            "attention.dismiss",
+            "attention.restore",
+            "attention.snooze",
             "attention.resolve",
             "review.approve",
             "review.reject",
@@ -3481,6 +3496,9 @@
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
+        {"properties": {"type": {"const": "attention.dismiss"}, "parameters": {"$ref": "#/$defs/AttentionControlParameters"}}},
+        {"properties": {"type": {"const": "attention.restore"}, "parameters": {"$ref": "#/$defs/AttentionControlParameters"}}},
+        {"properties": {"type": {"const": "attention.snooze"}, "parameters": {"$ref": "#/$defs/AttentionSnoozeParameters"}}},
         {"properties": {"type": {"const": "agent.create"}, "parameters": {"$ref": "#/$defs/AgentCreateParameters"}}},
         {"properties": {"type": {"const": "agent.retire"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentRetireParameters"}}},
         {"properties": {"type": {"const": "agent.stop"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentStopParameters"}}},
@@ -3731,6 +3749,7 @@
         "snapshot_id": { "$ref": "#/$defs/Id" },
         "private_notes": { "$ref": "#/$defs/PrivateNotesFence" },
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
+        "control_revision": { "type": ["string", "null"], "description": "Exact post-write presentation control revision; replay returns the original durable action result." },
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" }

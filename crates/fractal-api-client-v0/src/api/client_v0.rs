@@ -36,6 +36,9 @@ pub use fractal_api_core::api::client_v0::{ClientSession, CollectionSubscribe, E
 pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
+mod attention_controls;
+#[cfg(test)]
+mod attention_controls_tests;
 pub mod assistant;
 pub mod collection_ivm;
 pub mod collection_windows;
@@ -9404,6 +9407,12 @@ async fn action_inner(
         }
         result["snapshot_id"] = Value::String(new_client_snapshot(&state).id);
         return Ok(Json(result));
+    }
+    if matches!(request.action_type.as_str(), "attention.dismiss" | "attention.restore" | "attention.snooze") {
+        return tokio::task::spawn_blocking(move || {
+            let _guard = _guard;
+            attention_controls::write(&state, &session, &request, &receipt_subject, &request_digest, &actor_key).map(Json)
+        }).await.map_err(ApiError::internal)?;
     }
     if matches!(
         request.action_type.as_str(),

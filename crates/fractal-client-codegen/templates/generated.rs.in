@@ -3312,6 +3312,12 @@ pub enum ActionType {
     ArrangementEdit,
     #[serde(rename = "arrangement.membership.edit")]
     ArrangementMembershipEdit,
+    #[serde(rename = "attention.dismiss")]
+    AttentionDismiss,
+    #[serde(rename = "attention.restore")]
+    AttentionRestore,
+    #[serde(rename = "attention.snooze")]
+    AttentionSnooze,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -3453,6 +3459,20 @@ impl ActionRequest {
         })
     }
     // @st3-codegen:rust-action-constructors
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AttentionControlParameters {
+    pub target_id: String, pub source_id: String, pub attention_kind: String,
+    pub episode: String, pub source_revision: String,
+    pub expected_control_revision: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AttentionSnoozeParameters {
+    pub target_id: String, pub source_id: String, pub attention_kind: String,
+    pub episode: String, pub source_revision: String,
+    pub expected_control_revision: Option<String>,
+    pub until: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -3883,6 +3903,8 @@ pub struct ActionResult {
     pub harness_answer: Option<HarnessAnswerResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

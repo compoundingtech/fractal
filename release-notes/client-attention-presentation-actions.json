@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add authenticated dismiss, restore and snooze actions for native attention items",
+  "replay": { "status": "changed", "detail": "Presentation controls and original client action receipts commit atomically. Same-key retries retain the original control revision, including after an inverse action." },
+  "schema": { "status": "additive", "detail": "Add typed attention control action parameters and optional control_revision on action results across generated clients." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "Only the authenticated person can control an item's presentation. Source identity and semantic revision plus control CAS are checked on the writer. Restore works while hidden; snooze clears at its UTC deadline or on new source activity. Source work is never answered or modified." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "Use a fresh idempotency key for inverse actions and the preceding result's control revision as the new fence." },
+  "recovery": { "status": "none", "detail": "A failed atomic write can be retried with the same key; conflicting source or control revisions require a fresh authoritative read." }
+}
