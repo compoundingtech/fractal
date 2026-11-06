@@ -20,14 +20,14 @@ const divergences = {
   [`${lifted}/tree`]: { reason: 'Native v1 displays nested folders as peer groups.', flattened: [uuid('b')] },
   [`${cycle}/tree`]: { reason: 'Native v1 displays resolved nested folders as peer groups.', flattened: [uuid('a'), uuid('b')] },
   [`${unicode}/tree`]: { reason: 'Native ties use UTF-16, not Unicode scalar ordering.', roots: ['agent/test/😀', 'agent/test/\ue000', 'agent/test/unplaced'] },
-  [`${nested}/0`]: { reason: 'Flat folder reorder has no self-parent validation.', shared: 'Self', native: 'folder.move' },
-  [`${nested}/1`]: { reason: 'Flat folder reorder has no ancestry-cycle validation.', shared: 'Cycle', native: 'folder.move' },
-  [`${nested}/2`]: { reason: 'Native destination is a folder ID, not a typed node.', shared: 'ParentNotAllowed', native: 'subject.place' },
-  [`${nested}/3`]: { reason: 'Native planner trusts the destination supplied by its UI.', shared: 'ParentMissing', native: 'subject.place' },
-  [`${nested}/4`]: { reason: 'Native planner permits new resource placements.', shared: 'NodeMissing', native: 'subject.place' },
-  [`${nested}/5`]: { reason: 'Native anchor error is unstructured.', shared: 'AnchorMoved', native: 'The destination changed; choose it again.' },
-  [`${nested}/6`]: { reason: 'Native planner emits an operation for a no-op drop.', shared: 'NoChange', native: 'subject.place' },
-  [`${lifted}/1`]: { reason: 'Native planner does not reject a tombstoned destination.', shared: 'ParentMissing', native: 'subject.place' },
+  [`${nested}/0`]: { reason: 'Flat folder reorder has no self-parent validation.', shared: 'Self', native: [{ op: 'folder.move', id: uuid('a'), parent: null, key: 'a2' }] },
+  [`${nested}/1`]: { reason: 'Flat folder reorder has no ancestry-cycle validation.', shared: 'Cycle', native: [{ op: 'folder.move', id: uuid('a'), parent: null, key: 'a2' }] },
+  [`${nested}/2`]: { reason: 'Native destination is a folder ID, not a typed node.', shared: 'ParentNotAllowed', native: [{ op: 'subject.place', subject: 'agent/test/one', folder: 'agent/test/dormant', key: 'a0' }] },
+  [`${nested}/3`]: { reason: 'Native planner trusts the destination supplied by its UI.', shared: 'ParentMissing', native: [{ op: 'subject.place', subject: 'agent/test/one', folder: uuid('e'), key: 'a0' }] },
+  [`${nested}/4`]: { reason: 'Native planner permits new resource placements.', shared: 'NodeMissing', native: [{ op: 'subject.place', subject: 'agent/test/missing', folder: null, key: 'a0' }] },
+  [`${nested}/5`]: { reason: 'Native anchor error is unstructured.', shared: 'AnchorMoved', error: 'The destination changed; choose it again.' },
+  [`${nested}/6`]: { reason: 'Native planner emits an operation for a no-op drop.', shared: 'NoChange', native: [{ op: 'subject.place', subject: 'agent/test/one', folder: uuid('b'), key: 'a0' }] },
+  [`${lifted}/1`]: { reason: 'Native planner does not reject a tombstoned destination.', shared: 'ParentMissing', native: [{ op: 'subject.place', subject: 'agent/test/lifted', folder: uuid('c'), key: 'a0' }] },
 };
 const used = new Set();
 const difference = id => { const value = divergences[id]; if (value) { assert.ok(value.reason); used.add(id); } return value; };
@@ -96,10 +96,12 @@ for (const fixture of fixtures.cases) test(`native sidebar behavior: ${fixture.n
       if (delta) {
         assert.equal(expected._tag, 'Refused');
         assert.equal(expected.refusal._tag, delta.shared);
-        if (delta.native.includes(' ')) { assert.throws(() => plan(arrangement, intent), { message: delta.native }); continue; }
+        if (delta.error) { assert.throws(() => plan(arrangement, intent), { message: delta.error }); continue; }
         const operations = plan(arrangement, intent);
-        assert.equal(operations.at(-1).op, delta.native);
-        assert.notDeepEqual(operations, []);
+        assert.deepEqual(operations, delta.native);
+        const next = acknowledged(arrangement, operations);
+        send(next, true);
+        assert.deepEqual(delivered, [next]);
         continue;
       }
       assert.equal(expected._tag, 'Planned', 'Every unsupported native move must have an explicit divergence.');
