@@ -1923,7 +1923,7 @@ mod tests {
         assert_eq!(normalized["x-st-conditions"].as_array().unwrap().len(), 1);
         let generated = models(&schema).unwrap();
         assert!(generated.contains("conditional object relationship"));
-        assert!(generated.contains("[\"epoch\"]"));
+        assert!(generated.contains("hasOwnProperty.call((o as Record<string, unknown>)[\"membership\"], \"epoch\")"));
         let mut unsupported = schema;
         unsupported["$defs"]["Entry"]["allOf"][0]["then"]["additionalProperties"] = json!(false);
         assert!(models(&unsupported).is_err(), "unsupported predicates must still fail closed");
@@ -2113,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_conditional_discriminators_fail_instead_of_changing_missing_semantics() {
+    fn optional_conditional_discriminators_preserve_missing_semantics() {
         let mut input = conditional_schema();
         input["required"] = json!(["id"]);
         let schema = json!({
@@ -2123,7 +2123,10 @@ mod tests {
                 "Entry": input
             }
         });
-        assert!(models(&schema).is_err());
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("!Object.prototype.hasOwnProperty.call(o, \"type\")"));
+        assert!(generated.contains("Object.prototype.hasOwnProperty.call(o, \"payload\")"));
+        assert!(generated.contains("conditional object relationship"));
     }
 
     #[test]
