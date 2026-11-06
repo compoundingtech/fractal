@@ -8305,10 +8305,11 @@ mod tests {
         let sidebar = |ui: &Ui| ui.glasses.sidebar.clone();
         assert!(sidebar(&ui).shown && sidebar(&ui).focused);
         let shown = screen(&ui);
-        for section in ["Everything else", "Agents", "Missions", "Machines", "Filter:"] {
+        for section in ["Everything else", "Agents", "Missions", "Filter:"] {
             assert!(shown.contains(section), "{shown}");
         }
         let rows = ui.resource_sidebar.rows();
+        assert!(rows.iter().any(|row| matches!(row, super::super::resource_sidebar::Row::Group { title, .. } if title == "Machines")), "taller agent rows leave lower groups reachable by scrolling");
         let (agent_index, agent) = rows.iter().enumerate().find_map(|(index, row)| match row {
             super::super::resource_sidebar::Row::Resource(row) if row.kind == "Agents" => Some((index, row.id.clone())),
             _ => None,

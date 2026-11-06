@@ -1314,6 +1314,7 @@ mod tests {
         assert_eq!(text(&ui.resource_sidebar, &rows[first + 3]), ["     completed build 2/2 ██████"]);
         assert_eq!(ui.resource_sidebar.choices.collapsed.get(&format!("runs/{}", agents[0])), Some(&false));
         ui.resource_sidebar.selected = first + 1;
+        ui.glasses.sidebar.shown = true;
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 32)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
         let frame = ui.frame.borrow();
