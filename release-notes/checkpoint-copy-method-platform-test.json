@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Checkpoint accounting tests verify the filesystem's actual copy strategy on macOS and Linux instead of assuming VACUUM INTO.",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No database or claim schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Test-only change. A copy probe into the checkpoint scratch filesystem determines the exact expected accounting method: clone on clone-capable filesystems, or vacuum_into on the existing fallback path. Production behavior and status metadata are unchanged."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing stored changes; reverting restores the previous test expectation."}
+}

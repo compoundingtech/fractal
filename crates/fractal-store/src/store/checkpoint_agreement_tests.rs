@@ -16,6 +16,15 @@ fn checkpoint_verification_accounts_phases_and_adds_status_metadata() {
     assert!(before.get("verification_attempt").is_none());
     observe(&store, 4);
     assert_eq!(kinds(&step(&store, &context)), ["sealed"]);
+    // `open_memory` is file-backed: APFS and reflink-capable Linux filesystems can clone,
+    // while other filesystems fall back to VACUUM INTO. Probe the same destination filesystem
+    // so the metadata must name the actual copy strategy, not merely any known strategy.
+    let probe = scratch.path().join("copy-method-probe.sqlite3");
+    let expected_copy_method = match store.copy_store_to(&probe).unwrap() {
+        smallclaims::store::checkpoint::StoreCopy::Clone => "clone",
+        smallclaims::store::checkpoint::StoreCopy::Full => "vacuum_into",
+    };
+    std::fs::remove_file(&probe).unwrap();
     assert_eq!(kinds(&step(&store, &context)), ["verified"]);
     let status = store.checkpoint_status(context.now_unix_ms, &[]).unwrap();
     let attempt = status.verification_attempt.as_ref().unwrap();
@@ -33,7 +42,7 @@ fn checkpoint_verification_accounts_phases_and_adds_status_metadata() {
             assert!(value[counter].is_null());
         }
     }
-    assert_eq!(attempt.phases[2].copy_method.as_deref(), Some("vacuum_into"));
+    assert_eq!(attempt.phases[2].copy_method.as_deref(), Some(expected_copy_method));
     assert!(attempt.phases[5].count.is_some());
     assert!(attempt.phases[8].count.is_some());
     let mut json = serde_json::to_value(&status).unwrap();
