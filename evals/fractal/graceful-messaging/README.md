@@ -23,9 +23,9 @@ A seat passes when all of these hold:
   the same PID;
 - no channel process (Claude's `claude-mcp`, or the pi-family channel) still executes the deleted
   binary;
-- `st agents show` reports the seat's delivery path as `current`.
+- `fractal agents show` reports the seat's delivery path as `current`.
 
-The runner must run outside any st seat. The isolated daemon binds a caller to the nearest `ST_AGENT`
+The runner must run outside any fractal seat. The isolated daemon binds a caller to the nearest `ST_AGENT`
 among its ancestors, and the runner sends as `person/eval`. From a seat, start it detached, for
 example with `setsid -f env -i HOME="$HOME" PATH=/usr/bin:/bin bash scripts/...`. Pass
 `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` through when the host has a user service manager,

@@ -10,9 +10,9 @@ fn history(root: &Path) -> String {
         .env("XDG_CONFIG_HOME", root.join("missing-config"))
         .env("ST3_PERSON", "invalid")
         .env("ST3_ENDPOINT", root.join("missing-endpoint"))
-        .env("STUI_TIMING_LOG", root.join("unexpected-timing"))
-        .env("STUI_OPEN_TRACE_FILE", root.join("unexpected-open-trace"))
-        .env("STUI_OPEN_TRACE_CONVERSATION", "agent/example/observer")
+        .env("FRACTAL_TUI_TIMING_LOG", root.join("unexpected-timing"))
+        .env("FRACTAL_TUI_OPEN_TRACE_FILE", root.join("unexpected-open-trace"))
+        .env("FRACTAL_TUI_OPEN_TRACE_CONVERSATION", "agent/example/observer")
         .output()
         .unwrap();
     assert!(
