@@ -135,7 +135,7 @@ it('draws served related runs under the host row in server order without joins, 
     expect(row().getAttribute('aria-label')).toBe('Worker, Working')
     expect(row().querySelector('[data-agent-menu]')).not.toBeNull()
     expect(row().querySelector('[data-mission-pill], [data-mission-unavailable]')).toBeNull()
-    expect(section()?.getAttribute('aria-label')).toBe('Related missions, 1 waiting on you')
+    expect(section()?.getAttribute('aria-label')).toBe('Related missions')
     expect([...row().querySelectorAll('[data-run]')].map(item => item.getAttribute('data-run'))).toEqual(served.rows.map(item => item.id))
     expect([...row().querySelectorAll('details[data-fold="finished"] [data-run]')].map(item => item.getAttribute('data-run'))).toEqual([served.rows[2]!.id])
     expect(row().querySelector('[data-waiting-on-you]')).not.toBeNull()
