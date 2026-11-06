@@ -26,7 +26,7 @@ def main():
     args = parser.parse_args()
     app = args.app.resolve()
     electron = str(app / "electron/pixel")
-    with tempfile.TemporaryDirectory(prefix="stui-browser-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-browser-") as directory:
         root = Path(directory)
         document = root / "document.html"
         document.write_text("<html><body><h1>Copper browser probe</h1><p>Invented local content.</p></body></html>")
