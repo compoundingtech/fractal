@@ -33,8 +33,10 @@ and the phone passes `phone` to retain its wording.
 ## Folder-only sidebar semantics
 
 `@fractal/views/sidebarView` is the React-free twin of
-`fractal_ui_model::sidebar`. `build(arrangement, inventory)` projects native version-1
-arrangements using the daemon's authoritative `resolved` maps. Its tagged result
+`fractal_sidebar::projection`. Rust hosts supply `model::ArrangementInput` with
+schema bodies and explicit resolved maps; the default crate has no client dependency.
+`build(arrangement, inventory)` projects native version-1 arrangements using the daemon's
+authoritative `resolved` maps. Its tagged result
 is `Built { tree }` or `Refused { error }`; missing resolution is `NotReady`,
 not a guessed parent graph. Opaque register revisions cannot establish which
 concurrent edge won a cycle.

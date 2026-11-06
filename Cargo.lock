@@ -2475,6 +2475,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-sidebar"
+version = "0.1.0"
+dependencies = [
+ "fractal-schema",
+ "jsonschema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fractal-storage-version"
 version = "0.1.0"
 
@@ -2636,7 +2646,6 @@ version = "0.1.0"
 dependencies = [
  "fractal-client",
  "fractal-schema",
- "jsonschema",
  "serde",
  "serde_json",
 ]
