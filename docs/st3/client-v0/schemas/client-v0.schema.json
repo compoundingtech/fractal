@@ -21,12 +21,13 @@
   ],
   "$defs": {
     "AgentRelatedRuns": {
-      "type": "object", "required": ["kind", "agent_id", "as_of", "work_cut", "missions_cut", "rows"],
+      "type": "object", "required": ["kind", "agent_id", "as_of", "work_cut", "missions_cut", "total_rows", "truncated", "rows"],
       "properties": {
         "kind": {"const": "agent-related-runs"}, "agent_id": {"type": "string"},
         "as_of": {"type": "integer", "minimum": 0},
         "work_cut": {"type": "integer", "minimum": 0}, "missions_cut": {"type": "integer", "minimum": 0},
-        "rows": {"type": "array", "items": {"$ref": "#/$defs/AgentRelatedRun"}}
+        "total_rows": {"type": "integer", "minimum": 0}, "truncated": {"type": "boolean"},
+        "rows": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/AgentRelatedRun"}}
       }
     },
     "AgentRelatedRun": {

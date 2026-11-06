@@ -1041,7 +1041,7 @@ test('reads bounded seat status history through the paired gateway', async () =>
 
 test('reads semantic related mission rows without joining agent work', async () => {
     const calls = [];
-    const rows = { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: 100, work_cut: 1, missions_cut: 1, rows: [] };
+    const rows = { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: 100, work_cut: 1, missions_cut: 1, total_rows: 0, truncated: false, rows: [] };
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
         calls.push(url);
         return response(envelope(url.endsWith('/capabilities') ? capabilities : rows));
