@@ -160,7 +160,7 @@ fn terminal_closed(revents: libc::c_short) -> bool {
     false
 }
 /// How many looks, a tenth of a second apart, a terminal must keep looking closed before the
-/// watch below ends stui. A terminal that is really gone stays gone; the macOS test in
+/// watch below ends the TUI. A terminal that is really gone stays gone; the macOS test in
 /// `terminal_closed` (readable with nothing queued) can also hold for an instant while another
 /// thread of this process drains the keys that made it readable.
 const HANGUP_LOOKS: u32 = 10;
@@ -183,11 +183,11 @@ fn watch_terminal_hangup() {
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
     //
-    // Nathan, 2026-10-17: stui on a macOS laptop ended again and again with no panic, no signal and no
+    // Nathan, 2026-10-17: the TUI on a macOS laptop ended again and again with no panic, no signal and no
     // line in exits.log (`silent_exits` in its counters, a draft restored as unclean). This
     // thread was the one place that ends the process without a trace, and on macOS a single
     // look at "readable, nothing queued" was enough. It now needs the look to hold for a
-    // second, and says so in exits.log when it does end stui.
+    // second, and says so in exits.log when it does end the TUI.
     std::thread::spawn(|| {
         let mut run = 0;
         loop {
@@ -927,7 +927,7 @@ pub fn run(mut options: Args) -> Result<()> {
     let open_timing = ui::open_timing::Trace::from_env(process_started);
     fractal_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
-    if let Some(path) = std::env::var_os("STUI_TIMING_LOG") {
+    if let Some(path) = std::env::var_os("FRACTAL_TUI_TIMING_LOG") {
         install_timing_log(path.into());
     }
     let args = options.render_args();
@@ -1192,7 +1192,7 @@ mod tests {
     }
     #[test]
     fn regression_person_falls_back_to_local_config() {
-        let dir = std::env::temp_dir().join(format!("stui-person-{}", uuid::Uuid::now_v7()));
+        let dir = std::env::temp_dir().join(format!("fractal-tui-person-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "person = \"person/alex\"\n").unwrap();
@@ -1237,7 +1237,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::os::unix::net::UnixListener;
 
-        let path = std::env::temp_dir().join(format!("stui-{}.sock", uuid::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("fractal-tui-{}.sock", uuid::Uuid::now_v7()));
         let listener = UnixListener::bind(&path).unwrap();
         let client = Client::unix_as(&path, "person/test");
         let server = std::thread::spawn(move || {
@@ -1395,7 +1395,7 @@ mission "release" state="ready" {
         /// st serving a run of the `release` mission in `source`, before any reconcile pass.
         async fn serve(source: &str) -> Self {
             let root = tempfile::tempdir().unwrap();
-            let node = "stui-gate";
+            let node = "fractal-tui-gate";
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), node).unwrap());
             let intent = fractal_daemon::graph::parse_intent(source, node).unwrap();
@@ -1477,7 +1477,7 @@ mission "release" state="ready" {
             let _ = (&mut self.server).await;
             std::fs::remove_file(&self.socket).unwrap();
             self.store = Arc::new(
-                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "stui-gate").unwrap(),
+                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "fractal-tui-gate").unwrap(),
             );
             self.state.store = self.store.clone();
             self.state.notify = Arc::new(tokio::sync::Notify::new());
@@ -1485,7 +1485,7 @@ mission "release" state="ready" {
             self.reconciler = fractal_daemon::reconcile::Reconciler::new(
                 self.store.clone(),
                 Arc::new(NoRuntime),
-                "stui-gate".into(),
+                "fractal-tui-gate".into(),
                 self.state.notify.clone(),
             );
             let state = self.state.clone();

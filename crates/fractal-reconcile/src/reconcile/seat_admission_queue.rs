@@ -134,8 +134,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(BurstReserve { full: 0, kept: 0 });
         };
-        let granted = self.seat_admission.status.state().lane_bursts.iter().filter(|burst| burst.granted)
-            .map(|burst| (burst.subject.clone(), burst.capacity.memory)).collect::<BTreeMap<_, _>>();
+        // A raise found at start is a burst the daemon before this one granted (find_raised_lanes).
+        let granted = {
+            let state = self.seat_admission.status.state();
+            state.lane_bursts.iter().filter(|burst| burst.granted)
+                .map(|burst| (burst.subject.clone(), burst.capacity.memory))
+                .chain(state.lane_found.iter().map(|(subject, lane)| (subject.clone(), lane.memory)))
+                .collect::<BTreeMap<_, _>>()
+        };
         let (mut smallest, mut burst_raise) = (lane.memory, 0);
         for desired in self.store.desired_subjects()? {
             let Some(base) = desired.member.as_ref().filter(|member| member.host == self.host).and_then(|member| member.capacity)

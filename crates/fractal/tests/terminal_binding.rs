@@ -77,7 +77,7 @@ impl RuntimeControl for Runtime {
         self.actions.lock().unwrap().push("leftovers".into());
     }
 }
-fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::St3Error> {
+fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::FractalError> {
     let intent = fractal_daemon::parse_intent(source, "orchid")?;
     let preview = store.mission(
         &intent,

@@ -31,13 +31,13 @@ pub trait ProjectionDivergenceStore {
     /// Open a fault for each divergence with no open fault, and end the open faults this node
     /// shares with a peer whose last comparison agrees. Reads the comparisons in memory and the
     /// open faults once; writes only when a fault opens or ends.
-    fn check_projection_divergences(&self) -> Result<DivergenceCheck, St3Error>;
+    fn check_projection_divergences(&self) -> Result<DivergenceCheck, FractalError>;
     fn append_projection_divergence(
             &self,
             local: &str,
             episode: &str,
             divergence: &ProjectionDivergence,
-        ) -> Result<(), St3Error>;
+        ) -> Result<(), FractalError>;
     /// Open divergence episodes: every divergence failure on this member's and its peers' daemon
     /// subjects that no recovery names, however old. Each is a P1 bug, so these claims stay few.
     /// The read never stops at the newest of them, since an older episode that is still open
@@ -47,7 +47,7 @@ pub trait ProjectionDivergenceStore {
 
 impl ProjectionDivergenceStore for Store {
 
-    fn check_projection_divergences(&self) -> Result<DivergenceCheck, St3Error> {
+    fn check_projection_divergences(&self) -> Result<DivergenceCheck, FractalError> {
         let local = self.origin().to_owned();
         let divergences = self.replication_divergences();
         let open = self.open_projection_divergences().map_err(internal)?;
@@ -107,7 +107,7 @@ impl ProjectionDivergenceStore for Store {
             local: &str,
             episode: &str,
             divergence: &ProjectionDivergence,
-        ) -> Result<(), St3Error> {
+        ) -> Result<(), FractalError> {
         let peer = divergence.peer.as_str();
         let peer_build = divergence.peer_build.as_deref().unwrap_or("unknown");
         let reason = format!(

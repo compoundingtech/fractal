@@ -3,7 +3,7 @@ use kdl::{KdlDocument, KdlNode};
 use crate::declaration_render::{annotations, common_body, protection};
 use crate::gate_render::{block, duration, node, property, text};
 use crate::loop_render::{comment, dependencies, has_legacy_loop_shapes, render_loop_node};
-use crate::model::{CompletionSpec, MissionInputKind, MissionSpec, MissionState, ResourceReferenceKind, RevisionCutover, St3Error, StepSpec, UsedMissionSpec};
+use crate::model::{CompletionSpec, MissionInputKind, MissionSpec, MissionState, ResourceReferenceKind, RevisionCutover, FractalError, StepSpec, UsedMissionSpec};
 
 pub struct MissionDeclarationText {
     pub text: String,
@@ -11,14 +11,14 @@ pub struct MissionDeclarationText {
     pub legacy: bool,
 }
 
-pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationText, St3Error> {
+pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationText, FractalError> {
     let mut document = KdlDocument::new();
     document.nodes_mut().extend([node("version", [2_i128.into()]), mission_node(mission)?]);
     document.autoformat();
     Ok(MissionDeclarationText { text: document.to_string(), legacy: has_legacy_loop_shapes(mission) })
 }
 
-fn mission_node(mission: &MissionSpec) -> Result<KdlNode, St3Error> {
+fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
     let mut root = text("mission", &mission.id);
     property(&mut root, "state", match mission.state { MissionState::Draft => "draft", MissionState::Ready => "ready", MissionState::Retired => "retired" });
     protection(&mut root, mission.revisions_human_only, mission.revision_reviewer.as_deref(), mission.timeout_ms);
@@ -33,16 +33,29 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, St3Error> {
     Ok(block(root, mission_body(mission, None)?))
 }
 
-fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, St3Error> {
+fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
     let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, inputs,
         max_active_runs, timeout_ms: _, report_to: _, stalled_after_ms: _, report_stalls: _,
         report_completed: _, revision_owners: _, revisions_human_only: _, revision_reviewer: _,
         revision_cutover: _, declarations_kdl: _, capacity, work_selector, completion, goals,
+        declared_priority, declared_lane, declared_budgets,
         constraints, agent_constraints: _, baselines, products, gates, steps, display_order } = mission;
     let goals = if parent.is_some() { goals.get(1..).ok_or_else(||
-        St3Error::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
+        FractalError::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
+    if let Some(priority) = declared_priority { children.push(text("declared-priority", priority.as_str())); }
+    if let Some(lane) = declared_lane { children.push(text("declared-lane", lane.as_str())); }
+    if let Some(budgets) = declared_budgets {
+        let mut leaves = Vec::new();
+        for (name, value) in [("cpu-seconds", budgets.cpu_seconds), ("token-budget", budgets.token_budget)] {
+            if let Some(value) = value { leaves.push(node(name, [i128::from(value).into()])); }
+        }
+        for (name, value) in [("memory-max", budgets.memory_max.as_deref()), ("disk-max", budgets.disk_max.as_deref())] {
+            if let Some(value) = value { leaves.push(text(name, value)); }
+        }
+        children.push(block(node("declared-budgets", []), leaves));
+    }
     if *system { children.push(node("system", [])); }
     for reference in resources {
         let mut resource = text("resource", &reference.name);
@@ -80,10 +93,10 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
         children.push(block(node("completion", []), body));
     }
     if display_order.len() != steps.len() || display_order.iter().collect::<std::collections::BTreeSet<_>>().len() != steps.len() {
-        return Err(St3Error::new("unrenderable-mission", "display order does not enumerate every step exactly once"));
+        return Err(FractalError::new("unrenderable-mission", "display order does not enumerate every step exactly once"));
     }
     for id in display_order {
-        let step = steps.get(id).ok_or_else(|| St3Error::new("unrenderable-mission", "display order names an absent step"))?;
+        let step = steps.get(id).ok_or_else(|| FractalError::new("unrenderable-mission", "display order names an absent step"))?;
         let rendered = if let Some(spec) = &step.loop_spec {
             render_loop_node(spec, &step.dependencies, &|branch| mission_body(branch, Some(mission)))?
         } else { step_node(step)? };
@@ -106,7 +119,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
     Ok(children)
 }
 
-fn step_node(step: &StepSpec) -> Result<KdlNode, St3Error> {
+fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     let StepSpec { id, path: _, fresh_context, keep_open, queue: _, queue_position: _, title,
         goals, constraints, agent_constraints, timeout_ms, capacity, retry, finally: _,
         work_selector, revision_owners, revisions_human_only, revision_reviewer, dependencies: after,
@@ -178,6 +191,29 @@ mod tests {
         let reread = parse(&rendered.text);
         assert_eq!(visible(serde_json::to_value(&spec).unwrap()), visible(serde_json::to_value(&reread).unwrap()));
         assert_eq!(render_mission_kdl(&spec).unwrap().text, rendered.text);
+    }
+
+    #[test]
+    fn canonical_declared_admission_retains_typed_metadata() {
+        let mut spec = parse(r#"mission "test" state="ready" { goal "Keep declaration metadata."; }"#);
+        spec.declared_priority = Some(crate::model::DeclaredPriority::Unknown("future-priority".into()));
+        spec.declared_lane = Some(crate::model::DeclaredLane::Build);
+        spec.declared_budgets = Some(crate::model::DeclaredBudgets {
+            cpu_seconds: Some(300),
+            token_budget: Some(100_000),
+            memory_max: Some("8G".into()),
+            disk_max: Some("20G".into()),
+        });
+        let rendered = render_mission_kdl(&spec).unwrap();
+        let document: KdlDocument = rendered.text.parse().unwrap();
+        let body = document.get("mission").unwrap().children().unwrap();
+        assert_eq!(body.get("declared-priority").unwrap().get(0).unwrap().as_string(), Some("future-priority"));
+        assert_eq!(body.get("declared-lane").unwrap().get(0).unwrap().as_string(), Some("build"));
+        let budgets = body.get("declared-budgets").unwrap().children().unwrap();
+        assert_eq!(budgets.get("cpu-seconds").unwrap().get(0).unwrap().as_integer(), Some(300));
+        assert_eq!(budgets.get("token-budget").unwrap().get(0).unwrap().as_integer(), Some(100_000));
+        assert_eq!(budgets.get("memory-max").unwrap().get(0).unwrap().as_string(), Some("8G"));
+        assert_eq!(budgets.get("disk-max").unwrap().get(0).unwrap().as_string(), Some("20G"));
     }
 
     #[test]
