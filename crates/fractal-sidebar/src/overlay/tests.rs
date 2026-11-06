@@ -172,3 +172,21 @@ fn atomic_delete_move_lifts_from_final_positions_in_every_operation_order() {
         assert_eq!(visible.nodes["folder:folder-c"].children, vec![subject("member-b")]);
     }
 }
+#[test]
+fn create_delete_preserves_tombstone_and_missing_ancestor_rules_in_both_orders() {
+    let (arrangement, members) = inputs();
+    let observed = build_v2(&arrangement, &members).unwrap();
+    let create = Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("missing".into()), key: "a0".into() };
+    let delete = Folder::FolderDelete { id: "folder-c".into() };
+    for folders in [vec![delete.clone(), create.clone()], vec![create, delete]] {
+        let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-c"), before: None };
+        let mut folders = folders;
+        folders.push(Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-c".into()), key: "a0".into() });
+        let visible = staged(intent.clone(), V2Plan { folders, memberships: vec![] }).project(&observed).unwrap().into_owned();
+        assert!(!visible.nodes.contains_key("folder:folder-c"));
+        assert_eq!(visible.deleted_folders, vec!["folder-c"]);
+        assert_eq!(visible.nodes["folder:folder-b"].shown_under, Parent::Root {});
+        assert_eq!(visible.nodes["folder:folder-b"].parent, parent("folder-c"));
+        assert!(matches!(crate::plan::plan_move(&visible, &intent), Err(crate::plan::MoveRefusal::ParentMissing { cause: crate::plan::ParentMissingCause::FolderDeleted, .. })));
+    }
+}

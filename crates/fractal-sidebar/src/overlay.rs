@@ -22,7 +22,6 @@ impl Edits {
                         let node = NodeRef::Folder { id: id.clone() };
                         let parent = parent_ref(parent);
                         tree.nodes.insert(node_key(&node), ProjectedNode { node, parent: parent.clone(), shown_under: parent, key: Some(key.clone()), revision: None, source: Source::Person, children: Vec::new() });
-                        tree.deleted_folders.retain(|deleted| deleted != id);
                     }
                     Folder::FolderMove { id, parent, key } => position(&mut tree, &NodeRef::Folder { id: id.clone() }, parent, key)?,
                     Folder::FolderDelete { id } => {
@@ -67,8 +66,14 @@ impl Edits {
                 if matches!(row.node, NodeRef::Subject { .. }) { row.parent = parent.clone(); }
             }
         }
-        // Reuse projection ordering; reject a newly missing destination or conflicting
-        // ancestry rather than showing orphaned rows or panicking in child-list rebuild.
+        // Missing final-batch ancestors resolve to root, as in server live_ancestors.
+        let missing: std::collections::BTreeSet<_> = tree.nodes.values().filter_map(|row| match &row.shown_under {
+            Parent::Folder { id } if !tree.nodes.contains_key(&node_key(&NodeRef::Folder { id: id.clone() })) => Some(row.shown_under.clone()), _ => None,
+        }).collect();
+        for row in tree.nodes.values_mut().filter(|row| missing.contains(&row.shown_under)) {
+            row.shown_under = Parent::Root {};
+            if matches!(row.node, NodeRef::Subject { .. }) { row.parent = Parent::Root {}; }
+        }
         if !invalid_ancestry(&tree).is_empty() { return Err(ProjectionError::InvalidResolution); }
         order_rows(&mut tree);
         Ok(Cow::Owned(tree))
