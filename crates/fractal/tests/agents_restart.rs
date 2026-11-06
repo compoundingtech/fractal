@@ -3890,7 +3890,8 @@ async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_rest
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(300, std::sync::atomic::Ordering::SeqCst);
+    // Long enough that a loaded host's fixture and passes fit inside each wait.
+    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(1500, std::sync::atomic::Ordering::SeqCst);
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
     park(&fixture, &subject, "claude");
     *fixture.runtime.refuse_start.lock().unwrap() = true;
@@ -3903,7 +3904,7 @@ async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_rest
     assert!(retry_decisions(&fixture, &subject).is_empty());
 
     // The first retry fails, and says so; the next waits twice as long.
-    wait_ms(350);
+    wait_ms(1550);
     fresh_passes(&fixture, 4);
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
     assert_eq!(retry_decisions(&fixture, &subject).len(), 1);
@@ -3913,7 +3914,7 @@ async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_rest
 
     // Once the launcher works, the next retry starts the seat and the fault is gone.
     *fixture.runtime.refuse_start.lock().unwrap() = false;
-    wait_ms(700);
+    wait_ms(3050);
     fresh_passes(&fixture, 4);
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2, "the retry started the seat");
     let retries = retry_decisions(&fixture, &subject);
