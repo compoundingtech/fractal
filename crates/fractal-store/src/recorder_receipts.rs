@@ -49,11 +49,22 @@ pub async fn run(
 }
 
 fn spool_watcher(directory: &Path, wake: Arc<Notify>) -> Result<notify::RecommendedWatcher> {
+    spool_watcher_observed(directory, wake, |_| {})
+}
+
+fn spool_watcher_observed(
+    directory: &Path,
+    wake: Arc<Notify>,
+    observe: impl Fn(&notify::Event) + Send + 'static,
+) -> Result<notify::RecommendedWatcher> {
     // FSEvents reports canonical paths even when TMPDIR traverses /tmp's symlink.
     let directory = directory.canonicalize().context("resolve recorder spool watch directory")?;
     let watched_directory = directory.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|event| spool_event_needs_scan(&event, &watched_directory)) {
+        if let Ok(event) = event
+            && spool_event_needs_scan(&event, &watched_directory)
+        {
+            observe(&event);
             wake.notify_one();
         }
     })?;
@@ -358,13 +369,21 @@ mod tests {
 
     async fn assert_idle_scan_then_publication(spool: &Path) {
         let wake = Arc::new(Notify::new());
-        let _watcher = spool_watcher(spool, wake.clone()).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queued_events = events.clone();
+        let _watcher = spool_watcher_observed(spool, wake.clone(), move |event| {
+            queued_events.lock().unwrap().push(format!(
+                "kind={:?}, paths={:?}, attrs={:?}, need_rescan={}",
+                event.kind, event.paths, event.attrs, event.need_rescan()
+            ));
+        }).unwrap();
         assert_eq!(fs::read_dir(spool).unwrap().count(), 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(250), wake.notified())
                 .await
                 .is_err(),
-            "the consumer's own scan queued another scan"
+            "the consumer's own scan queued another scan; queued notify events: {:#?}",
+            events.lock().unwrap()
         );
         // Ignoring reads must not suppress the next atomic publication.
         fs::write(spool.join("receipt.tmp"), b"partial").unwrap();
