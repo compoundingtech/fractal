@@ -443,11 +443,24 @@ fn agent_review_owner_snapshot_default_agentless_and_unknown_owner() {
     let other = &step(&parent, "other").subject;
     // Neither the pinned mission nor this step declares a selector.
     assert!(snapshot(&store, other, FREE).unwrap().agentless);
-    assert!(
-        !snapshot(&store, &step(&parent, "start").subject, FREE)
-            .unwrap()
-            .agentless
-    );
+    for s in [
+        WorkSelector::Assigned {
+            agent: PARENT.into(),
+        },
+        WorkSelector::Available {
+            agents: vec![PARENT.into()],
+        },
+    ] {
+        let mut req = request("parent");
+        req.idempotency_key = format!("{s:?}");
+        let run = store
+            .create_child_mission_run(&req, &parent, other, Some(&s))
+            .unwrap();
+        let inherited = &step(&run, "other").subject;
+        assert!(!snapshot(&store, inherited, FREE).unwrap().agentless);
+    }
+    let assigned = &step(&parent, "start").subject;
+    assert!(!snapshot(&store, assigned, FREE).unwrap().agentless);
     for owner in [
         "step-run/missing/work",
         "loop-run/missing/work",
