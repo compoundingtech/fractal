@@ -121,3 +121,171 @@ pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
     primary
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A fresh directory below `/tmp`: a test runner's own temporary directory can be long enough
+    /// that no socket path below it fits the address limit.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let name = format!(
+                "fsd-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let dir = Path::new("/tmp").join(name);
+            std::fs::create_dir(&dir).unwrap();
+            Self(std::fs::canonicalize(&dir).unwrap())
+        }
+
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A socket file nothing listens on, as a daemon that exited leaves behind.
+    fn dead_socket(path: &Path) {
+        drop(UnixListener::bind(path).unwrap());
+    }
+
+    #[test]
+    fn a_path_fits_up_to_the_address_limit_and_not_past_it() {
+        // SAFETY: an all-zero sockaddr_un is a valid value; only its field size is read.
+        let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let capacity = address.sun_path.len();
+        // The path and its terminating NUL must fit in sun_path.
+        let longest = format!("/{}", "s".repeat(capacity - 2));
+        assert_eq!(longest.len(), capacity - 1);
+        assert!(unix_socket_path_fits(Path::new(&longest)));
+        assert!(!unix_socket_path_fits(Path::new(&format!("{longest}s"))));
+    }
+
+    #[test]
+    fn only_a_listening_socket_answers() {
+        let scratch = Scratch::new();
+        assert!(!unix_socket_answers(&scratch.join("missing.sock")));
+        let dead = scratch.join("dead.sock");
+        dead_socket(&dead);
+        assert!(!unix_socket_answers(&dead));
+        let live = scratch.join("live.sock");
+        let _listener = UnixListener::bind(&live).unwrap();
+        assert!(unix_socket_answers(&live));
+        let too_long = PathBuf::from(format!("/{}", "s".repeat(4096)));
+        assert!(!unix_socket_answers(&too_long));
+    }
+
+    #[test]
+    fn the_runtime_default_stands_without_a_published_link() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("fractal.sock");
+        assert_eq!(
+            runtime_or_published_socket(&runtime, &scratch.join("published.sock")),
+            runtime
+        );
+    }
+
+    #[test]
+    fn a_dead_runtime_default_yields_to_a_published_socket_that_answers() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("fractal.sock");
+        dead_socket(&runtime);
+        let elsewhere = scratch.join("elsewhere.sock");
+        let _listener = UnixListener::bind(&elsewhere).unwrap();
+        let published = scratch.join("published.sock");
+        std::os::unix::fs::symlink(&elsewhere, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), elsewhere);
+    }
+
+    #[test]
+    fn a_runtime_default_that_answers_is_kept_over_the_published_socket() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("fractal.sock");
+        let _runtime_listener = UnixListener::bind(&runtime).unwrap();
+        let elsewhere = scratch.join("elsewhere.sock");
+        let _listener = UnixListener::bind(&elsewhere).unwrap();
+        let published = scratch.join("published.sock");
+        std::os::unix::fs::symlink(&elsewhere, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+    }
+
+    #[test]
+    fn a_published_socket_that_does_not_answer_keeps_the_runtime_default() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("fractal.sock");
+        let elsewhere = scratch.join("elsewhere.sock");
+        dead_socket(&elsewhere);
+        let published = scratch.join("published.sock");
+        std::os::unix::fs::symlink(&elsewhere, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+    }
+
+    #[test]
+    fn a_published_link_to_the_runtime_default_is_not_probed() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("fractal.sock");
+        dead_socket(&runtime);
+        let published = scratch.join("published.sock");
+        std::os::unix::fs::symlink(&runtime, &published).unwrap();
+        assert_eq!(runtime_or_published_socket(&runtime, &published), runtime);
+    }
+
+    #[test]
+    fn without_a_separate_runtime_directory_the_published_target_is_used() {
+        let scratch = Scratch::new();
+        let elsewhere = scratch.join("elsewhere.sock");
+        dead_socket(&elsewhere);
+        let published = scratch.join("published.sock");
+        std::os::unix::fs::symlink(&elsewhere, &published).unwrap();
+        assert_eq!(
+            runtime_or_published_socket(&published, &published),
+            elsewhere
+        );
+    }
+
+    #[test]
+    fn default_socket_names_prefer_the_fractal_socket_that_answers() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("fractal.sock");
+        let published = scratch.join("published").join("fractal.sock");
+        let _listener = UnixListener::bind(&runtime).unwrap();
+        let _legacy = UnixListener::bind(scratch.join("st3.sock")).unwrap();
+        assert_eq!(default_unix_socket(&runtime, &published), runtime);
+    }
+
+    #[test]
+    fn default_socket_names_fall_back_to_a_legacy_socket_that_answers() {
+        let scratch = Scratch::new();
+        let published = scratch.join("published").join("fractal-client.sock");
+        let runtime = scratch.join("fractal-client.sock");
+        let legacy = scratch.join("st3-client.sock");
+        let listener = UnixListener::bind(&legacy).unwrap();
+        assert_eq!(default_unix_socket(&runtime, &published), legacy);
+        // With neither answering, the fractal name stands.
+        drop(listener);
+        assert_eq!(default_unix_socket(&runtime, &published), runtime);
+    }
+
+    #[test]
+    fn explicit_socket_names_are_not_redirected_to_legacy_names() {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("custom.sock");
+        let _legacy = UnixListener::bind(scratch.join("st3.sock")).unwrap();
+        assert_eq!(
+            default_unix_socket(&runtime, &scratch.join("published.sock")),
+            runtime
+        );
+    }
+}
