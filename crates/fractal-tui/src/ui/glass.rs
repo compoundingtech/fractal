@@ -5070,6 +5070,7 @@ mod tests {
             ui.resource_sidebar = resource_sidebar::golden_sidebar(state);
             ui.glasses.sidebar.focused = false;
             let (width, height) = match state {
+                "scroll" => (38, 4),
                 "narrow" => (7, 6), "zero-width" => (0, 10),
                 "zero-height" => (38, 0), "zero" => (0, 0), _ => (38, 10),
             };
