@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn sweeping_the_pointer_over_every_cell_of_a_busy_conversation_never_panics() {
-        // Nathan, 2026-10-07: hovering messages seemed to crash stui.
+        // Nathan, 2026-10-07: hovering messages seemed to crash the terminal UI.
         for (width, height) in [(60, 20), (100, 30), (160, 48)] {
             let mut ui = Ui::new(demo::test_world());
             ui.live = true;

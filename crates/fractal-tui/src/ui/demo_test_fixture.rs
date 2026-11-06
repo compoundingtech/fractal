@@ -107,7 +107,7 @@ pub fn world() -> World {
         slo_otel_url: Some("https://otel.example.test/d/slo".into()),
         clients: Load::Ready(vec![
             Connected {
-                client: s("stui 0.1.0+1ecae71"),
+                client: s("fractal-tui 0.1.0+1ecae71"),
                 who: s("person/robin"),
                 device: None,
                 member: s("lark"),
@@ -129,7 +129,7 @@ pub fn world() -> World {
                 older: false,
             },
             Connected {
-                client: s("stui 0.0.9+77d0a13"),
+                client: s("fractal-tui 0.0.9+77d0a13"),
                 who: s("person/robin"),
                 device: None,
                 member: s("lark"),
