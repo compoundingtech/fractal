@@ -1608,9 +1608,20 @@ describe('optimistic conversation sends', () => {
           has_more: false, upserts: [], removes: [], order: [agent.id], snapshot: refreshed,
         })
         yield* settle
-        expect((yield* Effect.promise(() => live.source.attachments!.send({
+        const { promise, resolve: releaseRetry } = Promise.withResolvers<void>()
+        gateway.sendGate = promise
+        const retrying = live.source.attachments!.send({
           ...request, _tag: 'Resend', idempotencyKey: first.idempotency_key,
-        })))._tag).toBe('Success')
+        })
+        yield* Effect.promise(() => gateway.nextAction(2))
+        // Concurrent retry gestures share the admitted delivery instead of posting twice.
+        const duplicate = live.source.attachments!.send({
+          ...request, id: 'action/rebuilt', _tag: 'Resend', idempotencyKey: first.idempotency_key,
+        })
+        releaseRetry()
+        expect((yield* Effect.promise(() => retrying))._tag).toBe('Success')
+        expect(yield* Effect.promise(() => duplicate)).toEqual(yield* Effect.promise(() => retrying))
+        expect(gateway.messageActions).toHaveLength(2)
         expect(gateway.messageActions[1]).toMatchObject({
           id: first.id, idempotency_key: first.idempotency_key, parameters: first.parameters,
           fence: { snapshot_id: refreshed.id, subject_revisions: {} },

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Move the web composer outbox onto shared optimistic mutations",
+  "replay": {"status": "none", "detail": "Composer overlays remain in-memory; no durable replay changes."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "Server admission, capability checks and snapshot fences remain authoritative."},
+  "compatibility": {"status": "none", "detail": "Preserves immediate message drawing, submission order, retained failures and identical same-key retries. ACKs keep the outbox row until identity-correlated authoritative content arrives; omitted rows never prove delivery."},
+  "downtime": {"status": "none", "detail": "No deployment interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reloading discards client overlays without changing authoritative messages."}
+}

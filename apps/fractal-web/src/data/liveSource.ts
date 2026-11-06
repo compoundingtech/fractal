@@ -1,7 +1,7 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
-import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
+import type { ActionResult, Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   Fractal,
   FractalLive,
@@ -45,6 +45,7 @@ import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
+import { makeOptimisticMutations, MutationRefused } from './optimisticMutation.ts'
 import {
   initialFeedSync,
   observeFeedSync,
@@ -115,6 +116,8 @@ interface RetainedConversation extends RetainedFeed<ConversationPage> {
 
 interface PendingSend {
   item: TextItem
+  readonly deliver: () => Promise<ConversationPortResult<ActionResult>>
+  delivery?: Promise<ConversationPortResult<ActionResult>>
 }
 /** Terminal-only presentation and recovery policy; unrelated feeds keep their existing verdicts. */
 const terminalUnavailable = (error: AttachFailure): Feed<never> => {
@@ -820,7 +823,22 @@ export const liveSource = ({
     // A Sent row retires only when its identity-correlated server content is in the window.
     // Until Fractal #1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
-    const pending = new Map<string, PendingSend>()
+    const initial: { items: ConversationPage['items']; sends: PendingSend[] } = { items: [], sends: [] }
+    const mutations = Effect.runSync(makeOptimisticMutations({
+      initial,
+      nextKey: () => crypto.randomUUID(),
+      send: ({ action }: { action: PendingSend }) => Effect.gen(function* () {
+        action.item = { ...action.item, sendState: { _tag: 'Pending' } }
+        publishPending()
+        action.delivery = action.deliver()
+        yield* Effect.promise(() => action.delivery!)
+        const status = action.item.sendState
+        if (status?._tag === 'Failed' || status?._tag === 'Unconfirmed')
+          return yield* new MutationRefused({ message: status.detail })
+      }),
+      project: (frame, { action }) => ({ ...frame, sends: [...frame.sends, action] }),
+      reconcile: (frame, { action }) => frame.items.some((item) => item.id === action.item.id) ? 'applied' : 'pending',
+    }))
     // Fractal deduplicates a key by its whole request except the fence. Each key's first action
     // id and parameters are what every Resend of it repeats, even after its row retires.
     const sentActions = new Map<string, Pick<AttachmentSendRequest, 'id' | 'parameters'>>()
@@ -834,10 +852,10 @@ export const liveSource = ({
     let generation = 0
     const projectPage = (): ConversationPage => {
       const projection = timeline.project()
-      const hadPending = pending.size > 0
-      if (hadPending)
-        for (const item of projection.items) pending.delete(item.id)
-      const items = pending.size === 0 ? projection.items : mergeOutboxItems(projection.items, pending.values())
+      const hadPending = Effect.runSync(SubscriptionRef.get(mutations.state)).pending.size > 0
+      Effect.runSync(mutations.accept({ items: projection.items, sends: [] }))
+      const view = Effect.runSync(mutations.view)
+      const items = mergeOutboxItems(view.items, view.sends)
       if (hadPending) {
         // Timeline indices exclude interleaved outbox rows. Compare against the actual
         // last published page, including when an echo retires the final outbox row.
@@ -934,9 +952,10 @@ export const liveSource = ({
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
       const id = `pending/${idempotencyKey}`
+      const retainedSend = Effect.runSync(SubscriptionRef.get(mutations.state)).pending.get(idempotencyKey)
       const action = sentActions.get(idempotencyKey) ?? { id: request.id, parameters: request.parameters }
       sentActions.set(idempotencyKey, action)
-      const local: PendingSend = {
+      const local: PendingSend = retainedSend?.action ?? {
         item: {
           _tag: 'Text', id, role: 'user',
           text: action.parameters.content ?? '',
@@ -946,27 +965,24 @@ export const liveSource = ({
             // The encoded wire side carries `name: null`; the view model has no null names.
             ...(typeof attachment.name === 'string' ? { name: attachment.name } : {}),
           })),
-          streaming: false, at: pending.get(id)?.item.at ?? new Date().toISOString(), sendState: { _tag: 'Pending' },
+          streaming: false, at: new Date().toISOString(), sendState: { _tag: 'Pending' },
         },
+        deliver: async () => deliver(),
       }
-      // A first send paints immediately: Enter must not wait for any await. An explicit
-      // Resend names mail the stream may already show, so its authoritative identity is
-      // reconciled before any optimistic row can duplicate it.
-      if (request._tag === 'Send') {
-        lastSendId = id
-        pending.set(id, local)
-        publishPending()
-      }
-      try {
-        // The public device-signing contract names mail from the first 16 SHA-256 hex digits.
-        // Resolve this before POST so an echo that wins the HTTP race still replaces its outbox item.
-        const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(idempotencyKey)))
-        const messageIds = [`message/${[...hash.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`]
-        if (request._tag === 'Send') timeline.keepOwnSendId(messageIds, id)
-        const submit = async () => {
+      if (request._tag === 'Send') lastSendId = id
+      let messageIds: readonly string[] | undefined
+      let drawsOutbox = true
+      const deliver = async (): Promise<ConversationPortResult<ActionResult>> => {
+        try {
+          // Resolve the public device-signing identity before POST, including when
+          // the authoritative echo wins the HTTP race.
+          if (messageIds === undefined) {
+            const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(idempotencyKey)))
+            messageIds = [`message/${[...hash.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`]
+          }
+          if (drawsOutbox) timeline.keepOwnSendId(messageIds, id)
           const current = await messageSnapshot()
-          if (current._tag === 'Refused') return current
-          return submitMessage({
+          const result = current._tag === 'Refused' ? current : await submitMessage({
             api_version: request.api_version,
             type: request.type,
             id: action.id,
@@ -974,35 +990,46 @@ export const liveSource = ({
             parameters: action.parameters,
             idempotency_key: idempotencyKey,
           })
+          if (result._tag === 'Success' && result.value.status === 'rejected') {
+            local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
+          } else if (result._tag === 'Refused') {
+            local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
+              ? { _tag: 'Unconfirmed', detail: result.detail }
+              : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
+          } else if (result._tag === 'Success' && result.value.status === 'completed') {
+            const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
+            if (drawsOutbox && affected.length > 0) timeline.keepOwnSendId(affected, id)
+            // ACK changes presentation, not retention: only a matching frame retires the row.
+            local.item = { ...local.item, sendState: { _tag: 'Sent' } }
+          }
+          return result
+        } catch (cause) {
+          const detail = cause instanceof Error ? cause.message : String(cause)
+          local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'failed', detail } }
+          return { _tag: 'Refused', reason: 'failed', detail }
         }
-        if (request._tag === 'Resend' && timeline.shownMessageIds().has(messageIds[0]!)) return submit()
-        if (request._tag === 'Resend') {
-          pending.set(id, local)
-          timeline.keepOwnSendId(messageIds, id)
-          publishPending()
-        }
-        const result = await submit()
-        if (result._tag === 'Success' && result.value.status === 'rejected') {
-          local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
-        } else if (result._tag === 'Refused') {
-          local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
-            ? { _tag: 'Unconfirmed', detail: result.detail }
-            : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
-        } else if (result._tag === 'Success' && result.value.status === 'completed') {
-          const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
-          if (affected.length > 0) timeline.keepOwnSendId(affected, id)
-          // Terminal gateway success settles the outbox row even when the mailbox echo
-          // falls outside the newest window; an in-window echo still removes it.
-          local.item = { ...local.item, sendState: { _tag: 'Sent' } }
-        }
+      }
+      // A new send is admitted before its first await. Retained failures retry the
+      // primitive's original action, preserving both request identity and row order.
+      if (retainedSend?.phase === 'failed') await runtime.runPromise(mutations.retry(idempotencyKey))
+      else if (retainedSend?.phase === 'sending') return local.delivery!
+      else if (retainedSend !== undefined) {
+        const result = await local.deliver()
         publishPending()
         return result
-      } catch (cause) {
-        const detail = cause instanceof Error ? cause.message : String(cause)
-        local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'failed', detail } }
-        publishPending()
-        return { _tag: 'Refused', reason: 'failed', detail }
+      } else {
+        if (request._tag === 'Resend') {
+          const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(idempotencyKey)))
+          messageIds = [`message/${[...hash.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`]
+          drawsOutbox = !timeline.shownMessageIds().has(messageIds[0]!)
+          if (!drawsOutbox) return deliver()
+          const admitted = Effect.runSync(SubscriptionRef.get(mutations.state)).pending.get(idempotencyKey)
+          if (admitted !== undefined) return admitted.action.delivery!
+        }
+        await runtime.runPromise(mutations.submit({ key: idempotencyKey, action: local, refusal: 'retain' }))
       }
+      publishPending()
+      return local.delivery!
     }
     return { ...retained, send, loadOlder }
   })
