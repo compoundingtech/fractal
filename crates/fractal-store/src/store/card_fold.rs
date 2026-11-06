@@ -507,11 +507,20 @@ impl Store {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                 })? {
                     let (subject, claim) = row?;
-                    let claim = if contaminated.contains(&subject) && let Some(id) = claim.as_deref() {
-                        let kind: String = connection.query_row(
-                            "SELECT kind FROM claims WHERE id=?1", [id], |row| row.get(0),
-                        )?;
-                        if fractal_schema::notice::is_reserved_kind(&kind) { None } else { claim }
+                    let claim = if contaminated.contains(&subject) {
+                        let mut native = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf9e2da198b6b owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &canonical_sql(
+                            "SELECT id,kind FROM claims INDEXED BY claims_subject_accepted_index
+                             WHERE subject=?1 AND store_index<=?2 ORDER BY CANONICAL_DESC(claims)",
+                        ))?;
+                        let mut rows = native.query(params![subject, store_index])?;
+                        let mut latest = None;
+                        while let Some(row) = rows.next()? {
+                            if !fractal_schema::notice::is_reserved_kind(&row.get::<_, String>(1)?) {
+                                latest = Some(row.get::<_, String>(0)?);
+                                break;
+                            }
+                        }
+                        latest
                     } else { claim };
                     newest_claim.insert(subject, claim);
                 }

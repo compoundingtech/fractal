@@ -53,7 +53,7 @@ async fn notice_agent_first_page_keeps_native_membership_and_runtime() {
         ).await.expect("a legacy reserved row must not break native first-page assembly");
         assert_eq!(served.store_index, snapshot.store_index);
         assert_eq!(page.items.len(), refs.len());
-        assert!(!page.has_more);
+        assert!(!page.page.has_more);
         assert_eq!(page.items[0]["id"], refs[0]["id"]);
         assert_eq!(page.items[0]["runtime_ids"], json!(["runtime/notice-native"]));
         assert_eq!(page.items[0]["state"], "running");

@@ -1199,11 +1199,13 @@ fn notice_terminal_resources_keep_native_owners_and_strip_reserved_rows() {
     let names = BTreeSet::from([subject.to_owned()]);
     let raw = store.agent_card_status_at(Some(&names), cut, false).unwrap();
     assert!(serde_json::to_string(&raw).unwrap().contains("notice-secret"));
+    let clean = store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap();
     for history in [false, true] {
         for owner in [None, Some(subject)] {
             let visible = store.terminal_resource_status_at(owner, cut, history).unwrap();
             assert_eq!(visible.subjects.len(), 1);
             assert_eq!(visible.subjects[0].actual.as_ref().unwrap()["incarnation_id"], "one");
+            assert_eq!(visible.subjects[0].claims, clean.subjects[0].claims);
             let shown = serde_json::to_string(&visible).unwrap();
             assert!(!shown.contains("notice-secret"));
             assert!(!shown.contains(&hidden.id));
