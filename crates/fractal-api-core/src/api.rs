@@ -3131,7 +3131,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
