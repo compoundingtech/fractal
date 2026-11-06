@@ -4674,16 +4674,24 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
-            // A schedule collection has no missing-item 404. An older router may answer an
-            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
-            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+            // These projections have no missing-item 404; an older router may return no envelope.
+            let related_runs = path.starts_with("/v1/client/agent-related-runs/");
+            if status == 404
+                && (related_runs || path.split('?').next() == Some("/v1/client/schedules"))
+            {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
                     code: ErrorCode::UnsupportedCapability,
-                    message: "this server does not support schedules.list; upgrade the server"
-                        .into(),
+                    message: format!(
+                        "this server does not support {}; upgrade the server",
+                        if related_runs {
+                            "agent-related-runs.get"
+                        } else {
+                            "schedules.list"
+                        }
+                    ),
                     retryable: false,
                     retry_after_ms: None,
                     details: Default::default(),
@@ -6365,6 +6373,20 @@ mod tests {
             assert_eq!(lines.len(),3);
             assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
             assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
+    }
+
+    #[test]
+    fn related_runs_old_daemon_is_typed_unsupported_not_an_empty_list() {
+        runtime().block_on(async {
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("related.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,404,String::new()),(0,404,error)]);
+            let client=Client::unix_as(&socket,"person/reviewer");
+            for _ in 0..2 {
+                assert!(matches!(client.agent_related_runs_get("agent/example").await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            }
+            assert_eq!(server.await.unwrap().len(),2);
         });
     }
 
