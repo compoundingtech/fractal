@@ -121,6 +121,13 @@ pub fn advance(readers: &ReadPool, writer: &WriterConnection) -> Result<Page> {
     advance_with_budget(readers, writer, PAGE_SIZE, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {})
 }
 
+/// [`advance`] in pages of at most `page_size` claims, so a test can interleave writes between
+/// many small pages.
+#[cfg(any(test, feature = "test-support"))]
+pub fn advance_in_pages_of(readers: &ReadPool, writer: &WriterConnection, page_size: i64) -> Result<Page> {
+    advance_with_budget(readers, writer, page_size, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {})
+}
+
 fn advance_with_budget(
     readers: &ReadPool,
     writer: &WriterConnection,

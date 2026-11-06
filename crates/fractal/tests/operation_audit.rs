@@ -457,11 +457,12 @@ fn digest_differences(store: &Store) -> i64 {
     store.readers.get().query_row(DIGEST_DIFFERENCES, [], |row| row.get(0)).unwrap()
 }
 
-/// Copy every stored operation claim's keys, as the daemon does after it starts serving.
+/// Copy every stored operation claim's keys, as the daemon does after it starts serving, in
+/// pages of 32 claims, so the edges span many pages and writes land between them.
 fn backfill_digests(store: &Store, between_pages: &mut dyn FnMut(usize)) -> usize {
     use smallclaims::store::operation_claim_digests as digests;
     let mut pages = 0;
-    while !digests::advance(&store.readers, &store.connection).unwrap().ready {
+    while !digests::advance_in_pages_of(&store.readers, &store.connection, 32).unwrap().ready {
         pages += 1;
         between_pages(pages);
     }
