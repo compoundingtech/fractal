@@ -26926,6 +26926,24 @@ agent "import/omp/fixture" {{
             .expect("a target mutation must still wake reconciliation");
     }
 
+    #[test]
+    fn launch_input_measurement_failure_is_unknown_and_subscription_faults_target_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let desired = crate::graph::parse_test_intent(&format!("version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}", root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let mut member = desired.member.clone().unwrap();
+        member.environment.insert("PATH".into(), root.path().display().to_string());
+        crate::contract::install(&store, Box::new(move |_| Ok(member.clone())));
+        assert!(crate::contract::declared(&store, &desired).is_err()); // Settle the environment, not the missing provider.
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("claude").display())));
+        let scope = format!("stage/launch-inputs/{}", desired.subject);
+        reconciler.isolate(&scope, "daemon/node", || Err::<(), _>(anyhow::anyhow!("subscription failed")));
+        assert_eq!(store.reconcile_fault("daemon/node", &scope).unwrap().as_deref(), Some("subscription failed"));
+    }
+
     #[tokio::test]
     async fn launch_input_watchers_recover_missing_and_retargeted_interpreters() {
         use std::os::unix::fs::PermissionsExt as _;
