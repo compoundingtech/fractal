@@ -737,15 +737,8 @@ fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header
         .record(&spender, status, headers, now);
 }
 
-struct GithubResponseAccounting;
-
-static GITHUB_RESPONSE_ACCOUNTING: GithubResponseAccounting = GithubResponseAccounting;
-
-impl crate::github_http::ResponseObserver for GithubResponseAccounting {
-    fn record(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
-        record_github_response(status, headers);
-    }
-}
+static GITHUB_RESPONSE_ACCOUNTING: crate::github_http::ResponseObserver =
+    crate::github_http::ResponseObserver::new(record_github_response);
 
 #[cfg(any(test, feature = "test-support"))]
 impl GithubAuth {

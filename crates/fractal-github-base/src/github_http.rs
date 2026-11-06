@@ -281,14 +281,22 @@ fn token_cache() -> &'static Arc<TokenCache> {
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
 /// Observes every actual HTTP response, before replay or redirect handling.
-pub trait ResponseObserver: Sync {
-    fn record(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap);
+pub struct ResponseObserver(fn(reqwest::StatusCode, &reqwest::header::HeaderMap));
+
+impl ResponseObserver {
+    pub const fn new(record: fn(reqwest::StatusCode, &reqwest::header::HeaderMap)) -> Self {
+        Self(record)
+    }
+
+    fn record(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+        (self.0)(status, headers);
+    }
 }
 
-static RESPONSE_OBSERVER: OnceLock<&'static dyn ResponseObserver> = OnceLock::new();
+static RESPONSE_OBSERVER: OnceLock<&'static ResponseObserver> = OnceLock::new();
 
 /// Install the process-wide observer; accounting cannot be replaced after construction.
-pub fn observe_responses(observer: &'static dyn ResponseObserver) -> Result<()> {
+pub fn observe_responses(observer: &'static ResponseObserver) -> Result<()> {
     let known = RESPONSE_OBSERVER.get_or_init(|| observer);
     anyhow::ensure!(
         std::ptr::eq(*known, observer),
@@ -299,7 +307,7 @@ pub fn observe_responses(observer: &'static dyn ResponseObserver) -> Result<()> 
 
 pub fn configure(
     config: &crate::config::Config,
-    observer: &'static dyn ResponseObserver,
+    observer: &'static ResponseObserver,
 ) -> Result<()> {
     let mut config = config.clone();
     if let Some(root) = std::env::var_os("ST3_GITHUB_APP_TOKEN_ROOT") {
