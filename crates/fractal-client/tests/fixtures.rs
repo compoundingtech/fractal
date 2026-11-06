@@ -17,6 +17,23 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn related_run_rows_decode_and_validate_server_semantics() {
+    let value: serde_json::Value = serde_json::from_slice(&fixture("agent-related-runs.json")).unwrap();
+    let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();
+    assert!(decoded.rows[0].waiting_on_you);
+    assert!(decoded.rows[0].eta.is_none());
+    assert_eq!(decoded.rows[0].current_step.as_ref().unwrap().who.as_deref(), Some("person/reviewer"));
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let schema = serde_json::json!({"$defs":schema["$defs"],"$ref":"#/$defs/AgentRelatedRuns"});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&value));
+    let mut invalid = value;
+    invalid["rows"][0]["urgency_rank"] = serde_json::json!(5);
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
 fn revisioned_agents_frames_keep_typed_publication_and_snapshot_provenance() {
     let CollectionEvent::AgentsSnapshotChunk {
         id, collection, snapshot, publication, chunk_index, chunk_count, items, order, has_more,

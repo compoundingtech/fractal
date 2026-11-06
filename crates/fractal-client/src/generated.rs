@@ -2070,6 +2070,52 @@ pub struct StatusTransition {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentRelatedRuns {
+    pub kind: String,
+    pub agent_id: String,
+    pub as_of: u64,
+    pub work_cut: u64,
+    pub missions_cut: u64,
+    pub total_rows: u64,
+    pub truncated: bool,
+    pub rows: Vec<AgentRelatedRun>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentRelatedRun {
+    pub id: String,
+    pub mission_id: String,
+    pub status: String,
+    pub status_chip: String,
+    pub progress: Value,
+    pub eta: Option<Value>,
+    pub waiting_on_you: bool,
+    pub late: bool,
+    pub deadline_at: Option<u64>,
+    pub current_step: Option<RelatedRunWait>,
+    pub waits_on: Vec<RelatedRunWait>,
+    pub urgency_rank: u64,
+    pub folded: bool,
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RelatedRunWait {
+    pub step: String,
+    pub path: String,
+    pub title: Option<String>,
+    pub state: String,
+    pub kind: String,
+    pub who: Option<String>,
+    pub seat_state: Option<String>,
+    pub detail: Option<String>,
+    pub since_unix_ms: Option<u64>,
+    pub lease_expires_at_unix_ms: Option<u64>,
+    pub until_unix_ms: Option<u64>,
+    pub wake_attempts: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentQueue {
     pub kind: String,
     pub agent_id: String,
