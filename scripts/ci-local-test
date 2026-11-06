@@ -452,6 +452,7 @@ elif stage == 'clippy':
             with self.subTest(target=target):
                 self.log.unlink(missing_ok=True)
                 extra = {'CARGO_TARGET_DIR': target} if target else {}
+                extra['CARGO_BUILD_BUILD_DIR'] = '/srv/build/cargo/{workspace-path-hash}'
                 done, calls = self.run_local('tests', 'fleet-compat', CI_LOCAL_SERIAL='1', **extra)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 stages = [call for call in calls if call['argv'] in (['tests'], ['fleet-compat'])]
@@ -461,6 +462,10 @@ elif stage == 'clippy':
                 if not expected.is_absolute(): expected = self.work / expected
                 expected = str(expected) + '-fleet-compat' if target else str(self.work / 'target/fleet-compat')
                 self.assertEqual(stages[1]['env']['CARGO_TARGET_DIR'], expected)
+                # Its intermediates follow it, whatever build-dir the caller had: one shared with the tests' target relinks their
+                # binaries as surely as a shared target (#4128).
+                self.assertEqual(stages[1]['env']['CARGO_BUILD_BUILD_DIR'], expected)
+                self.assertEqual(stages[0]['env'].get('CARGO_BUILD_BUILD_DIR'), '/srv/build/cargo/{workspace-path-hash}')
 
     def test_default_compat_build_outputs_are_ignored_in_a_plain_checkout(self):
         # A plain run (or ST_EVIDENCE_TARGET=off) has no CARGO_TARGET_DIR. Cargo's normal /target ignore must cover the new

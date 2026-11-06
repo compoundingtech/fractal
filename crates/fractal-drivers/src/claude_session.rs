@@ -6,9 +6,9 @@
 //! itself lives in [`crate::provider_session`], which every interactive harness wrapper shares.
 //!
 //! Observed harness state for Claude has two producers with one owner each: hook invocations
-//! (`st2 driver claude-observe`, [`run_observe`]) write turn transitions, and the wrapper's poll
-//! loop re-stamps and terminates the record through [`SessionObserver`] without ever overwriting a
-//! state a hook wrote in between.
+//! ([`run_observe_payload_paths`] and [`run_observe_payload`]) write turn transitions. The wrapper's
+//! poll loop re-stamps and terminates the record through [`SessionObserver`] without ever
+//! overwriting a state a hook wrote in between.
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -809,33 +809,6 @@ fn load_binding(
     load_binding_file(&state_dir.join(BINDING_FILE), agent, runtime_id)
 }
 
-/// The verified transcript of this wrapper session. Channel receipts observe native user
-/// records directly; they never depend on a UserPromptSubmit marker or hook receipt.
-pub fn channel_transcript(
-    catalog_root: &Path,
-    identity: &str,
-    runtime_id: &str,
-    incarnation: &str,
-) -> Result<Option<PathBuf>> {
-    channel_transcript_paths(
-        &state_dir(catalog_root, identity),
-        identity,
-        runtime_id,
-        incarnation,
-    )
-}
-
-pub fn channel_transcript_paths(
-    session_dir: &Path,
-    identity: &str,
-    runtime_id: &str,
-    incarnation: &str,
-) -> Result<Option<PathBuf>> {
-    Ok(load_binding(session_dir, identity, runtime_id)?
-        .filter(|binding| binding.runtime_incarnation == incarnation)
-        .map(|binding| binding.transcript_path))
-}
-
 /// A receipt may name a native user record only in the same verified binding that
 /// supplied the channel's transcript. This accessor grants no new binding authority.
 pub fn channel_receipt_session(
@@ -1163,30 +1136,6 @@ pub fn residency_ready(
     crate::residency::atomic_json(&state_dir.join(BINDING_FILE), &candidate)?;
     let _ = fs::remove_file(state_dir.join(PENDING_BINDING_FILE));
     Ok(true)
-}
-
-pub fn run_observe(
-    catalog_root: &Path,
-    identity: &str,
-    runtime_id: Option<&str>,
-    event: &str,
-) -> Result<()> {
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, identity, &crate::run::detect_host())?
-            .with_context(|| format!("Claude driver agent '{identity}' is not declared"))?;
-    let mut raw = String::new();
-    let _ = std::io::stdin().read_to_string(&mut raw);
-    let var = |name: &str| std::env::var(name).ok();
-    observe_payload(
-        &state_dir(catalog_root, identity),
-        &agent_dir,
-        false,
-        identity,
-        runtime_id,
-        event,
-        &raw,
-        &var,
-    )
 }
 
 /// Apply one Claude hook event whose payload the caller already read. st3 answers its seats'

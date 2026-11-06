@@ -377,7 +377,7 @@ pub(super) fn queue_affected_by_tx(connection: &Connection, claim_id: &str) -> R
 pub(super) fn judge_claims(store: &Store, check_roots: bool) -> Result<usize> {
     let result = judge_claims_inner(store, check_roots);
     if let Err(error) = &result {
-        let contention=error.downcast_ref::<St3Error>().is_some_and(St3Error::is_sqlite_contention)
+        let contention=error.downcast_ref::<FractalError>().is_some_and(FractalError::is_sqlite_contention)
             || error.downcast_ref::<rusqlite::Error>().is_some_and(|error|matches!(error,rusqlite::Error::SqliteFailure(code,_) if matches!(code.code,rusqlite::ErrorCode::DatabaseBusy|rusqlite::ErrorCode::DatabaseLocked)));
         if !contention {
             store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h84df06b98d77 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET legacy_fault=?1 WHERE id=1 AND serving_legacy=1",[format!("{error:#}")])?;

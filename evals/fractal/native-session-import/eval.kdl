@@ -2,7 +2,7 @@ version 2
 
 mission "eval/native-session-import" state="ready" timeout="45m" {
   completion { when "all-steps-exhausted" }
-  goal "Every supported interactive harness can start in a raw PTY outside st3, expose a native session, and be fenced into one durable ownerless st3 seat."
+  goal "Every supported interactive harness can start in a raw PTY outside fractal, expose a native session, and be fenced into one durable ownerless fractal seat."
 
   step "import-all-drivers" timeout="40m" {
     agentless

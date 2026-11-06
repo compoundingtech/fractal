@@ -6,7 +6,7 @@ set -euo pipefail
 : "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 run="mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
-mission="$(env -u FRACTAL_AGENT -u ST_AGENT st3 --json missions show "$run")"
+mission="$(env -u FRACTAL_AGENT -u ST_AGENT fractal --json missions show "$run")"
 
 completed_steps=(
   start-team
@@ -31,12 +31,12 @@ done
 for name in reviewer-report final-verdict; do
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   subject="resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$name"
-  status="$(st3 subject show "$subject" --json)"
+  status="$(fractal subject show "$subject" --json)"
   jq -e '
     .status.subjects[0].actual | (.fields // .)
       | (.kind == "custom.st3.message-receipt") and (.state == "published")' \
     <<<"$status" >/dev/null
-  bindings="$(st3 trace "$subject" --json --limit 20 \
+  bindings="$(fractal trace "$subject" --json --limit 20 \
     | jq -s '[.[] | select(.kind == "resource.observed")] | length')"
   test "$bindings" -ge 1
 done

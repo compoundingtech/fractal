@@ -33,7 +33,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
@@ -223,6 +223,18 @@ pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64>
     Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6ec3fa9174f4 owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
 }
 
+/// The subjects whose claims an agent card reads: its agent, the runs, generations and steps that
+/// own or queue agents, messages (activity and delivery blockers), and the exec and pty children
+/// a memberless card reduces. A claim about any other subject, of any kind, changes no card.
+const AGENT_CARD_INPUT_PREFIXES: [&str; 7] =
+    ["agent/", "mission-run/", "run-generation/", "step-run/", "message/", "exec/", "pty/"];
+
+/// Whether a claim about `subject` can change an agent card. The roster's incremental fold reads
+/// only these, so a refresher that waits for one this node writes cannot drift from what it folds.
+pub fn agent_card_input_subject(subject: &str) -> bool {
+    AGENT_CARD_INPUT_PREFIXES.iter().any(|prefix| subject.starts_with(prefix))
+}
+
 #[derive(Default)]
 pub struct AgentResourcesDelta {
     pub subjects: BTreeSet<String>,
@@ -264,7 +276,7 @@ pub trait SeatsStoreCore {
             &self,
             intent: &NormalizedIntent,
             key: &str,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Reduce only subjects whose IDs begin with `prefix`.
     ///
     /// Product projections use this instead of reducing every subject in the graph and filtering
@@ -305,7 +317,7 @@ impl SeatsStoreCore for Store {
             &self,
             intent: &NormalizedIntent,
             key: &str,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         self.apply_internal_with_declared_agents(intent, key, &BTreeSet::new())
     }
 

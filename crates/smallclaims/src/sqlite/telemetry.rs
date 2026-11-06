@@ -67,6 +67,8 @@ static TASK_ORIGINS: &[&str] = &[
     "task mailbox-fence", "task mailbox-report", "task mailbox-replay", "task mailbox-primary",
     "task mailbox-rollout", "task mailbox-attachment", "task mailbox-own-post", "task mailbox-loss",
     "maintenance.client_message_selectors", "maintenance.completion_health",
+    "replication.inventory_full", "replication.sealing_recovery", "operations.audit",
+    "operations.doctor_report",
 ];
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -762,6 +764,8 @@ mod tests {
             "task mailbox-fence", "task mailbox-report", "task mailbox-replay", "task mailbox-primary",
             "task mailbox-rollout", "task mailbox-attachment", "task mailbox-own-post", "task mailbox-loss",
             "maintenance.client_message_selectors", "maintenance.completion_health",
+            "replication.inventory_full", "replication.sealing_recovery", "operations.audit",
+            "operations.doctor_report",
         ] {
             assert_eq!(task_origin(label).attribute("origin").value, opentelemetry::Value::from(label));
             crate::profile::task(label, || {
