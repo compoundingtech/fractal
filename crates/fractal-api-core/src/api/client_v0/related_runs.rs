@@ -106,9 +106,13 @@ pub async fn get(
 mod tests {
     #[tokio::test]
     async fn unknown_agent_is_an_empty_supported_projection_not_a_legacy_404() {
+        use crate::WorkListStore;
         use tower::ServiceExt as _;
         let root = tempfile::tempdir().unwrap();
         let state = crate::api::tests_shared::state(root.path());
+        crate::api::published_lists::tests_shared_client_v0_tests::fold(&state.store);
+        state.store.published_work_list().start();
+        crate::api::published_lists::refresh_work_once(&state.store);
         let app = Router::new()
             .route("/v1/client/agent-related-runs/{*id}", axum::routing::get(super::get))
             .layer(Extension(ClientSession::local(Some("person/reviewer")).unwrap()))
