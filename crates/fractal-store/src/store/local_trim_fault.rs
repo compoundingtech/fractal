@@ -13,7 +13,7 @@ pub const LOCAL_TRIM_STOP_PREFIX: &str = "local-trim-stopped/";
 impl Store {
     /// Open a fault for each local trim the step stopped. Shared checkpoints keep their own
     /// diagnostics and wait for a person.
-    pub fn record_local_trim_stops(&self, actions: &[CheckpointAction]) -> Result<(), St3Error> {
+    pub fn record_local_trim_stops(&self, actions: &[CheckpointAction]) -> Result<(), FractalError> {
         if !self.trims_locally() {
             return Ok(());
         }
@@ -58,13 +58,13 @@ impl Store {
 
     /// Resume stopped checkpoints and end every open local trim stop. A person may, and on a
     /// member that trims locally so may the agent `[trim] notify` names, and no other agent.
-    pub fn resume_stopped_trims(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+    pub fn resume_stopped_trims(&self, actor: &str, reason: &str) -> Result<(), FractalError> {
         self.resume_checkpoints_allowing(actor, reason, self.trim_notify().as_deref())?;
         self.recover_local_trim_stops(actor, reason)
     }
 
     /// End every open local trim stop, after a resume.
-    pub fn recover_local_trim_stops(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+    pub fn recover_local_trim_stops(&self, actor: &str, reason: &str) -> Result<(), FractalError> {
         let subject = format!("daemon/{}", self.origin());
         let open: Vec<(String, String)> = {
             let connection = self.readers.get();

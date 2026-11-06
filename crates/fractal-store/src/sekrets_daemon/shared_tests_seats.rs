@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use rusqlite::OptionalExtension as _;
 use crate::sekrets::identity::{self, STATEMENT_VERSION, Statement};
 use crate::sekrets::protocol::Attestation;
-use crate::model::St3Error;
+use crate::model::FractalError;
 use crate::store::Store;
 use crate::sekrets_daemon::*;
 use crate::sekrets::store::LogEntry;

@@ -215,7 +215,7 @@ pub async fn cleanup(
     Json(request): Json<CleanupRequest>,
 ) -> Result<Json<Value>, ApiError> {
     if request.older_than_ms == 0 || request.all == request.to.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mail-cleanup",
             "choose a mailbox or all mailboxes and a positive age threshold",
         )));

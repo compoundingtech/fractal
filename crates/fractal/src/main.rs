@@ -9260,7 +9260,7 @@ async fn run_devices_fabric(
             fabric
                 .expose_socket(
                     &service,
-                    &fractal_client::default_unix_socket(
+                    &fractal_socket_discovery::default_unix_socket(
                         &config.client_gateway_socket,
                         &config.client_gateway_socket,
                     ),
