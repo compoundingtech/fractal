@@ -198,9 +198,9 @@ it('draws harness, observed model, declared effort and exact open asks under the
   await act(async () => registry.set(declared.get('agent/example-meta\n8')!, { _tag: 'Unavailable', reason: 'ungranted', detail: 'Example refusal' }))
   expect(fields().map(([field]) => field)).toEqual(['harness', 'model', 'asks'])
   // Bounded or missing attention is no count at all, never a lower bound.
-  await act(async () => registry.set(attention, { ...observed({ value: cards }), coverage: { _tag: 'Partial' } }))
+  await act(async () => registry.set(attention, { _tag: 'Observed', value: cards, freshness: 'live', coverage: { _tag: 'Partial' } }))
   expect(fields().map(([field]) => field)).toEqual(['harness', 'model'])
-  await act(async () => registry.set(attention, { ...observed({ value: [card('attention/a')] }), coverage: { _tag: 'Complete' } }))
+  await act(async () => registry.set(attention, { _tag: 'Observed', value: [card('attention/a')], freshness: 'live', coverage: { _tag: 'Complete' } }))
   expect(fields()).toContainEqual(['asks', '1 ask'])
   await act(async () => registry.set(attention, { _tag: 'Unavailable', reason: 'failed', detail: 'Example failure' }))
   expect(fields().map(([field]) => field)).toEqual(['harness', 'model'])
