@@ -70,7 +70,7 @@ it('shows the lowest-UUIDv7 arrangement and switches when an empty owner frame r
     collectionStream: async (next) => {
       options = next
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop } satisfies CollectionStream
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribeOrderedMembershipsCollection: async () => undefined, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop } satisfies CollectionStream
     },
   }
   const atom = sidebarFolders({ gateway: () => gateway })

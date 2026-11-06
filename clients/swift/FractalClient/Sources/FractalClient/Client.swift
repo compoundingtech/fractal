@@ -261,6 +261,41 @@ public actor FractalClient {
             }
         }
     }
+    /// Returns only after subscribe has been sent; request pages after awaiting this method.
+    public func orderedMembershipsCollectionV1Stream(person: String, subject: String, subscriptionID: String = "ordered-memberships", limit: Int = 100) async throws -> AsyncThrowingStream<OrderedMembershipCollectionFrame, Error> {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!)
+        request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        applyTraceContext(to: &request)
+        let task = session.webSocketTask(with: request)
+        task.resume()
+        do {
+            let command = try JSONSerialization.data(withJSONObject: ["kind":"subscribe", "id":subscriptionID, "collection":"ordered-memberships", "person":person, "subject":subject, "limit":limit, "paging_contract":"collection-v1"])
+            try await task.send(.string(String(decoding: command, as: UTF8.self)))
+        } catch { task.cancel(with: .normalClosure, reason: nil); throw error }
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
+            Task {
+                do {
+                    while true {
+                        let frame = try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: Self.websocketData(from: try await task.receive()))
+                        try MembershipPagingJoin.validate(frame)
+                        continuation.yield(frame)
+                    }
+                } catch { continuation.finish(throwing: error); task.cancel(with: .normalClosure, reason: nil) }
+            }
+        }
+    }
+    public func arrangementsMembershipsCollectionV1(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> {
+        var query: [URLQueryItem] = [.init(name: "person", value: person), .init(name: "paging_contract", value: "collection-v1")]
+        if let cursor { query.append(.init(name: "cursor", value: cursor)) }
+        if let limit { query.append(.init(name: "limit", value: String(limit))) }
+        let response: Envelope<OrderedMembershipPage> = try await get("v1/client/arrangements/\(Self.routedSessionID(personName))/\(Self.routedSessionID(uuid))/memberships", query: query)
+        try MembershipPagingJoin.validate(contract: response.value.pagingContract, membership: response.value.membership)
+        return response
+    }
     /// Keep one image (PNG, JPEG, GIF or WebP, at most 10 MiB) on the member this client talks to. Name the answer's `blob` in a `message.send` attachment.
     public func uploadBlob(_ bytes: Data, mediaType: String) async throws -> Envelope<BlobUpload> { try await request("v1/client/blobs", query: [], method: "POST", body: bytes, contentType: mediaType) }
     /// Up to 512 KiB of an attachment from `offset`, base64 in `data`.
