@@ -22,7 +22,7 @@ pub fn build(
     arrangement: &ArrangementInput,
     inventory: &[String],
 ) -> Result<SidebarTree, ProjectionError> {
-    build_input(arrangement, inventory, None)
+    require_complete(build_available(arrangement, inventory)?)
 }
 
 /// Project a complete live v2 membership set, never catalog-only remembered resources.
@@ -31,14 +31,41 @@ pub fn build_v2(
     arrangement: &ArrangementInput,
     memberships: &[MembershipInput],
 ) -> Result<SidebarTree, ProjectionError> {
-    build_input(arrangement, &[], Some(memberships))
+    require_complete(build_input(arrangement, &[], Some(memberships))?)
+}
+
+fn require_complete(projected: AvailableProjection) -> Result<SidebarTree, ProjectionError> {
+    // Completeness precedes ancestry validation, independent of identity ordering.
+    if projected.unavailable.values().any(|error| *error == ProjectionError::NotReady) {
+        return Err(ProjectionError::NotReady);
+    }
+    if let Some(error) = projected.unavailable.into_values().next() {
+        return Err(error);
+    }
+    Ok(projected.tree)
+}
+
+/// Read-only projection: invalid entries and their dependants are omitted, never guessed.
+/// Use `build`, not this partial tree, when validating edits against a complete arrangement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailableProjection {
+    pub tree: SidebarTree,
+    pub unavailable: BTreeMap<String, ProjectionError>,
+}
+
+/// Keep unrelated valid entries visible; whole-arrangement refusal still returns `Err`.
+pub fn build_available(
+    arrangement: &ArrangementInput,
+    inventory: &[String],
+) -> Result<AvailableProjection, ProjectionError> {
+    build_input(arrangement, inventory, None)
 }
 
 fn build_input(
     arrangement: &ArrangementInput,
     inventory: &[String],
     memberships: Option<&[MembershipInput]>,
-) -> Result<SidebarTree, ProjectionError> {
+) -> Result<AvailableProjection, ProjectionError> {
     if arrangement.deleted {
         return Err(ProjectionError::ArrangementUnavailable);
     }
@@ -59,12 +86,16 @@ fn build_input(
         arrangement_revision: arrangement.revision.clone(),
         deleted_folders: Vec::new(),
     };
+    let mut unavailable = BTreeMap::new();
     for (id, folder) in folders {
         if folder.tombstone.is_some() {
             tree.deleted_folders.push(id.clone());
             continue;
         }
-        let shown_under = resolved.parents.get(id).ok_or(ProjectionError::NotReady)?;
+        let Some(shown_under) = resolved.parents.get(id) else {
+            unavailable.insert(format!("folder:{id}"), ProjectionError::NotReady);
+            continue;
+        };
         let node = NodeRef::Folder { id: id.clone() };
         tree.nodes.insert(
             node_key(&node),
@@ -80,10 +111,10 @@ fn build_input(
         );
     }
     for (subject, register) in placements.into_iter().flatten() {
-        let shown_under = resolved
-            .folders
-            .get(subject)
-            .ok_or(ProjectionError::NotReady)?;
+        let Some(shown_under) = resolved.folders.get(subject) else {
+            unavailable.insert(format!("subject:{subject}"), ProjectionError::NotReady);
+            continue;
+        };
         let node = NodeRef::Subject {
             subject: subject.clone(),
         };
@@ -102,10 +133,11 @@ fn build_input(
     }
     for membership in memberships.into_iter().flatten() {
         let node = NodeRef::Subject { subject: membership.member.clone() };
-        if membership.container != arrangement.subject || tree.nodes.contains_key(&node_key(&node)) {
+        let key = node_key(&node);
+        if membership.container != arrangement.subject || tree.nodes.contains_key(&key) {
             return Err(ProjectionError::InvalidResolution);
         }
-        tree.nodes.insert(node_key(&node), ProjectedNode {
+        tree.nodes.insert(key, ProjectedNode {
             node,
             parent: folder_parent(&membership.position.bucket),
             shown_under: folder_parent(&membership.position.bucket),
@@ -116,6 +148,9 @@ fn build_input(
         });
     }
     for subject in inventory {
+        if unavailable.contains_key(&format!("subject:{subject}")) {
+            continue;
+        }
         tree.nodes
             .entry(format!("subject:{subject}"))
             .or_insert_with(|| ProjectedNode {
@@ -131,36 +166,42 @@ fn build_input(
             });
     }
     // Walk each ancestry once. A visiting state detects cycles without recursive stack growth.
-    let mut states = BTreeMap::<&str, bool>::new();
+    let mut states = BTreeMap::<&str, Option<bool>>::new();
     let mut path = Vec::new();
     for key in tree.nodes.keys() {
         path.clear();
         let mut cursor = key.as_str();
-        loop {
+        let valid = loop {
             match states.get(cursor) {
-                Some(true) => break,
-                Some(false) => return Err(ProjectionError::InvalidResolution),
+                Some(Some(valid)) => break *valid,
+                Some(None) => break false,
                 None => {}
             }
-            states.insert(cursor, false);
+            states.insert(cursor, None);
             path.push(cursor);
             match &tree.nodes[cursor].shown_under {
-                Parent::Root {} => break,
+                Parent::Root {} => break true,
                 Parent::Folder { id } => {
                     // Borrow the stored key for the next iteration, avoiding owned ancestry copies.
                     let parent_key = format!("folder:{id}");
                     let Some((key, _)) = tree.nodes.get_key_value(&parent_key) else {
-                        return Err(ProjectionError::InvalidResolution);
+                        break false;
                     };
                     cursor = key;
                 }
-                Parent::Subject { .. } => return Err(ProjectionError::InvalidResolution),
+                Parent::Subject { .. } => break false,
             }
-        }
+        };
         for key in &path {
-            states.insert(*key, true);
+            states.insert(*key, Some(valid));
         }
     }
+    for (key, valid) in states {
+        if valid == Some(false) {
+            unavailable.insert(key.to_owned(), ProjectionError::InvalidResolution);
+        }
+    }
+    tree.nodes.retain(|key, _| !unavailable.contains_key(key));
     let mut ordered: Vec<_> = tree.nodes.values().collect();
     ordered.sort_by(|a, b| {
         fn rank(node: &ProjectedNode) -> u8 {
@@ -191,7 +232,7 @@ fn build_input(
                 .children = children;
         }
     }
-    Ok(tree)
+    Ok(AvailableProjection { tree, unavailable })
 }
 
 
@@ -326,6 +367,63 @@ mod tests {
             .unwrap()
             .folders
             .insert(id.into(), parent.map(str::to_owned));
+    }
+
+    #[test]
+    fn partial_projection_contains_missing_resolution_without_inventory_resurrection() {
+        let mut a = arrangement();
+        add_folder(&mut a, "good", None, "a0");
+        add_folder(&mut a, "bad", None, "a1");
+        add_folder(&mut a, "child", Some("bad"), "a0");
+        place(&mut a, "mission/good", Some("good"), "a0");
+        place(&mut a, "mission/bad", Some("bad"), "a0");
+        place(&mut a, "mission/missing", None, "a0");
+        a.resolved.as_mut().unwrap().parents.remove("bad");
+        a.resolved.as_mut().unwrap().folders.remove("mission/missing");
+        let projected = build_available(&a, &["mission/missing".into(), "mission/unfiled".into()]).unwrap();
+        assert_eq!(projected.tree.roots, [folder("good"), subject("mission/unfiled")]);
+        assert_eq!(projected.tree.nodes["folder:good"].children, [subject("mission/good")]);
+        assert_eq!(projected.tree.nodes.len(), 3);
+        assert_eq!(projected.unavailable, BTreeMap::from([
+            ("folder:bad".into(), ProjectionError::NotReady),
+            ("folder:child".into(), ProjectionError::InvalidResolution),
+            ("subject:mission/bad".into(), ProjectionError::InvalidResolution),
+            ("subject:mission/missing".into(), ProjectionError::NotReady),
+        ]));
+        assert!(build(&a, &[]).is_err(), "partial display must not enable complete-tree planning");
+    }
+
+    #[test]
+    fn strict_completeness_precedes_invalid_ancestry_in_both_identity_orders() {
+        for (missing, invalid) in [("a", "z"), ("z", "a")] {
+            let mut a = arrangement();
+            add_folder(&mut a, missing, None, "a0");
+            add_folder(&mut a, invalid, Some(invalid), "a1");
+            a.resolved.as_mut().unwrap().parents.remove(missing);
+            assert_eq!(build(&a, &[]), Err(ProjectionError::NotReady));
+            let projected = build_available(&a, &[]).unwrap();
+            assert_eq!(projected.unavailable[&format!("folder:{missing}")], ProjectionError::NotReady);
+            assert_eq!(projected.unavailable[&format!("folder:{invalid}")], ProjectionError::InvalidResolution);
+        }
+    }
+
+    #[test]
+    fn partial_projection_contains_cycles_unknown_parents_and_their_dependants() {
+        for bad_parent in ["bad", "missing"] {
+            let mut a = arrangement();
+            add_folder(&mut a, "good", None, "a0");
+            add_folder(&mut a, "bad", Some(bad_parent), "a1");
+            add_folder(&mut a, "child", Some("bad"), "a0");
+            place(&mut a, "mission/good", Some("good"), "a0");
+            place(&mut a, "mission/bad", Some("child"), "a0");
+            let projected = build_available(&a, &[]).unwrap();
+            assert_eq!(projected.tree.roots, [folder("good")]);
+            assert_eq!(projected.tree.nodes.len(), 2);
+            assert_eq!(projected.unavailable.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["folder:bad", "folder:child", "subject:mission/bad"]);
+            assert!(projected.unavailable.values().all(|e| *e == ProjectionError::InvalidResolution));
+            assert_eq!(build(&a, &[]), Err(ProjectionError::InvalidResolution));
+        }
     }
 
 

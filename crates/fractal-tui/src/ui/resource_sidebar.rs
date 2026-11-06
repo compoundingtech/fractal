@@ -154,9 +154,9 @@ impl Sidebar {
         rows.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
         rows
     }
-    fn project(&self, a: &fractal_client::Arrangement) -> Result<fractal_sidebar::model::SidebarTree, fractal_sidebar::model::ProjectionError> {
+    fn project(&self, a: &fractal_client::Arrangement) -> Result<fractal_sidebar::projection::AvailableProjection, fractal_sidebar::model::ProjectionError> {
         use fractal_sidebar::model::{ArrangementInput, ResolvedInput};
-        fractal_sidebar::projection::build(&ArrangementInput {
+        fractal_sidebar::projection::build_available(&ArrangementInput {
             subject: a.header.id.clone(), owner: a.owner.clone(), revision: a.header.revision.clone(),
             deleted: a.deleted, body: a.body.clone(),
             resolved: a.resolved.as_ref().map(|r| ResolvedInput { parents: r.parents.clone(), folders: r.folders.clone() }),
@@ -165,7 +165,7 @@ impl Sidebar {
     pub(super) fn folders(&self) -> Vec<(String, String)> {
         let Some(a) = self.arrangement() else { return Vec::new() };
         let Ok(tree) = self.project(a) else { return Vec::new() };
-        let mut folders = tree.nodes.values().filter_map(|node| match &node.node {
+        let mut folders = tree.tree.nodes.values().filter_map(|node| match &node.node {
             fractal_sidebar::model::NodeRef::Folder { id } => Some((id, &a.v1().folders[id])),
             _ => None,
         }).collect::<Vec<_>>();
@@ -396,11 +396,21 @@ impl Sidebar {
     pub fn rows(&self) -> Vec<Row> {
         let arrangement = self.arrangement();
         use fractal_sidebar::model::{NodeRef, Parent};
-        let tree = match arrangement.map(|a| self.project(a)).transpose() {
-            Ok(tree) => tree,
-            Err(error) => return vec![Row::Notice(format!("Sidebar layout unavailable: {error:?}"))],
+        let mut rows = Vec::new();
+        let projected = match arrangement.map(|a| self.project(a)).transpose() {
+            Ok(projected) => projected,
+            Err(error) => { rows.push(Row::Notice(format!("Sidebar layout unavailable: {error:?}"))); None }
         };
+        let tree = projected.as_ref().map(|p| &p.tree);
         let mut catalog = self.seen.clone();
+        if let Some(projected) = &projected {
+            for (key, error) in &projected.unavailable {
+                rows.push(Row::Notice(format!("{key} unavailable: {error:?}")));
+                if let Some(subject) = key.strip_prefix("subject:") { catalog.remove(subject); }
+            }
+        } else if let Some(a) = arrangement {
+            catalog.retain(|id, _| !a.v1().placements.contains_key(id));
+        }
         if let Some(tree) = &tree {
             for id in tree.nodes.values().filter_map(|node| match &node.node { NodeRef::Subject { subject } => Some(subject), _ => None }) {
                 catalog.entry(id.clone()).or_insert_with(|| ResourceRow {
@@ -423,7 +433,6 @@ impl Sidebar {
             Some((subject.as_str(), &node.shown_under))
         }).collect();
         let location = |id: &str| locations.get(id).and_then(|parent| match parent { Parent::Folder { id } => Some(id.as_str()), _ => None });
-        let mut rows = Vec::new();
         for name in &self.inventory_partial {
             rows.push(Row::Notice(format!("More {name} exist beyond this inventory window.")));
         }
@@ -934,15 +943,23 @@ mod tests {
         );
     }
     #[test]
-    fn core_projection_refuses_missing_and_cyclic_resolution_instead_of_guessing() {
-        let mut sidebar = golden_sidebar("reserved");
-        sidebar.arrangements.last_mut().unwrap().resolved = None;
-        assert!(matches!(&sidebar.rows()[..], [Row::Notice(message)] if message.contains("NotReady")));
-        let mut sidebar = golden_sidebar("reserved");
-        let parents = &mut sidebar.arrangements.last_mut().unwrap().resolved.as_mut().unwrap().parents;
-        let id = parents.keys().next().unwrap().clone();
-        parents.insert(id.clone(), Some(id));
-        assert!(matches!(&sidebar.rows()[..], [Row::Notice(message)] if message.contains("InvalidResolution")));
+    fn core_projection_contains_bad_entries_and_preserves_unrelated_resources() {
+        for problem in ["missing", "cycle", "all-missing"] {
+            let mut sidebar = golden_sidebar("reserved");
+            let good = "mission/independent";
+            sidebar.seen.insert(good.into(), ResourceRow { id: good.into(), kind: "Missions".into(), title: "Independent".into(), open: good.into(), missing: false });
+            let a = sidebar.arrangements.last_mut().unwrap();
+            let bad = a.resolved.as_ref().unwrap().parents.keys().next().unwrap().clone();
+            match problem {
+                "missing" => { a.resolved.as_mut().unwrap().parents.remove(&bad); }
+                "cycle" => { a.resolved.as_mut().unwrap().parents.insert(bad.clone(), Some(bad.clone())); }
+                _ => a.resolved = None,
+            }
+            let rows = sidebar.rows();
+            assert!(rows.iter().any(|row| matches!(row, Row::Notice(message) if message.contains("unavailable"))));
+            assert!(rows.iter().any(|row| matches!(row, Row::Resource(resource) if resource.id == good)));
+            assert!(!rows.iter().any(|row| matches!(row, Row::Group { id, .. } if id == &format!("folder/{bad}"))));
+        }
     }
     #[test]
     fn the_reserved_subject_is_the_sidebar_and_legacy_ones_pick_the_oldest_by_name() {
