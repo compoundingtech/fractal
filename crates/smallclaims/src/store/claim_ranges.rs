@@ -426,14 +426,17 @@ fn fold_page(connection: &Connection) -> Result<ClaimRangePage> {
 
 impl Store {
     /// Fold one bounded page into the claim range digests on a background writer loan, and return
-    /// it with the loan's hold time.
+    /// it with the loan's hold time. Each page is its own profile operation, so its writer hold is
+    /// named whether or not task metrics are on.
     pub fn fold_claim_ranges(&self) -> Result<(ClaimRangePage, std::time::Duration)> {
-        let mut connection = self.connection.write_background();
-        let started = std::time::Instant::now();
-        let transaction = connection.transaction()?;
-        let page = fold_page(&transaction)?;
-        transaction.commit()?;
-        Ok((page, started.elapsed()))
+        crate::profile::task("maintenance.claim_ranges", || {
+            let mut connection = self.connection.write_background();
+            let started = std::time::Instant::now();
+            let transaction = connection.transaction()?;
+            let page = fold_page(&transaction)?;
+            transaction.commit()?;
+            Ok((page, started.elapsed()))
+        })
     }
 
     /// Fold until nothing waits, resting `retired::import_rest` outside the loan between pages.
