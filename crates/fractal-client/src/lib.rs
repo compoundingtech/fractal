@@ -2700,6 +2700,16 @@ impl Client {
     pub async fn agent_queue(&self, agent_id: &str) -> Result<Envelope<AgentQueue>, ClientError> {
         self.agent_queue_internal(agent_id).await
     }
+    pub async fn agent_related_runs_get(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<AgentRelatedRuns>, ClientError> {
+        self.get(&format!(
+            "/v1/client/agent-related-runs/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn harness_inventory_get(
         &self,
         agent_id: &str,

@@ -17,6 +17,32 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn related_run_rows_decode_and_validate_server_semantics() {
+    let value = serde_json::json!({
+        "kind":"agent-related-runs", "agent_id":"agent/example", "as_of":100,
+        "work_cut":1, "missions_cut":1, "rows":[{
+            "id":"mission-run/example", "mission_id":"mission/example", "status":"running",
+            "status_chip":"waiting-on-you", "progress":{"done":1,"total":2},
+            "eta":null, "waiting_on_you":true, "late":false, "deadline_at":null,
+            "current_step":{"step":"step-run/example/check","path":"check","state":"ready","kind":"ask","who":"person/reviewer"},
+            "waits_on":[], "urgency_rank":0, "folded":false, "completed_at":null
+        }]
+    });
+    let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();
+    assert!(decoded.rows[0].waiting_on_you);
+    assert!(decoded.rows[0].eta.is_none());
+    assert_eq!(decoded.rows[0].current_step.as_ref().unwrap().who.as_deref(), Some("person/reviewer"));
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let schema = serde_json::json!({"$defs":schema["$defs"],"$ref":"#/$defs/AgentRelatedRuns"});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&value));
+    let mut invalid = value;
+    invalid["rows"][0]["urgency_rank"] = serde_json::json!(5);
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
 fn revisioned_agents_frames_keep_typed_publication_and_snapshot_provenance() {
     let CollectionEvent::AgentsSnapshotChunk {
         id, collection, snapshot, publication, chunk_index, chunk_count, items, order, has_more,

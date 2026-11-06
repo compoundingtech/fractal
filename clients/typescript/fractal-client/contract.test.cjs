@@ -1039,6 +1039,18 @@ test('reads bounded seat status history through the paired gateway', async () =>
     assert.equal(result.value.items[0].reset, true);
 });
 
+test('reads semantic related mission rows without joining agent work', async () => {
+    const calls = [];
+    const rows = { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: 100, work_cut: 1, missions_cut: 1, rows: [] };
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : rows));
+    } });
+    const result = await client.agentRelatedRunsGet('agent/example');
+    assert.equal(calls[1], 'https://example.test/v1/client/agent-related-runs/agent%2Fexample');
+    assert.deepEqual(result.value, rows);
+});
+
 test('canonical publication read encodes mission and schedule subjects and preserves defaults', async () => {
     const calls = [];
     const declaration = { max_active_runs: 1, revision_cutover: 'restart-active', steps: { inspect: { retry: { attempts: 1, backoff_ms: 0 } } } };
