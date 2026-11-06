@@ -106,9 +106,9 @@ pub struct FleetEndpointsRequest {
 /// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 
-/// What a refused send or reply says. The order matters: print in the chat first; an attention
-/// item (`work ask`, `work update`) only when the person asked for one.
-pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. To reach a person, print in the chat; only if the person asked for it, use `work ask` for a decision or `work update` for information";
+/// What a refused send or reply says: factual replies stay in the conversation,
+/// while every new question or decision uses a native work ask.
+pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. Any new question or decision for the person goes through a native `work ask`, even when the person is present. Use `work update` only for information the person asked for";
 
 /// Refuse a message addressed to a person. `recipient` is the canonical recipient subject.
 /// Messages to agents are unchanged.
@@ -3680,10 +3680,11 @@ mod person_inbox_tests {
             assert_eq!(error.code, PERSON_HAS_NO_INBOX_CODE);
             assert_eq!(error.message, PERSON_HAS_NO_INBOX);
         }
-        let chat = PERSON_HAS_NO_INBOX.find("print in the chat").unwrap();
+        let chat = PERSON_HAS_NO_INBOX.find("print your answer in the chat").unwrap();
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work ask`").unwrap());
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work update`").unwrap());
-        assert!(PERSON_HAS_NO_INBOX.contains("only if the person asked for it"));
+        assert!(PERSON_HAS_NO_INBOX.contains("Any new question or decision for the person"));
+        assert!(PERSON_HAS_NO_INBOX.contains("even when the person is present"));
         assert!(!PERSON_HAS_NO_INBOX.contains("NO REPLY"));
     }
 }

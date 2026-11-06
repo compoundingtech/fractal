@@ -62,6 +62,8 @@ mod membership_query_tests;
 #[cfg(test)]
 mod known_writers_tests;
 #[cfg(test)]
+mod fleet_residue_page_tests;
+#[cfg(test)]
 mod claims_in_order_tests;
 #[cfg(test)]
 mod sealed_view_cache_tests;
@@ -107,6 +109,7 @@ pub mod local_trim_citations;
 pub mod runtime;
 mod signature_backfill;
 pub mod transport_observation_index;
+pub mod operation_claim_digests;
 pub mod writer_heads;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
@@ -2944,17 +2947,7 @@ impl Store {
             let mut read = |at_least: u64, through: Option<u64>| -> Result<Vec<(u64, Option<String>)>> {
                 let connection = self.readers.get();
                 let rows = connection
-                    .prepare_cached(
-                        "SELECT envelopes.sequence,
-                                (SELECT group_concat(member_key, ' ') FROM replica_envelope_signatures AS signatures
-                                 WHERE signatures.writer=envelopes.writer
-                                   AND signatures.sequence=envelopes.sequence
-                                   AND signatures.envelope_hash=envelopes.envelope_hash)
-                         FROM replica_envelopes AS envelopes
-                         WHERE envelopes.receipt_state='validated' AND envelopes.writer=?1
-                           AND envelopes.sequence>=?2 AND envelopes.sequence<=?3
-                         ORDER BY envelopes.sequence LIMIT ?4",
-                    )?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1e106be0afa1 owner=smallclaims::store TODO=trace-statement-and-value-representation */ RESIDUE_PAGE_QUERY)?
                     .query_map(
                         params![
                             &writer,
@@ -3002,6 +2995,26 @@ impl Store {
 
 /// How many envelopes one page of the admission residue reads.
 pub const RESIDUE_PAGE: usize = 4096;
+
+/// One page of a writer's validated envelopes, each with its signers. It reads the envelope keys
+/// from the primary-key index, which holds every column the page needs, and never the envelope
+/// rows: those keep the payload beside them, so reading them pulled about 4 KB from disk for each
+/// of millions of envelopes every hour (#5171). The few envelopes not yet validated are left out
+/// through `replica_envelopes_state`, which reads an envelope row only at a sequence that has a
+/// pending or degraded envelope, to compare its hash.
+pub const RESIDUE_PAGE_QUERY: &str = "SELECT envelopes.sequence,
+        (SELECT group_concat(member_key, ' ') FROM replica_envelope_signatures AS signatures
+         WHERE signatures.writer=envelopes.writer
+           AND signatures.sequence=envelopes.sequence
+           AND signatures.envelope_hash=envelopes.envelope_hash)
+ FROM replica_envelopes AS envelopes INDEXED BY sqlite_autoindex_replica_envelopes_1
+ WHERE envelopes.writer=?1 AND envelopes.sequence>=?2 AND envelopes.sequence<=?3
+   AND NOT EXISTS(SELECT 1 FROM replica_envelopes AS unvalidated INDEXED BY replica_envelopes_state
+                  WHERE unvalidated.receipt_state IN ('pending','degraded')
+                    AND unvalidated.writer=envelopes.writer
+                    AND unvalidated.sequence=envelopes.sequence
+                    AND unvalidated.envelope_hash=envelopes.envelope_hash)
+ ORDER BY envelopes.sequence LIMIT ?4";
 
 /// Visit every row once, in sequence order, reading at most `page` rows at a time:
 /// `read(at_least, None)` returns up to `page` rows from that sequence on, and

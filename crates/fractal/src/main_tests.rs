@@ -4769,7 +4769,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
             text.starts_with("people do not have inboxes: print your answer in the chat"),
             "{to}: {text}"
         );
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     // Even a preview of the message is refused.
     let mut preview = args("person/ada");

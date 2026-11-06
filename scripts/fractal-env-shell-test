@@ -111,12 +111,19 @@ for native_hook in claude-observe claude-statusline; do
   test ! -e "$work/observed" || fail "$native_hook fell back to a masked legacy binary"
 done
 # The installer hands both updated config aliases to its macOS child, replacing inherited values.
+real_python=$(command -v python3)
 cat >"$work/bin/uname" <<'SH'
 #!/bin/sh
 printf 'Darwin\n'
 SH
 cat >"$work/bin/python3" <<'SH'
 #!/bin/sh
+# The ownership preflight computes its app path with inline Python. Only the
+# macOS install helper has --from/--bin-dir arguments; its third argument is
+# otherwise the preflight's source-install boolean, not a binary directory.
+if [ "$1" = - ]; then exec "$REAL_PYTHON" "$@"; fi
+case "$1" in */install-macos.py) ;; *) echo 'unexpected Python helper' >&2; exit 1 ;; esac
+test "$#" -eq 5 && test "$2" = --from && test "$4" = --bin-dir || exit 1
 printf '%s:%s\n' "$FRACTAL_INSTANCE" "$ST_INSTANCE" >"$OBSERVED"
 cp "$3/fractal" "$5/fractal"
 SH
@@ -124,12 +131,16 @@ mkdir -p "$work/source" "$work/home"
 printf '#!/bin/sh\nexit 0\n' >"$work/source/fractal"
 cp "$work/source/fractal" "$work/source/st3-migrate"
 chmod +x "$work/bin/uname" "$work/bin/python3" "$work/source/fractal" "$work/source/st3-migrate"
-env -i HOME="$work/home" PATH="$work/bin:$PATH" OBSERVED="$work/observed" \
+env -i HOME="$work/home" PATH="$work/bin:$PATH" OBSERVED="$work/observed" REAL_PYTHON="$real_python" \
   FRACTAL_INSTANCE=inherited-new ST_INSTANCE=inherited-old \
   bash "$repo/scripts/install" --from "$work/source" --instance selected >/dev/null
 test "$(cat "$work/observed")" = selected:selected || fail 'installer did not replace both inherited config aliases'
-env -i HOME="$work/home" PATH="$work/bin:$PATH" OBSERVED="$work/observed" \
+cmp "$work/source/fractal" "$work/home/.st-instance/selected/bin/fractal" \
+  || fail 'instance installer fixture did not copy to its binary directory'
+env -i HOME="$work/home" PATH="$work/bin:$PATH" OBSERVED="$work/observed" REAL_PYTHON="$real_python" \
   FRACTAL_INSTANCE= ST_INSTANCE=inherited-old \
   bash "$repo/scripts/install" --from "$work/source" >/dev/null
 test "$(cat "$work/observed")" = : || fail 'shared installer retained a masked legacy instance'
+cmp "$work/source/fractal" "$work/home/.local/bin/fractal" \
+  || fail 'shared installer fixture did not copy to its binary directory'
 printf 'shell environment alias tests passed\n'
