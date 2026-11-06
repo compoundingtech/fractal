@@ -1105,7 +1105,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             let through = through.unwrap_or(reader.store.client_messages_page_cut(index)?);
             let snapshot = if continuing { snapshot } else { client_snapshot_at(&reader, through) };
             let (mut rows, stream_through) = reader.store.client_messages_page_within(
-                person.as_deref(), actor.as_deref(), history, through, stream_through, after.as_ref(), limit,
+                person.as_deref(), actor.as_deref(), history, (through, stream_through), after.as_ref(), limit,
             )?;
             let selected_more = rows.len() > limit;
             rows.truncate(limit);

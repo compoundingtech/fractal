@@ -45,7 +45,7 @@ type Row = (MessageView, Value, bool);
 
 fn page(graph: &Store, history: bool, stream_through: Option<u64>) -> (Vec<Row>, u64) {
     graph
-        .read_snapshot(|through| graph.client_messages_page_within(None, None, history, through, stream_through, None, 20))
+        .read_snapshot(|through| graph.client_messages_page_within(None, None, history, (through, stream_through), None, 20))
         .unwrap()
 }
 

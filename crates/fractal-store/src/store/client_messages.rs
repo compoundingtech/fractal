@@ -255,6 +255,8 @@ struct Header {
 }
 
 type FieldSelection = (smallclaims::store::canonical::ClaimKey, Option<String>);
+/// A client page's rows: each message's view, its metadata, and whether it is current mail.
+pub type ClientMessageRows = Vec<(MessageView,Value,bool)>;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1331,15 +1333,16 @@ impl Store {
         Ok(has_pending(&connection)? || fold_incomplete(&connection)? || has_selector_cleanup(&connection)? || stream_seed_incomplete(&connection)?)
     }
 
-    pub fn client_messages_page(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,after: Option<&(u128,String)>,limit: usize) -> Result<Vec<(MessageView,Value,bool)>> {
-        Ok(self.client_messages_page_within(person,actor,history,through,None,after,limit)?.0)
+    pub fn client_messages_page(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,after: Option<&(u128,String)>,limit: usize) -> Result<ClientMessageRows> {
+        Ok(self.client_messages_page_within(person,actor,history,(through,None),after,limit)?.0)
     }
 
-    /// [`Self::client_messages_page`] with its stream frontier: the stream items it may list are
-    /// those the mirror held at `stream_through` (stream_mirror.rs), or at this read when `None`,
-    /// as a page's graph items are those at `through`. Answers the frontier it used, for the
-    /// page's continuation to carry.
-    pub fn client_messages_page_within(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,stream_through: Option<u64>,after: Option<&(u128,String)>,limit: usize) -> Result<(Vec<(MessageView,Value,bool)>,u64)> {
+    /// [`Self::client_messages_page`] with its stream frontier: `cut` is the page's graph cut and
+    /// stream frontier. The stream items it may list are those the mirror held at the frontier
+    /// (stream_mirror.rs), or at this read when `None`, as a page's graph items are those at the
+    /// graph cut. Answers the frontier it used, for the page's continuation to carry.
+    pub fn client_messages_page_within(&self,person: Option<&str>,actor: Option<&str>,history: bool,cut: (u64,Option<u64>),after: Option<&(u128,String)>,limit: usize) -> Result<(ClientMessageRows,u64)> {
+        let (through,stream_through)=cut;
         let connection=self.readers.get();
         let stream_through=match stream_through { Some(stream_through)=>stream_through, None=>stream_mirror::sent_through(&connection)? };
         let last_change: Option<String>=connection.prepare_cached("SELECT value FROM meta WHERE key=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-he75ba568317d owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [MARKER],|row|row.get(0)).optional()?;
