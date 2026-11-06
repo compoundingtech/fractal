@@ -222,3 +222,6 @@ fn validate_fleet(connection: &Connection, origin: &str) -> Result<(), St3Error>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fail_closed_tests;
