@@ -853,29 +853,31 @@ impl Store {
         let connection = self.readers.get();
         let query = match (kind, version) {
             (Some(_), Some(_)) => {
-                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND kind=?1 AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE kind=?1 AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject"
             }
             (Some(_), None) => {
-                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND kind=?1 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE kind=?1 AND subject>?3 ORDER BY subject"
             }
             (None, Some(_)) => {
-                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject"
             }
             (None, None) => {
-                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE subject>?3 ORDER BY subject"
             }
         };
-        let texts = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-hef0985e2aacf owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ query)?
-            .query_map(
-                params![kind, version, after.unwrap_or(""), limit.min(501)],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        texts
-            .into_iter()
-            .map(|s| serde_json::from_str(&s).map_err(Into::into))
-            .collect()
+        let mut statement = connection.prepare(query)?;
+        let rows = statement.query_map(params![kind, version, after.unwrap_or("")], |row| {
+            let subject: String = row.get(0)?;
+            if fractal_schema::notice::is_reserved_subject(&subject) {
+                Ok(None)
+            } else {
+                row.get::<_, String>(1).map(Some)
+            }
+        })?;
+        // Apply the shared reservation predicate before the bounded page, including roots
+        // and ancestors. Streaming avoids parsing reserved bodies or reading beyond the page.
+        rows.filter_map(|row| row.transpose()).take(limit.min(501))
+            .map(|text| Ok(serde_json::from_str(&text?)?)).collect()
     }
     pub fn custom_basis_revision(&self, subject: &str, kinds: &[String]) -> Result<String> {
         basis_revision(&self.readers.get(), subject, kinds)
@@ -885,17 +887,20 @@ impl Store {
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
-        let rows = if let Some(person) = person {
-            connection.prepare("SELECT body,requested_at FROM custom_sources WHERE active=1 AND person=?1 ORDER BY subject")?
-                .query_map([person], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+        let query = if person.is_some() {
+            "SELECT subject,body,requested_at FROM custom_sources WHERE active=1 AND person=?1 ORDER BY subject"
         } else {
-            connection
-                .prepare(
-                    "SELECT body,requested_at FROM custom_sources WHERE active=1 ORDER BY subject",
-                )?
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            "SELECT subject,body,requested_at FROM custom_sources WHERE active=1 AND ?1 IS NULL ORDER BY subject"
         };
+        let mut statement = connection.prepare(query)?;
+        let rows = statement.query_map([person], |row| {
+            let subject: String = row.get(0)?;
+            if fractal_schema::notice::is_reserved_subject(&subject) {
+                Ok(None)
+            } else {
+                Ok(Some((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            }
+        })?.filter_map(|row| row.transpose()).collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
             .map(|(text, at)| {
                 attention_item(&serde_json::from_str(&text)?, at.parse().unwrap_or(0))
