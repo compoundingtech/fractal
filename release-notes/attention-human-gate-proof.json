@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve human-gate attention from its canonical accepted answer",
+  "replay": { "status": "none", "detail": "Point reads reuse durable gate claims and the existing reviewer predicate; no projection or repair." },
+  "schema": { "status": "none", "detail": "No schema changes or indexes." },
+  "rules": { "status": "none", "detail": "Original request recipients and admitted winner-time reassignees can obtain the accepted answer actor; current ownership is never consulted." },
+  "compatibility": { "status": "additive", "detail": "Adds a lower-store proof helper and shared SourceResolution. Missing or unattributed answers return no proof." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No manual action." },
+  "recovery": { "status": "none", "detail": "Existing durable claims remain authoritative." }
+}

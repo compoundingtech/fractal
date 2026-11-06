@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read accepted attention resolution actors by exact original native locator",
+  "replay": { "status": "none", "detail": "Read retained accepted source claims without writing or populating a global projection." },
+  "schema": { "status": "additive", "detail": "Add a typed attention-resolutions read across generated clients, returning claim, actual actor, addressed person and accepted time." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "The original source subject, kind and episode must reproduce the native item ID for the authenticated person. Mismatches are typed validation refusals; absent or unavailable proofs are typed not-found, never a fallback scan or an inferred owner." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "A bounded collection omission does not prove resolution. Read this exact locator to obtain retained actor attribution." },
+  "recovery": { "status": "none", "detail": "When an attributed receipt is unavailable, keep the local answer recoverable instead of inventing an answering actor." }
+}
