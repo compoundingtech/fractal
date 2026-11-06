@@ -59,9 +59,10 @@ pub async fn ask_person(
         return Err(ApiError::bad(FractalError::new(
             "stale-work-ask",
             format!(
-                "only the current claimant and incarnation of live work can ask a person; expected incarnation `{}`, given `{}`",
-                expected.as_deref().unwrap_or("<none>"),
-                request.incarnation.as_deref().unwrap_or("<none>")
+                "cannot ask from step `{}` with stale incarnation `{}` (current harness incarnation `{}`); refresh the claim with `work ls` and use the current incarnation, or omit --step for an independent ask",
+                request.step.as_deref().unwrap(),
+                request.incarnation.as_deref().unwrap_or("<none>"),
+                expected.as_deref().unwrap_or("<none>")
             ),
         )));
     }

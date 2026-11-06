@@ -162,11 +162,17 @@ async fn a_read_queues_a_close_without_waiting_for_a_held_writer() {
     let store = reminders();
     let (release, holder) = hold_writer(&store);
 
-    let started = std::time::Instant::now();
-    relayed_closes::queue(&store, vec![close("message/r2"), close("message/unknown")]).unwrap();
-    assert!(started.elapsed() < Duration::from_millis(500), "a read waited for the writer: {:?}", started.elapsed());
+    // Off the runtime no writer starts, so nothing takes the close from the queue before it is
+    // counted (#5311).
+    std::thread::scope(|scope| {
+        scope.spawn(|| relayed_closes::queue(&store, vec![close("message/r2"), close("message/unknown")]).unwrap());
+    });
     assert_eq!(relayed_closes::queued(&store), 1, "mail this member does not hold is never queued");
+    let started = std::time::Instant::now();
+    relayed_closes::queue(&store, vec![close("message/r2")]).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500), "a read waited for the writer: {:?}", started.elapsed());
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!relayed_closes::idle(&store), "the close waits for the held writer");
     assert_eq!(current(&store), ["message/r2"], "nothing recorded while the writer is held");
 
     release.send(()).unwrap();

@@ -109,6 +109,7 @@ pub mod local_trim_citations;
 pub mod runtime;
 mod signature_backfill;
 pub mod transport_observation_index;
+pub mod operation_claim_digests;
 pub mod writer_heads;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};

@@ -373,8 +373,25 @@ pub fn declaration_live(connection: &Connection, subject: &str) -> Result<bool> 
 }
 
 fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<bool> {
-    let row = desired_row(connection, subject)?;
-    let Some(row) = row else { return Ok(false) };
+    let Some(row) = desired_row(connection, subject)? else { return Ok(false) };
+    if !declaration_present(&row)? {
+        return Ok(false);
+    }
+    if let Some(run) = row.owner_run.as_deref() {
+        if !run_live(connection, run, row.owner_generation.as_deref(), false)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A declared requester still exists even when its owning work has ended.
+pub fn requester_declared(connection: &Connection, subject: &str) -> Result<bool> {
+    let Some(row) = desired_row(connection, subject)? else { return Ok(false) };
+    declaration_present(&row)
+}
+
+fn declaration_present(row: &DesiredRow) -> Result<bool> {
     let body: Value = serde_json::from_str(&row.body)?;
     if row.kind == "stop"
         || body
@@ -383,11 +400,6 @@ fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<b
             .is_some_and(|children| children.len() == 1 && children[0]["name"] == "stop")
     {
         return Ok(false);
-    }
-    if let Some(run) = row.owner_run.as_deref() {
-        if !run_live(connection, run, row.owner_generation.as_deref(), false)? {
-            return Ok(false);
-        }
     }
     Ok(true)
 }
@@ -531,17 +543,33 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     let Some(view) = step(connection, &ask.subject)? else {
         return Ok(false);
     };
+    // Resolution claims are terminal authority, even if a stale projection looks open.
+    let resolved: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1
+         AND kind IN ('work.person-done','work.person-cancelled')
+         AND CAST(accepted_at_unix_ms AS INTEGER)<=?2)",
+        params![ask.subject, as_of as i64], |row| row.get(0))?;
+    if resolved {
+        return Ok(false);
+    }
     let requester = ask.actor.as_deref().unwrap_or_default();
+    // Independent asks belong to the agent, not its current work or runtime turn.
+    // This also preserves asks written before owner-run fencing was removed.
+    let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
     // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
     // waits for nobody, so it stays until the person reads it, even after its poster stops.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
-        || !run_live(connection, &view.run, Some(&view.generation), false)?
+        || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)
     {
         return Ok(false);
     }
-    let requester_live = unfenced || declaration_live(connection, requester)?;
-    let retiring = !requester_live && super::rollouts::retiring_ask_live(connection, ask)?;
+    let requester_live = unfenced || if independent {
+        requester_declared(connection, requester)?
+    } else {
+        declaration_live(connection, requester)?
+    };
+    let retiring = !independent && !requester_live && super::rollouts::retiring_ask_live(connection, ask)?;
     if !requester_live && !retiring {
         return Ok(false);
     }
@@ -564,6 +592,9 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         {
             return Ok(false);
         }
+    }
+    if independent {
+        return Ok(true);
     }
     // A top-level seat's ask outlives its restarts and harness changes: only stopping or retiring
     // the seat (above) or cancelling the ask ends it, so a person never loses it to a restart. A
