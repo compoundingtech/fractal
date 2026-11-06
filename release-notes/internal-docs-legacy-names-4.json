@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Agent lifecycle and harness documentation examples now use fractal.",
+  "replay": {"status": "none", "detail": "Documentation only; claim replay is unchanged."},
+  "schema": {"status": "none", "detail": "No schema or generated artifact changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or authorization rule changes."},
+  "compatibility": {"status": "none", "detail": "Only current-facing prose and command examples change; legacy paths, aliases, wire vocabulary and bridge contracts remain unchanged."},
+  "downtime": {"status": "none", "detail": "No runtime changes or deployment required."},
+  "manual": {"status": "none", "detail": "No operator migration is required."},
+  "recovery": {"status": "none", "detail": "Existing recovery behavior is unchanged."}
+}
