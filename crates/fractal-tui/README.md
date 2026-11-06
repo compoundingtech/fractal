@@ -160,16 +160,18 @@ The pre-extraction sidebar baseline is `fixtures/clients/sidebar/tui-v1.snapshot
 It captures every Buffer cell (symbol and full Debug metadata, including styles) with lossless row-major RLE,
 plus stable-ID row/control hits and context targets. Cases cover reserved/legacy selection,
 retired reservation, focused/unfocused, folding, search, scroll and narrow/zero geometry.
-Generate **only from the original renderer** with
+Generate **only from the original renderer at commit `5256894e778b3dac60b9b6cbb50004a36978eed9`** with
 `STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --features fractal-daemon/test-support sidebar_golden`; review the baseline, run
 `node scripts/check-sidebar-fixtures.mjs`, then rerun without the update flag.
 The extracted widget must compare against this capture, never regenerate it to claim parity.
 The explicit dependency feature reproduces CI's workspace-unified test-support helpers
 without compiling every workspace test target.
 
-`fractal-sidebar/ratatui` exposes an unwired `widget::render` over borrowed host-prepared
-rows, presentation and styles, returning stable-ID hit/context regions. Hosts retain
-label sanitization, row projection, catalog/fold/filter state and input/navigation.
+The TUI uses `fractal-sidebar` for authoritative v1 projection and `widget::render`
+for drawing and stable-ID hit/context regions. The host retains sanitized labels,
+flat v1 presentation groups, catalog/fold/filter state and input/navigation.
+Projection requires complete server-resolved maps; missing or invalid resolution is
+shown as an unavailable layout rather than reconstructed from raw registers.
 `cargo test -p fractal-sidebar --features ratatui --test widget` compares all eleven
 states against the original immutable capture. Default features remain empty; enabling
 the widget does not enable a client adapter or introduce client dependencies.
