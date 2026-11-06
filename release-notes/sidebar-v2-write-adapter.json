@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add optional, unwired sidebar write conversions with exact restored replay and fresh post-folder membership fences.",
+  "replay": { "status": "none", "detail": "No production activation or replay change." },
+  "schema": { "status": "none", "detail": "Uses existing generated action request types and daemon schemas without new wire fields." },
+  "rules": { "status": "none", "detail": "No daemon rule change." },
+  "compatibility": { "status": "changed", "detail": "The optional client feature converts persisted staged requests into arrangement.edit version 2 or arrangement.membership.edit actions. Hosts execute only Send effects using the matching authenticated actor; actor is not a request field. Transport, malformed responses and explicitly unknown application remain pending; typed API refusals become reducer refusals. Receipts acknowledge but do not prove observation. Compound edits retain the reducer's completion-persistence and authoritative fresh-base barriers before membership staging. Default dependencies and production wiring are unchanged." },
+  "downtime": { "status": "none", "detail": "Unwired adapter only." },
+  "manual": { "status": "none", "detail": "No host activation." },
+  "recovery": { "status": "none", "detail": "Existing journal restoration supplies the immutable request used for exact replay." }
+}
