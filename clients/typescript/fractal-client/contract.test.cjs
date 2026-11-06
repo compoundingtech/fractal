@@ -1041,7 +1041,7 @@ test('reads bounded seat status history through the paired gateway', async () =>
 
 test('reads semantic related mission rows without joining agent work', async () => {
     const calls = [];
-    const rows = { kind: 'agent-related-runs', agent_id: 'agent/example', as_of: 100, work_cut: 1, missions_cut: 1, total_rows: 0, truncated: false, rows: [] };
+    const rows = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/agent-related-runs.json'), 'utf8'));
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
         calls.push(url);
         return response(envelope(url.endsWith('/capabilities') ? capabilities : rows));
@@ -1049,6 +1049,15 @@ test('reads semantic related mission rows without joining agent work', async () 
     const result = await client.agentRelatedRunsGet('agent/example');
     assert.equal(calls[1], 'https://example.test/v1/client/agent-related-runs/agent%2Fexample');
     assert.deepEqual(result.value, rows);
+});
+
+test('related runs on old daemons are typed unsupported, not an empty list', async () => {
+    for (const body of ['', JSON.stringify({ code: 'not-found', message: 'unknown route' })]) {
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url =>
+            url.endsWith('/capabilities') ? response(envelope(capabilities)) : new Response(body, { status: 404 }) });
+        await assert.rejects(client.agentRelatedRunsGet('agent/example'),
+            error => error instanceof ClientError && error.response.code === 'unsupported-capability' && error.status === 404);
+    }
 });
 
 test('canonical publication read encodes mission and schedule subjects and preserves defaults', async () => {

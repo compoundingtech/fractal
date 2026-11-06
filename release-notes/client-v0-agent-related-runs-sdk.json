@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "SDK and JSON Schema changes only; no claims or replay behavior."},
   "schema": {"status": "changed", "detail": "Adds AgentRelatedRuns, AgentRelatedRun and RelatedRunWait wire models and registers the projection read."},
   "rules": {"status": "none", "detail": "No execution or authority changes."},
-  "compatibility": {"status": "changed", "detail": "Generated Rust, Swift and TypeScript clients expose the additive sidebar projection. Existing agent and mission payloads are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Generated Rust, Swift and TypeScript clients expose the additive sidebar projection. Route HTTP 404 is typed unsupported-capability, never an empty list. Roll out the daemon before callers; clients show unsupported visibly."},
   "downtime": {"status": "none", "detail": "No service interruption."},
   "manual": {"status": "none", "detail": "No configuration changes."},
   "recovery": {"status": "none", "detail": "Reverting removes the new SDK methods and models without changing stored state."}

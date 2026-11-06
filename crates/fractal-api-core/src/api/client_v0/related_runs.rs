@@ -12,7 +12,7 @@ WITH related(id) AS (
  SELECT id FROM mission_runs WHERE requester=?1
  UNION SELECT run_id FROM step_runs WHERE assignee=?1
  UNION SELECT run_id FROM step_runs WHERE lease_owner=?1
- UNION SELECT run_id FROM step_runs WHERE available_to!='[]' AND available_to=json_array(?1)
+ UNION SELECT run_id FROM step_runs WHERE CASE WHEN json_valid(available_to) THEN json_array_length(available_to)=1 ELSE 0 END AND available_to=json_array(?1)
  UNION SELECT substr(subject,13) FROM claims
  WHERE kind IN ('mission-run.created','mission-run.report-to')
  AND json_extract(body,'$.fields.report_to')=?1
@@ -145,7 +145,7 @@ mod tests {
         let mut plan = db.prepare(&format!("EXPLAIN QUERY PLAN {RELATED}")).unwrap();
         let details = plan.query_map(rusqlite::params!["agent/example",0], |r| r.get::<_,String>(3)).unwrap()
             .collect::<Result<Vec<_>,_>>().unwrap().join("\n");
-        assert!(details.contains("SEARCH step_runs USING COVERING INDEX step_runs_individual_offer_index"), "{details}");
+        assert!(details.contains("SEARCH step_runs USING COVERING INDEX step_runs_single_agent_offer_index"), "{details}");
         assert!(!details.contains("SCAN step_runs"), "{details}");
     }
 
