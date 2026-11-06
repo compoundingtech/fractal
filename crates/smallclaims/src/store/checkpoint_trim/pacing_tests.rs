@@ -7,12 +7,13 @@ use std::time::Duration;
 fn already_deleted_tombstones_advance_without_claiming_exhaustion() {
     let mut db = Connection::open_in_memory().unwrap();
     db.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hc7e46360ec92 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+        /* sqlite-large-value: allow-for-now lv-h175352b3edc3 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              accepted_at_unix_ms INTEGER, PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE replica_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE checkpoint_claims(id TEXT PRIMARY KEY,operation_id TEXT,writer TEXT,
-             sequence INTEGER,envelope_hash TEXT);
+             sequence INTEGER,envelope_hash TEXT,
+             subject TEXT AS ('observer/example'), kind TEXT AS ('observer.observed'));
          CREATE INDEX claim_envelope ON checkpoint_claims(writer,sequence,envelope_hash);
          CREATE TABLE claims(id TEXT PRIMARY KEY);",
     )
@@ -215,12 +216,13 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
 fn a_local_walk_visits_only_its_own_cuts_tombstones() {
     let mut db = Connection::open_in_memory().unwrap();
     db.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h1b0708ce8e80 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+        /* sqlite-large-value: allow-for-now lv-h7dfb6529d1bf owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              accepted_at_unix_ms INTEGER, checkpoint TEXT, PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE replica_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE checkpoint_claims(id TEXT PRIMARY KEY, operation_id TEXT, writer TEXT,
-             sequence INTEGER, envelope_hash TEXT, checkpoint TEXT);
+             sequence INTEGER, envelope_hash TEXT, checkpoint TEXT,
+             subject TEXT AS ('observer/example'), kind TEXT AS ('observer.observed'));
          CREATE INDEX claim_envelope ON checkpoint_claims(writer,sequence,envelope_hash);
          CREATE TABLE claims(id TEXT PRIMARY KEY);",
     )
