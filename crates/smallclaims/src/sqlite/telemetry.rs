@@ -67,6 +67,7 @@ static TASK_ORIGINS: &[&str] = &[
     "task mailbox-fence", "task mailbox-report", "task mailbox-replay", "task mailbox-primary",
     "task mailbox-rollout", "task mailbox-attachment", "task mailbox-own-post", "task mailbox-loss",
     "maintenance.client_message_selectors", "maintenance.completion_health",
+    "maintenance.gate_runner_history",
 ];
 
 #[derive(Clone, PartialEq, Eq, Hash)]

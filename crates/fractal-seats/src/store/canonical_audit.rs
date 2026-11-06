@@ -119,6 +119,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_coordination_backfill",
         "stop_deferral_claims",
         "local_stop_deferral_backfill",
+        // Live gate runners, kept from the claims by triggers: member-local.
+        "local_gate_runners",
+        "local_gate_runners_backfill",
         "local_publication_claims",
         "local_publication_starts",
         "local_publication_pending",
