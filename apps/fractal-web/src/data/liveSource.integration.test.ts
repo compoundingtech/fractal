@@ -457,7 +457,7 @@ describe('related runs pushed source binding', () => {
         expect(reads()).toBeGreaterThan(before)
         expect(live.registry.get(atom)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
       }
-    }), { maxFollows: 4 }),
+    }).pipe(Effect.scoped), { maxFollows: 4 }),
   )
   it.live('proves attention completeness only for an untruncated successfully decoded SDK window', () =>
     withGateway((live, gateway) => Effect.gen(function* () {
@@ -479,7 +479,7 @@ describe('related runs pushed source binding', () => {
         yield* settle
         expect(live.registry.get(live.source.attention)).toMatchObject({ _tag: 'Observed', coverage: { _tag: test.coverage } })
       }
-    })),
+    }).pipe(Effect.scoped)),
   )
 })
 

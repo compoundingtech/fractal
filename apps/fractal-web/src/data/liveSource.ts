@@ -540,7 +540,9 @@ export const liveSource = ({
                   initialReadDeadlineFiber?.interruptUnsafe()
                   initialReadDeadlineFiber = undefined
                   const value = prepareObservation?.(event.value, latest) ?? event.value
-                  latest = { ...observed({ value, freshness: observedFreshness?.(value) ?? 'live' }), coverage: observedCoverage?.(value) }
+                  const next = observed({ value, freshness: observedFreshness?.(value) ?? 'live' })
+                  const coverage = observedCoverage?.(value)
+                  latest = next._tag === 'Observed' && coverage !== undefined ? { ...next, coverage } : next
                   syncLatest = observeFeedSync(syncLatest, value, Date.now())
                 } else if (event._tag === 'Failed') {
                   const failure = syncStatusFromFailure(event.error)
