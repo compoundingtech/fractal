@@ -4,7 +4,7 @@ Account (gov%) / window                            used  reset state
 example/Team                           ███████░░░   72%  5h30m fresh
  * Weekly                              ███████░░░   72%  5h30m
    Session                             ?              ?      ?
-history   Daily spend (USD)
+history   Daily spend (USD) · max 8.00
 trend     ▁▃?▆█
 range     2025-12-27 .. 2025-12-31 · last 5/5 samples
 latest    8.00 USD

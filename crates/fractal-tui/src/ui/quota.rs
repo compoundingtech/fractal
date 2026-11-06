@@ -92,13 +92,14 @@ impl Quota {
 fn draw_history(doc: &mut Doc, history: &fractal_client::quota::QuotaHistory, width: usize) {
     let visible = history.points.len().min(width.saturating_sub(10));
     let points = &history.points[history.points.len() - visible..];
-    let maximum = points.iter().filter_map(|point| point.value).fold(0.0_f64, f64::max);
+    let maximum = points.iter().filter_map(|point| point.value).reduce(f64::max);
     const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let sparkline: String = points.iter().map(|point| match point.value {
         None => '?',
-        Some(value) => LEVELS[if maximum == 0.0 { 0 } else { (value / maximum * 7.0).round() as usize }],
+        Some(value) => LEVELS[maximum.filter(|maximum| *maximum > 0.0).map_or(0, |maximum| (value / maximum * 7.0).round() as usize)],
     }).collect();
-    doc.field("history", &format!("{} ({})", history.label, history.unit), width, theme::label());
+    let scale = maximum.map_or_else(|| "?".into(), |value| format!("{value:.2}"));
+    doc.field("history", &format!("{} ({}) · max {scale}", history.label, history.unit), width, theme::label());
     doc.field("trend", &sparkline, width, theme::label());
     if let (Some(first), Some(last)) = (points.first(), points.last()) {
         let date = |at: &str| chrono::DateTime::parse_from_rfc3339(at)
@@ -137,6 +138,10 @@ mod tests {
         let mut doc = Doc::default(); draw_history(&mut doc, &history, 20);
         assert!(doc.lines.iter().all(|line| line.width() <= 20));
         assert!(doc.lines.iter().any(|line| line.to_string().contains("10/128")));
+        for point in &mut history.points { point.value = None; }
+        let mut doc = Doc::default(); draw_history(&mut doc, &history, 70);
+        let text = doc.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("max ?") && !text.contains('▁'));
     }
     #[test]
     fn renders_distinct_source_states_without_zero_usage() {
