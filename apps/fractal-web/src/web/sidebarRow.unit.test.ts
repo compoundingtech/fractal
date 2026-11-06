@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
+import { sidebarRow } from './sidebarRow.ts'
 import { sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
 import { AgentRowDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx'
 import { sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
@@ -7,10 +7,7 @@ import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Agent } from '../data/source.ts'
-import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
-import * as Option from 'effect/Option'
-import type { Attention, MissionRunSummary } from '@fractal/client/schema'
-import fc from 'fast-check'
+import * as DateTime from 'effect/DateTime'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 describe('agent status glyph vocabulary', () => {
@@ -33,62 +30,8 @@ describe('agent status glyph vocabulary', () => {
     expect(html).not.toContain('data-agent-glyph')
   })
 })
-describe('mission feed evidence', () => {
-  it('keeps legacy live feeds live and leaves missing observation timestamps absent', () => {
-    const live = { _tag: 'Observed', freshness: 'live', value: [] } as const
-    expect(sidebarMissionFeeds({ missions: live, attention: live }).missionInfo).toEqual({ _tag: 'Live' })
-    const stale = sidebarMissionFeeds({ missions: { ...live, freshness: 'stale' }, attention: live })
-    expect(stale.missionInfo).toEqual({ _tag: 'Stale', updatedAt: undefined })
-    expect(stale.missionUnavailable).toBe(false)
-  })
-
-  it('keeps the last successful read time when a newer stale verdict arrives', () => {
-    fc.assert(fc.property(fc.integer({ min: 1, max: 1_000_000 }), successAt => {
-      const value = [] as const
-      const live = { _tag: 'Observed', freshness: 'live', value } as const
-      const sync = {
-        last: Option.some({ value, observedAt: successAt }),
-        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: successAt + 720_000 },
-      } as const
-      const result = sidebarMissionFeeds({ missions: { ...live, freshness: 'stale' }, attention: live,
-        missionsSync: sync, attentionSync: { ...sync, last: Option.some({ value, observedAt: successAt + 1000 }) } })
-      expect(result.missionInfo).toEqual({ _tag: 'Stale', updatedAt: successAt })
-    }))
-  })
-
-  it('distinguishes retained feed failures from failures before a value exists', () => {
-    const live = { _tag: 'Observed', freshness: 'live', value: [] } as const
-    const failed = sidebarMissionFeeds({ missions: {
-      ...live, freshness: 'stale', error: { reason: 'failed', detail: 'Follow failed' },
-    }, attention: live })
-    expect(failed.missionInfo).toEqual({ _tag: 'Failed', updatedAt: undefined })
-    expect(failed.missionUnavailable).toBe(false)
-    expect(sidebarMissionFeeds({ missions: {
-      ...live, freshness: 'stale', error: { reason: 'failed', detail: 'Follow failed' },
-    }, attention: { _tag: 'Waiting' } }).missionUnavailable).toBe(false)
-    const missing = sidebarMissionFeeds({
-      missions: { _tag: 'Unavailable', reason: 'failed', detail: 'No observation' }, attention: live,
-    })
-    expect(missing.missionInfo).toEqual({ _tag: 'Failed', updatedAt: undefined })
-    expect(missing.missionUnavailable).toBe(true)
-  })
-})
-
 const agent: Agent = { ref:'agent/example-readonly', terminal:'', name:'Reported name', lifecycle: {_tag:'Unknown'}, host:'build-1', connected:true, activity:'idle', status:'idle', usage: {_tag:'Unknown'}, checkout: {_tag:'Unknown'}, workspace: {_tag:'Unknown'}, startedAt: {_tag:'Unknown'}, endedAt: {_tag:'Unknown'}, blockedOn: {_tag:'Unknown'}, ask: {_tag:'Unknown'}, lastActivityAt: {_tag:'Unknown'} }
 const row = (change: Partial<Agent> = {}, stale = false) => sidebarRow({agent:{...agent,...change},stale})
-it('distinguishes no mission, failed without a value and failed with retained mission info', () => {
-  const failed = { _tag: 'Failed' } as const
-  const noMission = sidebarRow({ agent, stale: false, missionUnavailable: true, missionInfo: failed })
-  expect(noMission.missionContext).toEqual({ _tag: 'None' })
-  expect(sidebarRowAccessibleName(noMission)).toBe('Reported name, Idle')
-  const working = { ...agent, mission: 'mission/example/review' }
-  const missing = sidebarRow({ agent: working, stale: false, missionUnavailable: true, missionInfo: failed })
-  expect(missing.missionContext).toEqual({ _tag: 'Unavailable' })
-  expect(sidebarRowAccessibleName(missing)).toBe('Reported name, Idle, mission info unavailable')
-  const retained = sidebarRow({ agent: working, stale: false, missionInfo: failed })
-  expect(retained.missionContext).toMatchObject({ _tag: 'Mission', slug: 'review' })
-  expect(sidebarRowAccessibleName(retained)).toBe('Reported name, Idle, Mission review, mission info may be out of date')
-})
 describe('controlled native sidebar observations', () => {
   it('never exposes an unknown raw status in hover copy', () => {
     for (const status of ['indeterminate', 'unexpected-runtime-value']) {
@@ -241,114 +184,27 @@ describe('controlled native sidebar observations', () => {
   })
 })
 
-describe('retained mission row context', () => {
-  const mission = fixtureMissions[0]!
-  const work = { id: 'work/current', missionId: mission.id, runId: 'mission-run/example/run', path: 'review', state: 'claimed', title: 'Review changes' } as const
-  const seat = { ...agent, mission: mission.id, currentWork: [work] }
-  const run: MissionRunSummary = {
-    id: work.runId, requester: 'agent/example-worker', status: 'running', phase: 'working',
-    state_since: mission.updated_at, progress: { done: 2, total: 5 }, current_steps: [],
-    started_at: Option.none(), completed_at: Option.none(), eta: Option.none(),
-    after: Option.none(), blocker: Option.none(), deadline: Option.none(),
-    last_progress: Option.none(), outcome: Option.none(), steps: Option.none(), must_act: 'agent',
-  }
-  const hydrated = { ...mission, run_details: [run], run_generations: {} }
-  const project = (missions = [hydrated], attention: typeof fixtureAttention = []) =>
-    sidebarRow({ agent: seat, stale: false, missions, attention }).missionContext
-
-  it('joins exact run progress and preserves the observed step title', () => {
-    expect(project()).toMatchObject({ _tag: 'Mission', id: mission.id, slug: mission.id.split('/').at(-1),
-      progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Review changes' } })
-    expect(project([])).toMatchObject({ progress: { _tag: 'Unknown' } })
-    expect(project([{ ...hydrated, run_details: [{ ...run, id: 'mission-run/example/other' }] }]))
-      .toMatchObject({ progress: { _tag: 'Unknown' } })
-  })
-
-  it('preserves only the open run served ETA and hides missing estimates', () => {
-    const eta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000,
-      basis: { method: 'critical-path' as const, samples: 12 }, as_of: 1_794_000_000_000 }
-    const withRun = (summary: MissionRunSummary) => project([{ ...hydrated, run_details: [summary] }])
-    expect(withRun({ ...run, eta: Option.some(eta) })).toMatchObject({ eta })
-    expect(withRun({ ...run, eta: Option.none() })).toMatchObject({ eta: undefined })
-    for (const status of ['completed', 'failed', 'cancelled']) {
-      expect(withRun({ ...run, status, eta: Option.some(eta) })).toMatchObject({ eta: undefined })
-    }
-    expect(withRun({ ...run, completed_at: Option.some(eta.as_of), eta: Option.some(eta) }))
-      .toMatchObject({ eta: undefined })
-  })
-
-  it('does not borrow progress from a different generation', () => {
-    expect(project([{ ...hydrated, run_generations: { [run.id]: 'run-generation/current' },
-      run_details: [{ ...run, generation_id: 'run-generation/previous' }] }]))
-      .toMatchObject({ progress: { _tag: 'Unknown' } })
-  })
-
-  it('uses only the slug and step path when titles are unavailable', () => {
-    expect(sidebarRow({ agent: { ...seat, description: 'Not a mission title', currentWork: [{ ...work, title: undefined }] },
-      stale: false }).missionContext).toMatchObject({
-      slug: mission.id.split('/').at(-1), step: { _tag: 'Step', name: 'review' },
-    })
-    expect(project([{ ...hydrated, title: 'A title is not the mission slug' }])).toMatchObject({
-      slug: mission.id.split('/').at(-1),
-    })
-    expect(row().missionContext).toEqual({ _tag: 'None' })
-  })
-
-  it('shows actual attention question without manufacturing a q handle and follows updates', () => {
-    const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
-    expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Waiting', question: 'Ship this change?' } })
-    const waiting = project([hydrated], [card])
-    if (waiting?._tag === 'Mission') expect(waiting.step).not.toHaveProperty('handle')
-    expect(project([hydrated], [{ ...card, detail: 'Use the updated plan?' }]))
-      .toMatchObject({ step: { _tag: 'Waiting', question: 'Use the updated plan?' } })
-    expect(project([hydrated], [{ ...card, state: 'resolved' }]))
-      .toMatchObject({ step: { _tag: 'Step', name: work.title } })
-    expect(project([{ ...hydrated, run_details: [{ ...run, progress: { done: 3, total: 5 } }] }]))
-      .toMatchObject({ progress: { _tag: 'Known', done: 3, total: 5 } })
-  })
-
-  it('keeps concise accessible names aligned with real mission evidence', () => {
-    const actual = sidebarRow({ agent: seat, stale: false, missions: [hydrated] })
-    const prefix = `${seat.name}, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
-    expect(sidebarRowAccessibleName(actual)).toBe(`${prefix}, Step Review changes`)
-    const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
-    const waiting = sidebarRow({ agent: seat, stale: false, missions: [hydrated], attention: [card],
-      missionInfo: { _tag: 'Stale', updatedAt: 1000 } })
-    expect(sidebarRowAccessibleName(waiting)).toBe(`${prefix}, Waiting for you: Ship this change?, mission info may be out of date`)
-    expect(sidebarRowAccessibleName({ ...actual, missionInfo: { _tag: 'Failed' } }))
-      .toBe(`${prefix}, Step Review changes, mission info may be out of date`)
-    expect(sidebarRowAccessibleName(row())).toBe('Reported name, Idle')
-  })
-  it('does not attach another agent question just because it shares the mission run', () => {
-    const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-      actions: ['work.done' as const], conversation_id: 'agent/example-another', conversation_ids: [],
-      requester_id: 'agent/example-another', source_id: 'agent/example-another', step_run_id: undefined,
-      blocked: undefined, mission_run_id: work.runId, detail: 'Someone else must decide', update: undefined }
-    expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Step', name: work.title } })
-  })
-
-
-  it('deduplicates only observed upcoming missions and excludes the active mission', () => {
-    const other = { ...work, missionId: 'mission/example/next', runId: 'mission-run/example/next' }
-    for (const repetitions of [0, 1, 2, 5]) {
-      expect(sidebarRow({ agent: { ...seat, upcomingWork: [work, ...Array.from({ length: repetitions }, () => other)] },
-        stale: false }).missionContext).toMatchObject({
-        queued: repetitions === 0 ? [] : [{ id: other.missionId, slug: 'next' }],
-      })
-    }
+describe('server-owned mission runs', () => {
+  const work = { id: 'work/current', missionId: 'mission/example/review', runId: 'mission-run/example/run', path: 'review', state: 'claimed', title: 'Review changes' } as const
+  it('never joins current or upcoming work into the row; the related-runs read owns mission facts', () => {
+    const seat = sidebarRow({ agent: { ...agent, mission: work.missionId, currentWork: [work], upcomingWork: [{ ...work, missionId: 'mission/example/next' }] }, stale: false })
+    expect(seat).not.toHaveProperty('missionContext')
+    expect(seat).not.toHaveProperty('missionInfo')
+    expect(seat.mission).toBe(work.missionId)
+    expect(sidebarRowAccessibleName(seat)).toBe('Reported name, Idle')
   })
 })
 
-it('queued mission projection preserves first occurrence order for arbitrary bounded windows', () => {
-  fc.assert(fc.property(fc.array(fc.constantFrom('current', 'alpha', 'beta')), names => {
-    const currentWork = [{ id: 'work/example/current', missionId: 'mission/example/current',
-      runId: 'mission-run/example/current', path: 'work', state: 'claimed' }]
-    const upcomingWork = names.map(name => ({ ...currentWork[0]!, missionId: `mission/example/${name}` }))
-    const context = sidebarRow({ agent: { ...agent, currentWork, upcomingWork }, stale: false }).missionContext
-    expect(context?._tag).toBe('Mission')
-    if (context?._tag !== 'Mission') return
-    expect(context.queued.map(mission => mission.slug)).toEqual([...new Set(names.filter(name => name !== 'current'))])
-  }))
+describe('reported model', () => {
+  const usage = (model?: string) => ({ _tag: 'Known', value: {
+    aggregation: 'cumulative-per-incarnation-else-response-deltas', cached_tokens: 0, incarnation_count: 1, input_tokens: 1, output_tokens: 1, total_tokens: 2,
+    context: { used_tokens: 10, window_tokens: 100, observed_at_unix_ms: DateTime.makeUnsafe(1000), ...(model === undefined ? {} : { model }) },
+  } }) as Agent['usage']
+  it('shows only a fenced, concrete model and never invents one', () => {
+    expect(sidebarRow({ agent: { ...agent, usage: usage('model-example') }, stale: false, now: 2000 }).model).toBe('model-example')
+    for (const model of [undefined, '', ' ', '.unknown']) expect(sidebarRow({ agent: { ...agent, usage: usage(model) }, stale: false, now: 2000 }).model).toBeUndefined()
+    expect(sidebarRow({ agent: { ...agent, usage: usage('model-example'), contextObservedAfter: 1000 }, stale: false, now: 2000 }).model).toBeUndefined()
+    expect(row().model).toBeUndefined()
+    expect(row()).not.toHaveProperty('effort')
+  })
 })
