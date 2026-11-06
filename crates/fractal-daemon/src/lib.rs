@@ -146,4 +146,4 @@ pub(crate) use fractal_store::checkout;
 pub(crate) use fractal_seats::external_sessions;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
-pub use model::{NormalizedIntent, St3Error};
+pub use model::{NormalizedIntent, FractalError};

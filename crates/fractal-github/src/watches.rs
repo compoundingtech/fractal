@@ -3,7 +3,7 @@
 
 use crate::github_watch::{self, ThreadRef};
 use crate::model::ObserverSpec;
-use crate::model::{ClaimInput, DesiredSubject, St3Error, SubscriptionSpec};
+use crate::model::{ClaimInput, DesiredSubject, FractalError, SubscriptionSpec};
 use crate::store::Store;
 use crate::store::*;
 use anyhow::Result;
@@ -29,23 +29,23 @@ pub trait WatchesStore {
         thread: &ThreadRef,
         agent: &str,
         until_unix_ms: Option<u128>,
-    ) -> Result<Value, St3Error>;
+    ) -> Result<Value, FractalError>;
     /// Declare the repository's standing observer on this host unless it is running.
-    fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error>;
+    fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, FractalError>;
     /// Declare a repository's standing observer on this host unless it runs on the resource it
     /// should record into (`standing_resource`). `observers` is every declared observer.
     fn ensure_standing_observer(
         &self,
         locator: &str,
         observers: &[(String, ObserverSpec)],
-    ) -> Result<bool, St3Error>;
+    ) -> Result<bool, FractalError>;
     /// The declaration that `ensure_standing_observer` applies, and its idempotency key, or
     /// nothing when the observer already runs on its resource.
     fn standing_observer_source(
         &self,
         locator: &str,
         observers: &[(String, ObserverSpec)],
-    ) -> Result<Option<(String, String)>, St3Error>;
+    ) -> Result<Option<(String, String)>, FractalError>;
     /// The resource a repository's standing observer records into. While another observer of the
     /// repository runs, it is that observer's resource: both then record the same item facts,
     /// and a poll by either delivers to the subscriptions of both, so moving a subscription from
@@ -58,19 +58,19 @@ pub trait WatchesStore {
         subject: &str,
         current: Option<&ObserverSpec>,
         observers: &[(String, ObserverSpec)],
-    ) -> Result<String, St3Error>;
+    ) -> Result<String, FractalError>;
     /// Every declared observer, by subject.
-    fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error>;
+    fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, FractalError>;
     fn live_watch(
         &self,
         subject: &str,
-    ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, St3Error>;
+    ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, FractalError>;
     /// How a watch ended, if it did.
     fn watch_ended(
         &self,
         subject: &str,
         watch: &crate::model::WatchSpec,
-    ) -> Result<Option<Value>, St3Error>;
+    ) -> Result<Option<Value>, FractalError>;
     /// End a watch and stop its declaration. A final wake, when one is given, reaches its seat in
     /// the same write. Ending a watch that already ended changes nothing.
     fn end_watch(
@@ -78,11 +78,11 @@ pub trait WatchesStore {
         subject: &str,
         reason: &str,
         final_wake: Option<&github_watch::Wake>,
-    ) -> Result<bool, St3Error>;
+    ) -> Result<bool, FractalError>;
     /// Stop an ended watch's declaration, or the standing observer's.
-    fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error>;
+    fn stop_watch_declaration(&self, subject: &str) -> Result<(), FractalError>;
     /// Whether a seat's declaration is live: declared, not stopped, and its run still running.
-    fn seat_live(&self, agent: &str) -> Result<bool, St3Error>;
+    fn seat_live(&self, agent: &str) -> Result<bool, FractalError>;
     /// A stopped seat still owns its conversation and watches. Only removing the declaration
     /// or explicitly starting a fresh conversation ends them silently.
     fn watch_seat_ended(
@@ -90,15 +90,15 @@ pub trait WatchesStore {
         subject: &str,
         agent: &str,
         watch: &crate::model::WatchSpec,
-    ) -> Result<bool, St3Error>;
+    ) -> Result<bool, FractalError>;
     /// One watch as `st gh ls` shows it, if it was ever declared.
-    fn watch_view(&self, subject: &str) -> Result<Option<Value>, St3Error>;
-    fn watch_view_of(&self, subject: &str, desired: &Value) -> Result<Option<Value>, St3Error>;
+    fn watch_view(&self, subject: &str) -> Result<Option<Value>, FractalError>;
+    fn watch_view_of(&self, subject: &str, desired: &Value) -> Result<Option<Value>, FractalError>;
     /// The watch that most recently ended under this subject, read from its ending.
-    fn last_ended_watch(&self, subject: &str) -> Result<Option<crate::model::WatchSpec>, St3Error>;
+    fn last_ended_watch(&self, subject: &str) -> Result<Option<crate::model::WatchSpec>, FractalError>;
     /// The watches of one seat, or of every seat: each running watch, and each that ended within a
     /// day.
-    fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, St3Error>;
+    fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, FractalError>;
     /// Record that a seat posted a comment or review, by its GitHub ID. The first seat to record
     /// an ID keeps it; recording it again as that seat changes nothing.
     fn record_github_post(
@@ -109,14 +109,14 @@ pub trait WatchesStore {
         id: u64,
         url: &str,
         login: &str,
-    ) -> Result<Value, St3Error>;
+    ) -> Result<Value, FractalError>;
     /// The seat that recorded a comment or review, by its GitHub ID.
     fn github_post_agent(
         &self,
         locator: &str,
         kind: &str,
         id: u64,
-    ) -> Result<Option<String>, St3Error>;
+    ) -> Result<Option<String>, FractalError>;
     /// Background one-identity maintenance. The read captures an exact head, then releases
     /// its snapshot before publication. Admission rechecks custody and own-post attribution
     /// in the claim's existing savepoint; concurrent delivery cannot be overwritten.
@@ -124,11 +124,11 @@ pub trait WatchesStore {
         &self,
         fence: &crate::mailbox::Fence,
         subject: &str,
-    ) -> Result<bool, St3Error>;
+    ) -> Result<bool, FractalError>;
     /// Withdraw each undelivered wake of a seat about a comment or review it recorded as its own,
     /// so the seat never hears about what it posted. Such a wake exists when another host observed
     /// the comment before the seat's record reached it.
-    fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, St3Error>;
+    fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, FractalError>;
 }
 
 impl WatchesStore for Store {
@@ -150,10 +150,10 @@ impl WatchesStore for Store {
         thread: &ThreadRef,
         agent: &str,
         until_unix_ms: Option<u128>,
-    ) -> Result<Value, St3Error> {
+    ) -> Result<Value, FractalError> {
         let now = now_ms();
         if until_unix_ms.is_some_and(|until| until <= now) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-watch-deadline",
                 "a watch's deadline must be in the future",
             ));
@@ -196,14 +196,14 @@ impl WatchesStore for Store {
             self.apply_internal(&intent, &key)?;
         }
         self.watch_view(&subject)?.ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "watch-not-declared",
                 format!("the watch `{subject}` was not declared"),
             )
         })
     }
 
-    fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error> {
+    fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, FractalError> {
         let observers = self.repository_observers()?;
         self.ensure_standing_observer(&thread.locator(), &observers)
     }
@@ -212,7 +212,7 @@ impl WatchesStore for Store {
         &self,
         locator: &str,
         observers: &[(String, ObserverSpec)],
-    ) -> Result<bool, St3Error> {
+    ) -> Result<bool, FractalError> {
         let Some((source, key)) = self.standing_observer_source(locator, observers)? else {
             return Ok(false);
         };
@@ -225,7 +225,7 @@ impl WatchesStore for Store {
         &self,
         locator: &str,
         observers: &[(String, ObserverSpec)],
-    ) -> Result<Option<(String, String)>, St3Error> {
+    ) -> Result<Option<(String, String)>, FractalError> {
         let subject = github_watch::standing_observer(locator);
         let current = observers
             .iter()
@@ -251,7 +251,7 @@ impl WatchesStore for Store {
         subject: &str,
         current: Option<&ObserverSpec>,
         observers: &[(String, ObserverSpec)],
-    ) -> Result<String, St3Error> {
+    ) -> Result<String, FractalError> {
         if let Some((_, spec)) = observers.iter().find(|(observer, spec)| {
             observer != subject
                 && !spec.stopped
@@ -282,7 +282,7 @@ impl WatchesStore for Store {
         ))
     }
 
-    fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error> {
+    fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, FractalError> {
         let connection = self.readers.get();
         let mut statement = connection
             .prepare_cached(
@@ -311,7 +311,7 @@ impl WatchesStore for Store {
     fn live_watch(
         &self,
         subject: &str,
-    ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, St3Error> {
+    ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, FractalError> {
         let Some(spec) = self
             .desired_subjects_named(&[subject.to_owned()])
             .map_err(internal)?
@@ -335,7 +335,7 @@ impl WatchesStore for Store {
         &self,
         subject: &str,
         watch: &crate::model::WatchSpec,
-    ) -> Result<Option<Value>, St3Error> {
+    ) -> Result<Option<Value>, FractalError> {
         let connection = self.readers.get();
         watch_ended_tx(&connection, subject, watch)
     }
@@ -345,14 +345,14 @@ impl WatchesStore for Store {
         subject: &str,
         reason: &str,
         final_wake: Option<&github_watch::Wake>,
-    ) -> Result<bool, St3Error> {
+    ) -> Result<bool, FractalError> {
         let Some((spec, watch)) = self.live_watch(subject)? else {
             return Ok(false);
         };
         let origin = self.origin.clone();
         let ended = self
             .connection
-            .batched(|transaction| -> Result<bool, St3Error> {
+            .batched(|transaction| -> Result<bool, FractalError> {
                 if let Some(wake) = final_wake
                     && latest_claim_id_tx(transaction, &wake.subject)
                         .map_err(internal)?
@@ -387,12 +387,12 @@ impl WatchesStore for Store {
                     final_wake.map(|wake| wake.subject.as_str()),
                 )
             })
-            .map_err(|error| St3Error::new("internal", error))??;
+            .map_err(|error| FractalError::new("internal", error))??;
         self.stop_watch_declaration(subject)?;
         Ok(ended)
     }
 
-    fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error> {
+    fn stop_watch_declaration(&self, subject: &str) -> Result<(), FractalError> {
         let Some(source) = github_watch::stop_source(subject) else {
             return Ok(());
         };
@@ -401,7 +401,7 @@ impl WatchesStore for Store {
         Ok(())
     }
 
-    fn seat_live(&self, agent: &str) -> Result<bool, St3Error> {
+    fn seat_live(&self, agent: &str) -> Result<bool, FractalError> {
         let connection = self.readers.get();
         person_work::declaration_live(&connection, agent).map_err(internal)
     }
@@ -411,7 +411,7 @@ impl WatchesStore for Store {
         subject: &str,
         agent: &str,
         watch: &crate::model::WatchSpec,
-    ) -> Result<bool, St3Error> {
+    ) -> Result<bool, FractalError> {
         if self
             .desired_subjects_named(&[agent.to_owned()])
             .map_err(internal)?
@@ -450,7 +450,7 @@ impl WatchesStore for Store {
         }))
     }
 
-    fn watch_view(&self, subject: &str) -> Result<Option<Value>, St3Error> {
+    fn watch_view(&self, subject: &str) -> Result<Option<Value>, FractalError> {
         let Some(desired) = self
             .desired_subjects_named(&[subject.to_owned()])
             .map_err(internal)?
@@ -462,7 +462,7 @@ impl WatchesStore for Store {
         self.watch_view_of(subject, &desired.desired)
     }
 
-    fn watch_view_of(&self, subject: &str, desired: &Value) -> Result<Option<Value>, St3Error> {
+    fn watch_view_of(&self, subject: &str, desired: &Value) -> Result<Option<Value>, FractalError> {
         let Some(spec) = crate::graph::subscription_spec(desired) else {
             return Ok(None);
         };
@@ -509,7 +509,7 @@ impl WatchesStore for Store {
         )))
     }
 
-    fn last_ended_watch(&self, subject: &str) -> Result<Option<crate::model::WatchSpec>, St3Error> {
+    fn last_ended_watch(&self, subject: &str) -> Result<Option<crate::model::WatchSpec>, FractalError> {
         let Some((thread, _)) = github_watch::watch_parts(subject) else {
             return Ok(None);
         };
@@ -529,7 +529,7 @@ impl WatchesStore for Store {
             }))
     }
 
-    fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, St3Error> {
+    fn watches(&self, agent: Option<&str>) -> Result<Vec<Value>, FractalError> {
         let now = now_ms();
         let mut views = Vec::new();
         // Use the subject primary key to read only watches: unrelated fleet declarations must
@@ -583,11 +583,11 @@ impl WatchesStore for Store {
         id: u64,
         url: &str,
         login: &str,
-    ) -> Result<Value, St3Error> {
+    ) -> Result<Value, FractalError> {
         let locator = thread.locator();
         if let Some(owner) = self.github_post_agent(&locator, kind, id)? {
             if owner != agent {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "github-post-registered",
                     format!("{kind} {id} on {thread} is already recorded as {owner}'s"),
                 ));
@@ -626,7 +626,7 @@ impl WatchesStore for Store {
         locator: &str,
         kind: &str,
         id: u64,
-    ) -> Result<Option<String>, St3Error> {
+    ) -> Result<Option<String>, FractalError> {
         let connection = self.readers.get();
         github_post_agent_tx(&connection, locator, kind, id)
     }
@@ -635,7 +635,7 @@ impl WatchesStore for Store {
         &self,
         fence: &crate::mailbox::Fence,
         subject: &str,
-    ) -> Result<bool, St3Error> {
+    ) -> Result<bool, FractalError> {
         let candidate = self
             .read_snapshot(|_| -> Result<_> {
                 let Some(message) = self.message(subject)? else {
@@ -663,7 +663,7 @@ impl WatchesStore for Store {
             if github_post_agent_tx(connection, &locator, &kind, id)?.as_deref()
                 != Some(&fence.subject)
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "stale-subject",
                     "own-post attribution changed",
                 ));
@@ -694,7 +694,7 @@ impl WatchesStore for Store {
         .map(|(_, changed)| changed)
     }
 
-    fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, St3Error> {
+    fn close_own_post_wakes(&self, agent: &str) -> Result<Vec<String>, FractalError> {
         let mut closed = Vec::new();
         for message in self
             .messages(Some(agent), false)

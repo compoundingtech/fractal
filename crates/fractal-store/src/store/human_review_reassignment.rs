@@ -173,13 +173,13 @@ pub fn reassign_reviews_tx(
     tx: &Transaction<'_>,
     origin: &str,
     input: &PersonRenameRequest,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let reviews = attention::pending_human_reviews_tx(tx, Some(&input.old_person)).map_err(internal)?;
     let mut owners = Vec::with_capacity(reviews.len());
     for review in reviews {
         let request = claim_by_id_tx(tx, &review.request)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("missing-review-request", "the pending review request is missing"))?;
+            .ok_or_else(|| FractalError::new("missing-review-request", "the pending review request is missing"))?;
         let key = canonical_hash(&(
             "st3.person-review-reassignment.v1",
             &input.idempotency_key,
@@ -204,7 +204,7 @@ pub fn reassign_reviews_tx(
             .expect("a reviewer reassignment always has an idempotency key");
         if let Some((stored_digest, _, state)) = operation_tx(tx, &operation_id).map_err(internal)? {
             if state != "active" || stored_digest != request_digest {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "idempotency-conflict",
                     "this review reassignment key already names a different repair",
                 ));

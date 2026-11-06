@@ -13,7 +13,7 @@ pub async fn put_document(
     if let Some(bound) = bound.as_ref()
         && !crate::handoff::may_write(&bound.0.0, &request.name)
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "document-not-yours",
             format!(
                 "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
@@ -131,13 +131,13 @@ pub async fn list_documents(
             let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(encoded.strip_prefix("document/").unwrap_or(""))
                 .map_err(|_| {
-                    ApiError::bad(St3Error::new(
+                    ApiError::bad(FractalError::new(
                         "validation-failed",
                         "invalid document cursor",
                     ))
                 })?;
             let cursor: DocumentCursor = serde_json::from_slice(&bytes).map_err(|_| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "validation-failed",
                     "invalid document cursor",
                 ))
@@ -146,7 +146,7 @@ pub async fn list_documents(
                 || cursor.prefix != query.prefix
                 || cursor.history != history
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "validation-failed",
                     "document cursor filters changed",
                 )));
@@ -213,7 +213,7 @@ pub async fn get_document(
     Query(query): Query<DocumentContentQuery>,
 ) -> Result<Json<DocumentContent>, ApiError> {
     let (name, hash) = query.reference.rsplit_once('@').ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "invalid-document-reference",
             "a document reference needs `@HASH`",
         ))
@@ -285,7 +285,7 @@ pub async fn list_claims(
     Query(query): Query<ClaimsQuery>,
 ) -> Result<Json<ClaimsPage>, ApiError> {
     if query.limit == 0 || query.limit > 500 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-page-limit",
             "a claim page limit must be between 1 and 500",
         )));
@@ -343,7 +343,7 @@ pub async fn list_attention(
         .as_deref()
         .is_some_and(|person| !person.starts_with("person/"))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-attention-person",
             "an attention filter must name a person subject",
         )));
@@ -358,7 +358,7 @@ pub async fn request_attention(
     State(_state): State<AppState>,
     Json(_post): Json<crate::model::AttentionRequestPost>,
 ) -> Result<Json<AttentionRequestView>, ApiError> {
-    Err(ApiError::bad(St3Error::new(
+    Err(ApiError::bad(FractalError::new(
         "attention-migrated",
         "attention is a derived view; use work ask/done/cancel-ask or act on its source",
     )))
@@ -390,7 +390,7 @@ pub async fn resolve_attention(
         let actor = request.actor.clone();
         let summary = request.reason.clone().unwrap_or_else(|| "Read".into());
         if !matches!(request.outcome.as_str(), "resolved" | "dismissed") {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-attention-outcome",
                 "an attention outcome must be resolved or dismissed",
             )));
@@ -406,7 +406,7 @@ pub async fn resolve_attention(
                     .map_err(ApiError::internal)?
                     != subject
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "delegation-refused",
                     "dismissal needs the exact denial card and episode",
                 )));
@@ -452,7 +452,7 @@ pub async fn resolve_attention(
             .map_err(ApiError::internal)?
             != subject
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "delegation-refused",
                 "the attention card does not match the update episode",
             )));
@@ -503,7 +503,7 @@ pub async fn resolve_attention(
             closed_by: None,
         }));
     }
-    Err(ApiError::bad(St3Error::new(
+    Err(ApiError::bad(FractalError::new(
         "attention-migrated",
         "attention is a derived view; use work ask/done/cancel-ask or act on its source",
     )))
@@ -520,7 +520,7 @@ pub async fn withdraw_attention(
             .claim_by_id(episode)
             .map_err(ApiError::internal)?
             .filter(|claim| claim.kind == "work.person-asked")
-            .ok_or_else(|| ApiError::bad(St3Error::new("stale-fence", "missing update episode")))?;
+            .ok_or_else(|| ApiError::bad(FractalError::new("stale-fence", "missing update episode")))?;
         let person = original.body["fields"]["person"]
             .as_str()
             .unwrap_or_default();
@@ -529,7 +529,7 @@ pub async fn withdraw_attention(
                 .map_err(ApiError::internal)?
                 != subject
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "stale-fence",
                 "the update episode belongs to another item",
             )));
@@ -538,7 +538,7 @@ pub async fn withdraw_attention(
     } else if subject.starts_with("step-run/") {
         subject
     } else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "withdraw an update's step-run source, or supply its exact --episode; remedy other alerts at their source",
         )));
@@ -571,7 +571,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     {
         return Ok(target.to_owned());
     }
-    let unknown = |why: String| ApiError::bad(St3Error::new("review-target-unknown", why));
+    let unknown = |why: String| ApiError::bad(FractalError::new("review-target-unknown", why));
     if target.starts_with("attention/") {
         if let Some(card) = client_attention_resources(&state.store, None, false)
             .map_err(ApiError::internal)?
@@ -617,7 +617,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
                         .map_err(ApiError::internal)?
                 ),
             };
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "review-not-requested",
                 format!("`{target}` is not open: {why}"),
             )));
@@ -660,7 +660,7 @@ pub async fn post_review(
         request.decision.as_str(),
         "approved" | "rejected" | "changes-requested"
     ) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-review-decision",
             "a review decision must be approved, rejected, or changes-requested",
         )));
@@ -671,7 +671,7 @@ pub async fn post_review(
             .as_deref()
             .is_none_or(|reason| reason.trim().is_empty())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "missing-review-reason",
             "a rejection or request for changes needs a reason",
         )));
@@ -699,7 +699,7 @@ pub async fn post_review(
                 .store
                 .human_review_refusal(&subject)
                 .map_err(ApiError::internal)?;
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "review-not-requested",
                 format!("`{subject}` has no pending human review: {why}"),
             )));
@@ -721,7 +721,7 @@ pub async fn post_review(
                         .is_some_and(|actor| actor.starts_with("agent/"))
             })
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "wrong-reviewer",
                 format!("the pending review requires `{reviewer}`"),
             )));
@@ -736,7 +736,7 @@ pub async fn post_review(
         .and_then(Value::as_str)
         .unwrap_or("approve");
     if mode == "feedback" && !subject.starts_with("step-run/") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "feedback-gate-needs-step",
             "a feedback review must belong to a step",
         )));
@@ -745,7 +745,7 @@ pub async fn post_review(
         "feedback" => matches!(request.decision.as_str(), "approved" | "changes-requested"),
         _ => matches!(request.decision.as_str(), "approved" | "rejected"),
     } {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "review-decision-not-offered",
             format!(
                 "`{}` is not offered by this {mode} review",
@@ -880,7 +880,7 @@ pub async fn sekrets_attest(
     Json(request): Json<SekretsAttestRequest>,
 ) -> Result<Json<crate::sekrets::protocol::Attestation>, ApiError> {
     let Some(axum::Extension(peer)) = peer else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "sekrets-attestation-refused",
             "attestations are only given over the local socket",
         )));
@@ -923,8 +923,8 @@ pub async fn get_lane(
         let subject = store.resolve_lane(&lane)?;
         store
             .lane(&subject)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
-            .ok_or_else(|| St3Error::new("lane-not-found", format!("no lane `{subject}`")))
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+            .ok_or_else(|| FractalError::new("lane-not-found", format!("no lane `{subject}`")))
     })
     .await
     .map(Json)
@@ -939,7 +939,7 @@ pub async fn change_lane(
     request.actor = match request.actor.trim() {
         actor if actor.starts_with("person/") => actor.to_owned(),
         actor => normalized_agent_actor(actor).ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "invalid-lane-actor",
                 "a lane change needs a person or agent actor",
             ))

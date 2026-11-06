@@ -1136,6 +1136,28 @@ the runtime prelude includes the startup claim, notification state, and PTY dire
 readiness callback. The summary adds no per-request
 instrumentation and is not repeated for projection chunks or readiness progress updates.
 
+### Work after bind
+
+The first minute after bind does work that later minutes do incrementally. Under
+`ST3_PROFILE_DIR` each such read has a label of its own, so its SQL, CPU and disk reads do not
+fall into `(unlabeled THREAD)` rows, which record no disk reads:
+
+| Label | What it reads |
+| --- | --- |
+| `replication.inventory_full` | Every envelope identity this node holds, once per process. It is a span of the caller's operation, or its own operation when the caller has none. |
+| `replication.sealing_recovery` | Every batch, once per store open, for batches sealed behind the frontier. Labeled the same way. |
+| `operations.audit` | The startup operation audit: every operation against the claim log. |
+| `operations.doctor_report` | The doctor report built on the background thread. A doctor request keeps its route label. |
+| `startup.warmup` | The roster warm-up fold, now with or without task metrics. |
+
+Mailbox streams count why each full read happens as notes on `task mailbox-update`:
+`mailbox full read: no previous snapshot` (the stream's first read, or the one after a repair),
+`mailbox full read: resync` and `mailbox full read: held refill`. `task mailbox-fence` counts
+`mailbox repaired: snapshot restarts`, and `task mailbox-loss` counts
+`mailbox loss: channel-lost fault filed`; with task metrics on, both run inside
+`mailbox.write`, which then carries these two notes. Compare their counts across the first
+minute and a steady one.
+
 ## Reproduce a mailbox-wake comparison
 
 `scripts/profile-mailbox-wakes` copies the current test-only fixture into a disposable checkout

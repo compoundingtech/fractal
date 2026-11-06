@@ -7,13 +7,13 @@ pub use fractal_missions::store::rollouts::{intake_held, message_allowed, retiri
 
 pub trait RolloutsStore {
     /// The seat's current intake hold, if a rollout holds its independent mail.
-    fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error>;
+    fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, FractalError>;
     /// `rollout_message_allowed` for a message to the seat whose `rollout_intake_hold` is `hold`.
     fn rollout_message_allowed_under(
             &self,
             hold: Option<&Operation>,
             message: &MessageView,
-        ) -> Result<bool, St3Error>;
+        ) -> Result<bool, FractalError>;
     /// Capture publication and incarnation fences atomically with the durable request.
     #[allow(clippy::too_many_arguments)]
     fn request_rollout(
@@ -25,12 +25,12 @@ pub trait RolloutsStore {
             actor: &str,
             policy: &Policy,
             key: &str,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
 }
 
 impl RolloutsStore for Store {
 
-    fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error> {
+    fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, FractalError> {
         intake_hold(&self.readers.get(), subject)
     }
 
@@ -38,7 +38,7 @@ impl RolloutsStore for Store {
             &self,
             hold: Option<&Operation>,
             message: &MessageView,
-        ) -> Result<bool, St3Error> {
+        ) -> Result<bool, FractalError> {
         message_allowed_under(&self.readers.get(), hold, message)
     }
 
@@ -52,20 +52,20 @@ impl RolloutsStore for Store {
             actor: &str,
             policy: &Policy,
             key: &str,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         policy
             .validate()
-            .map_err(|e| St3Error::new("invalid-rollout-policy", e.to_string()))?;
+            .map_err(|e| FractalError::new("invalid-rollout-policy", e.to_string()))?;
         if crate::suspension::current(self, subject)
             .map_err(internal)?
             .is_some_and(|suspension| suspension.holds_seat())
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "rollout-suspended",
                 "the seat is suspended; resume it before requesting a rollout",
             ));
         }
-        self.connection.batched(|tx| -> Result<ClaimRecord, St3Error> {
+        self.connection.batched(|tx| -> Result<ClaimRecord, FractalError> {
             if let Some(prior) = tx.query_row(
                 "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims
                  WHERE subject=?1 AND kind='runtime.action.requested' AND origin=?2 AND json_extract(body,'$.fields.operation')=?3",
@@ -73,17 +73,17 @@ impl RolloutsStore for Store {
                 let fields = &prior.body["fields"]["rollout"];
                 if prior.actor.as_deref() != Some(actor) || fields["desired_token"] != expected_token
                     || fields["old_incarnation"] != incarnation || fields["policy"] != json!(policy) {
-                    return Err(St3Error::new("idempotency-key-mismatch", "rollout request key already names another request"));
+                    return Err(FractalError::new("idempotency-key-mismatch", "rollout request key already names another request"));
                 }
                 return Ok(prior);
             }
-            let selected = selection(tx, subject)?.ok_or_else(|| St3Error::new("rollout-not-enabled", "publish an owned set with --rollout when-idle or a rollout manual seat first"))?;
+            let selected = selection(tx, subject)?.ok_or_else(|| FractalError::new("rollout-not-enabled", "publish an owned set with --rollout when-idle or a rollout manual seat first"))?;
             if selected.desired_token != expected_token {
-                return Err(St3Error::new("stale-rollout-target", "selected declaration changed; read it again"));
+                return Err(FractalError::new("stale-rollout-target", "selected declaration changed; read it again"));
             }
             if let Some(member) = selected.desired.member.as_ref() {
                 crate::native_resume::rollout_support(member)
-                    .map_err(|refusal| St3Error::new(refusal.code, refusal.reason))?;
+                    .map_err(|refusal| FractalError::new(refusal.code, refusal.reason))?;
             }
             let actual = latest_actual(tx, subject).map_err(internal)?.unwrap_or(Value::Null);
             let prior = operation(tx,subject)?;
@@ -104,11 +104,11 @@ impl RolloutsStore for Store {
             let ended_session = ended_binding.and_then(|fields| fields["session_id"].as_str())
                 .filter(|session| !session.trim().is_empty());
             if actual["incarnation_id"].as_str() != Some(incarnation) || (actual["status"] != "running" && !(ended && (carry.is_some() || ended_session.is_some()))) {
-                return Err(St3Error::new("stale-rollout-incarnation", "rollout needs the exact running incarnation"));
+                return Err(FractalError::new("stale-rollout-incarnation", "rollout needs the exact running incarnation"));
             }
             if old.host != self.origin() || selected.desired.member.as_ref().is_some_and(|new| new.host != old.host || new.driver != old.driver)
                 || !matches!(old.driver.as_deref(), Some("claude" | "codex" | "pi" | "omp" | "opencode")) {
-                return Err(St3Error::new("unsupported-rollout", "rollout requires a supported native harness on its current host"));
+                return Err(FractalError::new("unsupported-rollout", "rollout requires a supported native harness on its current host"));
             }
             let now = now_ms();
             let mut asks = tx.prepare_cached("SELECT step.subject,step.attempt FROM step_runs step
@@ -130,7 +130,7 @@ impl RolloutsStore for Store {
                 &json!({"fields":{"action":"rollout","operation":key,"rollout":operation},"evidence":[expected_token]}),
                 &[], None).map_err(internal)?;
             Ok(claim)
-        }).map_err(|e| St3Error::new("internal", e))?
+        }).map_err(|e| FractalError::new("internal", e))?
     }
 }
 

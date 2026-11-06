@@ -413,7 +413,7 @@ impl Store {
         &self,
         episode: &str,
         input: &AttentionRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         self.record_failure(episode, input, "observed")
     }
 
@@ -422,9 +422,9 @@ impl Store {
         episode: &str,
         input: &AttentionRequest,
         condition: &str,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         let source = input.targets.first().ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-failure-source",
                 "an operational failure needs its source",
             )
@@ -478,7 +478,7 @@ impl Store {
         })?;
         self.operational_failure(episode)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the failure was not recorded"))
+            .ok_or_else(|| FractalError::new("internal", "the failure was not recorded"))
     }
 
     pub fn operational_failure(
@@ -1729,7 +1729,7 @@ fn declares_fault_agent(desired: &crate::model::DesiredSubject) -> bool {
 pub fn refuse_second_fault_agent(
     connection: &Connection,
     intent: &crate::model::NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let declared = intent
         .subjects
         .values()
@@ -1740,7 +1740,7 @@ pub fn refuse_second_fault_agent(
         [] => return Ok(()),
         [_] => {}
         _ => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "fault-agent-taken",
                 format!("{} each declare `handles-faults`; only one live agent may", declared.join(", ")),
             ));
@@ -1754,7 +1754,7 @@ pub fn refuse_second_fault_agent(
     if holders.is_empty() {
         return Ok(());
     }
-    Err(St3Error::new(
+    Err(FractalError::new(
         "fault-agent-taken",
         format!(
             "{} already handles faults; stop it or drop its `handles-faults` before {} declares it",
@@ -1975,9 +1975,9 @@ pub(super) fn validate_delegated_denial(
     fields: &BTreeMap<String, Value>,
     evidence: &[String],
     proof: &crate::model::DelegationProof,
-) -> std::result::Result<(), St3Error> {
+) -> std::result::Result<(), FractalError> {
     let refused = || {
-        St3Error::new(
+        FractalError::new(
             "delegation-refused",
             "close-item only dismisses a current auto-denial for this person",
         )
@@ -2015,7 +2015,7 @@ pub(super) fn validate_delegated_denial(
             .map_err(internal)?
             .is_some()
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-fence",
             "the denial was answered, the seat moved on, or the runtime changed",
         ));
@@ -2033,10 +2033,10 @@ impl Store {
         answer: &str,
         actor: &str,
         delegation: Option<&crate::model::DelegationProof>,
-    ) -> std::result::Result<ClaimRecord, St3Error> {
+    ) -> std::result::Result<ClaimRecord, FractalError> {
         if let Some(proof) = delegation {
             if proof.episode != episode || answer != "dismiss" {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "delegation-refused",
                     "close-item does not authorize allowing a call, a kind or a native permission",
                 ));
@@ -2123,8 +2123,8 @@ impl Store {
         answer: &str,
         actor: &str,
         delegation: Option<&crate::model::DelegationProof>,
-    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
-        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+    ) -> std::result::Result<Option<ClaimRecord>, FractalError> {
+        let internal = |error: anyhow::Error| FractalError::new("internal", format!("{error:#}"));
         let Some(denial) = self.claim_by_id(episode).map_err(internal)? else {
             return Ok(None);
         };
@@ -2136,7 +2136,7 @@ impl Store {
             return Ok(None);
         }
         if !DENIAL_ANSWERS.contains(&answer) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 "answer approve-once, approve-kind or dismiss",
             ));
@@ -2152,7 +2152,7 @@ impl Store {
             || moved_on(last.as_ref(), index, at)
             || answered.is_some()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-fence",
                 "that call is no longer waiting: it was answered, the seat moved on, or it restarted",
             ));
@@ -2189,7 +2189,7 @@ impl Store {
             delegated_write_probe::reached();
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
-            return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
+            return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, FractalError> {
                 // The fence above read a reader's snapshot. A concurrent dismissal may have
                 // committed its answer since: it is the answer, and a second one is not written.
                 if let Some(previous) = native_prompt_answer_claim(tx, episode).map_err(internal)? {
@@ -2207,7 +2207,7 @@ impl Store {
                         "in_reply_to":null, "tags":[format!("st3-denial:{episode}")]}, "evidence":[recorded.id]}),
                     std::slice::from_ref(&recorded.id), None, &message_key).map_err(claim_append_error)?;
                 Ok(Some(recorded))
-            }).map_err(|error| St3Error::new("internal", error))?;
+            }).map_err(|error| FractalError::new("internal", error))?;
         }
         let recorded = self.append_claim(&ClaimInput {
             subject: seat.to_owned(),
@@ -2622,7 +2622,7 @@ fn same_delegated_dismissal(
     seat: &str,
     actor: &str,
     proof: &crate::model::DelegationProof,
-) -> std::result::Result<ClaimRecord, St3Error> {
+) -> std::result::Result<ClaimRecord, FractalError> {
     if previous.subject == seat
         && previous.actor.as_deref() == Some(actor)
         && previous.body["fields"]["status"] == "dismiss"
@@ -2630,7 +2630,7 @@ fn same_delegated_dismissal(
     {
         return Ok(previous);
     }
-    Err(St3Error::new(
+    Err(FractalError::new(
         "stale-fence",
         "the denial already has another answer",
     ))
@@ -2901,8 +2901,8 @@ impl Store {
         episode: &str,
         answer: &str,
         actor: &str,
-    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
-        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+    ) -> std::result::Result<Option<ClaimRecord>, FractalError> {
+        let internal = |error: anyhow::Error| FractalError::new("internal", format!("{error:#}"));
         let Some(incarnation) = self
             .latest_actual_value(seat)
             .map_err(internal)?
@@ -2929,7 +2929,7 @@ impl Store {
             prompt["status"].as_str().unwrap_or_default(),
         );
         if !choices.iter().any(|(choice, _)| *choice == answer) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 format!(
                     "answer {}",
@@ -2965,11 +2965,11 @@ impl Store {
         seat: &str,
         actor: &str,
         proof: &crate::model::DelegationProof,
-    ) -> std::result::Result<ClaimRecord, St3Error> {
+    ) -> std::result::Result<ClaimRecord, FractalError> {
         if !actor.starts_with("agent/")
             || self.agent_person(seat).map_err(internal)?.as_deref() != Some(proof.person.as_str())
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "delegation-refused",
                 "dismissal needs an agent and the seat's current person",
             ));
@@ -2982,7 +2982,7 @@ impl Store {
         }
         self.answer_denial(seat, &proof.episode, "dismiss", actor, Some(proof))?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "delegation-refused",
                     "close-item only dismisses an auto-denial episode",
                 )
@@ -2997,8 +2997,8 @@ impl Store {
         episode: &str,
         answer: &str,
         actor: &str,
-    ) -> std::result::Result<ClaimRecord, St3Error> {
-        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+    ) -> std::result::Result<ClaimRecord, FractalError> {
+        let internal = |error: anyhow::Error| FractalError::new("internal", format!("{error:#}"));
         let now = now_ms();
         let current = self.newest_harness_observation(seat).map_err(internal)?;
         let question = current.as_ref().is_some_and(|(claim, _, harness)| {
@@ -3006,7 +3006,7 @@ impl Store {
         });
         let recipient = if question { self.question_principal(seat) } else { self.agent_person(seat) };
         if recipient.map_err(internal)?.as_deref() != Some(actor) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "forbidden",
                 "only the seat's person answers its prompts",
             ));
@@ -3018,13 +3018,13 @@ impl Store {
             return Ok(answered);
         }
         if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
             ));
         }
         let Some((claim, _, harness)) = current.filter(|(claim, _, _)| claim == episode) else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-fence",
                 format!(
                     "{}is no longer waiting: it was answered or replaced",
@@ -3033,7 +3033,7 @@ impl Store {
             ));
         };
         if !answerable(&harness, now) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-fence",
                 format!(
                     "{}can only be answered in the seat's terminal",
@@ -3042,7 +3042,7 @@ impl Store {
             ));
         }
         if answer == "allow" && subagent_prompt(&harness) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 "a subagent's call is not shown in the seat's conversation: deny it here, or allow it in the terminal",
             ));
@@ -3058,7 +3058,7 @@ impl Store {
             matches!(answer, "allow" | "deny")
         };
         if !valid {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-answer",
                 if question {
                     "answer this question with its choices, or deny it"

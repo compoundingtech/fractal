@@ -189,46 +189,51 @@ fn built_in_release(executable: &Path) -> bool {
         .is_some_and(|profile| profile == "release")
 }
 
-/// Run a process-spawning integration test inside a Linux subreaper. The outer
-/// test remains the guardian's liveness owner even when nextest kills it outright.
+/// Run a test in its own process so process-global state is isolated on every platform.
+/// On Linux, a subreaper also keeps the outer test as the guardian's liveness owner,
+/// even when nextest kills it outright.
 /// Call first in the test body, before creating runtimes' tasks or fixture files.
 /// The inner test keeps all its assertions and timing bounds unchanged.
 pub fn supervise_test() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Write as _;
+    use std::io::Write as _;
 
-        let thread = std::thread::current();
-        let name = thread.name().expect("libtest names each test thread");
-        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
-            return false;
-        }
+    let thread = std::thread::current();
+    let name = thread.name().expect("libtest names each test thread");
+    if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
+        return false;
+    }
+    let executable = std::env::current_exe().expect("integration test executable");
+    #[cfg(target_os = "linux")]
+    let mut command = {
         let script =
             Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/fractal_test_process.py");
-        let output = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg(script)
             .args(["--owner", &std::process::id().to_string(), "--"])
-            .arg(std::env::current_exe().expect("integration test executable"))
-            .args(["--exact", name, "--nocapture", "--include-ignored"])
-            .env_remove("ST_AGENT")
-            .env_remove("ST3_SUBJECT")
-            .env_remove("FRACTAL_AGENT")
-            .env_remove("FRACTAL_SUBJECT")
-            .env("FRACTAL_TEST_SUPERVISED", name)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .output()
-            .expect("launch isolated test guardian");
-        let _ = std::io::stdout().write_all(&output.stdout);
-        let _ = std::io::stderr().write_all(&output.stderr);
-        assert!(
-            output.status.success(),
-            "supervised test {name}: {}",
-            output.status
-        );
-        true
-    }
+            .arg(executable);
+        command
+    };
     #[cfg(not(target_os = "linux"))]
-    false
+    let mut command = Command::new(executable);
+    let output = command
+        .args(["--exact", name, "--nocapture", "--include-ignored"])
+        .env_remove("ST_AGENT")
+        .env_remove("ST3_SUBJECT")
+        .env_remove("FRACTAL_AGENT")
+        .env_remove("FRACTAL_SUBJECT")
+        .env("FRACTAL_TEST_SUPERVISED", name)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("launch isolated test");
+    let _ = std::io::stdout().write_all(&output.stdout);
+    let _ = std::io::stderr().write_all(&output.stderr);
+    assert!(
+        output.status.success(),
+        "supervised test {name}: {}",
+        output.status
+    );
+    true
 }
 
 /// The guardian captures this root after reaping its writers, even after SIGKILL.
@@ -349,5 +354,20 @@ mod memory_tempdir_tests {
         assert!(!noexec_in("tmpfs /dev/shm tmpfs rw,nosuid,nodev,size=32465040k 0 0\n", shm));
         // Only the mount at exactly that point counts.
         assert!(!noexec_in("tmpfs /dev/shm/other tmpfs rw,noexec 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n", shm));
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests {
+    #[test]
+    fn supervision_runs_the_body_only_in_its_marked_child_on_every_platform() {
+        if super::supervise_test() {
+            return;
+        }
+        let thread = std::thread::current();
+        assert_eq!(
+            std::env::var("FRACTAL_TEST_SUPERVISED").ok().as_deref(),
+            thread.name(),
+        );
     }
 }

@@ -47,7 +47,7 @@ Successful delivery is not proof that the agent read or completed the request. C
 
 ## Ask for a human answer
 
-Known decisions belong in a mission's human gates. Every new question or decision for a person goes through a native `fractal work ask`, even when the person is present in the conversation. Factual replies stay in the conversation. The working agent uses a structured request and the claimed step, or `--new-run` when it has no claimed work. The answer is stored with the work so it can resume with a clear decision.
+Known decisions belong in a mission's human gates. Every new question or decision for a person goes through a native `fractal work ask`, even when the person is present in the conversation. Factual replies stay in the conversation. The agent uses a structured request. By default the ask is independent: it stays open while the agent is idle or doing other work, without consuming work capacity or changing a claim. Use `--step` only when that specific claimed step must wait for the answer; its answer is stored with the work so it can resume with a clear decision. `--new-run NAME` optionally names an independent ask.
 
 The request should state the question, why a person is needed, relevant evidence, and consequences of each answer. Reuse the request's idempotency key when retrying the same question. Do not turn a message into an implicit approval.
 
