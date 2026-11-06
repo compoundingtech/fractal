@@ -47,28 +47,10 @@ impl Scope<'_> {
 
     fn size(self, field: &str, value: Option<&str>) -> Result<(), St3Error> {
         let value = value.ok_or_else(|| self.error(field, SIZE))?;
-        let power = value
-            .as_bytes()
-            .last()
-            .and_then(|b| b"KMGT".iter().position(|suffix| suffix == b));
-        let (digits, power) =
-            power.map_or((value, 0), |p| (&value[..value.len() - 1], p as u32 + 1));
-        if digits.is_empty()
-            || !digits.bytes().all(|b| b.is_ascii_digit())
-            || digits.bytes().all(|b| b == b'0')
-        {
+        let bytes = fractal_runtime::lane::parse_memory(value).map_err(|_| self.error(field, SIZE))?;
+        if bytes == 0 {
             return Err(self.error(field, SIZE));
         }
-        digits
-            .parse::<u64>()
-            .ok()
-            .and_then(|v| v.checked_mul(1024_u64.pow(power)))
-            .ok_or_else(|| {
-                self.error(
-                    field,
-                    "must fit in 18446744073709551615 bytes after applying the size suffix",
-                )
-            })?;
         Ok(())
     }
 
@@ -612,8 +594,10 @@ mod tests {
             for value in [
                 "1",
                 "0001",
+                "+1",
                 "512M",
                 "8G",
+                "8g",
                 "1K",
                 "1T",
                 "18446744073709551615",
@@ -625,7 +609,7 @@ mod tests {
                 parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}")).unwrap();
             }
             for value in [
-                "", "0", "00G", "-1", "+1", "1.5G", "8g", "8GB", "1P", " 1", "1 ", "１G", "G",
+                "", "0", "0G", "00G", "-1", "1.5G", "8GB", "1P", " 1", "1 ", "１G", "G",
             ] {
                 let error = parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}"))
                     .unwrap_err();
@@ -653,7 +637,7 @@ mod tests {
                 assert_eq!(
                     error.message,
                     format!(
-                        "agent 'agent/example' {field} must fit in 18446744073709551615 bytes after applying the size suffix"
+                        "agent 'agent/example' {field} must be a positive size such as 8G or 512M"
                     )
                 );
             }

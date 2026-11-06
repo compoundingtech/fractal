@@ -86,9 +86,10 @@ CPU seconds are accumulated CPU seconds; token budget counts input plus output t
 “Per seat incarnation” and “per mission run” describe their intended scope only:
 there are no counters, resets or aggregation. Memory and disk describe peak footprints;
 disk is not IO traffic or a free-space floor. CPU and token values must be integers from
-1 to 9007199254740991. Sizes are positive decimal integer strings, optionally followed
-by uppercase `K`, `M`, `G`, or `T` (powers of 1024), with a checked final byte count no
-greater than 18446744073709551615. The original size string is preserved.
+1 to 9007199254740991. Sizes reuse the `capacity memory=` parser: plain byte counts
+or integer strings followed by case-insensitive `K`, `M`, `G`, or `T` (powers of 1024).
+The checked final byte count must be greater than zero and no greater than
+18446744073709551615. The original size string is preserved.
 
 Omission means not declared, never zero, unlimited, or a runtime default. There is no
 inheritance or merging between declarations; replacement omission removes the value.
