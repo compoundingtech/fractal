@@ -71,6 +71,7 @@ impl Paging {
             Err(Some(frontier)) => {
                 let held = self.newest.as_ref().or(self.staged.frontier.as_ref()).or_else(|| self.complete.as_ref().map(|base| &base.frontier));
                 if let Some(held) = held {
+                    if held.epoch == frontier.epoch && held.changed_index == frontier.changed_index && held.live_count != frontier.live_count { return self.stop(Status::Refused); }
                     if held.epoch == frontier.epoch && frontier.changed_index < held.changed_index { return Vec::new(); }
                     if held == &frontier { return Vec::new(); }
                 }
@@ -266,5 +267,20 @@ mod tests {
         let mut fresh = page(1, 0, &[], None); fresh.frontier.epoch = "epoch-b".into();
         assert_eq!(state.reduce(Event::Page(next.clone(), fresh)), vec![Effect::PersistBase]);
         assert_eq!(state.complete().unwrap().frontier.epoch, "epoch-b");
+    }
+    #[test]
+    fn equal_frontier_metadata_count_conflicts_refuse_paging_and_ready() {
+        for paging in [false, true] {
+            let (mut state, mut token) = ready();
+            if paging {
+                token = refresh(&mut state);
+                state.reduce(Event::Page(token.clone(), page(1, 2, &["b"], Some("cursor"))));
+            }
+            assert!(state.reduce(Event::Metadata(token.clone(), frontier(1, 3))).is_empty());
+            assert_eq!(state.status, Status::Refused); assert!(state.stale());
+            assert_eq!(state.complete().unwrap().members[0].member, "a");
+            assert!(state.reduce(Event::Page(token, page(1, 3, &["a", "b", "c"], None))).is_empty());
+            assert_eq!(state.status, Status::Refused); assert_eq!(state.complete().unwrap().members.len(), 1);
+        }
     }
 }
