@@ -13611,7 +13611,10 @@ pub fn human_review_currency(
 /// the gate both read answers by this rule, so a review the list no longer offers is always one
 /// whose answer the gate acts on.
 fn reviewer_answer_sql(result: &str) -> String {
-    let reviewer = human_review_reassignment::reviewer_sql("request", Some(result));
+    let reviewer = human_review_reassignment::assignment_sql(
+        "request",
+        human_review_reassignment::AssignmentMoment::BeforeAnswer { answer: result },
+    );
     format!(
         "{result}.subject=request.subject
          AND {result}.kind='gate.result'
