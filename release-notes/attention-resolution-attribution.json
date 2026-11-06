@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Attribute retained attention resolutions to the accepted claim's actor",
+  "replay": { "status": "none", "detail": "Reads existing accepted claim attribution without changing replay or writing during reads." },
+  "schema": { "status": "additive", "detail": "Add optional resolved_by to the attention resource and generated typed clients." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "Retained withdrawn updates and dismissed denial records expose the actor that actually resolved them, including a delegated agent. Missing attribution remains absent rather than inferring the recipient." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Existing history remains readable by its original recipient." }
+}
