@@ -145,18 +145,18 @@ Authorization and capability refusals retain their distinct explanations.
 ## Local daemon web app
 
 The daemon serves the web app by default at `http://127.0.0.1:7410`.
-Disable it with `st up --web-listen off`. `--web-dist /path/to/dist/web`
+Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
 overrides the default installed assets at `../share/fractal-web` relative to the
 daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
 The assets stay separate from the daemon binary so a UI change does not require
 recompiling or relinking Rust.
 
 Missing assets or a missing configured concrete `person` degrade web availability
-without taking down the daemon's API listeners. `st doctor` reports the web
+without taking down the daemon's API listeners. `fractal doctor` reports the web
 finding and the configuration or installation to repair. An occupied listener port
 is still a startup error; use another loopback port or `--web-listen off`.
 
-Run `st web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+Run `fractal web [--state-dir DIR]` or `fractal web [--state-dir DIR]` to open the app.
 The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
@@ -211,7 +211,7 @@ its port when non-default.
 
 The settings:
 
-- `WF_ST_GATEWAY` names st's paired client gateway socket, never the privileged `fractal.sock`.
+- `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.
 - `WF_ST_AUTHORIZATION_FILE` holds the paired device's bearer. The composer needs a full-control pairing.
   The host refuses to start unless the file belongs to its user and nobody else can read it.
 - `WF_DIST` defaults to `dist/web`.
@@ -538,7 +538,7 @@ agent/example/atlas and a paired full-control device whose bearer it keeps in a 
 `run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
 headless Chromium, checks with Fractal that each step finished with that answer, and prints the
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
-header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
+header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
 ## Sidebar migration
 
