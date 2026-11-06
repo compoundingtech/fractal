@@ -1214,6 +1214,73 @@ fn past_its_cap_a_step_leaves_subjects_to_the_run_s_stop() {
     assert_eq!(projected, rebuilt);
 }
 
+/// What the next write that projects holds the writer for: the hooks it runs after projecting,
+/// `resources::flush` among them, in a transaction rolled back after.
+fn next_writer_hold(store: &Store, before: &str) -> std::time::Duration {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6cc0bf36e69e owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ before).unwrap();
+    let started = std::time::Instant::now();
+    store.runtime.after_projection(&transaction).unwrap();
+    let held = started.elapsed();
+    transaction.rollback().unwrap();
+    held
+}
+
+/// The next writer's hold after a trim's run that deletes 500 pull requests' superseded resource
+/// observations (#5382). As before this change, every subject the run touched stayed queued, and
+/// the next write that projected (a replication receive, a document put) refreshed them all while it
+/// held the writer; now the run settles them itself. `ST_TRIM_DIR` keeps the store.
+#[test]
+#[ignore = "large-store trim measurement (#5382): run alone"]
+fn the_next_writer_after_a_trim_s_run_holds_the_writer_briefly() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("ST_TRIM_DIR").map_or_else(|| temporary.path().to_owned(), std::path::PathBuf::from);
+    let _ = std::fs::remove_file(root.join("claims.sqlite3"));
+    let store = declared(Store::open(&root.join("claims.sqlite3"), "node").unwrap(), true);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    let subjects = 500;
+    // Open, open, queued, merged, each pull request's a round apart: the trim keeps the merged one.
+    for (round, shape) in [0, 0, 1, 2].into_iter().enumerate() {
+        for subject in 0..subjects {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("resource/github/acme/garden/pull-request/{subject}"),
+                    kind: "resource.observed".into(),
+                    actor: None,
+                    fields: resource_fields(shape, "observer/watch-0").into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("scale-{round}-{subject}")),
+                })
+                .unwrap();
+        }
+    }
+    flush_resources(&store);
+    let scratch = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["trimmed"]);
+    let run = started.elapsed();
+    assert_eq!(claims_of(&store, "resource.observed"), subjects as i64, "the newest of each stays");
+    assert!(pending_resources(&store).is_empty(), "the run left nothing for the next writer");
+    let now = next_writer_hold(&store, "");
+    // As before: every subject whose observations the run deleted still queued.
+    let before = next_writer_hold(
+        &store,
+        /* sqlite-large-value: allow-for-now lv-hb859fde7dd63 owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'",
+    );
+    println!(
+        "{}",
+        serde_json::json!({
+            "subjects": subjects, "observations_deleted": subjects * 3, "run_ms": run.as_millis(),
+            "next_writer_hold_ms": {"now": now.as_secs_f64() * 1000.0, "before": before.as_secs_f64() * 1000.0},
+        })
+    );
+    assert!(now < std::time::Duration::from_millis(100), "the next writer held the writer {now:?}");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+}
+
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
 /// claim by design (see schema.md), so it is not one.
 fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
