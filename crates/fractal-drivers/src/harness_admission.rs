@@ -754,15 +754,23 @@ pub fn executable_identity_ready_with(
     path: &Path,
     resolve: &dyn Fn(&str) -> Result<PathBuf>,
 ) -> Result<Option<String>> {
-    executable_identity_ready_recorded(path, resolve, SystemTime::now)
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, &|_| Ok(()))
+}
+
+/// Observe resolution dependencies even while identity measurement is pending.
+pub fn executable_identity_ready_observed(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>,
+    input: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Option<String>> {
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, input)
 }
 
 fn executable_identity_ready_recorded(
     path: &Path,
     resolve: &dyn Fn(&str) -> Result<PathBuf>,
     recorded_at: fn() -> SystemTime,
+    input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<Option<String>> {
-    let (files, probes) = identity_inputs(path, resolve)?;
+    let (files, probes) = identity_inputs(path, resolve, input)?;
     let dependencies = identity_snapshot(&probes)?;
     if let Some(identity) = cached_identity(&dependencies) {
         return Ok(Some(identity));
@@ -825,6 +833,10 @@ fn start_measurement(
         let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         measuring.retain(|pending| *pending != dependencies);
         IDENTITY_MEASURING.1.notify_all();
+        drop(measuring);
+        IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|wake| {
+            if let Some(wake) = wake.upgrade() { wake(); true } else { false }
+        });
     });
 }
 
@@ -836,6 +848,14 @@ struct ReadyIdentity {
 }
 
 static IDENTITY_READY: Mutex<Vec<ReadyIdentity>> = Mutex::new(Vec::new());
+
+type IdentityWake = dyn Fn() + Send + Sync;
+static IDENTITY_WAKES: Mutex<Vec<std::sync::Weak<IdentityWake>>> = Mutex::new(Vec::new());
+/// Subscribe without retaining the host reconciler after it shuts down.
+pub fn watch_identity_measurements(wake: std::sync::Weak<IdentityWake>) {
+    IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(wake);
+}
+
 
 /// Whether every dependency's timestamps precede `settled_before` (the racy-git rule).
 fn dependencies_settled(dependencies: &[IdentityDependency], settled_before: i128) -> bool {
@@ -863,7 +883,7 @@ fn settled_before(now: Duration) -> i128 {
 
 fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
     let settled_before = settled_before(recorded_at().duration_since(UNIX_EPOCH)?);
-    let (files, probes) = identity_inputs(path, resolve)?;
+    let (files, probes) = identity_inputs(path, resolve, &|_| Ok(()))?;
     let dependencies = identity_snapshot(&probes)?;
     if let Some(identity) = cached_identity(&dependencies) {
         return Ok(identity);
@@ -876,9 +896,11 @@ fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<Pa
 type IdentityInputs = (Vec<(PathBuf, bool)>, Vec<PathBuf>);
 
 /// An identity's inputs. Reads at most 256 bytes.
-fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result<IdentityInputs> {
+fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, input: &dyn Fn(&Path) -> Result<()>) -> Result<IdentityInputs> {
     let mut files = vec![(path.to_owned(), false)];
-    let mut probes = vec![path.to_owned()];
+    let mut probes = Vec::new();
+    let mut probe = |path: PathBuf| -> Result<()> { input(&path)?; probes.push(path); Ok(()) };
+    probe(path.to_owned())?;
     let mut prefix = [0_u8; 256];
     let n = File::open(path)?.read(&mut prefix)?;
     if let Some(shebang) = String::from_utf8_lossy(&prefix[..n])
@@ -888,25 +910,23 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Re
     {
         let parts = shebang.split_whitespace().collect::<Vec<_>>();
         if let Some(interpreter) = parts.first() {
+            probe(PathBuf::from(*interpreter))?;
             let interpreter = if interpreter.ends_with("/env") {
                 resolve(parts.get(1).context("missing script interpreter")?)?
             } else {
                 resolve_executable(interpreter)?
             };
-            probes.push(interpreter.clone());
+            if interpreter.as_path() != Path::new(parts[0]) { probe(interpreter.clone())?; }
             files.push((interpreter, false));
         }
     }
-    if let Some(package) = path
-        .ancestors()
-        .skip(1)
-        .take(3)
-        .find(|p| {
-            let manifest = p.join("package.json");
-            probes.push(manifest.clone());
-            manifest.is_file()
-        })
-    {
+    let mut package = None;
+    for parent in path.ancestors().skip(1).take(3) {
+        let manifest = parent.join("package.json");
+        probe(manifest.clone())?;
+        if manifest.is_file() { package = Some(parent); break; }
+    }
+    if let Some(package) = package {
         files.push((package.join("package.json"), false));
         for name in [
             "package-lock.json",
@@ -917,7 +937,7 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Re
             "pnpm-lock.yaml",
         ] {
             let lock = package.join(name);
-            probes.push(lock.clone());
+            probe(lock.clone())?;
             files.push((lock, true));
         }
         // npm's hidden lock lives beside the installed packages, including scoped packages.
@@ -926,7 +946,7 @@ fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Re
             .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
         {
             let lock = modules.join(".package-lock.json");
-            probes.push(lock.clone());
+            probe(lock.clone())?;
             files.push((lock, true));
         }
     }
@@ -1681,6 +1701,24 @@ pub(crate) mod tests {
             &state,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn identity_watch_surface_includes_missing_probes_and_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("program");
+        fs::write(&binary, "binary").unwrap();
+        fs::write(root.path().join("package.json"), "{}").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let wake: std::sync::Arc<IdentityWake> = std::sync::Arc::new(move || { let _ = send.send(()); });
+        watch_identity_measurements(std::sync::Arc::downgrade(&wake));
+        let seen = std::cell::RefCell::new(Vec::new());
+        assert!(executable_identity_ready_observed(&binary, &|_| unreachable!(),
+            &|path| { seen.borrow_mut().push(path.to_owned()); Ok(()) }).unwrap().is_none());
+        assert!(seen.borrow().contains(&root.path().join("package-lock.json")));
+        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        identity_measurements_settled();
+        assert!(executable_identity_ready_with(&binary, &|_| unreachable!()).unwrap().is_some());
     }
 
     #[test]

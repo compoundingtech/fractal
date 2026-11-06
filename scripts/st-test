@@ -1159,6 +1159,26 @@ class Burst:
             self.abandon()
             raise
 
+    def lost(self):
+        """Why a granted burst is no longer held, read without waiting, else None. Once granted the holder says nothing more unless the lane
+        stops holding it: `lost` and why (a daemon that restarted could not restore it; an older holder says `waiting` instead), or it ends.
+        The run then built in a smaller lane than it asked for, and says so rather than going on as if it held it."""
+        if self.holder is None or self.granted is None:
+            return None
+        while '\n' not in self.pending:
+            if not select.select([self.holder.stdout], [], [], 0)[0]:
+                return None
+            chunk = os.read(self.holder.stdout.fileno(), 4096).decode(errors='replace')
+            if not chunk:
+                self.holder.wait()
+                self.errors.seek(0)
+                why = self.errors.read().decode(errors='replace').strip().splitlines()
+                return f'its holder ended: {(why or [f"exit {self.holder.returncode}"])[-1]}'
+            self.pending += chunk
+        line, self.pending = self.pending.split('\n', 1)
+        kind, _, detail = line.partition(' ')
+        return detail if kind == 'lost' else line
+
     def wait(self):
         """Ask, and wait in the host's order until the answer (poll), or fail past `limit_s`."""
         while not self.poll(start=True, timeout=max(1.0, self.limit_s)):
@@ -3943,6 +3963,12 @@ def run_main(argv, cleanup):
                     rows += row if isinstance(row, list) else [row]
                     failed = failed or check_failed
                     unsigned = unsigned or check_unsigned
+                lost = burst.lost()
+                if lost:
+                    # The checks ran, from some moment on, in the seat's own lane rather than the burst it was granted: a check killed by that
+                    # lane's memory limit fails for this, and the run says so (2026-11-05, on a build host: a daemon roll forgot a granted burst).
+                    rows.append(('lane-burst', 'LOST', 0, f'the lane burst {burst.granted[0]} cores/{burst.granted[1]} was lost while the run held it: {lost}'))
+                    failed = True
                 confirm = sorted(set(CLAIMED)) if args.push and not args.out else []
                 if confirm:
                     # "pushed" meant git said so at the time; this asks the remote now, once, before the summary says what is covered.
