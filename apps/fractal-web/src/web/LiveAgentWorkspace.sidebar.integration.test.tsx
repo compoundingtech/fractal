@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@fractal/client/schema'
+import { Agent, AgentRelatedRuns, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
@@ -11,7 +11,8 @@ import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
+import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
+import { unsupportedSubjectReader } from '../data/subjectReadPort.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import * as dataHooks from '../data/react.tsx'
@@ -20,7 +21,6 @@ import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
 import type { ConnectionState } from '@fractal/sdk/read'
 import { within } from 'storybook/test'
-import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 
 // Vitest hoists the factory above static imports; load the shared mock inside it.
 vi.mock('@stylexjs/stylex', async () => ({
@@ -99,94 +99,58 @@ it('connects the responsive drawer toggle to its dialog while retaining narrow a
   expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
 })
 
-it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
-  (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
-('retains $family freshness and distinguishes missing mission info at $width $scheme', async ({ family, width, scheme }) => {
-  window.localStorage.setItem('wf.ui@1', JSON.stringify({ version: 1, entries: {
-    'round2.scheme': { version: 1, value: scheme, clock: 1, writer: 'mission-test' },
-  } }))
-  const mission = fixtureMissions[0]!
-  const runId = 'mission-run/example/review'
-  const hydrated: Mission = { ...mission, run_generations: {}, run_details: [{
-    ...mission.run_details![0]!, id: runId, generation_id: undefined, progress: { done: 2, total: 5 },
-  }] }
+it('draws served related runs under the host row in server order without joins, inbox coupling or exact row height', async () => {
   const seat = openAgent(decodeUnknownSync(Agent)({
     kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
     runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
     blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z',
-    current_work: [{ id: 'work/example/review', mission_id: mission.id, mission_run_id: runId,
+    current_work: [{ id: 'work/example/review', mission_id: 'mission/example/review', mission_run_id: 'mission-run/example/review',
       path: 'review', title: 'Review changes', state: 'claimed', since: '2026-10-20T12:00:00Z' }],
   }))
-  const question: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-    actions: ['work.done'], conversation_id: seat.id, detail: 'Ship the reviewed change?', update: undefined }
-  const missionValues = [hydrated]
-  const attentionValues = [question]
-  const missions = Atom.make<Feed<readonly Mission[]>>(observed({ value: missionValues })).pipe(Atom.keepAlive)
-  const attention = Atom.make<Feed<readonly Attention[]>>(observed({ value: attentionValues })).pipe(Atom.keepAlive)
-  const missionsSync = Atom.make<FeedSync<readonly Mission[]>>({
-    last: Option.some({ value: missionValues, observedAt: 2000 }),
-    sync: { status: { _tag: 'Live', since: 2000 }, observedAt: 2000 },
-  }).pipe(Atom.keepAlive)
-  const attentionSync = Atom.make<FeedSync<readonly Attention[]>>({
-    last: Option.some({ value: attentionValues, observedAt: 3000 }),
-    sync: { status: { _tag: 'Live', since: 3000 }, observedAt: 3000 },
-  }).pipe(Atom.keepAlive)
-  source = { ...source, missions, attention, sync: { ...source.sync!, missions: missionsSync, attention: attentionSync } }
+  const run = (id: string, fields: Record<string, unknown>) => ({ id: `mission-run/example/${id}`, mission_id: `mission/example/${id}`, status: 'running', status_chip: 'running',
+    progress: { done: 1, total: 4 }, eta: null, deadline_at: null, completed_at: null, late: false, folded: false, urgency_rank: 3, waiting_on_you: false, current_step: null, waits_on: [], ...fields })
+  // Served order deliberately differs from any client sort by name, progress or status.
+  const served = decodeUnknownSync(AgentRelatedRuns)({ kind: 'agent-related-runs', agent_id: seat.id, as_of: 5000, missions_cut: 1, work_cut: 1, total_rows: 3, truncated: false, rows: [
+    run('zeta', { status_chip: 'waiting-on-you', urgency_rank: 0, waiting_on_you: true, current_step: { step: 'approve', path: 'approve', state: 'waiting', kind: 'person', title: 'Approve the plan' } }),
+    run('alpha', { progress: { done: 3, total: 4 } }),
+    run('beta', { status: 'completed', status_chip: 'completed', folded: true, urgency_rank: 4, completed_at: 4000, progress: { done: 4, total: 4 } }),
+  ] })
+  const related = Atom.make<Feed<AgentRelatedRuns>>(waiting).pipe(Atom.keepAlive)
+  const read = vi.fn((_ref: string) => related)
+  const missing = { _tag: 'Unavailable', reason: 'failed', detail: 'No inbox observation' } as const
+  source = { ...source, missions: Atom.make<Feed<readonly Mission[]>>(missing), attention: Atom.make<Feed<readonly Attention[]>>(missing),
+    subjectReads: { ...source.subjectReads, relatedRuns: { ...unsupportedSubjectReader<AgentRelatedRuns>('Not under test'), feed: read } } }
   registry.set(agents, observed({ value: [seat] }))
-  await mount(width)
-  if (width === 390) {
-    const opener = host.querySelector<HTMLButtonElement>('button[aria-label="Expand sidebar"]')!
-    expect(opener).not.toBeNull()
-    await act(async () => opener.click())
+  const folders = vi.spyOn(folderComponents, 'AgentFolders')
+  try {
+    await mount(1440)
+    const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
+    const section = () => row().querySelector('section[aria-label^="Related missions"]')
+    const bound = folders.mock.calls.at(-1)![0]
+    expect('agentRowHeight' in bound ? bound.agentRowHeight : undefined).toBeUndefined()
+    expect(read).toHaveBeenCalledWith(seat.id)
+    expect(section()?.getAttribute('aria-busy')).toBe('true')
+    expect(section()?.textContent).toContain('Loading related missions')
+    await act(async () => registry.set(related, observed({ value: served })))
+    expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+    expect(row().querySelector('[data-agent-menu]')).not.toBeNull()
+    expect(row().querySelector('[data-mission-pill], [data-mission-unavailable]')).toBeNull()
+    expect(section()?.getAttribute('aria-label')).toBe('Related missions, 1 waiting on you')
+    expect([...row().querySelectorAll('[data-run]')].map(item => item.getAttribute('data-run'))).toEqual(served.rows.map(item => item.id))
+    expect([...row().querySelectorAll('details[data-fold="finished"] [data-run]')].map(item => item.getAttribute('data-run'))).toEqual([served.rows[2]!.id])
+    expect(row().querySelector('[data-waiting-on-you]')).not.toBeNull()
+    // A refetch or its failure keeps the last served rows drawn.
+    await act(async () => registry.set(related, observed({ value: served, freshness: 'stale', error: { reason: 'failed', detail: 'Refetch failed' } })))
+    expect(row().querySelectorAll('[data-run]')).toHaveLength(3)
+    await act(async () => registry.set(related, { _tag: 'Unavailable', reason: 'unsupported', detail: 'HTTP 404' }))
+    expect(row().querySelector('[data-run]')).toBeNull()
+    expect(section()?.querySelector('[data-failed]')?.textContent).toBe('Related missions unavailable: this server does not serve them yet')
+    expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+    await act(async () => registry.set(related, observed({ value: { ...served, rows: [], total_rows: 0 } })))
+    expect(section()).toBeNull()
+  } finally {
+    folders.mockRestore()
   }
-  const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
-  const expected = `Worker, Working, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
-  expect(row().getAttribute('aria-label')).toBe(expected)
-  expect(row().querySelector('[data-mission-progress="2/5"]')).not.toBeNull()
-  expect(row().querySelector('[data-row-field="host"]')).toBeNull()
-  await act(async () => {
-    if (family === 'missions') {
-      registry.set(missions, observed({ value: missionValues, freshness: 'stale' }))
-      registry.set(missionsSync, { ...registry.get(missionsSync),
-        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: 4000 } })
-    } else {
-      registry.set(attention, observed({ value: attentionValues, freshness: 'stale' }))
-      registry.set(attentionSync, { ...registry.get(attentionSync),
-        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: 4000 } })
-    }
-  })
-  expect(row().getAttribute('aria-label')).toBe(`${expected}, mission info may be out of date`)
-  expect(row().querySelector('[data-mission-info="stale"]')).not.toBeNull()
-  expect(row().querySelector('[data-mission-updated-at="2000"]')).not.toBeNull()
-  await act(async () => {
-    const sync = { status: { _tag: 'Failed', cause: { _tag: 'Unknown' } }, observedAt: 4500 } as const
-    if (family === 'missions') registry.set(missionsSync, { ...registry.get(missionsSync), sync })
-    else registry.set(attentionSync, { ...registry.get(attentionSync), sync })
-  })
-  expect(row().getAttribute('aria-label')).toBe(`${expected}, mission info may be out of date`)
-  expect(row().querySelector('[data-mission-info="failed"]')).not.toBeNull()
-  expect(row().querySelector('[data-mission-updated-at="2000"]')).not.toBeNull()
-  await act(async () => {
-    const missing = { _tag: 'Unavailable', reason: 'failed', detail: 'Follow failed before a value was available' } as const
-    if (family === 'missions') {
-      registry.set(missions, missing)
-      registry.set(missionsSync, { ...registry.get(missionsSync), last: Option.none() })
-    } else {
-      registry.set(attention, missing)
-      registry.set(attentionSync, { ...registry.get(attentionSync), last: Option.none() })
-    }
-  })
-  expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
-  expect(row().querySelector('[data-mission-pill]')).toBeNull()
-  const warning = row().querySelector('[data-mission-unavailable]')!
-  expect(warning.textContent).toContain('Mission info unavailable')
-  expect(warning.querySelector('svg')).not.toBeNull()
-  expect(warning.closest('button')).toBeNull()
-  expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
-  await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
-  expect(row().getAttribute('aria-label')).toBe('Worker, Working')
-  expect(row().querySelector('[data-mission-unavailable], [data-mission-pill]')).toBeNull()
-  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
 })
 
 it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {
