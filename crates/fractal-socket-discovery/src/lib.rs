@@ -135,14 +135,20 @@ mod tests {
     impl Scratch {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let name = format!(
-                "fsd-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            );
-            let dir = Path::new("/tmp").join(name);
-            std::fs::create_dir(&dir).unwrap();
-            Self(std::fs::canonicalize(&dir).unwrap())
+            loop {
+                let name = format!(
+                    "fsd-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                );
+                let dir = Path::new("/tmp").join(name);
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => return Self(std::fs::canonicalize(&dir).unwrap()),
+                    // A killed run skips Drop, and its pid can come round again: take the next name.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => panic!("create {}: {error}", dir.display()),
+                }
+            }
         }
 
         fn join(&self, name: &str) -> PathBuf {
