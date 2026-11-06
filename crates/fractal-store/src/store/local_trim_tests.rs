@@ -1069,9 +1069,12 @@ fn pending_resources(store: &Store) -> BTreeSet<String> {
     statement.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
 }
 
+/// The resource projection's rows: subject, claim, facts and openers.
+type ProjectedRows = Vec<Vec<Option<String>>>;
+
 /// What the resource projection holds, and what a rebuild from every claim present holds.
-fn projected_and_rebuilt(store: &Store) -> (Vec<Vec<Option<String>>>, Vec<Vec<Option<String>>>) {
-    let rows = |transaction: &Transaction<'_>| -> Vec<Vec<Option<String>>> {
+fn projected_and_rebuilt(store: &Store) -> (ProjectedRows, ProjectedRows) {
+    let rows = |transaction: &Transaction<'_>| -> ProjectedRows {
         let mut statement = transaction
             .prepare("SELECT subject, claim_id, facts, opened_by, opened_by_run FROM resource_observations ORDER BY subject")
             .unwrap();
