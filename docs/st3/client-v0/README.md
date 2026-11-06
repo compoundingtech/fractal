@@ -1216,6 +1216,10 @@ not the time its roster row happened to change.
 Agent sidebar entries show harness/model/effort, last activity and open asks, followed by two-line
 mission rows. Finished runs start folded under a device-persisted “Finished” toggle; opening a
 mission row navigates to its mission. Late ETA text is red; person holds say “waiting on you”.
+The singleton-only index cannot replace the general seat-offer index; daemon cost probes cover this route.
+Roll out the daemon before callers. Rust, Swift and TypeScript clients turn this route's HTTP 404
+into typed `unsupported-capability` (including an empty older-router response), never empty rows.
+Clients must show that unsupported result visibly. `fixtures/agent-related-runs.json` is normative.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run

@@ -18,16 +18,7 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 
 #[test]
 fn related_run_rows_decode_and_validate_server_semantics() {
-    let value = serde_json::json!({
-        "kind":"agent-related-runs", "agent_id":"agent/example", "as_of":100,
-        "work_cut":1, "missions_cut":1, "total_rows":1, "truncated":false, "rows":[{
-            "id":"mission-run/example", "mission_id":"mission/example", "status":"running",
-            "status_chip":"waiting-on-you", "progress":{"done":1,"total":2},
-            "eta":null, "waiting_on_you":true, "late":false, "deadline_at":null,
-            "current_step":{"step":"step-run/example/check","path":"check","state":"ready","kind":"ask","who":"person/reviewer"},
-            "waits_on":[], "urgency_rank":0, "folded":false, "completed_at":null
-        }]
-    });
+    let value: serde_json::Value = serde_json::from_slice(&fixture("agent-related-runs.json")).unwrap();
     let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();
     assert!(decoded.rows[0].waiting_on_you);
     assert!(decoded.rows[0].eta.is_none());
