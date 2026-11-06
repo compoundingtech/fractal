@@ -203,8 +203,7 @@ fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
                     &json!({"fields":{"reason":"Finished","retired_by":"person/example","declaration":token,"owner_host":store.origin}}), &[], None)?;
                 // Exercise the core retirement projector without depending on the seats command crate.
                 retirements::project_subject(tx, RUNTIME)?;
-                custom::flush(tx)?;
-                assert_links_fail_closed_like_rebuild(tx)
+                Ok(())
             }).unwrap().unwrap();
         } else {
             let source = if mutation == "stop" { "version 2\nstop \"agent/example/runtime\"" }
@@ -212,8 +211,8 @@ fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
             let intent = crate::parse_intent(source, "example").unwrap();
             store.apply_as(&intent, &BTreeMap::from([(RUNTIME.into(), vec![token])]),
                 mutation, Some("person/example")).unwrap();
-            store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
         }
+        store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
     }
 }
 

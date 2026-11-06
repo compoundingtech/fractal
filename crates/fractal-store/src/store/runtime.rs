@@ -559,6 +559,9 @@ impl Runtime for FractalRuntime {
         // without running APPEND (or can do so after its last claim projector).
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
+        // Desired/liveness projections can change after the final claim projector.
+        // Never commit ready notice rows against an already-revoked current binding.
+        custom::flush(transaction)?;
         completion_state::flush(transaction)?;
         run_eta::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
