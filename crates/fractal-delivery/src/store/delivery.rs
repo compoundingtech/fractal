@@ -243,7 +243,8 @@ pub trait DeliveryStore {
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
         ) -> Result<crate::mailbox::Fence, FractalError>;
-    /// Recheck captured physical custody under the writer, before any capability mutation.
+    /// Recheck captured physical custody before any capability mutation: under the writer when the
+    /// bind writes, and on a fresh read transaction when it would write nothing.
     fn bind_mailbox_with_lease_checked(
             &self,
             request: &crate::mailbox::Fence,
@@ -1025,7 +1026,8 @@ impl DeliveryStore for Store {
         // A channel that reconnects with the lease and binding it already holds, as every seat's
         // does when the daemon restarts, writes nothing. Decide it on a read transaction begun
         // after the request arrived, so every commit before it is seen, through the same checks
-        // in the same order; only an admission that must write takes the writer.
+        // in the same order; only an admission that must write takes the writer. That one runs
+        // every check again under it, `validate` included: what the read saw may have changed.
         {
             let connection = self.readers.get();
             if connection.is_autocommit() {
