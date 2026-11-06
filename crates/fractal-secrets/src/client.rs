@@ -592,7 +592,7 @@ impl Client {
         request: &fractal_schema::deploy::VerifyGoRequest,
     ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
         if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
-            return Err(crate::model::St3Error::new(
+            return Err(crate::model::FractalError::new(
                 "deploy-local-only",
                 "deploy verification requires the local Unix endpoint",
             ).into());

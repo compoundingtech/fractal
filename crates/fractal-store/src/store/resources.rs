@@ -1311,7 +1311,7 @@ END;
         };
         record_invalid_replica_envelope(
             &transaction, &envelope,
-            &St3Error::new("internal", "pending control failure"),
+            &FractalError::new("internal", "pending control failure"),
         ).unwrap();
         let (position, claim_id, state): (i64, Option<String>, String) = transaction.query_row(
             "SELECT position,claim_id,state FROM replica_records WHERE writer='writer' AND sequence=1 AND envelope_hash='hash'",

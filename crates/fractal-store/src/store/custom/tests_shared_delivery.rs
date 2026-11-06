@@ -111,7 +111,7 @@ pub fn tree_claim(
     kind: &str,
     actor: &str,
     fields: Value,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     s.append_claim(&ClaimInput {
         subject: tree.into(),
         kind: format!("custom.decision.tree.v1.{kind}"),
