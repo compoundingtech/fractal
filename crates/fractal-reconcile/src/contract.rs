@@ -21,12 +21,16 @@ pub fn declared(store: &Store, desired: &DesiredSubject) -> Result<Contract> {
 /// The declared contract if every executable it names is already measured, or `None` while one
 /// is measured in the background. A read never streams an executable's bytes (#5209).
 pub fn declared_ready(store: &Store, desired: &DesiredSubject) -> Result<Option<Contract>> {
+    declared_ready_inputs(store, desired, &|_| Ok(()))
+}
+
+pub(crate) fn declared_ready_inputs(store: &Store, desired: &DesiredSubject, input: &dyn Fn(&Path) -> Result<()>) -> Result<Option<Contract>> {
     let member = prepared(store, desired)?;
     let ready = Measures {
         environment: &|declared, executable| crate::reconcile::member_environment_ready(declared, executable, None),
-        identity: &|path, resolve| fractal_drivers::harness_admission::executable_identity_ready_with(path, resolve),
+        identity: &|path, resolve, input| fractal_drivers::harness_admission::executable_identity_ready_observed(path, resolve, input),
     };
-    capture_with(store, desired, &member, false, &ready)
+    capture_with(store, desired, &member, false, &ready, input)
 }
 
 fn prepared(store: &Store, desired: &DesiredSubject) -> Result<MemberSpec> {
@@ -44,18 +48,18 @@ struct Measures<'a> {
 }
 
 type EnvironmentMeasure = dyn Fn(&BTreeMap<String, String>, &Path) -> Result<Option<BTreeMap<String, String>>>;
-type IdentityMeasure = dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>) -> Result<Option<String>>;
+type IdentityMeasure = dyn Fn(&Path, &dyn Fn(&str) -> Result<std::path::PathBuf>, &dyn Fn(&Path) -> Result<()>) -> Result<Option<String>>;
 
 pub(crate) fn capture(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool) -> Result<Contract> {
     let blocking = Measures {
         environment: &|declared, executable| crate::reconcile::member_environment(declared, executable, None).map(Some),
-        identity: &|path, resolve| fractal_drivers::harness_admission::executable_identity_with(path, resolve).map(Some),
+        identity: &|path, resolve, _| fractal_drivers::harness_admission::executable_identity_with(path, resolve).map(Some),
     };
-    capture_with(store, desired, member, running, &blocking)?
+    capture_with(store, desired, member, running, &blocking, &|_| Ok(()))?
         .context("a blocking measurement always answers")
 }
 
-fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool, measures: &Measures<'_>) -> Result<Option<Contract>> {
+fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, running: bool, measures: &Measures<'_>, input: &dyn Fn(&Path) -> Result<()>) -> Result<Option<Contract>> {
     let executable = crate::reconcile::launch_executable()?;
     let Some(mut environment) = (measures.environment)(&member.environment, &executable)? else {
         return Ok(None);
@@ -67,6 +71,13 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
     let resolve = |program: &str| {
         let mut program = program.to_owned();
         fractal_runtime::expand_path_placeholder(&mut program, &environment);
+        if Path::new(&program).components().count() == 1 {
+            for directory in std::env::split_paths(environment.get("PATH").map(String::as_str).unwrap_or("")) {
+                input(&directory.join(&program))?;
+            }
+        } else {
+            input(&Path::new(&member.cwd).join(&program))?;
+        }
         let path = fractal_runtime::resolve_executable(&program, &environment)?;
         Ok(if path.is_absolute() { path } else { Path::new(&member.cwd).join(path) })
     };
@@ -83,14 +94,15 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
     let mut binaries = BTreeMap::new();
     for (role, path) in [("launcher", executable), ("provider", resolve(provider)?)] {
         // Start every pending measurement before answering, so one later read finds them all.
-        binaries.insert(role.to_owned(), (measures.identity)(&path, &resolve)?);
+        binaries.insert(role.to_owned(), (measures.identity)(&path, &resolve, input)?);
     }
     let Some(binaries) = binaries.into_iter().map(|(role, identity)| identity.map(|identity| (role, identity)))
         .collect::<Option<BTreeMap<_, _>>>()
     else {
         return Ok(None);
     };
-    crate::launch_contract::capture_effective(store, desired, &binaries, &environment, running).map(Some)
+    crate::launch_contract::capture_effective_observed(store, desired, &binaries, &environment, running, input)
+        .map(|(contract, _)| Some(contract))
 }
 
 /// Running identity is exclusively the receipt for the observed incarnation, never its token's
@@ -147,12 +159,18 @@ mod tests {
         member.environment.insert("PATH".into(), root.path().join("bin").display().to_string());
         let mut prepared = member.clone();
         let original = declared(&store, &desired).unwrap();
-        prepared.environment.insert("PATH".into(), root.path().join("overlay").display().to_string());
+        prepared.environment.insert("PATH".into(), std::env::join_paths([root.path().join("missing"), root.path().join("overlay")]).unwrap().to_string_lossy().into_owned());
         prepared.environment.insert("CLAUDE_CONFIG_DIR".into(), root.path().join("overlay").display().to_string());
         let expected = capture(&store, &desired, &prepared, true).unwrap();
         install(&store, Box::new(move |_| Ok(prepared.clone())));
         assert_ne!(original.binary, expected.binary);
         assert_eq!(declared(&store, &desired).unwrap(), expected);
+        let seen = std::cell::RefCell::new(Vec::new());
+        declared_ready_inputs(&store, &desired, &|path| {
+            seen.borrow_mut().push(path.to_owned()); Ok(())
+        }).unwrap();
+        assert!(seen.borrow().contains(&root.path().join("missing/node")), "shadowing executable creation must invalidate");
+        assert!(seen.borrow().contains(&root.path().join("overlay/node")));
         std::fs::write(root.path().join("overlay/CLAUDE.md"), "effective account context").unwrap();
         assert_ne!(declared(&store, &desired).unwrap().prompt, expected.prompt);
     }
