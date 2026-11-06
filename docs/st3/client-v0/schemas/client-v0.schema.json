@@ -931,6 +931,16 @@
         "snoozed_until": { "type": ["string", "null"], "format": "date-time", "description": "Server UTC snooze deadline; null explicitly clears snooze." }
       }
     },
+    "AttentionResolution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_id", "resolved_by", "person_id", "resolved_at"],
+      "properties": {
+        "claim_id": { "$ref": "#/$defs/Id" },
+        "resolved_by": { "$ref": "#/$defs/Id" },
+        "person_id": { "$ref": "#/$defs/Id" },
+        "resolved_at": { "type": "string", "format": "date-time" }
+      }
+    },
     "Attention": {
       "allOf": [
         { "$ref": "#/$defs/ResourceHeader" },

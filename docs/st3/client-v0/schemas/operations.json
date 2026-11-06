@@ -65,6 +65,7 @@
     { "id": "devices.list", "method": "GET", "path": "/v1/client/devices", "response": "Page" },
     { "id": "attention.list", "method": "GET", "path": "/v1/client/attention", "response": "Page" },
     { "id": "attention.get", "method": "GET", "path": "/v1/client/attention/{id}", "response": "Resource" },
+    { "id": "attention-resolutions.get", "method": "GET", "path": "/v1/client/attention-resolutions/{id}", "response": "AttentionResolution", "scope": "read.projections", "query": { "source_id": "required original source subject", "attention_kind": "required original native attention kind", "episode": "required original source episode; authenticated person and locator must recompute id" } },
     { "id": "messages.list", "method": "GET", "path": "/v1/client/messages", "response": "Page" },
     { "id": "messages.get", "method": "GET", "path": "/v1/client/messages/{id}", "response": "Resource" },
     { "id": "message-body.get", "method": "GET", "path": "/v1/client/message-bodies/{id}", "response": "MessageBody", "scope": "read.projections" },
