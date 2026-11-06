@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add explicit Rust collection-v1 membership paging and subscription joining",
+  "replay": { "status": "none", "detail": "No daemon replay or backfill." },
+  "schema": { "status": "none", "detail": "Uses existing optional collection-v1 metadata fields." },
+  "rules": { "status": "none", "detail": "No admission or checkpoint changes." },
+  "compatibility": { "status": "changed", "detail": "Additive typed HTTP and subscribe entrypoints preserve legacy methods. The public joiner stages canonical unique rows, compares exact u64 frontiers only within equal scope and opaque epoch, refuses missing metadata, and retains stale complete views across invalidation. Subscribe before beginning pages; replace the joiner on selection or connection changes. No capability advertisement or UI activation." },
+  "downtime": { "status": "none", "detail": "No service restart required." },
+  "manual": { "status": "none", "detail": "No operator steps. Callers explicitly opt in and restart from page one on collection change or frontier reset; no automatic retries are added." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Decode collection-scoped membership metadata and refusals in generated clients",
+  "replay": {"status": "none", "detail": "No replay or projection rebuild is required."},
+  "schema": {"status": "none", "detail": "The additive client wire contract describes opt-in page and stream metadata; canonical graph schemas are unchanged."},
+  "rules": {"status": "none", "detail": "Authorization rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "Rust, Swift and TypeScript retain legacy decoding and expose optional collection contract and epoch metadata. Collection-v1 schema validation requires epoch metadata and preserves the exact refusal codes. No capability is advertised yet."},
+  "downtime": {"status": "none", "detail": "Normal client rollout only."},
+  "manual": {"status": "none", "detail": "No manual steps are required."},
+  "recovery": {"status": "none", "detail": "Malformed selected metadata is rejected by the shared wire schema instead of being mistaken for a legacy response."}
+}

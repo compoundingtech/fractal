@@ -56,6 +56,15 @@ container, replacing it even when a `changes` frame leaves rows and order alone.
 resource windows without membership state. Rich-schema decoding validates membership frames
 and response envelopes, including empty pages, as disjoint variants.
 
+For collection-scoped paging, subscribe first with `subscribeOrderedMembershipsCollection`,
+then call `arrangementsMembershipsCollection`. Feed metadata frames to
+`MembershipPaging.observeStream`; call `begin()` before the first request and pass its opaque
+token with every page to `acceptPage`. Late responses to invalidated tokens are ignored.
+Only `complete` publishes complete rows. `restart` starts a new attempt, never retries its
+cursor. Older held-window metadata cannot roll back completed pages. Host, projection,
+person, container and opaque epoch scope comparisons; TypeScript rejects integers outside
+the exact JSON-safe range instead of rounding a frontier. Existing methods remain legacy.
+
 Run the client checks from the repository root with Node 24 and Corepack:
 
 ```sh

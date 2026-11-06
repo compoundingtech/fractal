@@ -1040,6 +1040,126 @@ mod tests {
         assert!(cursor.is_empty(), "the terminal page must finish without a restart");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "release-only sustained collection paging acceptance with real local transport"]
+    async fn collection_paging_sustained_unrelated_writes_release() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        use fractal_client::{CollectionEvent, Envelope, MembershipJoin, MembershipProgress, OrderedMembershipPage};
+        use std::time::{Duration, Instant};
+        assert!(!cfg!(debug_assertions), "run this acceptance with cargo test --release");
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-sustained");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let mut expected = Vec::with_capacity(4096);
+        for batch in 0..16 {
+            let mut declarations = String::from("version 2\n");
+            for index in batch * 256..(batch + 1) * 256 {
+                if index < 1001 {
+                    declarations.push_str(&format!("agent \"ada/scale-{index:04}\" {{ workspace \"/tmp\"; command \"true\"; }}\n"));
+                    expected.push(format!("agent/ada/scale-{index:04}"));
+                } else {
+                    declarations.push_str(&format!("resource \"scale-{index:04}\" {{ kind \"filesystem.file\"; }}\n"));
+                    expected.push(format!("resource/scale-{index:04}"));
+                }
+            }
+            let intent = crate::graph::parse_internal_intent(&declarations, "membership-scale-fixture").unwrap();
+            state.store.apply_internal(&intent, &format!("scale-declare-{batch}")).unwrap();
+        }
+        for (batch, members) in expected.chunks(1024).enumerate() {
+            let operations = Value::Array(members.iter().map(|member| json!({
+                "op":"place","member":member,"bucket":null,"key":"a0"
+            })).collect());
+            edit_memberships(&state, &session, &membership_request(&state, &format!("scale-place-{batch}"), operations)).await.unwrap();
+        }
+        expected.sort();
+        let route_state = state.clone();
+        let app = crate::api::router(state.clone()).route("/paging-scale-stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let state = route_state.clone();
+            async move { upgrade.on_upgrade(move |socket| {
+                let windows = collection_windows::Windows::attach(&state.store);
+                collection_stream_socket_with_reader(socket, state,
+                    ClientSession::local(Some("person/ada")).unwrap(), None,
+                    move |state, session, request, permit| {
+                        let windows = windows.clone();
+                        async move { collection_items_with_windows(&state, &session, &request, permit, windows).await }
+                    })
+            }) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/paging-scale-stream")).await.unwrap();
+        socket.send(Message::Text(json!({"kind":"subscribe","id":"scale","collection":"ordered-memberships",
+            "person":"person/ada","subject":SUBJECT,"limit":200,"paging_contract":"collection-v1"
+        }).to_string().into())).await.unwrap();
+        let metadata = membership_frame(&mut socket).await;
+        assert_eq!(metadata["membership"]["live_count"], 4096);
+        let mut join = MembershipJoin::after_subscription("scale", "person/ada", SUBJECT);
+        join.stream(&CollectionEvent::from_frame(metadata.clone()).unwrap()).unwrap();
+        let (committed, mut commits) = watch::channel(0_u64);
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut offered = tokio::time::interval(Duration::from_millis(10));
+            for sequence in 1..=1000 {
+                offered.tick().await;
+                let state = writer_state.clone();
+                tokio::task::spawn_blocking(move || {
+                    declare_resource_member(&state, &format!("resource/unrelated-{sequence}"));
+                    state.event_notify.send_replace(state.store.index().unwrap());
+                }).await.unwrap();
+                committed.send_replace(sequence);
+            }
+            started.elapsed()
+        });
+        let http = reqwest::Client::new();
+        let path = format!("http://{address}/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships");
+        let mut timings = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let attempt = join.begin();
+            let mut cursor = None::<String>;
+            loop {
+                // A committed unrelated claim, not a timer or scheduler guess, separates pages.
+                let previous = *commits.borrow_and_update();
+                while *commits.borrow_and_update() <= previous {
+                    commits.changed().await.expect("INVALID: writer ended before terminal page");
+                }
+                assert!(!writer.is_finished(), "INVALID: writer must remain active through the terminal page");
+                let mut request = http.get(&path).header(LOCAL_PERSON_HEADER, "person/ada")
+                    .query(&[("person","person/ada"),("limit","200"),("paging_contract","collection-v1")]);
+                if let Some(cursor) = &cursor { request = request.query(&[("cursor", cursor)]); }
+                let response = request.send().await.unwrap();
+                assert_eq!(response.status().as_u16(), 200, "no cursor restarts are permitted");
+                let response: Envelope<OrderedMembershipPage> = response.json().await.unwrap();
+                assert_eq!(serde_json::to_value(response.value.membership.as_ref().unwrap()).unwrap(), metadata["membership"]);
+                cursor = response.value.page.next_cursor.clone();
+                let progress = join.page(attempt, response).unwrap();
+                if cursor.is_none() {
+                    assert_eq!(progress, MembershipProgress::Complete);
+                    assert!(!writer.is_finished(), "INVALID: writer stopped before publication");
+                    break;
+                }
+                assert_eq!(progress, MembershipProgress::Pending);
+            }
+            timings.push(started.elapsed());
+            assert_eq!(join.complete().unwrap().iter().map(|row| row.member.clone()).collect::<Vec<_>>(), expected);
+        }
+        let duration = writer.await.unwrap();
+        let rate = 1000.0 / duration.as_secs_f64();
+        timings.sort();
+        let p95 = timings[18];
+        eprintln!("collection-v1 acceptance: release {}-{}, workers=4, agents=1001 memberships=4096 limit=200 loads=20; commits=1000 duration={duration:?} rate={rate:.3}/s p95={p95:?}",
+            std::env::consts::OS, std::env::consts::ARCH);
+        assert!(rate >= 100.0, "INVALID: achieved committed write rate was below 100/s");
+        assert!(duration >= Duration::from_millis(9990), "INVALID: writer did not cover the offered ten-second interval");
+        assert!(p95 <= Duration::from_secs(1), "initial load p95 exceeds the local transport budget");
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn collection_http_errors_distinguish_invalid_changed_reset_and_inconsistent() {
         let root = tempfile::tempdir().unwrap();
@@ -1654,5 +1774,182 @@ mod tests {
         assert!(!envelope.retryable);
         assert_eq!(state.store.index().unwrap(), index);
         assert!(state.store.claims_for(SUBJECT, Some("ordered-membership.edited")).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn collection_tuple_ties_and_abandoned_cursors_release_each_page_read() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-tuple-boundaries");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let folder = "019a0000-0000-7000-8000-000000000010";
+        edit(&state, &session, &request(&state, "tie-folder", json!([
+            {"op":"folder.create","id":folder,"name":"Folder","parent":null,"key":"a0"}
+        ]))).await.unwrap();
+        for member in ["resource/a", "resource/b", "resource/c", "resource/d"] {
+            declare_resource_member(&state, member);
+        }
+        edit_memberships(&state, &session, &membership_request(&state, "ties", json!([
+            {"op":"place","member":"resource/d","bucket":folder,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/c","bucket":folder,"key":"a0"},
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        let checkpoint = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
+        let mut cursor = None::<String>;
+        let mut metadata = None;
+        let mut abandoned = Vec::new();
+        for (index, member) in ["resource/a", "resource/b", "resource/c", "resource/d"].into_iter().enumerate() {
+            let uri = cursor.as_ref().map_or_else(|| path.to_owned(), |cursor| format!("{path}&cursor={cursor}"));
+            let (status, page) = membership_json(&state, &uri, "person/ada").await;
+            assert_eq!(status, StatusCode::OK);
+            let value = &page["value"];
+            assert_eq!(value["items"][0]["member"], member);
+            assert_eq!(value["items"][0]["position"]["bucket"], if index < 2 { Value::Null } else { json!(folder) });
+            assert_eq!(value["membership"]["live_count"], 4);
+            if let Some(expected) = &metadata { assert_eq!(&value["membership"], expected); }
+            else { metadata = Some(value["membership"].clone()); }
+            assert_eq!(value["page"]["has_more"], index < 3);
+            cursor = value["page"]["next_cursor"].as_str().map(str::to_owned);
+            if let Some(token) = &cursor { abandoned.push(token.clone()); }
+            // Keep earlier tokens alive, then commit beyond this page's snapshot.
+            // A retained read would prevent complete WAL backfill/recycling.
+            declare_resource_member(&state, &format!("resource/unrelated-{index}"));
+            let report = state.store.checkpoint_idle_wal_report(&checkpoint).unwrap();
+            assert!(report.frames > 0);
+            assert_eq!(report.frames, report.backfilled);
+            assert!(report.recycled, "page {index} retained a read transaction");
+        }
+        assert_eq!(abandoned.len(), 3);
+        let (status, replay) = membership_json(&state, &format!("{path}&cursor={}", abandoned[0]), "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["value"]["items"][0]["member"], "resource/b");
+    }
+
+    #[tokio::test]
+    async fn collection_http_scope_reset_and_legacy_cursor_shapes_stay_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-scope-boundaries");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "scope-rows", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1";
+        let selected = format!("{path}&paging_contract=collection-v1");
+        let (_, first) = membership_json(&state, &selected, "person/ada").await;
+        let token = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        for field in ["host", "projection", "epoch"] {
+            let mut cursor = membership_paging::Cursor::decode(token, "person/ada", SUBJECT, 1).unwrap();
+            match field {
+                "host" => cursor.host_id = "host/other".into(),
+                "projection" => cursor.projection_version = "other".into(),
+                _ => cursor.epoch = "other".into(),
+            }
+            let (status, body) = membership_json(&state, &format!("{selected}&cursor={}", cursor.encode().unwrap()), "person/ada").await;
+            assert_eq!((status.as_u16(), body["code"].as_str()), (409, Some(membership_paging::RESET)));
+            assert!(body.get("membership").is_none());
+        }
+        let (_, legacy) = membership_json(&state, path, "person/ada").await;
+        assert!(legacy["value"].get("membership").is_none());
+        assert!(legacy["value"].get("paging_contract").is_none());
+        assert!(legacy["value"]["page"]["cursor_expires_at"].is_string());
+        let token = legacy["value"]["page"]["next_cursor"].as_str().unwrap();
+        assert!(token.starts_with("membership/"));
+        let (status, terminal) = membership_json(&state, &format!("{path}&cursor={token}"), "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(terminal["value"]["items"][0]["member"], "resource/b");
+        assert_eq!(terminal["value"]["page"]["has_more"], false);
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.strip_prefix("membership/").unwrap()).unwrap();
+        let mut expired: MembershipCursor = serde_json::from_slice(&bytes).unwrap();
+        expired.expires = client_now_ms().saturating_sub(CLIENT_PAGE_TTL_MS + 1);
+        let token = format!("membership/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expired).unwrap()));
+        let (status, _) = membership_json(&state, &format!("{path}&cursor={token}"), "person/ada").await;
+        assert_eq!(status, StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn collection_http_rechecks_revoked_credentials_before_cursor_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-revoked-authorization");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "authorized-rows", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let append = |kind: &str, fields: Value| state.store.append_claim(&ClaimInput {
+            subject:"custom/client/pairing-membership-boundary".into(), kind:kind.into(),
+            actor:Some("person/ada".into()), fields:serde_json::from_value(fields).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        append("custom.client.pairing-completed", json!({
+            "session_actor":"client/device-membership-test","person_id":"person/ada",
+            "credential_hash":credential_digest("membership-test-credential"),"expires_at_unix_ms":u64::MAX,
+            "scopes":["read.projections","read.arrangements"]
+        }));
+        let get = |uri: String, credential: &str| {
+            let request = Request::builder().uri(uri).header("authorization", format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            let app = crate::api::router(state.clone());
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+                (status, body)
+            }
+        };
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        let (status, first) = get(path.into(), "membership-test-credential").await;
+        assert_eq!(status, StatusCode::OK);
+        let continuation = format!("{path}&cursor={}", first["value"]["page"]["next_cursor"].as_str().unwrap());
+        append("custom.client.pairing-revoked", json!({"reason":"revoked between pages"}));
+        for (uri, credential) in [(continuation, "membership-test-credential"), (format!("{path}&cursor=!"), "unknown-credential")] {
+            let (status, body) = get(uri, credential).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body["code"], "forbidden");
+            assert!(body.get("value").is_none());
+            assert!(body.get("membership").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_maximal_rows_fit_http_budget_and_packer_keeps_whole_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-byte-boundary");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let key = format!("a0{}", "1".repeat(fractal_schema::arrangements::MAX_KEY_BYTES - 2));
+        let members: Vec<_> = (0..201).map(|index| format!("resource/{}-{index:03}", "a".repeat(499))).collect();
+        let mut operations = Vec::new();
+        for member in &members {
+            assert_eq!(member.len(), 512);
+            declare_resource_member(&state, member);
+            operations.push(json!({"op":"place","member":member,"bucket":null,"key":key}));
+        }
+        edit_memberships(&state, &session, &membership_request(&state, "maximal-rows", json!(operations))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=200&paging_contract=collection-v1";
+        let (status, first) = membership_json(&state, path, "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["value"]["items"].as_array().unwrap().len(), 200);
+        assert_eq!(first["value"]["membership"]["live_count"], 201);
+        let cursor = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        let (status, last) = membership_json(&state, &format!("{path}&cursor={cursor}"), "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last["value"]["membership"], first["value"]["membership"]);
+        assert_eq!(last["value"]["items"][0]["member"], members[200]);
+        assert_eq!(last["value"]["page"]["has_more"], false);
+        // Current legal row and limit caps cannot fill the byte budget. Exercise the
+        // production packer's truncation boundary separately, without invalid store rows.
+        let mut large = first["value"]["items"][0].clone();
+        large["padding"] = json!("x".repeat((CLIENT_MAX_RESPONSE_BYTES - 128_000) / 2));
+        let items = vec![large.clone(), large];
+        assert_eq!(window_end(&items, 0, items.len()).unwrap(), 1);
+        assert_eq!(window_end(&items, 1, items.len()).unwrap(), 2);
+        assert_eq!(first["value"]["membership"]["live_count"], 201);
     }
 }

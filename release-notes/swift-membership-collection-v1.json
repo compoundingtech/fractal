@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add opt-in Swift collection-v1 membership paging and complete page/stream joining",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules changes."},
+  "compatibility": {"status": "none", "detail": "Additive Swift APIs require collection-v1 metadata and an epoch; legacy APIs remain unchanged. No capability is advertised or consumer activated."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No upgrade action required; consumers must explicitly opt in and subscribe before loading pages."},
+  "recovery": {"status": "none", "detail": "No database recovery changes; typed restart errors discard the entire paging attempt."}
+}

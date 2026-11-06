@@ -228,4 +228,28 @@ mod tests {
         assert!(selected(Some(CONTRACT), true).unwrap());
         assert!(!selected(None, true).unwrap());
     }
+
+    #[test]
+    fn collection_cursor_from_an_old_snapshot_has_no_time_lease() {
+        let original = cursor();
+        let mut snapshot: ClientSnapshot = serde_json::from_value(serde_json::json!({
+            "id":"snapshot/old", "host_id":original.host_id, "projection_version":original.projection_version,
+            "store_index":42, "created_at":"2000-01-01T00:00:00Z"
+        })).unwrap();
+        let state = State { live_count: 4096, changed_index: 42 };
+        let token = Cursor::new(&snapshot, original.epoch.clone(), original.person.clone(),
+            original.subject.clone(), original.limit, state, original.after.clone()).encode().unwrap();
+        // Advance snapshot time by a day, far beyond the legacy five-minute TTL,
+        // without changing the comparable collection frontier or sleeping.
+        snapshot.created_at = "2000-01-02T00:00:00Z".into();
+        snapshot.id = "snapshot/later".into();
+        snapshot.store_index = 900;
+        let decoded = Cursor::decode(&token, "person/ada", SUBJECT, 200).unwrap();
+        decoded.check_frontier(&snapshot, &original.epoch, state).unwrap();
+        assert_eq!(decoded, original);
+        let value = serde_json::to_value(decoded).unwrap();
+        for field in ["expires", "cursor_expires_at", "created_at", "snapshot"] {
+            assert!(value.get(field).is_none());
+        }
+    }
 }

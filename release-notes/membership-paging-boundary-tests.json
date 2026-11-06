@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add deterministic ordered-membership paging boundary and compatibility coverage",
+  "replay": { "status": "none", "detail": "No replay or backfill changes." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "No admission or checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Adds HTTP tests for root/folder tuple ties, host/projection/epoch reset errors, revoked and unknown credentials, legacy cursor shapes and expiry, maximal legal rows with authoritative counts, and WAL recycling while abandoned cursor strings remain alive. Adds an old-snapshot codec test for time-independent continuation. Current legal row and page caps do not reach byte-budget truncation; that boundary is covered directly through the production packing helper with synthetic oversized rows. These tests have not been run for this change. No capability is advertised." },
+  "downtime": { "status": "none", "detail": "Test-only change; no restart required." },
+  "manual": { "status": "none", "detail": "No operator steps." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

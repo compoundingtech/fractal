@@ -27,6 +27,17 @@ container, which moves on edits outside the window too; `changedIndex` is an opa
 invalidation frontier scoped by `snapshot.hostID`, not a canonical revision or cross-host value.
 Existing v1 placements are not implicitly migrated.
 
+Opt in with `arrangementsMembershipsCollectionV1` and await
+`orderedMembershipsCollectionV1Stream` **before** requesting pages (subscribe is sent before
+it returns). Legacy methods remain unchanged; missing contract/epoch is refused on opted APIs.
+Create one `MembershipPagingJoin(person:container:)` per subscribed connection. Serialize
+`observe` and `append`; pass `beginAttempt()`'s token with each page, and pass HTTP
+`ErrorEnvelope`s to `reject`. On `.restart`, abandon the entire cursor chain and begin again;
+on reconnect create a new join. No retries are automatic. Render `complete` atomically,
+retaining it as stale while refreshing. A terminal page can complete without a stream frame;
+older delayed frames cannot roll it back. Metadata uses exact `UInt64`, epochs equality only.
+This adapter does not advertise capability support or activate a consumer.
+
 ## Trace context
 
 An iOS app can connect its tracing adapter to the client with an optional synchronous,

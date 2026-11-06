@@ -891,6 +891,23 @@ test('ordered membership root/place/remove/page and strict versioned bodies roun
     }
 });
 
+test('collection-v1 metadata is decoded exactly and cannot fall back to legacy', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json').collection_v1;
+    const decode = (schema, value) => Rich.decodeUnknownSync(schema, 'strict')(value);
+    for (const [schema, value] of [[Rich.OrderedMembershipPage, fixture.page], [Rich.CollectionFrame, fixture.frame]]) {
+        assert.deepEqual(Schema.encodeSync(schema)(decode(schema, value)).membership, value.membership);
+        assert.throws(() => decode(schema, { ...value, membership: undefined }));
+        const { epoch, ...withoutEpoch } = value.membership;
+        assert.throws(() => decode(schema, { ...value, membership: withoutEpoch }));
+        assert.throws(() => decode(schema, { ...value, membership: { ...value.membership, changed_index: 9007199254740992 } }));
+        assert.throws(() => decode(schema, { ...value, paging_contract: 'unknown' }));
+    }
+    for (const code of ['invalid-membership-cursor', 'membership-collection-changed', 'membership-frontier-reset', 'unsupported-membership-paging-contract', 'membership-frontier-inconsistent']) {
+        assert.equal(decode(Rich.ErrorCode, code), code);
+    }
+});
+
 test('ordered membership frames and envelopes decode only as membership variants', async () => {
     const [{ Schema, Option }, Rich] = await modules;
     const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');

@@ -882,6 +882,7 @@ pub enum CollectionEvent {
         id: String,
         snapshot: Snapshot,
         membership: OrderedMembershipState,
+        paging_contract: Option<String>,
         items: Vec<OrderedMembership>,
         order: Vec<String>,
         has_more: bool,
@@ -893,6 +894,7 @@ pub enum CollectionEvent {
         id: String,
         snapshot: Snapshot,
         membership: OrderedMembershipState,
+        paging_contract: Option<String>,
         upserts: Vec<OrderedMembership>,
         removes: Vec<String>,
         order: Vec<String>,
@@ -978,7 +980,7 @@ fn stream_sync(frame: &serde_json::Value) -> Option<StreamSync> {
 }
 
 impl CollectionEvent {
-    fn from_frame(frame: serde_json::Value) -> Result<Self, ClientError> {
+    pub fn from_frame(frame: serde_json::Value) -> Result<Self, ClientError> {
         fn field<T: DeserializeOwned>(
             frame: &serde_json::Value,
             name: &str,
@@ -1067,6 +1069,7 @@ impl CollectionEvent {
             Some("snapshot") if memberships => Ok(Self::MembershipSnapshot {
                 snapshot: field(&frame, "snapshot")?,
                 membership: field(&frame, "membership")?,
+                paging_contract: field(&frame, "paging_contract")?,
                 items: field(&frame, "items")?,
                 order: field(&frame, "order")?,
                 has_more: field(&frame, "has_more")?,
@@ -1075,6 +1078,7 @@ impl CollectionEvent {
             Some("changes") if memberships => Ok(Self::MembershipChanges {
                 snapshot: field(&frame, "snapshot")?,
                 membership: field(&frame, "membership")?,
+                paging_contract: field(&frame, "paging_contract")?,
                 upserts: field(&frame, "upserts")?,
                 removes: field(&frame, "removes")?,
                 order: field(&frame, "order")?,
@@ -1417,6 +1421,11 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::InvalidMembershipKey
         | ErrorCode::InvalidMembershipOperations
         | ErrorCode::MembershipEditTooLarge
+        | ErrorCode::InvalidMembershipCursor
+        | ErrorCode::MembershipCollectionChanged
+        | ErrorCode::MembershipFrontierReset
+        | ErrorCode::UnsupportedMembershipPagingContract
+        | ErrorCode::MembershipFrontierInconsistent
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
         | ErrorCode::IdentityCycle
@@ -5573,6 +5582,7 @@ mod tests {
                 container: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001".into(),
                 live_count: 2,
                 changed_index: 1842,
+                epoch: None,
             }
         );
         let super::CollectionEvent::MembershipChanges {
