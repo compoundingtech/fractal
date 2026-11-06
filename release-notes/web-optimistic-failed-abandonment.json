@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow explicit abandonment of proven non-applied failed optimistic intents",
+  "replay": { "status": "none", "detail": "Unknown delivery outcomes continue to retry the same idempotency key." },
+  "schema": { "status": "none", "detail": "No wire or database schema changes." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "Shared discardFailed removes only a failed entry after the caller proves non-application. Sending and accepted entries cannot be discarded; authoritative reconciliation remains the only settlement path for accepted actions." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No action required." },
+  "recovery": { "status": "none", "detail": "Interrupted in-flight operations remain recoverable with their original key." }
+}
