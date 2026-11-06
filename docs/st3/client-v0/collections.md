@@ -147,6 +147,66 @@ Keep the subscription open while reading and coalesce concurrent invalidations i
 a follow-up complete read. Bounded prefix contents cannot prove absence or select a
 winner across the full inventory. Reconnect/resync handling remains unchanged.
 
+### Collection-scoped ordered membership paging
+
+This opt-in contract is separate from owner-wide arrangement inventory paging.
+Use it only after the connected daemon grants `ordered-memberships.paging.v1`
+version 1; absence is not permission to send a selector to an older daemon.
+The generated Rust, TypeScript and Swift selected-paging helpers enforce this
+preflight. Capability publication is withheld until acceptance proof is complete.
+
+Select `paging_contract=collection-v1` on ordered-membership HTTP reads and
+`"paging_contract":"collection-v1"` on the corresponding collection subscription.
+Keep person, arrangement, container and limit identical throughout an attempt.
+A null container denotes the root. Legacy reads and subscriptions omit the
+selector and retain their existing wire shape and cursor expiry behavior.
+
+Every selected page, including an empty or terminal page, and every selected
+stream snapshot/change carries authoritative `membership` metadata:
+`container`, opaque `epoch`, `changed_index`, and `live_count`.
+Rows and metadata are read in one short SQLite snapshot. The ordinary snapshot
+envelope still describes that read; its global store index is **not** a membership
+invalidation signal. Compare collection frontiers as `(epoch, changed_index)`,
+only within the same host, projection, person and arrangement scope.
+
+The epoch combines a fresh store-open identity with the persistent membership
+projection generation. It changes on restart, reopen, replacement and projection
+reset/rebuild, including when the claim index does not advance. Different epochs
+are incomparable: discard the attempt and begin with its first page.
+Pages and stream frames use the same epoch construction.
+
+Continuation tokens are opaque, versioned keyset cursors ordered by
+`(effective bucket, order key, member)`, with member breaking ties. No page-sized
+result set, cursor lease or SQLite transaction is retained between requests.
+Unrelated local and replicated writes do not invalidate a continuation; relevant
+collection changes do, including count-preserving edits outside the visible window.
+There is no wall-clock expiry for these selected cursors.
+
+| HTTP status | Error code | Client action |
+| --- | --- | --- |
+| 422 | `invalid-membership-cursor` | Reject malformed or wrong-scope input. |
+| 409 | `membership-collection-changed` | Restart the entire read from page one. |
+| 409 | `membership-frontier-reset` | Restart after an incomparable epoch/reset. |
+| 422 | `unsupported-membership-paging-contract` | Do not retry the selector. |
+| 500 | `membership-frontier-inconsistent` | Do not publish the partial attempt. |
+
+Normal authorization is checked before cursor validation. A 409 is never a
+request to retry the same continuation.
+
+Subscribe and await subscription admission before starting pages. Stage rows
+separately from the last complete published collection. Publish only after the
+terminal page and exactly `live_count` distinct, canonically ordered members.
+If no stream frame arrived, or its comparable frontier is older than or equal
+to the completed pages, the pages are authoritative and may publish immediately.
+A newer frontier restarts the attempt; a different scope or epoch is incomparable
+and also restarts it. Ignore late pages and frames belonging to obsolete attempts;
+never let them roll a complete collection back. Keep the last complete collection
+visible while replacing it, not an intermediate prefix.
+
+The SDK join helpers implement these rules with attempt identities. Rust and
+Swift retain exact unsigned 64-bit metadata. TypeScript rejects unsafe integer
+metadata instead of silently rounding a frontier or count.
+
 A window contains 1–200 current items. History remains on the
 corresponding paged HTTP reads. Send `{"kind":"unsubscribe","id":"missions-tab"}`
 to remove a subscription. IDs are chosen by the client and unique on the socket.

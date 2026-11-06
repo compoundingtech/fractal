@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document collection-scoped membership paging and the page/stream join contract",
+  "replay": {"status": "none", "detail": "Documentation only; no replay is required."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Existing authorization applies."},
+  "compatibility": {"status": "none", "detail": "Documents the opt-in selector, authoritative metadata, lifetime epochs, exact errors and typed join behavior. Capability advertisement remains withheld pending acceptance proof."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No manual action is required."},
+  "recovery": {"status": "none", "detail": "Documents whole-attempt restart and preservation of the last complete collection."}
+}
