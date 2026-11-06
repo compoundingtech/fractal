@@ -1,4 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
+import type { Arrangement as ClientArrangement } from '@fractal/client'
 import { Schema } from 'effect'
 import vectors from '../../../../fixtures/clients/sidebar/behavior-v1.json'
 import { loadSidebarBehavior } from '../../../../scripts/sidebar-behavior-fixtures.mjs'
@@ -10,6 +11,14 @@ import type { SidebarMove, SidebarNode } from './sidebarContract.ts'
 loadSidebarBehavior(vectors)
 // Preserve the web's lazy SDK-schema boundary; this runner must not add an eager schema import.
 const { Arrangement } = await import('@fractal/client/schema')
+const fixtureArrangement = (value: unknown): ClientArrangement => {
+  // The rich schema admits nullable optional headers; this fixture contract contains only these fields.
+  const decoded = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))(value)
+  return {
+    id: decoded.id, kind: decoded.kind, owner: decoded.owner, revision: decoded.revision,
+    updated_at: decoded.updated_at, deleted: decoded.deleted, body: decoded.body, resolved: decoded.resolved ?? undefined,
+  }
+}
 type Ref = { _tag: string; id?: string; subject?: string }
 const id = (ref: Ref): string => ref.id ?? ref.subject ?? ''
 const rowKey = (ref: Ref): string => `${ref._tag === 'Folder' ? 'folder' : 'subject'}:${id(ref)}`
@@ -76,7 +85,7 @@ describe('shared sidebar v1 through the production web adapter/editor', () => {
   })
   for (const fixture of vectors.cases) {
     it(fixture.name, () => {
-      const arrangement = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))(fixture.initial.arrangement)
+      const arrangement = fixtureArrangement(fixture.initial.arrangement)
       // Only catalog identities become seats: dormant placements are deliberately not synthesized.
       const roster = fixture.catalog.map(subject => ({ id: subject, subject, host: '', label: subject }))
       const doc = { ...arrangementSidebarDoc(arrangement), roster }
@@ -110,7 +119,7 @@ describe('shared sidebar v1 through the production web adapter/editor', () => {
   })
   it('applies a catalog-seat move through production optimistic editing', () => {
     const fixture = vectors.cases.find(value => value.name === nested)!
-    const arrangement = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))(fixture.initial.arrangement)
+    const arrangement = fixtureArrangement(fixture.initial.arrangement)
     const roster = fixture.catalog.map(subject => ({ id: subject, subject, host: '', label: subject }))
     const doc = { ...arrangementSidebarDoc(arrangement), roster }
     const parent = id(fixture.events[0]!.moves[0]!.node)
