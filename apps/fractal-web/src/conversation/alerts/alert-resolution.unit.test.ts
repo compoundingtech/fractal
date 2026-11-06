@@ -1,11 +1,13 @@
 import { ClientError, type FractalClient } from '@fractal/client'
+import { Revision } from '@fractal/client/schema'
+import { Schema } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
 import { gatewayAlertActions, type AlertAnswered } from './alert-action-port.ts'
 import { readAlertResolution } from './alert-resolution.ts'
 import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
-const alert: AlertAnswered = { id: 'attention/original', revision: 'claim/episode', source_id: 'step-run/example',
-  episode: 'claim/episode', attention_kind: 'person-step' }
+const alert = { id: 'attention/original', revision: Schema.decodeUnknownSync(Revision)('claim/episode'),
+  source_id: 'step-run/example', episode: 'claim/episode', attention_kind: 'person-step' } satisfies AlertAnswered
 const refused = (code: string) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
   request_id: 'request/test', code, message: 'The source is no longer waiting.', retryable: false, details: {} }, 409)
 const proof = () => ({ value: { claim_id: 'claim/accepted', resolved_by: 'agent/delegate',

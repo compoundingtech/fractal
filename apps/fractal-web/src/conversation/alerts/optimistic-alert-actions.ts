@@ -24,7 +24,7 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
   const receipts = new Map<string, Extract<AlertActionResult, { _tag: 'Sent' }> & { readonly supersedes?: string }>()
   const controlProofs = new Map<string, Native.AttentionControl>()
   const resolutionProofs = new Map<string, AlertResolution>()
-  const reconcileControl = (control: Native.Attention['presentation_control'], mutation: { readonly key: string; readonly action: Answer }) => {
+  const reconcileControl = (control: Omit<Native.AttentionControl, 'id'> | undefined, mutation: { readonly key: string; readonly action: Answer }) => {
     const { alert, action } = mutation.action
     if (action.type !== 'attention.dismiss' && action.type !== 'attention.restore' && action.type !== 'attention.snooze') return 'pending'
     // An inverse's authoritative frame also proves its predecessor was applied.
@@ -71,7 +71,7 @@ export const optimisticAlertActions = (transport: AlertActionPort) => {
       receipts.delete(key)
       if (!after.notices.some((notice) => notice.key === key)) noticeTargets.delete(key)
     }
-    const pendingIds = new Set([...after.pending.values()].map((entry) => entry.action.alert.id))
+    const pendingIds = new Set<string>([...after.pending.values()].map((entry) => entry.action.alert.id))
     for (const id of controlProofs.keys()) if (!pendingIds.has(id)) controlProofs.delete(id)
     for (const id of resolutionProofs.keys()) if (!pendingIds.has(id)) resolutionProofs.delete(id)
     for (const notice of after.notices) if (frame.some((alert) => alert.id === noticeTargets.get(notice.key)?.id &&

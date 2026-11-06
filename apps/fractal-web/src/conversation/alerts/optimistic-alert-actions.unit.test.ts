@@ -1,16 +1,17 @@
 import { ClientError, type FractalClient } from '@fractal/client'
-import type * as Native from '@fractal/client/schema'
-import { DateTime, Effect, SubscriptionRef } from 'effect'
+import * as Native from '@fractal/client/schema'
+import { DateTime, Effect, Schema, SubscriptionRef } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
 import { gatewayAlertActions } from './alert-action-port.ts'
 import { optimisticAlertActions } from './optimistic-alert-actions.ts'
 
+const revision = Schema.decodeUnknownSync(Native.Revision)
 const alert = {
-  kind: 'attention', id: 'attention/original', revision: 'delivery/r1', source_id: 'step-run/example',
+  kind: 'attention', id: 'attention/original', revision: revision('delivery/r1'), source_id: 'step-run/example',
   episode: 'claim/original', attention_kind: 'person-step', state: 'open', title: 'Answer', detail: '',
   priority: 'normal', requested_at: DateTime.makeUnsafe('2026-11-06T10:00:00Z'), person_id: 'person/receiver',
   conversation_ids: [], actions: ['work.done'], alert: true,
-} as Native.Attention
+} as unknown as Native.Attention
 const action = { type: 'work.done', summary: 'My answer' } as const
 const actorProof = { value: { claim_id: 'claim/accepted', resolved_by: 'agent/delegate',
   person_id: 'person/receiver', resolved_at: '2026-11-06T10:01:00.000Z' } }
@@ -21,7 +22,7 @@ describe('source answer reconciliation', () => {
     const inbox = optimisticAlertActions({ act: async () => ({ _tag: 'Sent' }) })
     await Effect.runPromise(inbox.accept([alert]))
     await inbox.port.act({ alert, action })
-    for (const frame of [[], [{ ...alert, revision: 'delivery/r2' }]]) {
+    for (const frame of [[], [{ ...alert, revision: revision('delivery/r2') }]]) {
       await Effect.runPromise(inbox.accept(frame))
       const state = Effect.runSync(SubscriptionRef.get(inbox.state))
       expect([...state.pending.values()][0]?.phase).toBe('accepted')
