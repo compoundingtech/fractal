@@ -104,6 +104,28 @@ pub async fn get(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn unknown_agent_is_an_empty_supported_projection_not_a_legacy_404() {
+        use tower::ServiceExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let app = Router::new()
+            .route("/v1/client/agent-related-runs/{*id}", axum::routing::get(super::get))
+            .layer(Extension(ClientSession::local(Some("person/reviewer")).unwrap()))
+            .with_state(state);
+        let response = app.oneshot(axum::http::Request::builder()
+            .uri("/v1/client/agent-related-runs/agent/unknown")
+            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["kind"], "agent-related-runs");
+        assert_eq!(value["agent_id"], "agent/unknown");
+        assert_eq!(value["rows"], json!([]));
+        assert_eq!(value["total_rows"], 0);
+        assert_eq!(value["truncated"], false);
+    }
+
     #[test]
     fn relationships_include_asks_but_not_pool_offers_or_expired_history() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
