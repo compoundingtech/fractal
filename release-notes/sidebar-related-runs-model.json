@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share semantic sidebar mission-row presentation across Rust clients",
+  "replay": {"status": "none", "detail": "Presentation only; no claims or replay changes."},
+  "schema": {"status": "none", "detail": "Uses the existing agent-related-runs response."},
+  "rules": {"status": "none", "detail": "Server status, urgency and folding remain authoritative."},
+  "compatibility": {"status": "none", "detail": "Adds shared progress, ETA and step/waits-on formatting without changing wire contracts."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Reverting changes no stored state."}
+}

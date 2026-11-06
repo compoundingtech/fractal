@@ -9,5 +9,6 @@ pub mod attention;
 pub mod documents;
 pub mod missions;
 pub mod prompts;
+pub mod related_runs;
 pub mod sidebar;
 pub mod slo;

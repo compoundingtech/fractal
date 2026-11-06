@@ -1206,6 +1206,9 @@ then finished runs (4); deadline and run ID break active ties. `as_of`, `work_cu
 `missions_cut` identify the clock and published inputs. Clients draw these facts without joins.
 Responses contain at most 100 rows after urgency sorting; `total_rows` and `truncated` make the
 bound explicit. Individual offers seek the recipient's indexed singleton offer, not fleet history.
+`fractal-ui-model::related_runs` presents these same facts for Rust clients: status, a done/total
+bar, remaining-time range or “waiting on you”, and a second line naming the current step and waits.
+It preserves the served order and folded flag; renderers do not recompute urgency or deadlines.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run
