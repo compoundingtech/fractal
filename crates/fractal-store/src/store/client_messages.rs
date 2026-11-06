@@ -558,7 +558,10 @@ fn reminder_winners(transaction: &Transaction<'_>,reminder: &str,recipient: Opti
 /// hold it back, and while its header waits for the fold its reminder group has no open winner.
 /// Close the subject's live header in place, as a mark counts at every cut, and move its group's
 /// winner: that header and its group's top candidates, nothing else. A fold with saved work on the
-/// subject keeps it, and the page reads the mark until that fold finishes.
+/// subject keeps it, and the page reads the mark until that fold finishes. Once a later version
+/// has folded past the published cut, that cut's next winner shares its row with the live cut,
+/// where the later version wins, so a reader pinned there sees no winner for the group until the
+/// cut publishes (#5532).
 pub(super) fn close_marked(transaction: &Transaction<'_>,subject: &str) -> Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(()); }
