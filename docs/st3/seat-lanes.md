@@ -126,7 +126,7 @@ lane (an `app-lanes-<seat>.slice` directly in `app-lanes.slice`), and that slice
 holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. In place,
 the check runs with `BUILDS_SLICE_ACTIVE=1`, so a cargo front door that reads only that variable keeps
 its cargo in the cap. Outside every cap, a caller that names a seat (`ST_AGENT`, as a unit the
-seat started without `--slice` does) asks the daemon for the seat's slice (`st agents lane AGENT`,
+seat started without `--slice` does) asks the daemon for the seat's slice (`fractal agents lane AGENT`,
 the reconciler's own name for it) and, when the kernel shows that slice in `app-lanes.slice` with
 both limits, starts the check in a scope there, with `BUILDS_SLICE_ACTIVE=1` and
 `FRACTAL_LANE_SLICE`. Otherwise it starts the check in `builds.slice` as before, and a seat's run says
@@ -151,8 +151,17 @@ empties on its own. The lane outlives it until the seat stops for good (above).
 
 ## The host guard
 
-The kernel OOM-kills inside a lane on purpose. A host guard that counts every `oom_kill` in the user
-slice would read that as a fault, so it counts only the kills outside lanes:
+The kernel OOM-kills inside a lane on purpose. `scripts/fractal-test` names such a kill, which
+otherwise leaves only a bare exit: before a check that builds, it reads the `oom_kill` count in
+`memory.events` of each memory limit the check runs under (its own cap, else the seat's lane it runs
+in, and builds.slice, where the host's sccache server compiles), and a check that fails while one grew
+says `killed by the lane's memory limit (SLICE): N OOM kills at memory.max X while it ran`. Only the
+innermost limit that counted kills is named, since a kill counts in every cgroup above it too. A
+limit is shared with what else runs under it (builds.slice with every run's compiles, a lane with the
+run's other checks and the seat's harness), so a kill it names may be theirs.
+
+A host guard that counts every `oom_kill` in the user slice would read a lane's kills as a fault, so
+it counts only the kills outside lanes:
 
 ```
 oom_kill(user.slice/user-UID.slice/memory.events)
@@ -262,7 +271,7 @@ limit shrinks what `nproc` reports. From that room, admission takes:
 
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
-claim), and its reason shows where admission reasons show (`st agents show`'s `ADMISSION` line, the
+claim), and its reason shows where admission reasons show (`fractal agents show`'s `ADMISSION` line, the
 list, the tree and `agents start`), naming the host's free room:
 
 ```
@@ -279,7 +288,7 @@ A waiting seat is tried again every 30 seconds, since what seats outside lanes h
 claim. A seat without a lane is not held.
 
 To start a waiting seat now despite its fit, for the day a stale measurement holds a seat that must
-run: `st agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
+run: `fractal agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
 asked (`--as`, a person or an agent acting for one) and why (`ignore_fit` and `reason` on its
 `runtime.action.requested` claim); the daemon logs both when the seat starts, and its lane then holds
 room like any other start.
@@ -308,14 +317,14 @@ burst that can never fit), and then holds the burst while its standard input sta
 a 90-second lease every 30 seconds. It gives the burst back when its input closes: when the run that
 started it ends, however it ends. A holder killed outright stops renewing, and the daemon drops the
 burst when its lease lapses; each such drop is counted (`bursts dropped by lease` in
-`st doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
+`fractal doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
 only the seat's own host answers. While that daemon cannot be reached (a restart), the holder waits
 for it as it waits for room, saying so, rather than answering: the run that asked bounds the wait.
 
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
 beside the other lanes and what seats outside lanes hold, the room admission keeps from starts for a
-burst included (`st doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
+burst included (`fractal doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
 it for a seat's start, naming that seat). Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at
 once. A seat that has waited 15 minutes or more to start, first in line for room, is served before

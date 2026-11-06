@@ -842,6 +842,53 @@ class GovernedTest(unittest.TestCase):
         self.assertIsNone(self.asked)
         self.assertEqual(self.said, '')
 
+    def test_an_oom_kill_at_the_memory_limit_a_check_runs_under_is_named_at_the_innermost_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.tree(tmp, self.LANE, {self.LANE_SLICE: (str(8 * 2 ** 30), '100000 100000'), 'user.slice': (str(60 * 2 ** 30), None)})
+            sys_root, manager = Path(tmp, 'sys'), Path(tmp, 'sys', 'user.slice/user-1000.slice/user@1000.service')
+            lane, builds, user = manager / 'app.slice/app-lanes.slice' / self.LANE_SLICE, manager / 'builds.slice', Path(sys_root, 'user.slice')
+            builds.mkdir()
+            builds.joinpath('memory.max').write_text(f'{32 * 2 ** 30}\n')
+            for cgroup, kills in ((lane, 3), (builds, 0), (user, 5)):
+                cgroup.joinpath('memory.events').write_text(f'low 0\nhigh 0\nmax 9\noom 4\noom_kill {kills}\n')
+            caps = st_test.memory_caps(Path(tmp, 'cgroup'), sys_root)
+            self.assertEqual(caps, {user: 'the memory limit of user.slice', lane: f"the lane's memory limit ({self.LANE_SLICE})",
+                                    builds: "builds.slice's memory limit"})
+            before = st_test.oom_kills(caps)
+            self.assertEqual(st_test.oom_note(caps, before), '')
+            # Seven kills in the lane count in user.slice above it too: only the lane is named.
+            lane.joinpath('memory.events').write_text('oom 11\noom_kill 10\n')
+            user.joinpath('memory.events').write_text('oom 11\noom_kill 12\n')
+            self.assertEqual(st_test.oom_note(caps, before),
+                             f"; killed by the lane's memory limit ({self.LANE_SLICE}): 7 OOM kills at memory.max 8.0G while it ran")
+            builds.joinpath('memory.events').write_text('oom_kill 1\n')
+            self.assertIn("; killed by builds.slice's memory limit: 1 OOM kill at memory.max 32.0G while it ran", st_test.oom_note(caps, before))
+            # A caller under no cap and no seat: only builds.slice, where its check and the host's compiles run.
+            self.tree(tmp, self.SEAT, {})
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(st_test.memory_caps(Path(tmp, 'cgroup'), sys_root), {builds: "builds.slice's memory limit"})
+            # A seat's unit outside its lane, under a user manager that holds a memory.max but no build cap: its check runs in the lane
+            # (governed), so the lane's limit is the one a kill there is named by. Not scoped (ST_EVIDENCE_GOVERN=off), it is not.
+            self.tree(tmp, self.UNIT, {'user@1000.service': (str(50 * 2 ** 30), None)})
+            Path(tmp, 'bus').touch()
+            st = Path(tmp, 'st')
+            st.write_text(f'#!/bin/sh\nprintf %s {shlex.quote(self.named()[1])}\n')
+            st.chmod(0o755)
+            seat = {'ST_AGENT': 'agent/seat-1', 'ST3_BIN': str(st), 'XDG_RUNTIME_DIR': tmp}
+            with mock.patch.dict(os.environ, seat, clear=True), mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'):
+                caps = st_test.memory_caps(Path(tmp, 'cgroup'), sys_root)
+                self.assertEqual(caps, {manager: 'the memory limit of user@1000.service', lane: f"the lane's memory limit ({self.LANE_SLICE})",
+                                        builds: "builds.slice's memory limit"})
+                lane.joinpath('memory.events').write_text('oom_kill 0\n')
+                manager.joinpath('memory.events').write_text('oom_kill 0\n')
+                before = st_test.oom_kills(caps)
+                lane.joinpath('memory.events').write_text('oom_kill 2\n')
+                manager.joinpath('memory.events').write_text('oom_kill 2\n')
+                self.assertIn(f"the lane's memory limit ({self.LANE_SLICE}): 2 OOM kills", st_test.oom_note(caps, before))
+            with mock.patch.dict(os.environ, dict(seat, ST_EVIDENCE_GOVERN='off'), clear=True), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'):
+                self.assertNotIn(lane, st_test.memory_caps(Path(tmp, 'cgroup'), sys_root))
+
     def test_an_unreadable_cgroup_is_no_cap(self):
         self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
         with tempfile.TemporaryDirectory() as tmp:
@@ -4195,6 +4242,20 @@ finally:
             code, out, err = self.run_st_test(command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'lane-burst +LOST .*the lane burst 8 cores/24G was lost while the run held it: burst lane 8 cores/24.0G waits behind')
+
+    def test_a_check_killed_at_its_lane_s_memory_limit_says_so_in_the_summary(self):
+        self.commit('b.txt', 'two')
+        lane = Path(self.tmp.name, 'lane')
+        lane.mkdir()
+        lane.joinpath('memory.max').write_text(f'{8 * 2 ** 30}\n')
+        lane.joinpath('memory.events').write_text('oom 0\noom_kill 2\n')
+        kill = f'printf "oom 25\\noom_kill 9\\n" > {shlex.quote(str(lane / "memory.events"))}; exit 101'
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), \
+                mock.patch.object(st_test, 'memory_caps', lambda: {lane: "the lane's memory limit (app-lanes-x.slice)"}):
+            code, out, err = self.run_st_test(command=['sh', '-c', kill], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("FAILED (101)", out)
+        self.assertIn("killed by the lane's memory limit (app-lanes-x.slice): 7 OOM kills at memory.max 8.0G while it ran", out)
 
     def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
         self.commit('b.txt', 'two')

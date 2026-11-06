@@ -5,9 +5,9 @@ Silent mail is stored and readable, but wakes nobody; the recipient sees a cappe
 next real turn or reads it on demand. FYI is one use of silent, rather than a separate type.
 
 ```sh
-st conversations send agent/example/builder -m "Merged #12." --kind silent --as agent/example/reviewer
-st conversations reply message/ID -m "Thanks, noted." --kind silent --as agent/example/builder
-st conversations send agent/example/builder -m "Which branch?" --kind wake --as agent/example/reviewer
+fractal conversations send agent/example/builder -m "Merged #12." --kind silent --as agent/example/reviewer
+fractal conversations reply message/ID -m "Thanks, noted." --kind silent --as agent/example/builder
+fractal conversations send agent/example/builder -m "Which branch?" --kind wake --as agent/example/reviewer
 ```
 
 `--fyi` is the same as `--kind silent` on send and reply; it cannot be combined with `--kind`.
@@ -45,14 +45,14 @@ on-demand reads or a later wake. Each harness shows a held message with
 staged, delivered and read receipts. Reconnects load bodies for at most eight held subjects, regardless of age; all others remain durable. A changed-claim update coalesces waking messages into one held-batch refill. The existing delivery query still sorts mailbox metadata, so this bounds held body hydration rather than total mailbox work. Remaining-count notices can stay stale until the next wake after an on-demand read. Native harnesses also forward `dictated` on person messages so their existing dictated notice is visible.
 
 Held mail is never lost. Until it is read it is unread like any other message:
-`st conversations ls` lists it, and `st conversations read` reads it on demand. Held mail waiting
+`fractal conversations ls` lists it, and `fractal conversations read` reads it on demand. Held mail waiting
 for a turn does not count as late in the `message-delivery` check, does not keep a stopping seat
-running, and does not block a rollout drain. `st doctor`'s `held-mail` check lists each seat with
+running, and does not block a rollout drain. `fractal doctor`'s `held-mail` check lists each seat with
 up to 128 oldest unoffered silent messages unread for over a day, selected from an indexed held flag. Backlog cleanup excludes unoffered silent messages.
 
 ## Coordination cost
 
-`st usage --hours 24 --messages-only --json` reads counts without message bodies or token
+`fractal usage --hours 24 --messages-only --json` reads counts without message bodies or token
 usage: `agent_to_agent`, its held `silent` subset, and `to_person`. Each message subject counts
 once, including messages already read. Daemon and person senders, delivery probes, soaks and explicit synthetic test traffic do not count. The covering
 metadata index is maintained by writers; historical bootstrap advances at most eight subjects per
@@ -65,7 +65,7 @@ rolling day and publishes informational values; zero merges gives no ratio.
 Beside the counts, `merged_pull_requests` counts the pull requests this daemon observed merging in the
 period, from the `merged_at` of each `vcs.pull-request` observation, once per pull request; one
 merged in a repository the daemon does not observe is not counted. `agent_to_agent_per_merged_pull_request`
-divides the two, and is null while `complete` is false or nothing merged. `st usage` prints both on
+divides the two, and is null while `complete` is false or nothing merged. `fractal usage` prints both on
 its `MESSAGES` line, so coordination cost shows beside spend.
 
 ## Count bootstrap
