@@ -2,6 +2,16 @@
 use super::*;
 use crate::model::LoopSpec;
 
+pub(super) fn create_attention_control_source_index(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h99f72ae03ed0 owner=fractal_store::store::attention_snapshot TODO=chunk-or-reference-variable-columns */
+        "CREATE INDEX IF NOT EXISTS claims_operational_control_source_index
+         ON claims(COALESCE(json_extract(body,'$.fields.episode'),''),kind)
+         WHERE kind IN ('operational.failure','operational.recovered');",
+    )?;
+    Ok(())
+}
+
 /// The operational failure episodes as last folded, under the newest index and the count of
 /// their claims.
 #[derive(Default)]
@@ -150,6 +160,33 @@ impl Store {
             .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut items = Vec::new();
+        for seat in seats {
+            items.extend(self.harness_prompt_items_at(&connection, &seat, person, as_of)?);
+        }
+        Ok(items)
+    }
+
+    /// Derive an exact native prompt from its seat on the supplied writer/read connection.
+    pub fn harness_prompt_attention_item_at(
+        &self,
+        connection: &Connection,
+        seat: &str,
+        person: &str,
+        episode: &str,
+        as_of: u128,
+    ) -> Result<Option<AttentionItemView>> {
+        Ok(self.harness_prompt_items_at(connection, seat, Some(person), as_of)?
+            .into_iter().find(|item| item.episode == episode))
+    }
+
+    fn harness_prompt_items_at(
+        &self,
+        connection: &Connection,
+        seat: &str,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4c401b40b08 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
@@ -175,16 +212,16 @@ impl Store {
             .transpose()
         };
         let mut items = Vec::new();
-        for seat in seats {
-            if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
+        'native: {
+            if let Some(item) = self.screen_prompt_item(connection, seat, person)? {
                 items.push(item);
             }
-            items.extend(self.denial_items(&connection, &seat, person)?);
-            let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
-                continue;
+            items.extend(self.denial_items(connection, seat, person)?);
+            let Some((claim, at, harness)) = newest(seat, "harness.observed")? else {
+                break 'native;
             };
             if harness["blocked_on"] != "human" {
-                continue;
+                break 'native;
             }
             // The prompt was refused in the terminal, which its harness did not report: the
             // reconciler recorded that once, keyed by this observation.
@@ -195,33 +232,33 @@ impl Store {
                          AND json_extract(body, '$._operation.id')=?1)",
                 )?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h5f2b2d51372d owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [native_prompt_gone_operation(&claim)], |row| row.get(0))?;
-            if gone || native_prompt_answer(&connection, &claim)?.is_some() {
-                continue;
+            if gone || native_prompt_answer(connection, &claim)?.is_some() {
+                break 'native;
             }
             // Only the running incarnation's prompt waits: a restarted seat's old prompt is gone.
-            let Some((_, _, runtime)) = newest(&seat, "runtime.observed")? else {
-                continue;
+            let Some((_, _, runtime)) = newest(seat, "runtime.observed")? else {
+                break 'native;
             };
             if runtime["status"] != "running"
                 || runtime["incarnation_id"] != harness["incarnation_id"]
-                || !person_work::declaration_live(&connection, &seat)?
+                || !person_work::declaration_live(connection, seat)?
             {
-                continue;
+                break 'native;
             }
             let ask = harness["ask"].as_str().unwrap_or("unknown");
             let owner = if ask == "question" {
-                self.question_principal(&seat)?
+                self.question_principal_at(connection, seat)?
             } else {
-                self.agent_person(&seat)?
+                agent_person_at(connection, seat)?
             };
             let missing_principal = ask == "question" && owner.is_none();
             let owner = match owner {
                 Some(owner) => owner,
                 None if missing_principal => String::new(),
-                None => continue,
+                None => break 'native,
             };
             if person.is_some_and(|person| person != owner) {
-                continue;
+                break 'native;
             }
             let what = match ask {
                 "permission" => "permission",
@@ -235,7 +272,7 @@ impl Store {
                 .unwrap_or("its terminal shows a prompt");
             let answerable = !missing_principal && answerable(&harness, as_of);
             // The exact call it asks about, as its hook or driver named it for this observation.
-            let call = prompt_call(&connection, &seat, &harness)?;
+            let call = prompt_call(connection, seat, &harness)?;
             items.push(AttentionItemView {
                 deadline_unix_ms: None,
                 default_answer: None,
@@ -243,7 +280,7 @@ impl Store {
                 priority: "high".into(),
                 kind: "harness-prompt".into(),
                 review_mode: None,
-                subject: seat.clone(),
+                subject: seat.to_owned(),
                 person: owner,
                 requester_id: None,
                 launch_id: None,
@@ -251,7 +288,7 @@ impl Store {
                 message_id: None,
                 prompt_call: call,
                 answers: if missing_principal { Vec::new() } else { prompt_answers(&harness, as_of) },
-                conversation: Some(seat.clone()),
+                conversation: Some(seat.to_owned()),
                 title: if missing_principal {
                     format!("{seat} has a human question but no principal")
                 } else {
@@ -294,7 +331,7 @@ impl Store {
                 mission: None,
                 mission_run: None,
                 step: None,
-                targets: vec![seat.clone()],
+                targets: vec![seat.to_owned()],
                 // Since the prompt opened, not since its latest restatement: a prompt that has
                 // waited for hours must not read as minutes old. An opening time of zero or after
                 // the restatement is not one, so the restatement's time stands.
@@ -305,7 +342,7 @@ impl Store {
                     .unwrap_or(at),
                 actions: vec![attention_action(
                     "Attach to answer",
-                    &["st", "terminals", "attach", &seat],
+                    &["st", "terminals", "attach", seat],
                 )],
             });
         }
@@ -518,6 +555,12 @@ impl Store {
         let claims = query
             .query_map([], claim_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let episodes = Self::fold_operational_failures(claims);
+        *kept.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::new(episodes.clone())));
+        Ok(episodes)
+    }
+
+    fn fold_operational_failures(claims: Vec<ClaimRecord>) -> Vec<AttentionRequestView> {
         let mut episodes: BTreeMap<String, AttentionRequestView> = BTreeMap::new();
         for claim in claims {
             let f = &claim.body["fields"];
@@ -531,33 +574,33 @@ impl Store {
                 }
                 continue;
             }
-            episodes.insert(
-                episode.into(),
-                AttentionRequestView {
-                    subject: episode.into(),
-                    request: claim.id.clone(),
-                    reviewer: f["reviewer"].as_str().unwrap_or("person/operator").into(),
-                    title: f["title"].as_str().unwrap_or_default().into(),
-                    reason: f["reason"].as_str().unwrap_or_default().into(),
-                    severity: f["severity"].as_str().unwrap_or("error").into(),
-                    targets: serde_json::from_value(f["targets"].clone())
-                        .unwrap_or_else(|_| vec![claim.subject.clone()]),
-                    actor: claim.actor.clone().unwrap_or_default(),
-                    status: "pending".into(),
-                    outcome: None,
-                    resolution_reason: None,
-                    requested_at_unix_ms: claim.accepted_at_unix_ms,
-                    resolved_at_unix_ms: None,
-                    until: None,
-                    step: None,
-                    step_attempt: None,
-                    closed_by: None,
-                },
-            );
+            episodes.insert(episode.into(), Self::operational_failure_view(claim));
         }
-        let episodes = episodes.into_values().collect::<Vec<_>>();
-        *kept.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::new(episodes.clone())));
-        Ok(episodes)
+        episodes.into_values().collect()
+    }
+
+    fn operational_failure_view(claim: ClaimRecord) -> AttentionRequestView {
+        let f = &claim.body["fields"];
+        AttentionRequestView {
+            subject: f["episode"].as_str().unwrap_or_default().into(),
+            request: claim.id,
+            reviewer: f["reviewer"].as_str().unwrap_or("person/operator").into(),
+            title: f["title"].as_str().unwrap_or_default().into(),
+            reason: f["reason"].as_str().unwrap_or_default().into(),
+            severity: f["severity"].as_str().unwrap_or("error").into(),
+            targets: serde_json::from_value(f["targets"].clone())
+                .unwrap_or_else(|_| vec![claim.subject]),
+            actor: claim.actor.unwrap_or_default(),
+            status: "pending".into(),
+            outcome: None,
+            resolution_reason: None,
+            requested_at_unix_ms: claim.accepted_at_unix_ms,
+            resolved_at_unix_ms: None,
+            until: None,
+            step: None,
+            step_attempt: None,
+            closed_by: None,
+        }
     }
 
     fn reconcile_fault_attention(
@@ -1150,6 +1193,37 @@ impl Store {
         Ok(items)
     }
 
+    /// Rebuild one person-owned broken gate from its exact failure and bounded currency result.
+    pub fn broken_gate_attention_item_at(
+        &self,
+        connection: &Connection,
+        subject: &str,
+        person: &str,
+        episode: &str,
+        as_of: u128,
+    ) -> Result<Option<AttentionItemView>> {
+        let Some(claim) = claim_by_id_tx(connection, episode)?.filter(|claim| claim.kind == "operational.failure") else {
+            return Ok(None);
+        };
+        static CURRENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(&format!(
+            "SELECT NOT EXISTS (
+                SELECT 1 FROM claims newer INDEXED BY claims_operational_control_source_index
+                WHERE newer.kind IN ('operational.failure','operational.recovered')
+                  AND COALESCE(json_extract(newer.body,'$.fields.episode'),'')=
+                      COALESCE(json_extract(request.body,'$.fields.episode'),'')
+                  AND {} AND (newer.kind='operational.failure'
+                    OR json_extract(newer.body,'$.fields.failure')=request.id)
+             ) FROM claims request WHERE request.id=?1",
+            canonical::after_sql("newer", "request"),
+        )));
+        /* sqlite-large-value: allow-for-now lv-h39d90a315c78 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */
+        let current: bool = connection.query_row(&*CURRENT, [episode], |row| row.get(0))?;
+        if !current { return Ok(None); }
+        let failure = Self::operational_failure_view(claim);
+        Ok(self.broken_gate_item(connection, failure, Some(person), as_of)?
+            .filter(|item| item.subject == subject))
+    }
+
     /// The broken-gate item one operational failure is now, if it still is one.
     pub(super) fn broken_gate_item(
         &self,
@@ -1167,7 +1241,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || claim_by_id_tx(connection, &failure.request))? else {
             return Ok(None);
         };
         smallclaims::touched::note_read(|| claim.subject.clone());
@@ -1886,7 +1960,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(owner) = self.agent_person(seat)? else {
+        let Some(owner) = agent_person_at(connection, seat)? else {
             return Ok(None);
         };
         if person.is_some_and(|person| person != owner) {
@@ -2062,7 +2136,7 @@ impl Store {
         if denials.is_empty() || !person_work::declaration_live(connection, seat)? {
             return Ok(Vec::new());
         }
-        let Some(owner) = self.agent_person(seat)? else {
+        let Some(owner) = agent_person_at(connection, seat)? else {
             return Ok(Vec::new());
         };
         if person.is_some_and(|person| person != owner) {
@@ -3181,12 +3255,31 @@ mod native_prompt_tests {
         };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
         let first = append_harness_history();
+        let listed = store.harness_prompt_attention_items(Some("person/operator"), u128::MAX)
+            .unwrap().into_iter().find(|item| item.episode == first.id).unwrap();
+        store.connection.batched(|connection| -> Result<()> {
+            let point = store.harness_prompt_attention_item_at(
+                connection, seat, "person/operator", &first.id, u128::MAX,
+            )?.unwrap();
+            assert_eq!(smallclaims::hash::canonical_hash(&point)?,
+                smallclaims::hash::canonical_hash(&listed)?);
+            assert!(store.harness_prompt_attention_item_at(
+                connection, seat, "person/other", &first.id, u128::MAX,
+            )?.is_none());
+            Ok(())
+        }).unwrap().unwrap();
         let choice = r#"{"0":[1],"1":[0,2]}"#;
         let answered = store
             .answer_native_prompt(seat, &first.id, choice, "person/operator")
             .unwrap();
         assert_eq!(answered.body["fields"]["status"], "answer");
         assert_eq!(answered.body["fields"]["reason"], choice);
+        store.connection.batched(|connection| -> Result<()> {
+            assert!(store.harness_prompt_attention_item_at(
+                connection, seat, "person/operator", &first.id, u128::MAX,
+            )?.is_none());
+            Ok(())
+        }).unwrap().unwrap();
         let mut restated = append_harness_history();
         for _ in 0..20 {
             restated = append_harness_history();

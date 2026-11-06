@@ -274,7 +274,12 @@ impl Store {
 
     /// Human-question authority is declaration metadata, not credential or graph ownership.
     pub fn question_principal(&self, agent: &str) -> Result<Option<String>> {
-        let desired = self.desired_subject_with_writer(agent)?;
+        self.question_principal_at(&self.readers.get(), agent)
+    }
+
+    /// Resolve human-question authority on the connection that admits its answer or control.
+    pub fn question_principal_at(&self, connection: &Connection, agent: &str) -> Result<Option<String>> {
+        let desired = desired_subject_with_writer_at(connection, agent)?;
         let declared = desired.as_ref().and_then(|(desired, _)| {
             desired.desired.get("children")?.as_array()?.iter()
                 .find(|child| child["name"] == "principal")?

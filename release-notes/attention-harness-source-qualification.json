@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Qualify harness prompt and broken-gate attention sources on one database connection",
+  "replay": { "status": "none", "detail": "Operational failure reduction and recovery retain their canonical ordering." },
+  "schema": { "status": "additive", "detail": "Add a partial expression index for exact operational failure episode currency checks." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "List and writer-admission source reads share prompt ownership, episode and answer derivation. Broken gates read the exact failure plus a bounded currency result instead of materializing history." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No new public mutation is advertised by this internal source-qualification change." },
+  "recovery": { "status": "none", "detail": "Stored work and approvals are unchanged." }
+}
