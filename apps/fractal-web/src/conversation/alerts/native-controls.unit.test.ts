@@ -1,17 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FractalClient } from '@fractal/client'
-import { DateTime, Effect, Option, SubscriptionRef } from 'effect'
-import type * as Native from '@fractal/client/schema'
+import { DateTime, Effect, Option, Schema, SubscriptionRef } from 'effect'
+import * as Native from '@fractal/client/schema'
 import { gatewayAlertActions, type AlertAction } from './alert-action-port.ts'
 import { optimisticAlertActions } from './optimistic-alert-actions.ts'
 
+const revision = Schema.decodeUnknownSync(Native.Revision)
 const alert = {
-  kind: 'attention', id: 'attention/native', revision: 'delivery/r1', source_id: 'step-run/example/build',
+  kind: 'attention', id: 'attention/native', revision: revision('delivery/r1'), source_id: 'step-run/example/build',
   episode: 'claim/example', attention_kind: 'person-step', state: 'open', title: 'Review build', detail: '',
   priority: 'normal', requested_at: DateTime.makeUnsafe('2026-11-06T10:00:00Z'), person_id: 'person/example',
   conversation_ids: [], actions: ['work.done'], alert: true,
   presentation_control: { source_revision: 'semantic/r1', revision: Option.none(), dismissed: false, snoozed_until: Option.none() },
-} as Native.Attention
+} as unknown as Native.Attention
 const capabilities = vi.fn(async () => ({ snapshot: { id: 'snapshot/now' }, value: {
   capabilities: ['attention.dismiss', 'attention.restore', 'attention.snooze'].map((id) => ({ id, state: 'granted' })),
 } }))
@@ -42,7 +43,7 @@ describe('native attention controls', () => {
     const port = gatewayAlertActions({ capabilities, attentionDismiss: send } as unknown as FractalClient)
     const request = { alert, action: { type: 'attention.dismiss' } as const, key: 'action/replay' }
     expect((await port.act(request))._tag).toBe('Refused')
-    expect((await port.act({ ...request, alert: { ...alert, revision: 'delivery/new' } }))._tag).toBe('Sent')
+    expect((await port.act({ ...request, alert: { ...alert, revision: revision('delivery/new') } }))._tag).toBe('Sent')
     expect(send.mock.calls[1]?.[0]).toBe(send.mock.calls[0]?.[0])
   })
 
@@ -64,7 +65,7 @@ describe('native attention controls', () => {
     const inbox = optimisticAlertActions({ act: async () => ({ _tag: 'Sent', controlRevision: 'control/r1' }) })
     await Effect.runPromise(inbox.accept([alert]))
     await inbox.port.act({ alert, action: { type: 'attention.dismiss' } })
-    for (const frame of [[], [{ ...alert, presentation_control: undefined }], [{ ...alert, revision: 'delivery/new' }],
+    for (const frame of [[], [{ ...alert, presentation_control: undefined }], [{ ...alert, revision: revision('delivery/new') }],
       [{ ...alert, presentation_control: { ...alert.presentation_control!, revision: Option.some('control/r1') } }]]) {
       await Effect.runPromise(inbox.accept(frame))
       expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(1)
@@ -168,7 +169,7 @@ describe('native attention controls', () => {
     await inbox.port.act({ alert: { ...alert, id: 'attention/source-answer' }, action: { type: 'work.done', summary: 'Done' } })
     const proof = { id: alert.id, ...alert.presentation_control!, revision: Option.some('control/r1'), dismissed: true }
     for (const invalid of [{ ...proof, id: 'attention/other' }, { ...proof, source_revision: 'semantic/other' },
-      { ...proof, revision: Option.some('control/other') }, { ...proof, dismissed: false }]) {
+      { ...proof, revision: Option.some('control/other') }, { ...proof, dismissed: false }] satisfies readonly Native.AttentionControl[]) {
       await Effect.runPromise(inbox.acceptControl(invalid))
       expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(2)
     }
