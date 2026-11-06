@@ -56,6 +56,7 @@ public struct MembershipPagingJoin {
             try Self.validate(frame)
             guard let snapshot = frame.snapshot, let state = frame.membership else { throw MembershipPagingFailure.refused }
             let incoming = try frontier(snapshot, state)
+            if let published, !incoming.sameScope(published) { self.published = nil; stream = incoming; throw MembershipPagingFailure.restart }
             if let stream, !incoming.sameScope(stream) { self.stream = incoming; throw MembershipPagingFailure.restart }
             if let stream { try compare(incoming, stream); if incoming.index < stream.index { return } }
             stream = incoming
