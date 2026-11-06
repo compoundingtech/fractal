@@ -9,6 +9,7 @@ import type * as TerminalDetailModule from '../terminal/TerminalDetail.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
+import { useAgentNoteQuickAdd } from './AgentNotes.tsx'
 import type * as AlertsTabModule from './AlertsTab.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
@@ -472,8 +473,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   const [diffOpen, setDiffOpen] = React.useState(false)
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
-  // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
+  // The row menu opens one declaration sheet and the note quick-add; a stable action object keeps rows memoizable.
   const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
+  // One `n` binding and one popover per workspace, for the selected agent or the row whose menu asked.
+  const { noteActions, notePopover } = useAgentNoteQuickAdd({ current, labelFor: ref => agents.find(row => row.ref === ref)?.name })
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
@@ -482,8 +485,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [agents, pins.state.members])
   const sidebarActions = React.useMemo<SidebarActions>(() => ({
     declaration: setDeclarationRef,
+    ...noteActions,
     ...(pins.editable ? { pins: { has: (ref: string) => pinned.has(ref), toggle: pins.toggle } } : {}),
-  }), [pins.editable, pins.toggle, pinned])
+  }), [noteActions, pins.editable, pins.toggle, pinned])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -736,6 +740,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               ) : null}
               {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
               <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
+              {notePopover}
               {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
                 {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
                   <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>

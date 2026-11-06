@@ -16,6 +16,7 @@ pub mod owned_terminals;
 pub mod provenance;
 pub mod private_notes;
 pub mod retention;
+pub mod subject_notes;
 pub mod slo_breaches;
 pub mod review;
 pub mod task_grants;
@@ -239,6 +240,7 @@ pub enum ValueType {
 pub enum WritePolicy {
     SystemOnly,
     SameSubjectActor,
+    SubjectEncodedAuthor,
     AuthorizedParticipant,
     AuthorizedRequester,
     CapabilityHolder,
@@ -538,6 +540,7 @@ impl Registry {
         output.push_str("\n## Agent principal grammar\n\nAn agent may declare one optional `principal \"person/operator\"` child. It takes\nexactly one canonical person ID string, with no properties or body; agent IDs,\nmalformed person IDs and duplicate principal children are rejected. `principal`\nis not an agent property. The canonical `intent.desired.desired` tree retains\nthe child without adding a separate claim field. Omitting it remains valid.\nThis grammar declaration is distinct from the accountable-root contract below.\n\nPending harness observations with `ask=\"question\"` route to the declared\nprincipal, otherwise to the daemon's configured `person`. Account ownership,\nhelper bindings, mission requesters and declaration authors are not question\nauthority. If neither principal exists, global attention retains the prompt\nwith an empty person and a configuration diagnostic instead of dropping it.\nOnly a live declaration and its running incarnation can produce the item;\nrepublishing its principal invalidates attention. `under` remains non-owning.\nPermission and review prompts retain their existing ownership and answer\nauthorization. This routing does not enable answering unsupported harnesses.\nSupported native question answers require the effective principal as answerer.\nUpgrade readers before publishing the child: older readers reject it.\n");
         output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
         output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
+        output.push_str("\n## Authored subject notes\n\n`note.set` records short context on `note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7`. The immutable person or agent author is encoded before the lowercase UUIDv7; every local and replicated claim actor must equal that author. Required `target` references an agent, session, mission, mission-run or step-run. Required `text` is null to archive, or nonblank text of at most 1024 UTF-8 bytes. Required `audience` is an open vocabulary; new local writes store `agent` and API inputs have no audience field. Optional `expires_at` is a valid RFC 3339 UTC timestamp. There is no note session field.\n\n`session/agent/ID/ENCODED_INCARNATION` is a read-only reference to an existing runtime incarnation. Its final component uses uppercase percent encoding of UTF-8, leaving only RFC 3986 unreserved bytes literal. The immutable parent agent and incarnation must match authoritative running runtime evidence at local admission. Session notes are current and resolve to their parent only while that exact incarnation runs; retained incarnation ids and provider session ids do not establish currency. No session declarations or lifecycle claims are introduced.\n\nThe latest canonical claim supplies revision and update time; the first supplies creation time. Archived, expired and ended-session revisions remain historical but are omitted from current views. Every current note, including historical self and unfamiliar audience values, is readable by persons with target access, its author and resolved agents. Audience is not a privacy boundary. Agents may write notes on themselves, their own sessions and assigned mission/step runs. Replicated admission enforces the stateless author and field rules. Notes live in the separate notes collection, never in agent or mission rows. Publication requires `features.subject_notes=1` on every active member's latest own-origin `daemon.started`, using the directive-note publication barrier. Notes and daemon-origin digests inform only: they do not assign work, approve gates, wake agents or grant authority.\n");
         output.push_str("\n## Arrangement operation vocabulary\n\nReplication retains unknown operation tags and unknown placement subject families as retryable `unknown-claim-field` records. Local edits still refuse them with `invalid-arrangement-operations` and `invalid-subject-reference`. Supported operation tags, included in this registry's digest:\n\n");
         for tag in &self.arrangement_operations {
             output.push_str(&format!("- `{tag}`\n"));
@@ -590,6 +593,9 @@ impl Registry {
                 "a subject needs a non-empty path after its registered family",
             ));
         }
+        if spec.family == "session" {
+            subject_notes::session_parts(subject)?;
+        }
         if spec.family == "assistant" && subject != "assistant/chatgpt" {
             let grant = subject.strip_prefix("assistant/chatgpt/session/assistant-grant/");
             if !grant.is_some_and(|id| id.len() == 24 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
@@ -632,6 +638,9 @@ impl Registry {
                     "a file subject must use file/HOST:/ABSOLUTE_PATH",
                 ));
             }
+        }
+        if spec.family == "note" {
+            subject_notes::author(subject)?;
         }
         if spec.family == "arrangement" {
             arrangements::owner(subject)?;
@@ -732,6 +741,9 @@ impl Registry {
         deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
+        }
+        if kind == subject_notes::KIND {
+            subject_notes::validate_fields(fields)?;
         }
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
@@ -873,6 +885,7 @@ impl Registry {
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
+        subject_notes::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
             || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject));
         if !allowed {
@@ -1072,6 +1085,12 @@ fn build_registry() -> Registry {
         ),
         ("host", "host/NAME", "A graph host.", false),
         (
+            "session",
+            "session/agent/ID/ENCODED_INCARNATION",
+            "An agent runtime incarnation, identified only for note targeting.",
+            false,
+        ),
+        (
             "harness-question",
             "harness-question/ID",
             "A question a seat's harness asked natively: question ids and option positions, never text.",
@@ -1108,6 +1127,12 @@ fn build_registry() -> Registry {
             "arrangement/person/NAME/UUIDv7",
             "A permanently person-owned shared folder arrangement.",
             false,
+        ),
+        (
+            "note",
+            "note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7",
+            "A short person- or agent-authored note about one subject; context, never authority.",
+            true,
         ),
         (
             "glass",
@@ -1488,6 +1513,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SameSubjectActor,
             Cardinality::StateTransition,
             Some("directive-notes"),
+            false,
+            &[],
+        ),
+        (
+            subject_notes::KIND,
+            &["note"],
+            WritePolicy::SubjectEncodedAuthor,
+            Cardinality::StateTransition,
+            Some("subject-notes"),
             false,
             &[],
         ),
@@ -3086,6 +3120,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "person.delegation-set" => &[("actions", required_array())],
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
+            ("expires_at", string()),
+        ],
+        subject_notes::KIND => &[
+            ("target", required_reference_to(subject_notes::TARGET_FAMILIES)),
+            ("text", FieldSpec { required: true, nullable: true, ..string() }),
+            ("audience", required_string()),
             ("expires_at", string()),
         ],
         "workspace.observed" => &[

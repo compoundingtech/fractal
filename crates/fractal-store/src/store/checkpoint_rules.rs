@@ -1134,7 +1134,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
 }
 
 /// Tables projected from claims, children before the tables their foreign keys name.
-pub const PROJECTION_TABLES: [&str; 38] = [
+pub const PROJECTION_TABLES: [&str; 41] = [
     "slo_episode_events",
     "slo_episode_heads",
     "slo_pending",
@@ -1157,6 +1157,9 @@ pub const PROJECTION_TABLES: [&str; 38] = [
     "person_directive_notes",
     "local_directive_note_pending",
     "local_directive_note_dirty",
+    "subject_notes",
+    "local_subject_note_pending",
+    "local_subject_note_dirty",
     "desired",
     "documents",
     "event_positions",

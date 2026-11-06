@@ -318,8 +318,10 @@ enum Command {
     Up(UpArgs),
     /// Understand what needs action now.
     Now(NowArgs),
-    /// Read current person notes; notes inform but never assign work or grant authority.
+    /// Manage subject notes; notes inform but never assign work or grant authority.
     Note(directive_note::NoteArgs),
+    /// Set, clear or show person directive notes.
+    Directive(directive_note::DirectiveArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
     /// List every objective and budget with its target, current value and what is left, and
@@ -5940,6 +5942,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Note(args) => {
             directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
         }
+        Command::Directive(args) => {
+            directive_note::run_directive(&endpoint, config.person.as_deref(), args, cli.json).await
+        }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Slo(args) => run_slo(&immediate, args, cli.json).await,
         Command::Launch { command } => {
@@ -7356,7 +7361,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"subject_notes":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
@@ -15165,6 +15170,31 @@ async fn message_page_filtered(
     client.get(&path).await
 }
 
+/// A held page may outlive the notes it originally contained. Resolve currency again
+/// before combining it with the waking page, including notes already in `pending`.
+async fn refresh_paged_notes(
+    client: &Client,
+    recipient: &str,
+    items: &mut Vec<MessageView>,
+    pending: &mut Vec<MessageView>,
+) -> Result<()> {
+    if !items.iter().chain(pending.iter()).any(fractal_daemon::silent::is_notes_digest) {
+        return Ok(());
+    }
+    #[derive(serde::Deserialize)]
+    struct CurrentNotes {
+        notes: Vec<fractal_store::store::subject_notes::SubjectNote>,
+    }
+    let response: CurrentNotes = client.get(&format!(
+        "/v1/client/subject-notes?recipient={}", urlencoding::encode(recipient),
+    )).await?;
+    let rendered = fractal_daemon::notes_digest::render(&response.notes)?;
+    pending.append(items);
+    std::mem::swap(items, pending);
+    fractal_daemon::silent::refresh_notes_rendered(items, recipient, rendered.as_deref());
+    Ok(())
+}
+
 async fn for_each_message(
     client: &Client,
     recipient: Option<&str>,
@@ -19813,6 +19843,7 @@ async fn forward_projected_messages_reporting(
         )
         .await?;
         let mut items = page.items;
+        refresh_paged_notes(client, subject, &mut items, &mut pending_silent).await?;
         // Held mail goes to the seat only beside a message that wakes it.
         fractal_daemon::silent::release_page(&mut items, &mut pending_silent);
         for message in items {

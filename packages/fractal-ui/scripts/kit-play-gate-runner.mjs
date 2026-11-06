@@ -25,7 +25,9 @@ export function assertStrictEvidence(records, id, a11y) {
 
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
-export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
+// An optional story-id pattern narrows the selected set; optional story args append to each case's `scheme:` arg.
+export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES, storyIdPattern, storyArgs }) {
+  const storyFilter = storyIdPattern === undefined ? undefined : new RegExp(storyIdPattern)
   const shardIndex = Number(process.env.KIT_PLAY_SHARD_INDEX ?? 0)
   const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
   // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
@@ -86,7 +88,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       shardIndex, shardCount, fullIds,
       runId: process.env.GITHUB_RUN_ID, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
       headSha: process.env.GITHUB_SHA,
-      set, a11y, ...cost,
+      set, a11y, storyIdPattern, storyArgs, ...cost,
       stories: ids.length, expectedCases, cases: rows.length, workers, omitted,
       caseOverrides: Object.fromEntries([...overrides].filter(([id]) => fullIds.includes(id))),
       passed: rows.filter(row => row.pass).length, failed: rows.filter(row => !row.pass).length,
@@ -116,7 +118,8 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     // Validate the complete index; fullIds is the selected set's inventory, which the union gate
     // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
     const index = await response.json()
-    fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
+    fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).filter(id => storyFilter === undefined || storyFilter.test(id)).toSorted()
+    if (fullIds.length === 0 && storyFilter !== undefined) throw new Error('No stories match the requested story-id pattern')
     validateCaseOverrides(index.entries, overrides)
     storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
@@ -158,7 +161,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         page.once('domcontentloaded', () => { domLoaded = performance.now() })
         // The guard awaits strict storyFinished; unrelated network idleness is not play readiness.
         // a11y.manual is addon-a11y's own switch for its afterEach axe run.
-        await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}`)}${a11y === 'off' ? `&globals=${encodeURIComponent('a11y.manual:!true')}` : ''}`, { waitUntil: 'domcontentloaded' })
+        await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}${storyArgs === undefined ? '' : `;${storyArgs}`}`)}${a11y === 'off' ? `&globals=${encodeURIComponent('a11y.manual:!true')}` : ''}`, { waitUntil: 'domcontentloaded' })
         const storyReady = performance.now()
         row.timings.navigationToDomMilliseconds = domLoaded - guardReady
         row.timings.readinessAfterDomMilliseconds = storyReady - domLoaded

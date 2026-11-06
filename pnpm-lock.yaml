@@ -304,6 +304,9 @@ importers:
       '@effect/atom-react':
         specifier: 4.1.0
         version: 4.1.0(effect@4.1.0)(react@19.2.3)(scheduler@0.27.0)
+      '@fractal/client':
+        specifier: workspace:^
+        version: link:../../clients/typescript/fractal-client
       '@pierre/highlights':
         specifier: 0.3.0
         version: 0.3.0
@@ -365,9 +368,6 @@ importers:
       '@types/react-dom':
         specifier: 19.2.7
         version: 19.2.7(@types/react@19.2.18)
-      jsdom:
-        specifier: 26.1.0
-        version: 26.1.0(supports-color@8.1.1)
       storybook:
         specifier: 10.6.1
         version: 10.6.1(@types/react@19.2.18)(react@19.2.3)

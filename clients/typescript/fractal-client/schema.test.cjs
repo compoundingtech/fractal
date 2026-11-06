@@ -4,6 +4,36 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('subject notes use rich open audiences and nullable archive patches', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/subject-notes.json').value;
+    const decoded = Rich.decodeUnknownSync(Rich.SubjectNotes)(wire);
+    assert.equal(decoded.notes[0].audience, 'self');
+    assert.deepEqual(decoded.notes[1].audience, { _tag: 'Unknown', raw: 'mission-crew' });
+    const encoded = Schema.encodeSync(Rich.SubjectNotes)(decoded);
+    assert.equal(encoded.notes[1].audience, 'mission-crew');
+    assert.equal(encoded.notes[0].target, 'session/agent/example/reviewer/incarnation%2Fexample');
+    assert.equal(Object.hasOwn(encoded.notes[0], 'session'), false);
+    assert.equal(encoded.notes[0].created_at, '2026-10-14T09:00:00.000Z');
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNotes)(Rich.decodeUnknownSync(Rich.SubjectNotes)({ notes: [] })), { notes: [] });
+    const patch = { text: null, expires_at: null };
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')(patch)), patch);
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')({})), {});
+    for (const partial of [{ text: null }, { expires_at: null }, { text: 'keep expiry' }, { expires_at: '2026-10-15T09:00:00.000Z' }]) {
+        assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')(partial)), partial);
+    }
+    const create = require('../../../docs/st3/client-v0/fixtures/subject-note-create.json');
+    assert.equal(Rich.decodeUnknownSync(Rich.SubjectNoteCreate, 'strict')(create).target, create.target);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.SubjectNoteCreate, 'strict')({ ...create, session: 'incarnation/example' }));
+    assert.throws(() => Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')({ session: null }));
+    const archived = { id: wire.notes[0].id, note: null };
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteResult)(Rich.decodeUnknownSync(Rich.SubjectNoteResult, 'strict')(archived)), archived);
+    const row = { ...wire.notes[0], kind: 'note' };
+    const resource = Rich.decodeUnknownSync(Rich.Resource)(row);
+    assert.equal(resource.kind, 'note');
+    assert.equal(Schema.encodeSync(Rich.Resource)(resource).target, row.target);
+});
+
 test('read entrypoint loads no mutation or PTY validators, even without tree shaking', () => {
     const { spawnSync } = require('node:child_process');
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', String.raw`

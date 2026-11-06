@@ -370,6 +370,28 @@ it('cannot tunnel dot-segment escapes or malformed encoded paths past the client
     expect(clientRoute(path)).toBe(false)
   expect(clientRoute('/v1/client/agents/agent%2Fexample?cursor=opaque')).toBe(true)
 })
+it('admits generated subject-note writes without opening other native routes', () => {
+  expect(clientRoute('/v1/subject-notes')).toBe(true)
+  expect(clientRoute('/v1/subject-notes/note%2Fperson%2Fexample%2F0192')).toBe(true)
+  for (const path of ['/v1/claims', '/v1/subject-notes-extra', '/v1/subject-notes/note/person/example/0192',
+    '/v1/subject-notes/note%2Fperson%2F..%2Fclaims', '/v1/subject-notes/note%2F%00', '/v1/subject-notes/note%2F%ZZ'])
+    expect(clientRoute(path)).toBe(false)
+})
+it('forwards note create and archive using gateway-owned authorization', async () => {
+  const setup = await fixture()
+  const noteId = 'note/person/example/0192'
+  for (const [path, method, body] of [
+    ['/v1/subject-notes', 'POST', { target: 'agent/example/planner', text: 'Keep the handoff short.' }],
+    [`/v1/subject-notes/${encodeURIComponent(noteId)}`, 'PUT', { text: null }],
+  ] as const) {
+    const response = await fetch(`${setup.base}${path}`, {
+      method, headers: { 'content-type': 'application/json', authorization: browserAuthorization },
+      body: JSON.stringify(body),
+    })
+    expect(response.status).toBe(200)
+    expect(setup.received.at(-1)).toMatchObject({ path, auth: gatewayAuthorization, body: JSON.stringify(body) })
+  }
+})
 it('handles upgrade socket errors while asynchronous admission is pending', async () => {
   let release!: (allowed: boolean) => void
   const setup = await fixture(() => new Promise<boolean>((resolve) => { release = resolve }))

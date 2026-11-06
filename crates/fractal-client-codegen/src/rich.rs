@@ -43,6 +43,7 @@ const KEYWORDS: &[&str] = &[
     "x-st-brand",
     "x-st-codec",
     "x-st-conditions",
+    "x-st-preserve-omission",
 ];
 const DATE_TIME: &str =
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$";
@@ -795,6 +796,9 @@ fn emit_field(
         None => (emit(value, cx)?, false),
     };
     let schema = match (nullable, required) {
+        (true, false) if value.get("x-st-preserve-omission") == Some(&Value::Bool(true)) => {
+            format!("Schema.optionalKey(Schema.OptionFromNullOr({schema}))")
+        }
         (true, true) => format!("Schema.OptionFromNullOr({schema})"),
         (true, false) => format!("Schema.OptionFromOptionalNullOr({schema}, NULL_NONE)"),
         (false, true) => schema,
@@ -1412,7 +1416,10 @@ fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
                 if encoded && !required && nullable.is_some() {
                     ty = format!("({ty}) | undefined");
                 }
-                let optional = !required && (encoded || nullable.is_none());
+                let optional = !required
+                    && (encoded
+                        || nullable.is_none()
+                        || field.get("x-st-preserve-omission") == Some(&Value::Bool(true)));
                 fields.push(format!(
                     "readonly {}{}: {ty}",
                     js(&json!(name)),
@@ -1842,6 +1849,25 @@ mod tests {
             assert!(output.contains(&format!("Schema.Literals({values})")));
         }
         Ok(())
+    }
+
+    #[test]
+    fn nullable_patch_fields_preserve_omission() {
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": {
+                "Patch": {
+                    "type": "object", "additionalProperties": false,
+                    "properties": {
+                        "text": { "type": ["string", "null"], "x-st-preserve-omission": true }
+                    }
+                }
+            }
+        });
+        let rendered = models(&schema).unwrap();
+        assert!(rendered.contains("Schema.optionalKey(Schema.OptionFromNullOr(Schema.String))"));
+        let ty = recursive_type(&schema["$defs"]["Patch"], false).unwrap();
+        assert!(ty.contains("readonly \"text\"?: Option.Option<string>"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
+import { AgentNotes } from './AgentNotes.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -93,10 +94,9 @@ const ConversationThreadPane = ({
   React.useLayoutEffect(() => {
     const node = boundary.current
     if (node === null) return
-    // Only the small composer is inert. Locking the entire transcript would restyle every
-    // row in the switch frame. The boundary hides covered content from assistive technology.
-    const composer = node.querySelector('textarea')?.closest('form')
-    if (composer !== null && composer !== undefined) composer.inert = !visible
+    // Only composers are inert. Locking the entire transcript would restyle every
+    // row in the switch frame. Include quick-note input as well as message input.
+    for (const composer of node.querySelectorAll('form')) composer.inert = !visible
     const focused = node.ownerDocument.activeElement
     if (!visible && focused instanceof HTMLElement && node.contains(focused)) focused.blur()
   }, [visible, state._tag])
@@ -223,6 +223,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
   const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
+    <AgentNotes agentRef={agentRef} targetLabel={agentName} />
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable} /> : <ConversationTranscript

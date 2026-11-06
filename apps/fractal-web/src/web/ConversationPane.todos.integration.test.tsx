@@ -3,16 +3,19 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import type * as AtomReact from '@effect/atom-react'
 
 const state = vi.hoisted(() => ({ tag: 'Waiting' }))
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
-vi.mock('@effect/atom-react', () => ({ useAtomValue: () => false }))
+// Pane preferences read as off; the notes header keeps its real per-target state atoms.
+vi.mock('@effect/atom-react', async importOriginal => ({ ...(await importOriginal<typeof AtomReact>()), useAtomValue: () => false }))
 vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({}), useConversation: () => state.tag === 'Waiting' ? { _tag: 'Waiting' } : { _tag: 'Unavailable', reason: 'failed', detail: 'example' },
   useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0, useAttention: () => ({ _tag: 'Waiting' }),
   useNowSnapshot: () => 0,
   useConnection: () => ({ _tag: 'Live' }),
   usePausedNow: () => undefined,
+  useSubjectNotes: () => ({ _tag: 'Observed', freshness: 'live', value: [] }),
 }))
 vi.mock('../conversation/todos/AgentTodos.tsx', () => ({ LiveAgentTodos: () => <details aria-label="To-dos"><summary>To-dos · Example phase 1/2</summary></details> }))
 import { ConversationPane } from './ConversationPane.tsx'

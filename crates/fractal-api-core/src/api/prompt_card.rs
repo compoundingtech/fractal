@@ -300,6 +300,7 @@ pub fn call_waits_among(items: &[Value], call: &str) -> bool {
 
 /// The tool calls without a result in a conversation `source`, following it from before the
 /// read.
+#[cfg(test)]
 pub(crate) fn source_pending_calls(
     source: &crate::external_sessions::ExternalSession,
     follow: impl FnOnce(&Path) -> Result<(), String>,

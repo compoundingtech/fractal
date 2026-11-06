@@ -1,3 +1,4 @@
+use crate::SubjectNotesStore;
 use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
@@ -146,6 +147,7 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
     refresh_agent_roster(store, false)
 }
 mod directive_notes;
+mod subject_notes;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
@@ -485,8 +487,9 @@ impl ApiError {
             | "forbidden"
             | "lane-approval-denied"
             | "person-rename-forbidden"
-            | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            | "glass-owner-forbidden"
+            | "note-forbidden" | "note-author-forbidden" | "note-target-access" => StatusCode::FORBIDDEN,
+            "identity-unknown" | "lane-not-found" | "not-found" | "subject-note-not-found" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -630,6 +633,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/notes", get(directive_notes::read))
         .route("/v1/notes", axum::routing::put(directive_notes::write))
+        .route("/v1/client/subject-notes", get(subject_notes::read))
+        .route("/v1/subject-notes", post(subject_notes::create))
+        .route("/v1/subject-notes/{*id}", axum::routing::put(subject_notes::update))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/observations", post(client_observations::report)
@@ -1117,7 +1123,9 @@ async fn response_envelope_unbounded(
             .into_response();
     }
     let started = Instant::now();
-    let client_request = request.uri().path().starts_with("/v1/client/");
+    let client_request = request.uri().path().starts_with("/v1/client/")
+        || request.uri().path() == "/v1/subject-notes"
+        || request.uri().path().starts_with("/v1/subject-notes/");
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -2069,10 +2077,12 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "note-forbidden" | "note-author-forbidden" | "note-target-access"
         | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
-        "lane-not-found" => "not-found".into(),
+        "lane-not-found" | "subject-note-not-found" => "not-found".into(),
         "invalid-person-ask"
+        | "invalid-note-subject" | "invalid-session-subject" | "invalid-subject-note" | "subject-note-feature-barrier"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"

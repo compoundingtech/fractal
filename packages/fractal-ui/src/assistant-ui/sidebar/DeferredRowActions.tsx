@@ -20,6 +20,8 @@ export function AgentHoverCard(props: { readonly row: Row; readonly reportedStat
 export interface AgentRowActionsProps extends SidebarClock {
   readonly row: Row
   readonly reportedStatusOnly?: boolean
+  /** The selected row: its "Add note…" item names the host's note shortcut, which acts on the selection from the conversation. */
+  readonly active?: boolean
   readonly actions?: SidebarActions
   readonly onOpen?: (row: Row) => void
   readonly onMarkRead?: (ref: string) => void

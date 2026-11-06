@@ -1,6 +1,6 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
 /** Shared derivations over SDK-decoded and generated rows, installed once per data source. */
-import type { Attention, Mission } from '@fractal/client/schema'
+import type { Attention, Mission, SubjectNote } from '@fractal/client/schema'
 import type { DecodedAgent as AgentRow } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -12,6 +12,7 @@ import type { MissionView } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { createProjections } from './projections.ts'
 import { askingAgentRefs, attentionAboutAgent, currentMissionIds } from './asking.ts'
+import { notesByTarget } from './notes.ts'
 import { type Agent, type DataSource, type Feed, type Fleet, type RosterDecode, decodedRoster, observed } from './source.ts'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import { createObservedClock, type ObservedClock } from './observedClock.ts'
@@ -38,6 +39,7 @@ interface DerivedData {
   readonly agent: (ref: string) => Atom.Atom<Feed<Agent | undefined>>
   readonly agentRow: (ref: string) => Atom.Atom<Feed<AgentRow | undefined>>
   readonly agentAttention: (ref: string) => Atom.Atom<Feed<readonly Attention[]>>
+  readonly subjectNotes: (ref: string) => Atom.Atom<Feed<readonly SubjectNote[]>>
   readonly askingAgents: Atom.Atom<ReadonlySet<string>>
   readonly terminalConnected: (ref: string) => Atom.Atom<boolean | undefined>
 }
@@ -131,6 +133,16 @@ const derive = (source: DataSource) => {
       })
     }).pipe(Atom.withEquality<Feed<readonly Attention[]>>((a, b) => sameFeed(a, b, sameItems))),
   )
+  const notesIndex = Atom.make((get) => mapFeed({
+    feed: source.notes === undefined
+      ? { _tag: 'Unavailable' as const, reason: 'unsupported' as const, detail: 'Notes are not available from this source.' }
+      : get(source.notes),
+    map: notesByTarget,
+  }))
+  const emptyNotes: readonly SubjectNote[] = []
+  const subjectNotes = Atom.family((ref: string) => Atom.make((get) =>
+    mapFeed({ feed: get(notesIndex), map: (targets) => targets.get(ref) ?? emptyNotes }),
+  ).pipe(Atom.withEquality<Feed<readonly SubjectNote[]>>((left, right) => sameFeed(left, right, sameItems))))
   // One roster-wide pass; an absent family contributes nothing rather than inventing asks.
   const askingAgents = Atom.make((get) => {
     const rows = get(source.agents)
@@ -159,6 +171,7 @@ const derive = (source: DataSource) => {
     agent,
     agentRow,
     agentAttention,
+    subjectNotes,
     askingAgents,
     terminalConnected,
   }
@@ -299,6 +312,9 @@ export const useAgentRowSelection = <T,>({
 /** Only open cards about this agent or its current missions notify its information surfaces. */
 export const useAgentAttention = (ref: string): Feed<readonly Attention[]> =>
   useAtomValue(useData().agentAttention(ref))
+/** Notes about a target, derived from the independent notes collection. */
+export const useSubjectNotes = (ref: string): Feed<readonly SubjectNote[]> =>
+  useAtomValue(useData().subjectNotes(ref))
 /** Agent refs Fractal reports as waiting for an answer: an ask-tool question or open attention. */
 export const useAskingAgents = (): ReadonlySet<string> => useAtomValue(useData().askingAgents)
 /** Badge/count projections ignore unrelated card metadata while detail readers keep native cards. */

@@ -11,6 +11,8 @@ use crate::model::MessageView;
 
 /// The sender chose the silent message kind.
 pub const SILENT_TAG: &str = "st3-silent";
+/// The daemon-origin held subject-note context family.
+pub const NOTES_DIGEST_TAG: &str = "st3-notes-digest";
 /// Read compatibility for unshipped FYI previews; new unsigned sends store only st3-silent.
 pub const LEGACY_FYI_TAG: &str = "st3-fyi";
 
@@ -111,6 +113,26 @@ pub fn stored_tags(from: &str, requested: &[String]) -> Vec<String> {
     tags
 }
 
+/// Apply a server-resolved current block to a legacy client's held paging batch.
+pub fn refresh_notes_rendered(messages: &mut Vec<MessageView>, recipient: &str, content: Option<&str>) {
+    let newest = messages.iter().filter(|message| message.to == recipient && is_notes_digest(message))
+        .max_by_key(|message| (message.created_index, &message.subject))
+        .map(|message| message.subject.clone());
+    messages.retain_mut(|message| {
+        if message.to != recipient || !is_notes_digest(message) { return true; }
+        let Some(content) = content else { return false; };
+        if newest.as_deref() != Some(&message.subject) { return false; }
+        message.content.clear();
+        message.content.push_str(content);
+        true
+    });
+}
+
+pub fn is_notes_digest(message: &MessageView) -> bool {
+    message.from == "daemon/runtime"
+        && message.tags.iter().any(|tag| tag == NOTES_DIGEST_TAG)
+}
+
 /// The mail a seat's delivery offers now. A held message that has not been offered stays back
 /// until a message that wakes the seat is offered, then goes with it; one already offered stays.
 pub fn release(messages: &mut Vec<MessageView>) {
@@ -189,7 +211,6 @@ pub fn waits_for_turn(message: &MessageView) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn message(subject: &str, from: &str, status: &str, tags: &[&str]) -> MessageView {
         MessageView {
             subject: subject.into(),
@@ -211,8 +232,25 @@ mod tests {
         }
     }
 
+
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|tag| (*tag).to_owned()).collect()
+    }
+
+    #[test]
+    fn paged_notes_refresh_keeps_only_current_latest_digest() {
+        let old = message("message/example-old", "daemon/runtime", "sent",
+            &[SILENT_TAG, NOTES_DIGEST_TAG]);
+        let mut new = old.clone();
+        new.subject = "message/example-new".into();
+        new.created_index = 1;
+        let mut batch = vec![old, new];
+        refresh_notes_rendered(&mut batch, "agent/example/reader", Some("Current block"));
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].subject, "message/example-new");
+        assert_eq!(batch[0].content, "Current block");
+        refresh_notes_rendered(&mut batch, "agent/example/reader", None);
+        assert!(batch.is_empty());
     }
 
     #[test]

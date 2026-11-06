@@ -36,6 +36,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `message` | `message/ID` | yes | A Fractal message. |
 | `mission` | `mission/ID` | no | An immutable mission revision lineage. |
 | `mission-run` | `mission-run/ID` | no | A mission execution. |
+| `note` | `note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7` | yes | A short person- or agent-authored note about one subject; context, never authority. |
 | `observer` | `observer/RUN/LOCAL_ID` | no | A mission-run resource observer. |
 | `owned-set` | `owned-set/NAME` | no | A graph-owned set of declarations with source ordering and omission retirement. |
 | `person` | `person/IDENTITY` | no | A human actor. |
@@ -48,6 +49,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `run-generation` | `run-generation/ID` | no | An immutable mission-run generation. |
 | `schedule` | `schedule/RUN/LOCAL_ID` | no | A mission-run schedule. |
 | `sekret` | `sekret/HOST or sekret/HOST/OWNER/NAME` | no | A host's sekrets gateway, or one of its profiles: calls run with a credential the caller never reads. |
+| `session` | `session/agent/ID/ENCODED_INCARNATION` | no | An agent runtime incarnation, identified only for note targeting. |
 | `step-run` | `step-run/GENERATION/PATH` | no | One step attempt lineage. |
 | `subscription` | `subscription/RUN/LOCAL_ID` | no | A mission-run observer subscription. |
 
@@ -161,6 +163,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `mission.provenance` | `mission` | `system-only` | `once` | `durable` | `mission!:subject-reference(mission)`, `provenance!:object`, `revision!:string` | `provenance` |
 | `mission.published` | `mission` | `authorized-requester` | `append` | `durable` | `body:object`, `revision:string`, `state:string` | `mission` |
 | `mission.renamed` | `mission` | `system-only` | `append` | `durable` | `declaration!:string`, `from!:subject-reference(agent|mission)`, `owner_host!:string`, `preserved_incarnation:string`, `previous_revision:string`, `reason!:string`, `request!:object`, `to!:subject-reference(agent|mission)` |  |
+| `note.set` | `note` | `subject-encoded-author` | `state-transition` | `durable` | `audience!:string`, `expires_at:string`, `target!:subject-reference(agent|session|mission|mission-run|step-run)`, `text!:string or null` |  |
 | `observer.observed` | `observer` | `system-only` | `append` | `durable` | `attempt:string`, `changed:boolean`, `changed_fields:array`, `cursor:string`, `locator:string`, `next_check_unix_ms:string`, `observation:subject-reference`, `provider:string`, `resource:subject-reference`, `revision:string`, `status:string` | `observer` |
 | `observer.refresh-requested` | `observer` | `system-only` | `append` | `durable` | `attempt!:string`, `revision!:string` | `refresh` |
 | `observer.state` | `observer` | `system-only` | `state-transition` | `durable` | `attempt:string`, `error_code:string`, `next_check_unix_ms:string`, `reason:string`, `revision:string`, `state!:string` | `observer` |
@@ -290,6 +293,14 @@ All members must upgrade before publishing accountable roots. Older members reta
 Notes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.
 
 Publication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.
+
+## Authored subject notes
+
+`note.set` records short context on `note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7`. The immutable person or agent author is encoded before the lowercase UUIDv7; every local and replicated claim actor must equal that author. Required `target` references an agent, session, mission, mission-run or step-run. Required `text` is null to archive, or nonblank text of at most 1024 UTF-8 bytes. Required `audience` is an open vocabulary; new local writes store `agent` and API inputs have no audience field. Optional `expires_at` is a valid RFC 3339 UTC timestamp. There is no note session field.
+
+`session/agent/ID/ENCODED_INCARNATION` is a read-only reference to an existing runtime incarnation. Its final component uses uppercase percent encoding of UTF-8, leaving only RFC 3986 unreserved bytes literal. The immutable parent agent and incarnation must match authoritative running runtime evidence at local admission. Session notes are current and resolve to their parent only while that exact incarnation runs; retained incarnation ids and provider session ids do not establish currency. No session declarations or lifecycle claims are introduced.
+
+The latest canonical claim supplies revision and update time; the first supplies creation time. Archived, expired and ended-session revisions remain historical but are omitted from current views. Every current note, including historical self and unfamiliar audience values, is readable by persons with target access, its author and resolved agents. Audience is not a privacy boundary. Agents may write notes on themselves, their own sessions and assigned mission/step runs. Replicated admission enforces the stateless author and field rules. Notes live in the separate notes collection, never in agent or mission rows. Publication requires `features.subject_notes=1` on every active member's latest own-origin `daemon.started`, using the directive-note publication barrier. Notes and daemon-origin digests inform only: they do not assign work, approve gates, wake agents or grant authority.
 
 ## Arrangement operation vocabulary
 

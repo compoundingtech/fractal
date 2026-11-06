@@ -47,7 +47,7 @@ bodies do not acquire this field. The generated TypeScript client exposes `trace
 as an opaque `SubscribeTraceContext`. Typed SDK helpers and Swift client support
 are follow-up work after the #1910 decision.
 
-Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
+Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `notes`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` plus exact `agent` to agents. For `arrangements`, `person: "person/NAME"`
 is required: agents explicitly select a fleet person's collection, never an inferred
@@ -116,6 +116,17 @@ Arrangement snapshots and changes carry full typed arrangement resources. Folder
 placement changes are full resource upserts; retirement sends the arrangement ID in
 `removes`. Glass privacy and its person-only selection are unchanged.
 
+The `notes` window carries independent `note` resources with the shared
+`SubjectNote` fields. It selects the authenticated authority actor, not a free
+`person` or `actor` filter. Every current note is visible to persons with target
+access, its author and the agents its target currently resolves to, regardless of
+stored audience (including historical `self` and unfamiliar values). Clients
+derive note counts and previews from this window; agent and mission rows have no
+note fields.
+Clock ticks remove expired notes, and runtime and assignment changes refresh
+currency and recipient access. A session note requires the target's authoritative
+runtime to be running in that incarnation. Archives and ended sessions remove
+rows through the same collection changes protocol.
 An owner-wide arrangements subscription (no `subject`) also invalidates the complete
 owner inventory, not just the visible prefix. The server reads that owner's inventory
 revision in the same SQLite snapshot as the resources and fence. After the initial
@@ -146,7 +157,6 @@ ones. Pin each complete read to its page snapshot/cursors; restart an expired re
 Keep the subscription open while reading and coalesce concurrent invalidations into
 a follow-up complete read. Bounded prefix contents cannot prove absence or select a
 winner across the full inventory. Reconnect/resync handling remains unchanged.
-
 A window contains 1–200 current items. History remains on the
 corresponding paged HTTP reads. Send `{"kind":"unsubscribe","id":"missions-tab"}`
 to remove a subscription. IDs are chosen by the client and unique on the socket.

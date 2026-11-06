@@ -290,6 +290,10 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn subject_definition(&self, subject: &str, show_env_values: bool) -> Result<Envelope<SubjectDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/subject-definition?subject={{}}&show_env_values={{show_env_values}}\", percent_encode(subject))).await }}"
             )?;
+        } else if id == "subject-notes.list" {
+            writeln!(out, "    pub async fn subject_notes_list(&self, target: Option<&str>) -> Result<Envelope<SubjectNotes>, ClientError> {{ let path = target.map_or_else(|| \"/v1/client/subject-notes\".to_owned(), |target| format!(\"/v1/client/subject-notes?target={{}}\", percent_encode(target))); self.get(&path).await }}")?;
+        } else if id == "subject-notes.mine" {
+            writeln!(out, "    pub async fn subject_notes_mine(&self, author: &str) -> Result<Envelope<SubjectNotes>, ClientError> {{ self.get(&format!(\"/v1/client/subject-notes?author={{}}\", percent_encode(author))).await }}")?;
         } else if id == "notes.list" {
             writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
         } else if id == "clients.list" {
@@ -500,6 +504,10 @@ fn swift_operation_methods(
                 out,
                 "    public func conversationSearch(text: String, agent: String? = nil, since: String? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ConversationSearch> {{ var query: [URLQueryItem] = [.init(name: \"text\", value: text)]; for (name, value) in [(\"agent\", agent), (\"since\", since), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/conversations/search\", query: query) }}"
             )?;
+        } else if id == "subject-notes.list" {
+            writeln!(out, "    public func subjectNotesList(target: String? = nil) async throws -> Envelope<SubjectNotes> {{ try await get(\"v1/client/subject-notes\", query: target.map {{ [.init(name: \"target\", value: $0)] }} ?? []) }}")?;
+        } else if id == "subject-notes.mine" {
+            writeln!(out, "    public func subjectNotesMine(author: String) async throws -> Envelope<SubjectNotes> {{ try await get(\"v1/client/subject-notes\", query: [.init(name: \"author\", value: author)]) }}")?;
         } else if id == "notes.list" {
             writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
         } else if id == "clients.list" {
@@ -812,6 +820,11 @@ fn validate_surfaces(
         "Capability",
         "DirectiveNote",
         "DirectiveNotes",
+        "SubjectNote",
+        "SubjectNotes",
+        "SubjectNoteResult",
+        "SubjectNoteCreate",
+        "SubjectNoteUpdate",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
@@ -1673,6 +1686,10 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(options: EventOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events', requestOptions); }}"
             )?;
+        } else if id == "subject-notes.list" {
+            writeln!(out, "    async subjectNotesList(target?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SubjectNotes>> {{ return this.get('/v1/client/subject-notes' + query({{ target }}), undefined, requestOptions); }}")?;
+        } else if id == "subject-notes.mine" {
+            writeln!(out, "    async subjectNotesMine(author: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SubjectNotes>> {{ return this.get('/v1/client/subject-notes' + query({{ author }}), undefined, requestOptions); }}")?;
         } else if id == "notes.list" {
             writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
         } else if id == "clients.list" {

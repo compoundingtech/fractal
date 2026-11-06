@@ -1,0 +1,131 @@
+import * as React from 'react'
+import * as stylex from '@stylexjs/stylex'
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
+import type { SubjectNote } from '@fractal/client/schema'
+import { NoteList } from './NoteList'
+import { agentNote, allNotes, diffNote, futureNote, longNote, newestFirstIds, retireNote, target, viewer } from './notes-fixtures'
+import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as styles, type NotesFrameArgs } from './notes-story-frame'
+import { greenFindings } from '../assistant-ui/composition/no-green-assertion'
+import { Button } from '../assistant-ui/composition/Controls'
+
+function NoteListStory({ scheme, width, negativeControl }: NotesFrameArgs) {
+  // The host owns data: an accepted archive leaves the note in place until the host publishes the
+  // next `notes` value, which the story delivers explicitly so the accepted state is observable.
+  const [notes, setNotes] = React.useState<readonly SubjectNote[]>(allNotes)
+  const [archived, setArchived] = React.useState<readonly string[]>([])
+  const onArchive = async (note: SubjectNote) => {
+    await Promise.resolve()
+    if (note.id === longNote.id) throw new Error('synthetic archive refusal')
+    setArchived(current => [...current, note.id])
+  }
+  const publish = () => setNotes(current => current.filter(candidate => !archived.includes(candidate.id)))
+  return <NotesFrame scheme={scheme} width={width} title="Note list">
+    <section aria-label="Notes on the reviewer" {...stylex.props(styles.section)}>
+      <h2 {...stylex.props(styles.heading)}>{target}</h2>
+      <NoteList notes={notes} author={viewer} onArchive={onArchive} />
+      {/* Negative control: a host regression that reintroduces an audience label beside the rows. */}
+      {negativeControl && <span>Only me</span>}
+    </section>
+    <span><Button variant="outline" onPress={publish} data-testid="deliver-update">Deliver list update</Button></span>
+    <section aria-label="Read-only notes" {...stylex.props(styles.section)}>
+      <h2 {...stylex.props(styles.heading)}>Read-only</h2>
+      <NoteList notes={[agentNote, futureNote]} />
+    </section>
+    <section aria-label="No notes" {...stylex.props(styles.section)}>
+      <h2 {...stylex.props(styles.heading)}>Empty</h2>
+      <NoteList notes={[]} author={viewer} onArchive={onArchive} />
+    </section>
+  </NotesFrame>
+}
+
+const meta = {
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal/Plugins/Notes/Note list', component: NoteListStory,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'No scenario slice models subject notes; synthetic notes with mixed stored audiences pin ordering, archive focus and the no-audience contract.' }, layout: 'fullscreen' },
+  args: notesFrameArgs,
+  argTypes: notesFrameArgTypes('Render a retired audience label beside the list: the no-audience assertion must fail.'),
+} satisfies Meta<typeof NoteListStory>
+export default meta
+type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
+
+const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const main = canvas.getByRole('region', { name: 'Notes on the reviewer' })
+  const rowOf = (id: string) => main.querySelector<HTMLElement>(`[data-note-id="${id}"]`)!
+  await expect([...main.querySelectorAll('[data-testid="note-row"]')].map(row => row.getAttribute('data-note-id'))).toEqual(newestFirstIds)
+
+  // Rows stored as `self`, `agent` and a future value render alike: no audience label, marker, hook
+  // or raw stored value, and every row keeps author, time and text.
+  await expectNoAudiencePresentation(main)
+  await expect(main.querySelector('svg[data-note-agent-marker]')).toBeNull()
+  for (const note of [retireNote, diffNote, futureNote]) await expect(within(rowOf(note.id)).getByTestId('note-text')).toHaveTextContent(note.text)
+
+  // Attribution, session scope, expiry.
+  await expect(within(rowOf(retireNote.id)).getByTestId('note-author')).toHaveTextContent('You')
+  await expect(within(rowOf(agentNote.id)).getByTestId('note-author')).toHaveTextContent(target)
+  const sessionChip = within(rowOf(retireNote.id)).getByTestId('note-session')
+  await expect(sessionChip).toHaveTextContent('This session')
+  await expect(sessionChip).toHaveAccessibleName("This session. Notes reach this session's agent until the session ends.")
+  // The chip explains itself on keyboard focus through the kit Tooltip.
+  await userEvent.keyboard('{Shift}')
+  sessionChip.focus()
+  await expect(await canvas.findByRole('tooltip', undefined, { timeout: 5000 })).toHaveTextContent("Notes reach this session's agent until the session ends.")
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull(), { timeout: 5000 })
+  await expect(within(rowOf(diffNote.id)).getByTestId('note-expires')).toHaveTextContent(/^Expires in /)
+  await expect(within(rowOf(longNote.id)).getByTestId('note-text').textContent).toBe(longNote.text)
+
+  // Archive appears only on the viewer's own notes.
+  await expect(within(main).getAllByRole('button', { name: 'Archive' })).toHaveLength(3)
+  await expect(within(rowOf(agentNote.id)).queryByRole('button')).toBeNull()
+  await expect(within(rowOf(futureNote.id)).queryByRole('button')).toBeNull()
+
+  // A refused archive keeps the row and explains the failure.
+  await userEvent.click(within(rowOf(longNote.id)).getByRole('button', { name: 'Archive' }))
+  await expect(await within(rowOf(longNote.id)).findByRole('alert')).toHaveTextContent("Couldn't archive this note. It is unchanged; try again.")
+  await expect(within(rowOf(longNote.id)).getByTestId('note-archive-error-detail')).toHaveTextContent('synthetic archive refusal')
+  await expect(within(rowOf(longNote.id)).getByRole('button', { name: 'Archive' })).toBeEnabled()
+
+  // An accepted archive keeps the row, disabled, until the host publishes; focus stays in the list,
+  // with a visible ring after a keyboard archive.
+  within(rowOf(diffNote.id)).getByRole('button', { name: 'Archive' }).focus()
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(rowOf(diffNote.id)).toHaveAttribute('data-archive-state', 'accepted'))
+  await expect(within(rowOf(diffNote.id)).getByRole('button', { name: 'Archived' })).toBeDisabled()
+  await expect(within(main).getByRole('status')).toHaveTextContent('Archive accepted. The note leaves the list when it updates.')
+  const list = within(main).getByTestId('note-list')
+  await expect(list).toHaveFocus()
+  await expect(list.matches(':focus-visible')).toBe(true)
+  await expect(getComputedStyle(list).outlineStyle).toBe('solid')
+  await expect(main.querySelectorAll('[data-testid="note-row"]')).toHaveLength(5)
+  await userEvent.click(canvas.getByTestId('deliver-update'))
+  await waitFor(() => expect(main.querySelector(`[data-note-id="${diffNote.id}"]`)).toBeNull())
+  await expect(main.querySelectorAll('[data-testid="note-row"]')).toHaveLength(4)
+  // Pending announcements must survive a host publication without naming removed DOM nodes.
+  for (const element of canvasElement.ownerDocument.querySelectorAll('[aria-labelledby]')) {
+    for (const id of element.getAttribute('aria-labelledby')!.trim().split(/\s+/)) {
+      await expect(canvasElement.ownerDocument.getElementById(id)).not.toBeNull()
+    }
+  }
+
+  const readOnly = canvas.getByRole('region', { name: 'Read-only notes' })
+  await expect(within(readOnly).getAllByTestId('note-row')).toHaveLength(2)
+  await expect(within(readOnly).queryByRole('button')).toBeNull()
+  await expect(within(canvas.getByRole('region', { name: 'No notes' })).getByTestId('note-list-empty')).toHaveTextContent('No notes yet.')
+
+  await expect(greenFindings(canvasElement)).toEqual([])
+}
+
+export const AllStates: Story = { play: assertStates }
+export const Light440: Story = { args: { scheme: 'light', width: 440 }, play: assertStates }
+export const Dark1440: Story = { args: { scheme: 'dark', width: 1440 }, play: assertStates }
+export const Light1440: Story = { args: { scheme: 'light', width: 1440 }, play: assertStates }

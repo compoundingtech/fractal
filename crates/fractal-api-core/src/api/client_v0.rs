@@ -240,6 +240,10 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     if collection == "summary" {
         return false;
     }
+    // Session notes become non-current when runtime authority loses reachability.
+    if collection == "notes" && kind == "transport.observed" {
+        return false;
+    }
     if collection == "summary-missions"
         && matches!(kind, "runtime.observed" | "harness.observed" | "harness.diagnostic"
             | "harness.activity" | "harness.usage" | "work.progress" | "work.submitted")
@@ -318,6 +322,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "control.glasses",
     "read.arrangements",
     "control.arrangements",
+    "control.notes",
     "terminal.read",
     "terminal.control",
     "control.attention",

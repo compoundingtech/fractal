@@ -11,6 +11,8 @@ pub use crate::store::shared_seats::{BASE_REBUILDS, DEFINITIONS_PARSED, RUN_PART
 #[allow(unused_imports)]
 pub use crate::store::shared::*;
 use crate::MissionsStore;
+use crate::SubjectNotesStore;
+pub mod subject_notes;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::fs;

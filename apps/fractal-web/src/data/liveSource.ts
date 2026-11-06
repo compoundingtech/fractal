@@ -1,7 +1,7 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
-import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
+import type { Attention, Mission, Note, SubjectNote, TerminalScreen } from '@fractal/client/schema'
 import {
   Fractal,
   FractalLive,
@@ -41,6 +41,7 @@ import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
+import { gatewayNoteActions } from './noteActions.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
@@ -755,6 +756,15 @@ export const liveSource = ({
       ),
   })
   const missions = missionsRetained.atom
+  const notesRetained = retain<readonly SubjectNote[], Extract<FollowSpec, { _tag: 'Window' }>>({
+    resolve: () => Effect.succeed({ _tag: 'Window', collection: 'notes', limit: 100 }),
+    follow: ({ fractal, spec }) => fractal.followWindow(spec).pipe(
+      Stream.map((event) => event._tag === 'Observed'
+        ? { _tag: 'Observed' as const, value: event.value.items.filter((row): row is Note => row.kind === 'note') }
+        : event),
+    ),
+  })
+  const notesActor = Atom.keepAlive(Atom.make<string | undefined>(undefined))
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
     follow: ({ fractal, spec }) =>
@@ -1168,6 +1178,7 @@ export const liveSource = ({
         Effect.gen(function* () {
           const fractal = yield* Fractal
           const discovered = yield* fractal.capabilities
+          registry.set(notesActor, discovered.session_actor)
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1225,6 +1236,9 @@ export const liveSource = ({
       retryAgents: () => agentsRetained.retry(),
       missions,
       attention,
+      notes: notesRetained.atom,
+      notesActor,
+      noteActions: gatewayNoteActions({ client, actor: () => registry.get(notesActor) }),
       conversation,
       conversationInterest: (ref) => retainConversation(ref).interest,
       prefetchConversation: (ref) => {

@@ -25,7 +25,10 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
 }
 export const clientRoute = (url: string): boolean => {
   const path = url.split('?')[0] ?? ''
-  if (path !== '/v1/client' && !path.startsWith('/v1/client/')) return false
+  // Note writes deliberately live outside /v1/client; admit only their generated routes.
+  const noteRoute = path === '/v1/subject-notes'
+    || /^\/v1\/subject-notes\/note%2f[^/]+$/i.test(path)
+  if (path !== '/v1/client' && !path.startsWith('/v1/client/') && !noteRoute) return false
   try {
     const decoded = decodeURIComponent(path)
     return !decoded.includes('\\') && !decoded.includes('\0') && !decoded.split('/').includes('..')

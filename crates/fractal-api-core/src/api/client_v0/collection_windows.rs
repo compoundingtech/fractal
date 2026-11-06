@@ -12,10 +12,11 @@ const STORES: usize = 64;
 pub const WINDOWS: usize = 64;
 pub const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-pub const COLLECTIONS: [&str; 15] = [
+pub const COLLECTIONS: [&str; 16] = [
     "missions",
     "attention",
     "agents",
+    "notes",
     "work",
     "glasses",
     "arrangements",
@@ -398,7 +399,7 @@ impl Windows {
         let period = match request.collection.as_str() {
             // Summary windows keep the shared wall-clock bucket; missions and attention
             // above use exact transition fences instead.
-            "summary" | "summary-missions" => now / ATTENTION_CLOCK_INTERVAL.as_millis(),
+            "summary" | "summary-missions" | "notes" => now / ATTENTION_CLOCK_INTERVAL.as_millis(),
             // Work's deterministic selected projection time is itself an input, even if a
             // claim kind does not otherwise change its rows (elapsed budgets/lease expiry).
             "work" => state.store.projection_time_at(index)?,

@@ -1893,6 +1893,10 @@ async fn run_pi_channel(
                     // A prior incarnation's handoff is not proof that the model consumed mail.
                     // The incarnation-local set survives channel reexec and prevents repeats here.
                     let mut items = page.items;
+                    if let Err(error) = refresh_paged_notes(client, subject, &mut items, &mut pending_silent).await {
+                        warn_pi_channel(subject, &error, &mut last_warning);
+                        break;
+                    }
                     fractal_daemon::silent::release_page(&mut items, &mut pending_silent);
                     for message in items.into_iter().filter(|message| matches!(message.status.as_str(), "sent" | "staged" | "delivered")) {
                     if state.retry_after_ms.get(&message.subject).is_some_and(|after|

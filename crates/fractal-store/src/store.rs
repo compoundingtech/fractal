@@ -39,6 +39,7 @@ mod rename_proof_tests;
 #[cfg(test)]
 mod observation_trim_tests;
 pub mod directive_notes;
+pub mod subject_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
@@ -11128,6 +11129,7 @@ pub fn append_claim_tx_with_assistant_answer(
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::subject_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
@@ -11151,6 +11153,9 @@ pub fn append_claim_tx_with_assistant_answer(
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     if kind == fractal_schema::directive_notes::KIND {
         directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
+    }
+    if kind == fractal_schema::subject_notes::KIND {
+        subject_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
     }
     if kind == "mission.published"
         && let Some(mission) = fields.get("body").and_then(|body| serde_json::from_value::<MissionSpec>(body.clone()).ok())
@@ -15653,6 +15658,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::subject_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
@@ -22687,6 +22694,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::subject_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     identities::claim_operation(input)?;
     Ok(())
 }
@@ -22941,6 +22950,7 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("resource_observations", &[]),
     ("glass_heads", &[]),
     ("person_directive_notes", &[]),
+    ("subject_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),

@@ -15,6 +15,9 @@ pub use fractal_delivery::*;
 pub mod graph;
 pub mod references;
 pub mod store;
+pub mod notes_digest;
+pub mod silent;
+pub use store::subject_notes::SubjectNotesStore;
 
 pub use store::MissionsStoreCore;
 #[cfg(any(test, feature = "test-support"))]

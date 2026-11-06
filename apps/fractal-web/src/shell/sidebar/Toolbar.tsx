@@ -5,6 +5,7 @@ import { ChromeControl } from '../../../../../packages/fractal-ui/src/assistant-
 import { lightTheme as compositionLightTheme } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { geometryVars as g, typeVars as t, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { shortcutContextBlocked } from '../../../../../packages/fractal-ui/src/notes/shortcut-guard.ts'
 
 import {
   Button,
@@ -57,14 +58,12 @@ export const SidebarToolbar = ({
   const shortcut = React.useCallback((node: HTMLDivElement | null) => {
     if (node === null) return
     const listener = (event: KeyboardEvent) => {
-      const target = event.target
       if (
         event.key !== '/' ||
         event.metaKey ||
         event.ctrlKey ||
         event.altKey ||
-        (target instanceof HTMLElement &&
-          (target.isContentEditable || target.closest('input,textarea,select,[role="textbox"]')))
+        shortcutContextBlocked(event)
       )
         return
       event.preventDefault()

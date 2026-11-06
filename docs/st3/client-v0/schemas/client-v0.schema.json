@@ -23,6 +23,50 @@
     { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "NoteAudience": {"anyOf": [{"enum": ["self", "agent"]}, {"type": "string"}], "description": "Open audience; unfamiliar values are rendered neutrally, not as Unknown."},
+    "SubjectNote": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "target", "author", "text", "audience", "created_at", "updated_at", "revision"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^note/"},
+        "target": {"type": "string"},
+        "author": {"type": "string"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Nonblank; at most 1024 UTF-8 bytes."},
+        "audience": {"$ref": "#/$defs/NoteAudience"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "revision": {"type": "string"}
+      }
+    },
+    "SubjectNotes": {"type": "object", "additionalProperties": false, "required": ["notes"], "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/SubjectNote"}}}},
+    "SubjectNoteResult": {"type": "object", "additionalProperties": false, "required": ["id", "note"], "properties": {"id": {"type": "string", "pattern": "^note/"}, "note": {"oneOf": [{"$ref": "#/$defs/SubjectNote"}, {"type": "null"}]}}},
+    "SubjectNoteCreate": {
+      "type": "object", "additionalProperties": false, "required": ["target", "text"],
+      "properties": {
+        "target": {"type": "string"}, "text": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "SubjectNoteUpdate": {
+      "type": "object", "additionalProperties": false,
+      "description": "Patch fields preserve omission (unchanged), null (clear), and a supplied value.",
+      "properties": {
+        "text": {"x-st-preserve-omission": true, "type": ["string", "null"], "minLength": 1, "maxLength": 1024},
+        "expires_at": {"x-st-preserve-omission": true, "oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "Note": {
+      "allOf": [
+        {"$ref": "#/$defs/ResourceHeader"},
+        {"type": "object", "required": ["kind", "target", "author", "text", "audience", "created_at"], "properties": {
+          "kind": {"const": "note"}, "target": {"type": "string"}, "author": {"type": "string"},
+          "text": {"type": "string", "minLength": 1, "maxLength": 1024}, "audience": {"$ref": "#/$defs/NoteAudience"},
+          "created_at": {"$ref": "#/$defs/Timestamp"},
+          "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+        }}
+      ]
+    },
     "NoticeTimestamp": {
       "description": "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission.",
       "type": "string", "format": "date-time", "x-st-codec": "lossless-timestamp",
@@ -589,6 +633,7 @@
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
+      "note",
       "attention",
       "message",
       "launch",
@@ -786,7 +831,8 @@
         "snapshot": { "$ref": "#/$defs/Snapshot" },
         "value": {
           "oneOf": [
-            { "$ref": "#/$defs/DirectiveNotes" },
+            { "anyOf": [{ "$ref": "#/$defs/DirectiveNotes" }, { "$ref": "#/$defs/SubjectNotes" }] },
+            { "$ref": "#/$defs/SubjectNoteResult" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },
@@ -2893,6 +2939,7 @@
     },
     "Resource": {
       "oneOf": [
+        { "$ref": "#/$defs/Note" },
         {
           "$ref": "#/$defs/ConnectedClient"
         },
@@ -4134,7 +4181,16 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": [
+            "read.projections",
+            "write.client-diagnostics",
+            "read.glasses",
+            "control.glasses",
+            "control.notes",
+            "terminal.read",
+            "control.attention",
+            "control.launches"
+          ] }
         }
       }
     },
@@ -4395,6 +4451,7 @@
       ]
     },
     "CollectionName": { "enum": [
+      "notes",
       "missions",
       "attention",
       "agents",
@@ -4412,6 +4469,7 @@
       "terminals"
     ] },
     "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": [
+      "notes",
       "missions",
       "attention",
       "agents",
@@ -4489,7 +4547,7 @@
             "kind": { "const": "subscribe" },
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
-            "collection": { "enum": ["missions", "attention", "work", "glasses", "summary"] },
+            "collection": { "enum": ["missions", "attention", "notes", "work", "glasses", "summary"] },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
             "actor": { "type": ["string", "null"] },

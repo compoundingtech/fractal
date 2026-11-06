@@ -24,6 +24,7 @@ pub use fractal_github::changes;
 pub use fractal_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
 pub use fractal_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
 pub use fractal_missions::{AdhocWorkStore, ArrangementsStore, CoordinationStore, DeclarationsStore, DelegationStore, LanesStore, MissionEligibilityStore, MissionListStore, MissionsStore, MissionsStoreCore, PersonWorkStore, WorkListStore};
+pub use fractal_missions::{SubjectNotesStore, notes_digest};
 pub use fractal_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore};
 pub use fractal_attention::{AttentionListStore, AttentionSnapshotStore, AttentionStore, ClientSummaryStore, OwnerListsStore, PublishedListStore, PublishedViewsAttentionStore, SummaryListStore};
 pub use fractal_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
@@ -44,7 +45,7 @@ pub use fractal_api_mailbox::subagent_sessions;
 pub use fractal_kernel::fabric_gateway;
 pub use fractal_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
-pub use fractal_store::silent;
+pub use fractal_missions::silent;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
 pub use fractal_api_mailbox::gate_check;
 pub use fractal_kernel::gate_kinds;

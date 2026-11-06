@@ -89,6 +89,10 @@ export interface SidebarActions {
   readonly split?: (ref: string, placement: 'right' | 'below') => void
   /** Host-owned canonical declaration view for an agent or mission ref; the row offers it only when set. */
   readonly declaration?: (ref: string) => void
+  /** Host-owned note quick-add for a row, anchored to `anchor` (the row's menu trigger); the row offers "Add note…" only when set. */
+  readonly note?: (ref: string, anchor: Element) => void
+  /** The key the host binds to add a note to the selected agent from the conversation; the selected row's "Add note…" item describes it. */
+  readonly noteShortcut?: string
   /** Present only when the host can edit Pins; rows offer Pin/Unpin for the stable agent ref and its attached mission, never subagents. */
   readonly pins?: { readonly has: (ref: string) => boolean; readonly toggle: (ref: string) => void }
 }

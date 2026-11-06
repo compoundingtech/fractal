@@ -100,6 +100,8 @@ pub enum Window {
     Attention,
     Missions,
     Agents,
+    /// Current subject notes visible to the authenticated reader.
+    Notes,
     /// The person's glasses, followed when requested and granted by st.
     Glasses,
     /// A handful of counts (needs you, working agents, active missions, machines), followed when
@@ -111,13 +113,14 @@ pub enum Window {
 }
 
 impl Window {
-    pub const ALL: [Self; 3] = [Self::Attention, Self::Missions, Self::Agents];
+    pub const ALL: [Self; 4] = [Self::Attention, Self::Missions, Self::Agents, Self::Notes];
 
     fn id(self) -> &'static str {
         match self {
             Self::Attention => "attention",
             Self::Missions => "missions",
             Self::Agents => "agents",
+            Self::Notes => "notes",
             Self::Glasses => "glasses",
             Self::Summary => "summary",
             Self::Arrangements => "arrangements",
@@ -1573,6 +1576,15 @@ mod tests {
         assert_ne!(first.id, same_target.id);
         assert_ne!(first.id, other_target.id);
         assert_ne!(same_target.id, other_target.id);
+    }
+
+    #[test]
+    fn notes_window_is_followed_and_dispatched_independently() {
+        assert!(Window::ALL.contains(&Window::Notes));
+        assert_eq!(Window::Notes.id(), "notes");
+        assert_eq!(Window::from_id("notes"), Some(Window::Notes));
+        assert_eq!(Window::Notes.limit(), WINDOW);
+        assert!(!left(Window::Notes, false));
     }
 
     fn following() -> Option<Following> {

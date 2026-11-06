@@ -2443,6 +2443,27 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
 export type Mission = typeof Mission.Type
 export type MissionEncoded = typeof Mission.Encoded
 
+/** Open audience; unfamiliar values are rendered neutrally, not as Unknown. */
+export const NoteAudience = /*#__PURE__*/ (() => openEnum(["self","agent"]).annotate({ identifier: "NoteAudience", description: "Open audience; unfamiliar values are rendered neutrally, not as Unknown." }))()
+export type NoteAudience = typeof NoteAudience.Type
+export type NoteAudienceEncoded = typeof NoteAudience.Encoded
+
+export const Note = /*#__PURE__*/ (() => Schema.Struct({
+  "audience": NoteAudience,
+  "author": Schema.String,
+  "created_at": Timestamp,
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "id": Id,
+  "kind": Schema.Literal("note"),
+  "operational": optionalKey(Operational),
+  "revision": Revision,
+  "target": Schema.String,
+  "text": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(1024)),
+  "updated_at": Timestamp
+}).annotate({ identifier: "Note" }))()
+export type Note = typeof Note.Type
+export type NoteEncoded = typeof Note.Encoded
+
 export const ObserverSpec = /*#__PURE__*/ (() => Schema.Struct({
   "fields": Schema.Array(Schema.String),
   "locator": Schema.String,
@@ -2608,7 +2629,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
+  "kind": unknownCase(["note","attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -2831,6 +2852,7 @@ export type Work = typeof Work.Type
 export type WorkEncoded = typeof Work.Encoded
 
 export const Resource = /*#__PURE__*/ (() => Schema.Union([
+  Note,
   ConnectedClient,
   Usage,
   Summary,
@@ -2864,6 +2886,7 @@ export type ResourceEncoded = typeof Resource.Encoded
 
 /** Collections whose windows hold resources. */
 export const ResourceCollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "notes",
   "missions",
   "attention",
   "agents",
@@ -3495,6 +3518,7 @@ export type TimelineEntry = typeof TimelineEntry.Type
 export type TimelineEntryEncoded = typeof TimelineEntry.Encoded
 
 export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "notes",
   "missions",
   "attention",
   "agents",
@@ -3923,6 +3947,27 @@ export const SubjectDefinition = /*#__PURE__*/ (() => Schema.Struct({
 export type SubjectDefinition = typeof SubjectDefinition.Type
 export type SubjectDefinitionEncoded = typeof SubjectDefinition.Encoded
 
+export const SubjectNote = /*#__PURE__*/ (() => Schema.Struct({
+  "audience": NoteAudience,
+  "author": Schema.String,
+  "created_at": Timestamp,
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "id": Schema.String.check(Schema.isPattern(new RegExp("^note/", "u"))),
+  "revision": Schema.String,
+  "target": Schema.String,
+  /** Nonblank; at most 1024 UTF-8 bytes. */
+  "text": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(1024)).annotate({ description: "Nonblank; at most 1024 UTF-8 bytes." }),
+  "updated_at": Timestamp
+}).annotate({ identifier: "SubjectNote" }))()
+export type SubjectNote = typeof SubjectNote.Type
+export type SubjectNoteEncoded = typeof SubjectNote.Encoded
+
+export const SubjectNotes = /*#__PURE__*/ (() => Schema.Struct({
+  "notes": Schema.Array(SubjectNote)
+}).annotate({ identifier: "SubjectNotes" }))()
+export type SubjectNotes = typeof SubjectNotes.Type
+export type SubjectNotesEncoded = typeof SubjectNotes.Encoded
+
 export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
   /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
   "header": optionalKey(ConversationHeader),
@@ -3990,7 +4035,7 @@ export const ReadCollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "agents_publication_version": Schema.Literal(1), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literal("commands"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "trace": optionalKey(SubscribeTraceContext), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","notes","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
 "agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */

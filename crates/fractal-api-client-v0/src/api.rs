@@ -1,5 +1,6 @@
 //! The part of `api` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+use crate::SubjectNotesStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;

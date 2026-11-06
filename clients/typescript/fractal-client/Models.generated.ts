@@ -1316,7 +1316,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   until_ms?: number;
 } & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; subject?: never; terminal?: never; }) | ({
   actor?: string | null;
-  collection: "missions" | "attention" | "work" | "glasses" | "summary";
+  collection: "missions" | "attention" | "notes" | "work" | "glasses" | "summary";
   id: string;
   kind: "subscribe";
   limit?: number;
@@ -1438,7 +1438,8 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
 } & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; membership?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }));
 
 export type CollectionName = 
-  "missions"
+  "notes"
+  | "missions"
   | "attention"
   | "agents"
   | "work"
@@ -1760,7 +1761,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: ((DirectiveNotes | SubjectNotes) | SubjectNoteResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2551,6 +2552,18 @@ export type MissionWake = {
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
 
+export type Note = ResourceHeader & {
+  audience: NoteAudience;
+  author: string;
+  created_at: Timestamp;
+  expires_at?: (Timestamp | null);
+  kind: "note";
+  target: string;
+  text: string;
+};
+
+export type NoteAudience = ("self" | "agent" | string);
+
 export type NoticeActor = string;
 
 export type NoticeClaimId = string;
@@ -2958,7 +2971,16 @@ export type PersonPairingBegin = {
   fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
-  scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
+  scopes?: Array<
+  "read.projections"
+  | "write.client-diagnostics"
+  | "read.glasses"
+  | "control.glasses"
+  | "control.notes"
+  | "terminal.read"
+  | "control.attention"
+  | "control.launches"
+>;
 };
 
 export type PersonStepParameters = {
@@ -3152,10 +3174,11 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
+export type Resource = (Note | ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceCollectionName = 
-  "missions"
+  "notes"
+  | "missions"
   | "attention"
   | "agents"
   | "work"
@@ -3491,6 +3514,38 @@ export type SubjectDefinition = {
   kdl: string;
   kind: "subject-definition";
   subject: string;
+};
+
+export type SubjectNote = {
+  audience: NoteAudience;
+  author: string;
+  created_at: Timestamp;
+  expires_at?: (Timestamp | null);
+  id: string;
+  revision: string;
+  target: string;
+  text: string;
+  updated_at: Timestamp;
+};
+
+export type SubjectNoteCreate = {
+  expires_at?: (Timestamp | null);
+  target: string;
+  text: string;
+};
+
+export type SubjectNoteResult = {
+  id: string;
+  note: (SubjectNote | null);
+};
+
+export type SubjectNoteUpdate = {
+  expires_at?: (Timestamp | null);
+  text?: string | null;
+};
+
+export type SubjectNotes = {
+  notes: Array<SubjectNote>;
 };
 
 export type SubscribeTraceContext = unknown;

@@ -6,7 +6,7 @@ import type {
     DeviceCommand, DeviceCommandRequest, DeviceResult,
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
-    ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, SubjectNotes, SubjectNoteResult, SubjectNoteCreate, SubjectNoteUpdate, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -661,6 +661,8 @@ export class FractalClient {
     listGlasses(options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/glasses${query(options)}`, undefined, requestOptions); }
     getGlass(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, undefined, requestOptions); }
     putGlass(id: string, request: GlassPut, idempotencyKey: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.request('PUT', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey, undefined, requestOptions); }
+    subjectNotesCreate(note: SubjectNoteCreate, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('POST', '/v1/subject-notes', note, undefined, undefined, requestOptions); }
+    subjectNotesUpdate(id: string, note: SubjectNoteUpdate, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('PUT', `/v1/subject-notes/${encodeURIComponent(id)}`, note, undefined, undefined, requestOptions); }
     deleteGlass(id: string, request: GlassDelete, idempotencyKey: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.request('DELETE', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey, undefined, requestOptions); }
     /** Exact server-side filters; refuses older servers that ignore them. */
     async terminalsListFiltered(options: TerminalListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> {

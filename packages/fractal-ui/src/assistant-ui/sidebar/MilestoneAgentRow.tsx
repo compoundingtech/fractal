@@ -127,7 +127,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     </span>
     {/* The hover card and the actions' overlays portal into the row's themed surface, so a light root gets light overlays. */}
     {!displayOnly && <>
-      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} active={active} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
       {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
         <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />

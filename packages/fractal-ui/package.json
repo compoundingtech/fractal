@@ -17,6 +17,7 @@
     "./assistant-ui/workbench-model": "./src/assistant-ui/workbench/workbench-model.ts",
     "./assistant-ui/sync": "./src/assistant-ui/sync-presentation/index.ts",
     "./assistant-ui/sync-status": "./src/assistant-ui/sync-presentation/sync-line.ts",
+    "./notes": "./src/notes/index.ts",
     "./human-time": "./src/time/HumanTime.tsx",
     "./human-time/format": "./src/time/human-time.ts",
     "./human-time/clock": "./src/time/clock.tsx"
@@ -46,6 +47,7 @@
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
     "@effect/atom-react": "4.1.0",
+    "@fractal/client": "workspace:^",
     "@pierre/highlights": "0.3.0",
     "@stylexjs/stylex": "0.19.0",
     "effect": "4.1.0",
@@ -68,7 +70,6 @@
     "@types/node": "26.6.4",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
-    "jsdom": "26.1.0",
     "storybook": "10.6.1",
     "tailwindcss": "4.2.2",
     "typescript": "6.0.3",
