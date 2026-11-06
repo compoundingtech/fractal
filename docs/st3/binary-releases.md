@@ -83,7 +83,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compound
 ```
 
 The script detects Linux x86_64 or Apple Silicon macOS, downloads the archive and
-its SHA256 checksum, verifies it before installation, then runs `st`. It restores
+its SHA256 checksum, verifies it before installation, then runs `fractal`. It restores
 terminal input for the `curl | sh` form. To select an exact release or install
 without opening the interface (`vX.Y.Z` below is a placeholder; choose a published tag):
 
@@ -153,12 +153,12 @@ only when its database, claim and driver contracts can read the current state; s
 unless the release explicitly documents a downgrade. Before upgrading a healthy populated
 store, make a [claim backup](backups.md) and preserve excluded local data separately.
 
-First-run `st` offers to install the background service. For an upgrade or changed
-executable path, `st service install` refreshes
-service definitions and restarts daemon and replication services. `st service restart` suffices
+First-run `fractal` offers to install the background service. For an upgrade or changed
+executable path, `fractal service install` refreshes
+service definitions and restarts daemon and replication services. `fractal service restart` suffices
 when those definitions already point at the intended binaries. Schedule that restart, compare
-`st --version --json` with the daemon's `machine_version` in `st doctor --json`, and verify peer
-health. `st doctor --strict` also treats warnings as failures: inspect each warning rather than
+`fractal --version --json` with the daemon's `machine_version` in `fractal doctor --json`, and verify peer
+health. `fractal doctor --strict` also treats warnings as failures: inspect each warning rather than
 assuming an optional-tool warning means that the API is unavailable. Restarting
 invalidates an ongoing continuous soak window, so coordinate that separately from downloading or
 installing files.
@@ -243,7 +243,7 @@ main builds continue. PRs above the documented [adoption boundary](release-impac
 also need a fresh valid fragment before merging. See [release impact authoring](release-impact.md) for
 committed fragments, measurements, historical backfills, and a notes-only preview.
 
-Archive builds carry a clean release stamp: `st --version` reports the package
+Archive builds carry a clean release stamp: `fractal --version` reports the package
 version and source revision with `(release)`, and JSON exposes the same machine
 version. A tag build uses its semantic tag version; untagged main builds use the
 Cargo package version and exact revision. Daily publication reuses those tested
