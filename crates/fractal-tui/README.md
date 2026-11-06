@@ -27,7 +27,7 @@ yet have a scenario-backed projection.
 
 `fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
 Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
-`STUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.
+`FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.
 The contract uses the kit anchor clock and omits local conversation clock labels;
 normal demo mode rebases to the current clock. Without the update flag, contract
 and rendered-frame tests fail on scenario/adapter drift. Invented per-feature inputs
@@ -153,8 +153,8 @@ ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target
 ```
 
 After an intended mission-rendering change, regenerate its text, style and target golden with
-`STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --locked mission_golden`, review the fixture diff,
-then run the same test without `STUI_UPDATE_GOLDEN`.
+`FRACTAL_TUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --locked mission_golden`, review the fixture diff,
+then run the same test without `FRACTAL_TUI_UPDATE_GOLDEN`.
 The PTY smoke test runs with or without a local daemon or Fractal config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
@@ -169,8 +169,8 @@ read for anyone.
 
 ## One cold conversation-open timing
 
-For a supported diagnostic in a real terminal, set `STUI_OPEN_TRACE_FILE` to a new private
-file and `STUI_OPEN_TRACE_CONVERSATION` to the exact agent or session being opened. Leave
+For a supported diagnostic in a real terminal, set `FRACTAL_TUI_OPEN_TRACE_FILE` to a new private
+file and `FRACTAL_TUI_OPEN_TRACE_CONVERSATION` to the exact agent or session being opened. Leave
 both unset for ordinary use. The selector only observes the UI: it does not open a tab,
 change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
 never appended to or overwritten; a new file is mode 0600 on Unix.
@@ -201,7 +201,7 @@ A killed process or failed trace write may leave a partial file. Missing final e
 not a latency success. Read/write overhead perturbs the opt-in run. Retain the external
 monotonic launch/key times, exit/result, exact installed source/build, host and ordinary UI
 context separately; process loading before `main` is outside the internal clock. Do not
-equate a subscribe-to-frame `STUI_TIMING_LOG` record with useful presentation.
+equate a subscribe-to-frame `FRACTAL_TUI_TIMING_LOG` record with useful presentation.
 
 ## Images
 
@@ -278,7 +278,7 @@ Older members read inventories when their relevant view opens or its period
 changes; Fleet says these inventories are read, not followed. Read errors and
 partial windows stay visible. Connection generations fence legacy results, so a
 late read cannot replace a newer member's streamed rows. The actual-binary idle
-transport test runs `scripts/fractal-ui-test-client` with `STUI_TIMING_LOG` on a private
+transport test runs `scripts/fractal-ui-test-client` with `FRACTAL_TUI_TIMING_LOG` on a private
 daemon, opening the Fleet list and Usage from Ctrl+K and holding them idle beyond every old
 read interval.
 

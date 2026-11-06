@@ -21,6 +21,7 @@ cat >"$work/bin/jq" <<'SH'
 cat >/dev/null
 SH
 chmod +x "$work/bin/st2" "$work/bin/st3" "$work/bin/jq"
+ln -s st3 "$work/bin/fractal"
 hook=$repo/crates/fractal-drivers/hooks/claude-observe.sh
 fail() { printf 'fractal-env-shell-test: %s\n' "$*" >&2; exit 1; }
 run_hook() {
