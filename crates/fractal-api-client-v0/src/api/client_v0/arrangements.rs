@@ -1040,6 +1040,126 @@ mod tests {
         assert!(cursor.is_empty(), "the terminal page must finish without a restart");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "release-only sustained collection paging acceptance with real local transport"]
+    async fn collection_paging_sustained_unrelated_writes_release() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        use fractal_client::{CollectionEvent, Envelope, MembershipJoin, MembershipProgress, OrderedMembershipPage};
+        use std::time::{Duration, Instant};
+        assert!(!cfg!(debug_assertions), "run this acceptance with cargo test --release");
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-sustained");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let mut expected = Vec::with_capacity(4096);
+        for batch in 0..16 {
+            let mut declarations = String::from("version 2\n");
+            for index in batch * 256..(batch + 1) * 256 {
+                if index < 1001 {
+                    declarations.push_str(&format!("agent \"ada/scale-{index:04}\" {{ workspace \"/tmp\"; command \"true\"; }}\n"));
+                    expected.push(format!("agent/ada/scale-{index:04}"));
+                } else {
+                    declarations.push_str(&format!("resource \"scale-{index:04}\" {{ kind \"filesystem.file\"; }}\n"));
+                    expected.push(format!("resource/scale-{index:04}"));
+                }
+            }
+            let intent = crate::graph::parse_internal_intent(&declarations, "membership-scale-fixture").unwrap();
+            state.store.apply_internal(&intent, &format!("scale-declare-{batch}")).unwrap();
+        }
+        for (batch, members) in expected.chunks(1024).enumerate() {
+            let operations = Value::Array(members.iter().map(|member| json!({
+                "op":"place","member":member,"bucket":null,"key":"a0"
+            })).collect());
+            edit_memberships(&state, &session, &membership_request(&state, &format!("scale-place-{batch}"), operations)).await.unwrap();
+        }
+        expected.sort();
+        let route_state = state.clone();
+        let app = crate::api::router(state.clone()).route("/paging-scale-stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let state = route_state.clone();
+            async move { upgrade.on_upgrade(move |socket| {
+                let windows = collection_windows::Windows::attach(&state.store);
+                collection_stream_socket_with_reader(socket, state,
+                    ClientSession::local(Some("person/ada")).unwrap(), None,
+                    move |state, session, request, permit| {
+                        let windows = windows.clone();
+                        async move { collection_items_with_windows(&state, &session, &request, permit, windows).await }
+                    })
+            }) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/paging-scale-stream")).await.unwrap();
+        socket.send(Message::Text(json!({"kind":"subscribe","id":"scale","collection":"ordered-memberships",
+            "person":"person/ada","subject":SUBJECT,"limit":200,"paging_contract":"collection-v1"
+        }).to_string().into())).await.unwrap();
+        let metadata = membership_frame(&mut socket).await;
+        assert_eq!(metadata["membership"]["live_count"], 4096);
+        let mut join = MembershipJoin::after_subscription("scale", "person/ada", SUBJECT);
+        join.stream(&CollectionEvent::from_frame(metadata.clone()).unwrap()).unwrap();
+        let (committed, mut commits) = watch::channel(0_u64);
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut offered = tokio::time::interval(Duration::from_millis(10));
+            for sequence in 1..=1000 {
+                offered.tick().await;
+                let state = writer_state.clone();
+                tokio::task::spawn_blocking(move || {
+                    declare_resource_member(&state, &format!("resource/unrelated-{sequence}"));
+                    state.event_notify.send_replace(state.store.index().unwrap());
+                }).await.unwrap();
+                committed.send_replace(sequence);
+            }
+            started.elapsed()
+        });
+        let http = reqwest::Client::new();
+        let path = format!("http://{address}/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships");
+        let mut timings = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let attempt = join.begin();
+            let mut cursor = None::<String>;
+            loop {
+                // A committed unrelated claim, not a timer or scheduler guess, separates pages.
+                let previous = *commits.borrow_and_update();
+                while *commits.borrow_and_update() <= previous {
+                    commits.changed().await.expect("INVALID: writer ended before terminal page");
+                }
+                assert!(!writer.is_finished(), "INVALID: writer must remain active through the terminal page");
+                let mut request = http.get(&path).header(LOCAL_PERSON_HEADER, "person/ada")
+                    .query(&[("person","person/ada"),("limit","200"),("paging_contract","collection-v1")]);
+                if let Some(cursor) = &cursor { request = request.query(&[("cursor", cursor)]); }
+                let response = request.send().await.unwrap();
+                assert_eq!(response.status().as_u16(), 200, "no cursor restarts are permitted");
+                let response: Envelope<OrderedMembershipPage> = response.json().await.unwrap();
+                assert_eq!(serde_json::to_value(response.value.membership.as_ref().unwrap()).unwrap(), metadata["membership"]);
+                cursor = response.value.page.next_cursor.clone();
+                let progress = join.page(attempt, response).unwrap();
+                if cursor.is_none() {
+                    assert_eq!(progress, MembershipProgress::Complete);
+                    assert!(!writer.is_finished(), "INVALID: writer stopped before publication");
+                    break;
+                }
+                assert_eq!(progress, MembershipProgress::Pending);
+            }
+            timings.push(started.elapsed());
+            assert_eq!(join.complete().unwrap().iter().map(|row| row.member.clone()).collect::<Vec<_>>(), expected);
+        }
+        let duration = writer.await.unwrap();
+        let rate = 1000.0 / duration.as_secs_f64();
+        timings.sort();
+        let p95 = timings[18];
+        eprintln!("collection-v1 acceptance: release {}-{}, workers=4, agents=1001 memberships=4096 limit=200 loads=20; commits=1000 duration={duration:?} rate={rate:.3}/s p95={p95:?}",
+            std::env::consts::OS, std::env::consts::ARCH);
+        assert!(rate >= 100.0, "INVALID: achieved committed write rate was below 100/s");
+        assert!(duration >= Duration::from_millis(9990), "INVALID: writer did not cover the offered ten-second interval");
+        assert!(p95 <= Duration::from_secs(1), "initial load p95 exceeds the local transport budget");
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn collection_http_errors_distinguish_invalid_changed_reset_and_inconsistent() {
         let root = tempfile::tempdir().unwrap();

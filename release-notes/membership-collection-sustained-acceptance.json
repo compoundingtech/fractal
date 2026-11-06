@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add release-build sustained-write acceptance for collection membership paging",
+  "replay": {"status": "none", "detail": "No replay is required."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No authorization changes."},
+  "compatibility": {"status": "none", "detail": "An explicit ignored acceptance test uses 1001 agents, 4096 live memberships, limit 200 and twenty local-transport loads while offering 100 unrelated commits per second for ten seconds. Production Rust decoding and joining publish without new unchanged-window frames."},
+  "downtime": {"status": "none", "detail": "No rollout changes."},
+  "manual": {"status": "none", "detail": "Run cargo test --release -p fractal-api-client-v0 collection_paging_sustained_unrelated_writes_release -- --ignored --nocapture on the chosen release runner. The test records its committed write rate and initial-load p95."},
+  "recovery": {"status": "none", "detail": "A commit barrier separates every pair of page requests. A slow or prematurely stopped writer invalidates the run; the test does not claim sustained-rate acceptance unless its rate and latency gates both pass. No capability is advertised here."}
+}
