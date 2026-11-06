@@ -11473,7 +11473,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Cleanup may have selected a stop while a seat still owns ready work in another run.
-    /// Keep that existing queue alive until ordinary seat retention lets the runtime end.
+    /// Keep that existing queue alive until ordinary seat retention lets the runtime end. Work in
+    /// a run recorded after the stop is not the seat's to finish, so its binding is missing.
     fn ready_step_binding_missing(&self, run: &MissionRunView, step: &StepRunView) -> Result<bool> {
         for name in step.assigned_to.iter().chain(step.available_to.iter()) {
             let kind = self.store.selected_desired_kind(name)?;
@@ -11481,11 +11482,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(false);
             }
             if kind.as_deref() == Some("stop")
-                && let Some(owner) = self.store.selected_stop_owner_run(name)?
+                && let Some((Some(owner), cut)) = self.store.seat_stop_cut(name)?
                 && owner != run.subject
                 && self
                     .store
-                    .seat_work_in_other_runs(name, &owner)?
+                    .seat_work_in_other_runs(name, &owner, Some(cut))?
                     .contains(&step.subject)
             {
                 return Ok(false);
@@ -15373,8 +15374,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
-    /// run other than the one that is ending. The stop declaration stays, so the seat stops once
-    /// both are gone. The answer is read again only when something it read changed: a seat with
+    /// run other than the one that is ending, that this host recorded before the stop. Later mail
+    /// and work never extend the hold, so a seat that keeps being sent mail still drains. The stop
+    /// declaration stays, so the seat stops once both are gone. The answer is read again only when something it read changed: a seat with
     /// thousands of messages costs a view of each one, so a held seat's 60 s recheck only wakes the
     /// pass that notices a change.
     fn seat_retention(&self, seat: &str, owner_run: &str) -> Result<Option<String>> {
@@ -15417,12 +15419,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         #[cfg(test)]
         SEAT_RETENTION_READS.with(|count| count.set(count.get() + 1));
         let (reason, reads) = smallclaims::touched::record(|| -> Result<Option<String>> {
+            // Only what the seat held when its stop was declared here can keep it running.
+            let cut = self.store.seat_stop_cut(seat)?.map(|(_, index)| index);
             let unread = self
                 .store
                 .messages(Some(seat), false)?
                 .into_iter()
                 .any(|message| {
-                    matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+                    cut.is_none_or(|cut| message.created_index < cut)
+                        && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
                         // Held mail waits for the seat's next turn, not for this seat.
                         && !crate::silent::waits_for_turn(&message)
                         && !message.tags.iter().any(|tag| {
@@ -15434,7 +15439,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some("the seat holds a message nobody has read".to_owned())
             } else if !self
                 .store
-                .seat_work_in_other_runs(seat, owner_run)?
+                .seat_work_in_other_runs(seat, owner_run, cut)?
                 .is_empty()
             {
                 Some("the seat holds work for another run".to_owned())
@@ -37777,7 +37782,7 @@ version 2
 
         // The other run's work ends, and the stop goes ahead.
         let elsewhere = store
-            .seat_work_in_other_runs(&format!("agent/{run_id}/worker"), &run_id)
+            .seat_work_in_other_runs(&format!("agent/{run_id}/worker"), &run_id, None)
             .unwrap();
         assert_eq!(elsewhere.len(), 1);
         store
@@ -37786,6 +37791,244 @@ version 2
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
         assert!(store.fault_items(None).unwrap().is_empty());
+    }
+
+    /// #4500: only what a seat held when its stop was declared keeps it running. Mail that keeps
+    /// arriving, and work in a run started after the stop, neither extend the hold nor can be
+    /// claimed, so the seat stops once its earlier mail and work are done. The later mail stays in
+    /// its mailbox, unread, for the seat's next incarnation.
+    #[test]
+    fn a_seat_that_keeps_getting_mail_after_its_stop_stops_once_its_earlier_holdings_drain() {
+        use crate::AdhocWorkStore;
+        let send = |store: &Store, seat: &str, name: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("message/{name}"),
+                    kind: "message.sent".into(),
+                    actor: Some("agent/sender".into()),
+                    fields: BTreeMap::from([
+                        ("from".into(), Value::String("agent/sender".into())),
+                        ("to".into(), Value::String(seat.into())),
+                        ("content".into(), Value::String(format!("{name}: one more unit"))),
+                        ("status".into(), Value::String("sent".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("send-{name}")),
+                })
+                .unwrap();
+        };
+        let start_run = |store: &Store, seat: &str, mission: &str| {
+            apply_source(
+                store,
+                &format!(
+                    r#"
+version 2
+
+  mission "{mission}" state="ready" {{
+    goal "Give the seat work in another run."
+    step "unit" {{ assigned-to "{seat}"; title "Work in another run" }}
+  }}
+
+"#
+                ),
+                &format!("publish-{mission}"),
+            );
+            let run = store
+                .create_mission_run(&MissionRunRequest {
+                    mission: mission.into(),
+                    revision: None,
+                    workspace: "/tmp".into(),
+                    requester: Some("person/test".into()),
+                    mode: None,
+                    inputs: BTreeMap::new(),
+                    idempotency_key: format!("run-{mission}"),
+                })
+                .unwrap();
+            store.mission_run(&run.id).unwrap().unwrap().steps[0].subject.clone()
+        };
+        let earlier_unit = std::cell::RefCell::new(String::new());
+        let (store, runtime, reconciler, run_id, runtime_id) =
+            finished_run_with_a_live_seat(|store, seat| {
+                send(store, seat, "early");
+                *earlier_unit.borrow_mut() = start_run(store, seat, "earlier");
+            });
+        let seat = format!("agent/{run_id}/worker");
+        let gate = store
+            .mission_run(&run_id)
+            .unwrap()
+            .unwrap()
+            .steps
+            .into_iter()
+            .find(|step| step.step == "gate")
+            .unwrap();
+        store.set_step_state(&gate.subject, "completed", None).unwrap();
+        for _ in 0..10 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert!(store.desired_subjects().unwrap().iter().any(|desired| {
+            desired.subject == seat && desired.kind == "stop"
+        }));
+        assert!(runtime.stops.lock().unwrap().is_empty(), "the seat holds its earlier mail");
+
+        // After the stop: more mail, and a run that assigns the seat new work.
+        let later_unit = start_run(&store, &seat, "later");
+        for round in 0..3 {
+            send(&store, &seat, &format!("late-{round}"));
+            reconciler.reconcile_once().unwrap();
+        }
+        let cut = store.seat_stop_cut(&seat).unwrap().map(|(_, index)| index);
+        assert!(cut.is_some());
+        assert_eq!(
+            store.seat_work_in_other_runs(&seat, &run_id, cut).unwrap(),
+            vec![earlier_unit.borrow().clone()],
+            "only the run that existed at the stop holds the seat"
+        );
+        let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
+            actor: Some(seat.clone()),
+            incarnation: Some("retained-incarnation".into()),
+            summary: None,
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: key.into(),
+        };
+        let refused = store
+            .work_action(&later_unit, "claim", &request("claim-later"))
+            .unwrap_err();
+        assert_eq!(refused.code, "seat-stopping", "{refused:?}");
+        let refused = store
+            .start_work(&crate::model::WorkStartRequest {
+                actor: seat.clone(),
+                title: "One more unit".into(),
+                idempotency_key: "start-after-stop".into(),
+            })
+            .unwrap_err();
+        assert_eq!(refused.code, "seat-stopping", "{refused:?}");
+
+        // The earlier holdings drain: the earlier mail is read and the earlier work is finished.
+        for (kind, status) in [
+            ("message.staged", "staged"),
+            ("message.delivered", "delivered"),
+            ("message.read", "read"),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "message/early".into(),
+                    kind: kind.into(),
+                    actor: Some(seat.clone()),
+                    fields: BTreeMap::from([("status".into(), Value::String(status.into()))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("early-{status}")),
+                })
+                .unwrap();
+        }
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty(), "the seat holds its earlier work");
+        store
+            .work_action(&earlier_unit.borrow(), "claim", &request("claim-earlier"))
+            .unwrap();
+        store
+            .set_step_state(&earlier_unit.borrow(), "completed", None)
+            .unwrap();
+        send(&store, &seat, "late-final");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
+
+        // The later mail is still there, unread, for whichever incarnation comes next.
+        let kept = store
+            .messages(Some(&seat), false)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.status == "sent")
+            .map(|message| message.subject)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            kept,
+            ["late-0", "late-1", "late-2", "late-final"]
+                .map(|name| format!("message/{name}"))
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// A stop that a person declares has no run to finish work for: the seat can claim nothing,
+    /// but work it had already claimed can still report and complete.
+    #[test]
+    fn a_seat_a_person_stopped_claims_no_work_but_finishes_what_it_holds() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+
+  agent "example/worker" { workspace "/tmp"; command "true"; restart "never" }
+  mission "pair" state="ready" {
+    goal "Two units for one seat."
+    step "first" { assigned-to "agent/example/worker"; title "Claimed before the stop" }
+    step "second" { assigned-to "agent/example/worker"; title "Not yet claimed" }
+  }
+
+"#,
+            "publish-pair",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "pair".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-pair".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let member = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|desired| desired.subject == "agent/example/worker")
+            .and_then(|desired| desired.member)
+            .unwrap();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: member.runtime_id,
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("pair-incarnation".into()),
+        });
+        reconciler.reconcile_once().unwrap();
+        let steps = store.mission_run(&run.id).unwrap().unwrap().steps;
+        let step = |name: &str| steps.iter().find(|step| step.step == name).unwrap().subject.clone();
+        let seat = "agent/example/worker";
+        let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
+            actor: Some(seat.into()),
+            incarnation: Some("pair-incarnation".into()),
+            summary: Some("done".into()),
+            reason: None,
+            evidence: vec!["doc/example/result".into()],
+            idempotency_key: key.into(),
+        };
+        store.work_action(&step("first"), "claim", &request("claim-first")).unwrap();
+        apply_source(&store, "version 2\nstop \"agent/example/worker\"\n", "stop-worker");
+        assert_eq!(store.seat_stop_cut(seat).unwrap().map(|(owner, _)| owner), Some(None));
+
+        let refused = store
+            .work_action(&step("second"), "claim", &request("claim-second"))
+            .unwrap_err();
+        assert_eq!(refused.code, "seat-stopping", "{refused:?}");
+        store.work_action(&step("first"), "progress", &request("progress-first")).unwrap();
+        store.work_action(&step("first"), "complete", &request("complete-first")).unwrap();
     }
 
     /// A run whose final step stops a seat that holds an unread message, with the seat live.
