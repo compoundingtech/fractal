@@ -33,7 +33,8 @@ export type AlertAction =
   | { readonly type: 'launch.revise'; readonly feedback: string }
   | { readonly type: 'prompt.respond'; readonly target_id: string; readonly episode: string; readonly answer: string }
   | { readonly type: 'message.read' }
-  | { readonly type: 'attention.dismiss' | 'attention.restore' }
+  | { readonly type: 'attention.dismiss' }
+  | { readonly type: 'attention.restore' }
   | { readonly type: 'attention.snooze'; readonly until: string | null }
 
 export type AlertActionRequest = { readonly alert: AlertAnswered; readonly action: AlertAction; readonly key?: string }
@@ -103,7 +104,8 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
       if (retry !== undefined) return await retry()
       if (action.type === 'attention.dismiss' || action.type === 'attention.restore' || action.type === 'attention.snooze') {
         const control = alert.presentation_control
-        if (control === undefined || alert.attention_kind === undefined) return refused('This alert lacks native control metadata. Refresh before trying again.')
+        if (control === undefined || alert.attention_kind === undefined || alert.episode === undefined)
+          return refused('This alert lacks native control metadata. Refresh before trying again.')
         const observed = await client.capabilities()
         if (!observed.value.capabilities.some((capability) => capability.id === action.type && capability.state === 'granted')) {
           return refused('This device is not granted this native alert control.')
