@@ -1677,14 +1677,14 @@ pub fn refresh_operation_report(
 ) {
     let report = if let Some(sender) = startup_audit {
         // The store keeps this audit's result, which the report's operation check reads.
-        let drift = state.store.operation_projection_drift();
-        let report = doctor_report(state);
+        let drift = crate::profile::task("operations.audit", || state.store.operation_projection_drift());
+        let report = crate::profile::task("operations.doctor_report", || doctor_report(state));
         // The repair owns these findings, including any scan error. It re-derives just the
         // drifted rows from current claims, never reuses expected values from this snapshot.
         let _ = sender.send(drift);
         report
     } else {
-        doctor_report(state)
+        crate::profile::task("operations.doctor_report", || doctor_report(state))
     };
     let checks = report.ok().map(|report| Arc::new(report.0.checks));
     let mut reports = operation_reports();
