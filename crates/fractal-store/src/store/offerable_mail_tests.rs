@@ -36,7 +36,7 @@ fn advance(store: &Store, subject: &str, statuses: &[&str]) {
     }
 }
 
-/// A mailbox of `READ_MAIL` read messages, one closed, and three the stream can offer.
+/// A mailbox of `READ_MAIL` read messages, one closed, and four the stream can offer.
 fn mailbox() -> Store {
     let store = Store::open_memory("node").unwrap();
     for index in 0..READ_MAIL {
@@ -51,9 +51,15 @@ fn mailbox() -> Store {
     }
     send(&store, "message/delivered");
     advance(&store, "message/delivered", &["delivered"]);
-    // A local mark ranks above the claims' status.
+    // A local mark ranks above the claims' status, and a claim above a lower mark.
     send(&store, "message/marked");
     message_marks::record(&store, "message/marked", "message.read", READER).unwrap();
+    send(&store, "message/claimed-read");
+    advance(&store, "message/claimed-read", &["delivered", "read"]);
+    message_marks::record(&store, "message/claimed-read", "message.delivered", READER).unwrap();
+    // Staging is a local record of its own, and offerable.
+    send(&store, "message/staged");
+    message_marks::record(&store, "message/staged", message_marks::STAGED, READER).unwrap();
     store
 }
 
@@ -79,7 +85,7 @@ fn a_first_delivery_read_builds_views_only_for_offerable_mail() {
         .collect::<Vec<_>>();
     assert_eq!(serde_json::to_value(&offerable).unwrap(), serde_json::to_value(&expected).unwrap());
     let subjects = offerable.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>();
-    assert_eq!(subjects, ["message/new-1", "message/new-2", "message/delivered"]);
+    assert_eq!(subjects, ["message/new-1", "message/new-2", "message/delivered", "message/staged"]);
 
     // A read message costs at most its newest claim, recorded as a claim or as a local mark,
     // against every claim of it, its send included, in the full listing.
