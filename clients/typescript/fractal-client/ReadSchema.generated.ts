@@ -727,7 +727,9 @@ export const AgentRelatedRuns = /*#__PURE__*/ (() => Schema.Struct({
   "as_of": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "kind": Schema.Literal("agent-related-runs"),
   "missions_cut": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "rows": Schema.Array(AgentRelatedRun),
+  "rows": Schema.Array(AgentRelatedRun).check(Schema.isMaxLength(100)),
+  "total_rows": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "truncated": Schema.Boolean,
   "work_cut": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "AgentRelatedRuns" }))()
 export type AgentRelatedRuns = typeof AgentRelatedRuns.Type

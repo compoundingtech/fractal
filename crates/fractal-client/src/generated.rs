@@ -2049,6 +2049,8 @@ pub struct AgentRelatedRuns {
     pub as_of: u64,
     pub work_cut: u64,
     pub missions_cut: u64,
+    pub total_rows: u64,
+    pub truncated: bool,
     pub rows: Vec<AgentRelatedRun>,
 }
 

@@ -356,6 +356,8 @@ export type AgentRelatedRuns = {
   kind: "agent-related-runs";
   missions_cut: number;
   rows: Array<AgentRelatedRun>;
+  total_rows: number;
+  truncated: boolean;
   work_cut: number;
 };
 
