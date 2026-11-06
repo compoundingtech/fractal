@@ -6350,7 +6350,7 @@ mod declared_admission_tests {
             "declared-lane \"other\"",
             "declared-budgets { cpu-seconds 0; }",
             "declared-budgets { disk-max \"16777216T\"; }",
-            "declared-budgets { memory-max \"8g\"; }",
+            "declared-budgets { memory-max \"8GB\"; }",
         ] {
             for source in [
                 format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields}; }}"),
