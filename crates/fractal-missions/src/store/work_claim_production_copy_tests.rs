@@ -1,10 +1,9 @@
 //! How long claiming and completing one step holds the writer on a production-size store copy
 //! (#5010). Ignored: set `ST3_WORK_CLAIM_PRODUCTION_COPY` to a disposable, checkpointed copy of
 //! a store. The test writes to it. For each of the agents the copy holds the most mail for, and
-//! the agent that has moved its queue most (#5215), it
-//! starts one spontaneous step, claims it and completes it, twice, and prints one JSON receipt
-//! with each action's longest writer hold, the SQLite work its writer job did, and how long the
-//! step's wake took to read on a reader.
+//! the agent that has moved its queue most (#5215), it starts one spontaneous step, claims it
+//! and completes it, twice, and prints one JSON receipt with each action's longest writer hold,
+//! the SQLite work its writer job did, and how long the step's wake took to read on a reader.
 
 use super::*;
 use crate::model::WorkStartRequest;
