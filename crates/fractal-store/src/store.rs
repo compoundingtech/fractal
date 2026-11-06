@@ -211,6 +211,9 @@ pub mod roster_admission;
 pub mod adhoc_work;
 pub mod attention_resolution;
 pub mod attention_history;
+pub mod attention_work_resolution;
+pub mod attention_launch_resolution;
+pub mod attention_prompt_resolution;
 pub mod attention_snapshot;
 pub mod fault_cache;
 pub use attention_snapshot::{
