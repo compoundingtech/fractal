@@ -100,6 +100,18 @@ test('older daemon 404 is unsupported, scoped to the current attempt and retains
   assert.equal(state.status, 'Unsupported'); assert.equal(state.stale, true); assert.equal(state.complete, base);
   assert.deepEqual(deliver(state, token, page()), []); assert.equal(state.status, 'Unsupported');
 });
+test('exact server reset and cursor-expiration pairs restart whole attempts, never continuations', () => {
+  for (const [status, code] of [[409, 'membership-frontier-reset'], [409, 'membership-collection-changed'], [410, 'page-cursor-expired']]) {
+    const { state } = ready(), base = state.complete, token = refresh(state);
+    deliver(state, token, page(['b'], 'cursor', frontier(2, 2)));
+    const event = sidebarMembershipFailure(token, { status, response: { code } });
+    assert.deepEqual(event, { type: 'Expired', token });
+    const [effect] = state.reduce(event); assert.equal(effect.type, 'SubscribeAndRead'); assert.ok(effect.token.attempt > token.attempt);
+    assert.equal(state.complete, base); assert.deepEqual(deliver(state, token, page()), []);
+    deliver(state, effect.token, page(['c'], undefined, frontier(3, 1))); assert.deepEqual(state.complete.members.map(row => row.member), ['c']);
+  }
+  for (const [status, code] of [[410, 'membership-frontier-reset'], [410, 'membership-collection-changed'], [409, 'page-cursor-expired'], [410, 'other']]) assert.equal(sidebarMembershipFailure(refresh(new SidebarMemberships()), { status, response: { code } }).type, 'Refused');
+});
 test('first reads await subscription; continuations do not resubscribe', async () => {
   const state = new SidebarMemberships(), token = refresh(state), calls = [];
   let joined;

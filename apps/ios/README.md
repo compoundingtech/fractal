@@ -446,6 +446,8 @@ automatic restarts to three attempts. Epochs must be supplied by a capable daemo
 missing epochs refuse rather than deriving a frontier from whole-host snapshots.
 An older daemon's HTTP 404 produces a distinct `Unsupported` state (needs a newer
 daemon), not a generic refusal; any last-complete base remains stale and retained.
+HTTP 409 `membership-frontier-reset`/`membership-collection-changed` and HTTP 410
+`page-cursor-expired` discard the whole staged attempt and restart at page one.
 Run `pnpm --dir apps/ios test sidebarMemberships.test.mjs` for its paging contract.
 
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
