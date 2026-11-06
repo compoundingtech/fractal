@@ -4544,12 +4544,27 @@ pub fn client_attention_resources_at(
     _history: bool,
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    Ok(client_attention_resources_fenced_at(store, person, at_unix_ms)?.0)
+    Ok(client_attention_resources_current_at(store, person, at_unix_ms)?.0)
 }
 
 /// Source semantics only: presentation, delivery receipts and control claims cannot wake a snooze.
 pub fn client_attention_control_source(item: &crate::model::AttentionItemView) -> anyhow::Result<String> {
-    smallclaims::hash::canonical_hash(item)
+    // Prompt answer capability and its explanatory text age with the clock, not source activity.
+    let detail = (item.kind != "harness-prompt").then_some(item.detail.as_str());
+    smallclaims::hash::canonical_hash(&(
+        (&item.episode, &item.priority, &item.kind, &item.review_mode, &item.subject, &item.person,
+         &item.requester_id, &item.launch_id, &item.variant_id, &item.message_id, &item.prompt_call, &item.conversation),
+        (&item.title, detail, &item.request, &item.mission, &item.mission_run, &item.step, &item.targets,
+         item.requested_at_unix_ms, &item.deadline_unix_ms, &item.default_answer, &item.actions),
+    ))
+}
+
+/// Preserve the current list's native prompt capabilities while exposing its control wake.
+pub fn client_attention_resources_current_at(
+    store: &Store, person: Option<&str>, at_unix_ms: u128,
+) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
+    let current = store.attention_snapshot(person, at_unix_ms)?;
+    client_attention_resources_from_snapshot(store, current, at_unix_ms, None)
 }
 
 pub fn client_attention_resources_fenced_at(
@@ -4557,9 +4572,16 @@ pub fn client_attention_resources_fenced_at(
     person: Option<&str>,
     at_unix_ms: u128,
 ) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
-    let (mut current, mut valid_until) = crate::performance::task("attention_collection/snapshot", || {
+    let (current, valid_until) = crate::performance::task("attention_collection/snapshot", || {
         store.attention_collection_snapshot(person, at_unix_ms)
     })?;
+    client_attention_resources_from_snapshot(store, current, at_unix_ms, valid_until)
+}
+
+fn client_attention_resources_from_snapshot(
+    store: &Store, mut current: Vec<crate::model::AttentionItemView>,
+    at_unix_ms: u128, mut valid_until: Option<u128>,
+) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
     let connection = store.readers.get();
     let mut failure = None;
     current.retain(|item| {

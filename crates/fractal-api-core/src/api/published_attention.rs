@@ -352,7 +352,7 @@ fn refresh_attention_list_reading(
             }
             (cause, _) => {
                 store.note_attention_list_fold(cause.as_deref().unwrap_or("first"));
-                let (mut rows, controls_due) = client_attention_resources_fenced_at(store, None, now)?;
+                let (mut rows, controls_due) = client_attention_resources_current_at(store, None, now)?;
                 present_attention(store, &mut rows, fleet.as_deref())?;
                 presented = present_prompts(&mut rows, pending);
                 let rows = match &previous {
@@ -687,6 +687,13 @@ mod tests {
         let mut changed = items[0].clone();
         changed.detail.push_str(" Updated");
         assert_ne!(client_attention_control_source(&changed).unwrap(), source);
+        changed.kind = "harness-prompt".into();
+        let prompt_source = client_attention_control_source(&changed).unwrap();
+        changed.detail.push_str(" Capability expired");
+        changed.answers = vec!["deny".into()];
+        assert_eq!(client_attention_control_source(&changed).unwrap(), prompt_source);
+        changed.episode.push_str("-new-activity");
+        assert_ne!(client_attention_control_source(&changed).unwrap(), prompt_source);
         let revision = source.as_str();
         let write = |change, key| {
             let controls = store.attention_controls("person/example", id, revision).unwrap();
