@@ -381,8 +381,10 @@ mod tests {
         assert_eq!(page["items"][0]["subject"], oldest.subject);
         assert_eq!(page["next_after"], hidden[0].store_index);
         assert_eq!(page["has_more"], true);
-        let (status, feed) = client_json(app.clone(), "/v1/client/events?after=event-cursor/node/0&limit=500").await;
-        assert_eq!(status, StatusCode::OK, "{feed}");
+        let feed = client_v0::events(
+            State(state), Extension(client_v0::ClientSession::for_tests_scoped("client/example", "person/example", &["read.projections"])),
+            Query(client_v0::EventsQuery { after: Some("event-cursor/node/0".into()), limit: Some(500), ..Default::default() }),
+        ).await.unwrap().0;
         assert_eq!(feed["items"].as_array().unwrap().len(), 2);
         assert!(!feed.to_string().contains("custom.attention"));
         assert!(!feed.to_string().contains("custom/attention"));
