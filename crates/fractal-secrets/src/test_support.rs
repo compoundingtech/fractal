@@ -295,6 +295,19 @@ pub fn git() -> Command {
     command
 }
 
+/// Publish one fixture barrier file whole. Existence is the reader's completion barrier, and
+/// `fs::write` creates the file empty before it writes it, so a test polling for the name could
+/// read "" (#5428). Write a temporary sibling and rename it into place instead.
+#[cfg(feature = "test-support")]
+pub fn publish_barrier(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("barrier {} has no parent", path.display()))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(contents)?;
+    file.persist(path)?;
+    Ok(())
+}
+
 /// Fixture-only barrier AFTER the actual owned provider has exited and its wrapper returned.
 /// The production binary never calls this function; a process environment cannot opt it in.
 #[cfg(feature = "test-support")]
@@ -302,7 +315,7 @@ pub fn hold_provider_completion(outcome: &anyhow::Result<()>) -> anyhow::Result<
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
         return Ok(());
     };
-    std::fs::write(root.join("provider-return.json"), serde_json::to_vec(&serde_json::json!({
+    publish_barrier(&root.join("provider-return.json"), &serde_json::to_vec(&serde_json::json!({
         "ok": outcome.is_ok(), "error": outcome.as_ref().err().map(|error| format!("{error:#}")),
     }))?)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

@@ -747,7 +747,7 @@ async fn drive_st2_native_loop(
             if completion_announced && crate::fixture()
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
             {
-                fs::write(PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
+                fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
             }
         }
         tokio::select! {
@@ -757,8 +757,8 @@ async fn drive_st2_native_loop(
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
-                    fs::write(PathBuf::from(root).join("fence-received"),
-                        if task.is_finished() { "finished" } else { "pending" })?;
+                    fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("fence-received"),
+                        if task.is_finished() { "finished" } else { "pending" }.as_bytes())?;
                 }
                 // The subscription can reopen after the provider has ended, and the daemon then
                 // fences it as terminal. With the provider's task returned there is nothing left
@@ -1223,7 +1223,7 @@ async fn fixture_terminal_completion_barrier(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let deferred = observations.drain_live(client, subject, driver, ready).await?;
-    fs::write(root.join("observation-drained"), if deferred { "deferred" } else { "published" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("observation-drained"), if deferred { "deferred" } else { "published" }.as_bytes())?;
     let after = fs::read_to_string(root.join("order"))? == "after";
     if after {
         while !task.is_finished() {
@@ -1233,7 +1233,7 @@ async fn fixture_terminal_completion_barrier(
     } else {
         anyhow::ensure!(!task.is_finished(), "fixture must retain pending provider JoinHandle");
     }
-    fs::write(root.join("join-phase"), if after { "finished" } else { "pending" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("join-phase"), if after { "finished" } else { "pending" }.as_bytes())?;
     while !root.join("poll-driver").exists() {
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "fixture driver release timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2466,8 +2466,8 @@ async fn drive_codex_native_loop(
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
-                    fs::write(PathBuf::from(root).join("fence-received"),
-                        if task.is_finished() { "finished" } else { "pending" })?;
+                    fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("fence-received"),
+                        if task.is_finished() { "finished" } else { "pending" }.as_bytes())?;
                 }
                 let mail_changed = matches!(&frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
@@ -2836,7 +2836,7 @@ async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "Codex fixture provider completion timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    fs::write(root.join("observation-drained"), b"deferred")?;
+    fractal_daemon::test_support::publish_barrier(&root.join("observation-drained"), b"deferred")?;
     let after = fs::read_to_string(root.join("order"))? == "after";
     if after {
         while !task.is_finished() {
@@ -2846,7 +2846,7 @@ async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()
     } else {
         anyhow::ensure!(!task.is_finished(), "Codex fixture must retain pending provider JoinHandle");
     }
-    fs::write(root.join("join-phase"), if after { "finished" } else { "pending" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("join-phase"), if after { "finished" } else { "pending" }.as_bytes())?;
     while !root.join("poll-driver").exists() {
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "Codex fixture driver release timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
