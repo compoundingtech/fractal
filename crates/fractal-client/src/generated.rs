@@ -572,6 +572,8 @@ pub struct Attention {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversation_ids: Vec<String>,
     pub requester_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
     pub launch_id: Option<String>,
     pub variant_id: Option<String>,
     pub message_id: Option<String>,
