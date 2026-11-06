@@ -58,9 +58,10 @@ and response envelopes, including empty pages, as disjoint variants.
 
 For collection-scoped paging, subscribe first with `subscribeOrderedMembershipsCollection`,
 then call `arrangementsMembershipsCollection`. Feed metadata frames to
-`MembershipPaging.observeStream` and every page to `acceptPage`; only `complete` publishes
-the complete rows. `restart` discards the attempt and starts a new first page, never retries
-its cursor. Older held-window metadata cannot roll back completed pages. Host, projection,
+`MembershipPaging.observeStream`; call `begin()` before the first request and pass its opaque
+token with every page to `acceptPage`. Late responses to invalidated tokens are ignored.
+Only `complete` publishes complete rows. `restart` starts a new attempt, never retries its
+cursor. Older held-window metadata cannot roll back completed pages. Host, projection,
 person, container and opaque epoch scope comparisons; TypeScript rejects integers outside
 the exact JSON-safe range instead of rounding a frontier. Existing methods remain legacy.
 

@@ -977,44 +977,54 @@ test('collection paging publishes complete pages without waiting for a matching 
     const page = (items, has_more) => ({ ...base.page, membership: state, items, page: { limit: 1, has_more, ...(has_more ? { next_cursor: 'membership-v1/opaque' } : {}) } });
     for (const streamIndex of [undefined, state.changed_index - 1, state.changed_index]) {
         const join = new MembershipPaging('person/ada', state.container);
+        const token = join.begin();
         if (streamIndex !== undefined) join.observeStream({ ...base.frame, membership: { ...state, changed_index: streamIndex } });
-        assert.equal(join.acceptPage(base.frame.snapshot, page([rows[0]], true)).kind, 'continue');
-        const complete = join.acceptPage(base.frame.snapshot, page([rows[1]], false));
+        assert.equal(join.acceptPage(base.frame.snapshot, page([rows[0]], true), token).kind, 'continue');
+        const complete = join.acceptPage(base.frame.snapshot, page([rows[1]], false), token);
         assert.equal(complete.kind, 'complete');
         assert.deepEqual(complete.items, rows);
+        assert.equal(join.acceptPage(base.frame.snapshot, page([rows[0]], true), token).kind, 'ignored');
         assert.equal(join.observeStream({ ...base.frame, membership: { ...state, changed_index: state.changed_index - 1 } }), 'ignored');
     }
     const join = new MembershipPaging('person/ada', state.container);
-    join.acceptPage(base.frame.snapshot, page([rows[0]], true));
+    const token = join.begin();
+    join.acceptPage(base.frame.snapshot, page([rows[0]], true), token);
     assert.equal(join.observeStream({ ...base.frame, snapshot: { ...base.frame.snapshot, store_index: 1843 }, membership: { ...state, changed_index: 1843 } }), 'restart');
-    assert.equal(join.acceptPage(base.frame.snapshot, page([rows[1]], false)).kind, 'restart');
+    assert.equal(join.acceptPage(base.frame.snapshot, page([rows[1]], false), token).kind, 'ignored');
+    assert.equal(join.acceptPage(base.frame.snapshot, page([rows[1]], false), join.begin()).kind, 'restart');
 });
 
 test('collection paging refuses duplicate/count/epoch/scope/inexact metadata', () => {
     const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
     const base = fixture.collection_v1;
     const make = () => new MembershipPaging('person/ada', base.page.membership.container);
-    assert.equal(make().acceptPage(base.frame.snapshot, base.page).kind, 'complete');
+    const append = (join, page) => join.acceptPage(base.frame.snapshot, page, join.begin());
+    assert.equal(append(make(), base.page).kind, 'complete');
     for (const membership of [
         { ...base.page.membership, epoch: undefined },
         { ...base.page.membership, live_count: 1 },
         { ...base.page.membership, changed_index: 9007199254740992 },
         { ...base.page.membership, changed_index: 1843 },
-    ]) assert.throws(() => make().acceptPage(base.frame.snapshot, { ...base.page, membership }), /membership-frontier-inconsistent/);
+    ]) assert.throws(() => append(make(), { ...base.page, membership }), /membership-frontier-inconsistent/);
     const duplicate = fixture.snapshot_frame.items[0];
-    assert.throws(() => make().acceptPage(base.frame.snapshot, { ...base.page, membership: { ...base.page.membership, live_count: 2 }, items: [duplicate, duplicate] }), /membership-frontier-inconsistent/);
+    assert.throws(() => append(make(), { ...base.page, membership: { ...base.page.membership, live_count: 2 }, items: [duplicate, duplicate] }), /membership-frontier-inconsistent/);
     for (const change of [
         frame => ({ ...frame, snapshot: { ...frame.snapshot, host_id: 'host/other' } }),
         frame => ({ ...frame, snapshot: { ...frame.snapshot, projection_version: 'projection/other' } }),
         frame => ({ ...frame, membership: { ...frame.membership, epoch: 'opaque-reset' } }),
     ]) {
         const join = make();
-        join.acceptPage(base.frame.snapshot, base.page);
+        append(join, base.page);
         assert.equal(join.observeStream(change(base.frame)), 'restart');
     }
     const mismatch = make();
     mismatch.observeStream({ ...base.frame, membership: { ...base.page.membership, live_count: 1 } });
-    assert.throws(() => mismatch.acceptPage(base.frame.snapshot, base.page), /membership-frontier-inconsistent/);
+    assert.throws(() => append(mismatch, base.page), /membership-frontier-inconsistent/);
+    for (const code of ['membership-collection-changed', 'membership-frontier-reset', 'invalid-membership-cursor', 'unsupported-membership-paging-contract', 'membership-frontier-inconsistent']) {
+        const join = make(), token = join.begin();
+        assert.equal(join.reject(code), ['membership-collection-changed', 'membership-frontier-reset'].includes(code) ? 'restart' : 'refused');
+        assert.equal(join.acceptPage(base.frame.snapshot, base.page, token).kind, 'ignored');
+    }
 });
 
 test('explicit membership methods send selectors without changing legacy requests', async () => {
