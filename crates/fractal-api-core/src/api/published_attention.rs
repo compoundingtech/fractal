@@ -352,7 +352,7 @@ fn refresh_attention_list_reading(
             }
             (cause, _) => {
                 store.note_attention_list_fold(cause.as_deref().unwrap_or("first"));
-                let mut rows = client_attention_resources_at(store, None, false, now)?;
+                let (mut rows, controls_due) = client_attention_resources_fenced_at(store, None, now)?;
                 present_attention(store, &mut rows, fleet.as_deref())?;
                 presented = present_prompts(&mut rows, pending);
                 let rows = match &previous {
@@ -369,6 +369,7 @@ fn refresh_attention_list_reading(
                     Some(start) if start < index => store.attention_future_since(start, index, now)?,
                     _ => None,
                 };
+                let due = [due, controls_due].into_iter().flatten().min();
                 (rows, now, due, due.and(start))
             }
         };
@@ -663,6 +664,56 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controls_filter_authoritative_rows_and_publish_the_snooze_wake() {
+        use crate::store::attention_controls::{AttentionControlChange as Change, AttentionControlRequest};
+        let store = Store::open_memory("node").unwrap();
+        let source = "version 2\nagent \"example/worker\" {\n workspace \"/tmp\"\n argv \"/usr/bin/true\"\n}".to_owned();
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let planned = store.mission(&intent, crate::model::IntentInput { kdl: source, source_name: None }).unwrap();
+        store.apply(&intent, &planned.subject_tokens, "declare").unwrap();
+        store.ask_person(&serde_json::from_value(json!({
+            "person":"person/example", "actor":"agent/example/worker", "title":"Choose",
+            "reason":"A person decides", "new_run":"example/choice", "idempotency_key":"ask",
+            "request":{"version":1,"type":"feedback","question":"Which?","why_person":"Only you can choose"}
+        })).unwrap()).unwrap();
+        let now = client_now_ms();
+        let original = client_attention_resources_at(&store, Some("person/example"), false, now).unwrap();
+        assert_eq!(original.len(), 1);
+        let id = original[0]["id"].as_str().unwrap();
+        let revision = original[0]["revision"].as_str().unwrap();
+        let write = |change, key| {
+            let controls = store.attention_controls("person/example", id, revision).unwrap();
+            store.write_attention_control(&AttentionControlRequest {
+                person:"person/example", attention_id:id, source_revision:revision,
+                expected_revision:controls.revision.as_deref(), change, now_unix_ms:now as i64, key,
+                validate_source:&|_| Ok(()),
+            }).unwrap();
+        };
+        store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        assert_eq!(store.published_attention_list().unwrap().rows.len(), 1);
+        let until = now + 60_000;
+        write(Change::Snooze(Some(until as i64)), "snooze");
+        refresh_attention_list(&store).unwrap();
+        let hidden = store.published_attention_list().unwrap();
+        assert!(hidden.rows.is_empty());
+        assert_eq!(hidden.due_at_unix_ms, Some(until));
+        assert!(client_attention_resources_fenced_at(&store, Some("person/example"), until - 1).unwrap().0.is_empty());
+        assert_eq!(client_attention_resources_fenced_at(&store, Some("person/example"), until).unwrap().0.len(), 1);
+        // A clear is an authoritative write, not a device-local reveal.
+        write(Change::Snooze(None), "clear");
+        refresh_attention_list(&store).unwrap();
+        assert_eq!(store.published_attention_list().unwrap().rows.len(), 1);
+        write(Change::Dismiss, "dismiss");
+        refresh_attention_list(&store).unwrap();
+        assert!(store.published_attention_list().unwrap().rows.is_empty());
+        assert_eq!(store.attention_snapshot(Some("person/example"), now).unwrap().len(), 1);
+        write(Change::Restore, "restore");
+        refresh_attention_list(&store).unwrap();
+        assert_eq!(store.published_attention_list().unwrap().rows.len(), 1);
+    }
 
     #[test]
     fn a_prompt_card_reads_its_seat_and_no_other_card_reads_one() {

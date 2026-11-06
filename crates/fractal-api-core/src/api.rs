@@ -4544,10 +4544,7 @@ pub fn client_attention_resources_at(
     _history: bool,
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    let current = crate::performance::task("attention_collection/snapshot", || {
-        store.attention_snapshot(person, at_unix_ms)
-    })?;
-    client_attention_resources_from_items(store, current)
+    Ok(client_attention_resources_fenced_at(store, person, at_unix_ms)?.0)
 }
 
 pub fn client_attention_resources_fenced_at(
@@ -4555,9 +4552,31 @@ pub fn client_attention_resources_fenced_at(
     person: Option<&str>,
     at_unix_ms: u128,
 ) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
-    let (current, valid_until) = crate::performance::task("attention_collection/snapshot", || {
+    let (mut current, mut valid_until) = crate::performance::task("attention_collection/snapshot", || {
         store.attention_collection_snapshot(person, at_unix_ms)
     })?;
+    let connection = store.readers.get();
+    let mut failure = None;
+    current.retain(|item| {
+        if failure.is_some() { return true; }
+        let read = || -> anyhow::Result<_> {
+            let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
+            crate::store::attention_controls::current(&connection, &item.person, &id, &item.episode)
+        };
+        match read() {
+            Ok(controls) => {
+                if !controls.dismissed
+                    && let Some(until) = controls.snoozed_until_unix_ms.map(|until| until as u128)
+                    && until > at_unix_ms
+                {
+                    valid_until = Some(valid_until.map_or(until, |due| due.min(until)));
+                }
+                !controls.dismissed && controls.snoozed_until_unix_ms.is_none_or(|until| until as u128 <= at_unix_ms)
+            }
+            Err(error) => { failure = Some(error); true }
+        }
+    });
+    if let Some(error) = failure { return Err(error); }
     Ok((client_attention_resources_from_items(store, current)?, valid_until))
 }
 
