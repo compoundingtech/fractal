@@ -26926,6 +26926,39 @@ agent "import/omp/fixture" {{
             .expect("a target mutation must still wake reconciliation");
     }
 
+    #[test]
+    fn launch_input_measurement_failure_is_unknown_and_subscription_faults_target_daemon() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let desired = crate::graph::parse_test_intent(&format!("version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}", root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let mut member = desired.member.clone().unwrap();
+        member.environment.insert("PATH".into(), root.path().display().to_string());
+        let member = Arc::new(Mutex::new(member));
+        let prepared = member.clone();
+        crate::contract::install(&store, Box::new(move |_| Ok(prepared.lock().unwrap().clone())));
+        assert!(crate::contract::declared(&store, &desired).is_err()); // Settle the environment, not the missing provider.
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("claude").display())));
+        let scope = format!("stage/launch-inputs/{}", desired.subject);
+        let denied = root.path().join("denied");
+        std::fs::create_dir(&denied).unwrap();
+        member.lock().unwrap().environment.insert("PATH".into(), denied.display().to_string());
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
+        reconciler.incremental.touch("kind:intent.desired");
+        for _ in 0..2 {
+            assert!(reconciler.isolate(&scope, "daemon/node", || reconciler.watch_launch_inputs(&desired)).is_none());
+            assert!(store.reconcile_fault("daemon/node", &scope).unwrap().is_some());
+            assert!(reconciler.incremental.needs(&format!("launch-inputs:{}", desired.subject), now_ms()));
+        }
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(reconciler.isolate(&scope, "daemon/node", || reconciler.watch_launch_inputs(&desired)).is_some());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", denied.join("claude").display())));
+        assert!(store.reconcile_fault("daemon/node", &scope).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn launch_input_watchers_recover_missing_and_retargeted_interpreters() {
         use std::os::unix::fs::PermissionsExt as _;
