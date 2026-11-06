@@ -691,21 +691,10 @@ pub async fn status(
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
-        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
-            store.status_harness_only(subject)
-        } else if query.history {
-            store.status_history(
-                subject.as_deref(),
-                query.owner_run.as_deref(),
-                query.at_index,
-            )
-        } else {
-            store.status_at(
-                subject.as_deref(),
-                query.owner_run.as_deref(),
-                query.at_index,
-            )
-        }?;
+        let mut response = store.status_for_generic_reads(
+            subject.as_deref(), query.owner_run.as_deref(), query.at_index,
+            query.history, query.harness_only,
+        )?;
         if !query.history && query.at_index.is_none() {
             response.seat_admission = Some(admission.snapshot(admission_now()));
         }

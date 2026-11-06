@@ -1179,6 +1179,29 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
 }
 
 #[test]
+fn notice_terminal_resources_exclude_contaminated_ordinary_owners_before_reduction() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/notice-terminal";
+    observe_runtime(&store, subject, "running", "one");
+    let clean_cut = store.index().unwrap();
+    let hidden = store.connection.batched(|tx| append_claim_tx(
+        tx, store.origin(), subject, "custom.attention.notice-created", None,
+        &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret"}}),
+        &[], None,
+    )).unwrap().unwrap();
+    store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+    let cut = store.index().unwrap();
+    SUBJECT_REDUCTIONS.with(|count| count.set(0));
+    for owner in [None, Some(subject)] {
+        assert!(store.terminal_resource_status_at(owner, cut, true).unwrap().subjects.is_empty());
+    }
+    assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
+    assert_eq!(store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap().subjects.len(), 1);
+    assert!(store.claim_by_id(&hidden.id).unwrap().is_some());
+    assert_eq!(store.status_history(Some(subject), None, Some(cut)).unwrap().subjects.len(), 1);
+}
+
+#[test]
 fn runtime_status_reuses_subject_generations_across_actor_only_claims() {
     let store = Store::open_memory("node").unwrap();
     // Keep the selected set below the parallel reduction threshold so the existing

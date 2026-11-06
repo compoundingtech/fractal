@@ -3603,7 +3603,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3620,7 +3620,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -4160,6 +4160,9 @@ pub fn managed_session_owner_at(
     crate::performance::task("conversation/owner", || {
         let owners = store.conversation_owners_at(snapshot_index)?;
         for owner in owners.values() {
+            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
+                continue;
+            }
             let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
                 continue;
             };
@@ -4178,6 +4181,9 @@ pub fn managed_session_owner_for_subject_at(
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4318,7 +4324,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -5902,7 +5908,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
