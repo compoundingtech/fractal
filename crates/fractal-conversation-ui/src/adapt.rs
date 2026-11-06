@@ -1228,6 +1228,7 @@ fn ping_id(line: &str) -> Option<&str> {
 /// person, and that a message was dictated. The earlier sentence stays recognized for agents that
 /// still carry it in their history.
 const ST_DELIVERY_NOTES: &[&str] = &[
+    "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.",
     "Answer the person in this conversation; people have no inbox, so do not reply with st.",
     "The person reads replies in st, not in the agent's session.",
     "(dictated by voice; it may contain transcription mistakes)",

@@ -4485,8 +4485,9 @@ enum MessageCommand {
     /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `fractal work handoff` for work, and `--kind silent` (or `--fyi`) for
     /// anything else, which wakes nobody and reaches the recipient at its next turn. Status goes to
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
-    /// People have no inbox: a send or reply to a person fails. To reach a person, print in
-    /// the chat.
+    /// People have no inbox: a send or reply to a person fails. Print factual replies in
+    /// the chat; every new question or decision goes through a native `work ask`, even
+    /// while the person is present.
     ///
     /// Use single quotes for literal shell text, or a quoted heredoc for multiline bodies:
     ///
