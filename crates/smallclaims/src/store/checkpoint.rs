@@ -54,10 +54,10 @@ pub fn checkpoint_name(cut_unix_ms: u128) -> String {
 }
 
 /// The cut of the checkpoint named for a UTC day, given as `YYYY-MM-DD` or `checkpoint/YYYY-MM-DD`.
-pub fn checkpoint_cut(day: &str) -> Result<u128, St3Error> {
+pub fn checkpoint_cut(day: &str) -> Result<u128, FractalError> {
     let day = day.strip_prefix("checkpoint/").unwrap_or(day);
     let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map_err(|_| {
-        St3Error::new(
+        FractalError::new(
             "invalid-checkpoint",
             format!("`{day}` is not a UTC day such as 2026-09-27"),
         )
@@ -66,7 +66,7 @@ pub fn checkpoint_cut(day: &str) -> Result<u128, St3Error> {
         .and_hms_opt(0, 0, 0)
         .map(|time| time.and_utc().timestamp_millis())
         .and_then(|millis| u128::try_from(millis).ok())
-        .ok_or_else(|| St3Error::new("invalid-checkpoint", format!("`{day}` is out of range")))?;
+        .ok_or_else(|| FractalError::new("invalid-checkpoint", format!("`{day}` is out of range")))?;
     Ok(start)
 }
 

@@ -17,8 +17,8 @@ pub fn validate_run_reviewer(
     run: &str,
     requester: &str,
     reviewer: &str,
-) -> Result<BTreeSet<String>, St3Error> {
-    let unresolved = |subject: &str| St3Error::new("reviewer-owner-unresolved", subject);
+) -> Result<BTreeSet<String>, FractalError> {
+    let unresolved = |subject: &str| FractalError::new("reviewer-owner-unresolved", subject);
     let mut pending = BTreeSet::from([run.to_owned()]);
     let mut visited = BTreeSet::new();
     let mut excluded = BTreeSet::new();
@@ -100,11 +100,11 @@ fn validate_loop_history(
     step_path: &str,
     spec: &LoopSpec,
     children: &BTreeSet<String>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let subject = format!("loop-run/{generation}/{}", spec.path);
     // Inline nesting rewrites the owning step path, not the loop history path.
     let parent = format!("step-run/{generation}/{step_path}");
-    let unresolved = || St3Error::new("reviewer-owner-unresolved", &subject);
+    let unresolved = || FractalError::new("reviewer-owner-unresolved", &subject);
     let mut rounds = BTreeSet::new();
     let mut linked = BTreeMap::new();
     for child in children {
@@ -179,7 +179,7 @@ pub fn validate_run_reviewer_assignment(
     requester: &str,
     proposed_assignee: &str,
     reviewer: &str,
-) -> Result<BTreeSet<String>, St3Error> {
+) -> Result<BTreeSet<String>, FractalError> {
     let mut excluded = validate_run_reviewer(scope, connection, run, requester, reviewer)?;
     let header = mission_run_header_tx(connection, run.trim_start_matches("mission-run/"))
         .map_err(internal)?;
@@ -189,7 +189,7 @@ pub fn validate_run_reviewer_assignment(
             .steps
             .into_iter()
             .next()
-            .ok_or_else(|| St3Error::new("reviewer-owner-unresolved", run))?;
+            .ok_or_else(|| FractalError::new("reviewer-owner-unresolved", run))?;
     step.assigned_to = Some(proposed_assignee.to_owned());
     excluded.extend(validate_step_reviewer(
         scope, connection, &step, requester, reviewer,

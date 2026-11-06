@@ -181,7 +181,7 @@ pub async fn recipient(
             let runtime = state.store.latest_claim(&identity, Some("runtime.observed"))
                 .map_err(ApiError::internal)?;
             if declared.is_none() && runtime.is_none() {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "unknown-recipient",
                     format!(
                         "recipient `{requested}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
@@ -218,13 +218,13 @@ pub struct MessagesPageQuery {
 impl MessagesPageQuery {
     fn validate_filters(&self) -> Result<(), ApiError> {
         if (self.subject.is_some() || self.subject_prefix.is_some()) && self.from.is_none() {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "validation-failed",
                 "subject filters need a sender filter",
             )));
         }
         if self.subject.is_some() && self.subject_prefix.is_some() {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "validation-failed",
                 "subject and subject_prefix are mutually exclusive",
             )));
@@ -276,7 +276,7 @@ impl MessagesPageCursor {
         let after = match (self.after, self.stream_after) {
             (Some(after), None) => after,
             (None, Some(after)) if after >= base => after,
-            _ => return Err(ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))),
+            _ => return Err(ApiError::bad(FractalError::new("validation-failed", "invalid message cursor"))),
         };
         if after >= base && !stream {
             return Err(ApiError {
@@ -305,7 +305,7 @@ impl MessagesPageCursor {
             && self.include_closed == query.include_closed
             && self.limit == limit;
         if !matches {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "validation-failed",
                 "message cursor filters changed",
             )));
@@ -329,7 +329,7 @@ pub async fn list_messages_page(
     let acting_as = query.acting_as.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
     query.validate_filters()?;
     if acting_as.is_some() && to.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed", "acting_as needs one explicit mailbox",
         )));
     }
@@ -342,7 +342,7 @@ pub async fn list_messages_page(
                 .map(|successor| message_party_identity(&state.store, successor)).transpose()?.as_deref() == Some(actor)
         } else { to == actor };
         if !permitted {
-            return Err(ApiError::bad(St3Error::new("wrong-message-recipient", format!(
+            return Err(ApiError::bad(FractalError::new("wrong-message-recipient", format!(
                 "`{actor}` has no mail custody for `{to}`"
             ))));
         }
@@ -363,10 +363,10 @@ pub async fn list_messages_page(
             let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(encoded.strip_prefix("messages/").unwrap_or(""))
                 .map_err(|_| {
-                    ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))
+                    ApiError::bad(FractalError::new("validation-failed", "invalid message cursor"))
                 })?;
             let cursor: MessagesPageCursor = serde_json::from_slice(&bytes).map_err(|_| {
-                ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))
+                ApiError::bad(FractalError::new("validation-failed", "invalid message cursor"))
             })?;
             cursor.validate(&query, to.as_deref(), from.as_deref(), acting_as.as_deref(), limit)?;
             Ok(cursor)
@@ -543,7 +543,7 @@ pub async fn post_message_claim(
         "read" => "message.read",
         "closed" => "message.closed",
         other => {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-message-lifecycle",
                 format!("message lifecycle `{other}` is not registered"),
             )));
@@ -558,7 +558,7 @@ pub async fn post_message_claim(
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
         let actor = request.actor.ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-message-actor",
                 "message lifecycle transitions require the recipient actor",
             ))
@@ -582,7 +582,7 @@ pub async fn post_message_claim(
                 .as_ref()
                 .is_some_and(|proof| proof.person == message.to && actor.starts_with("agent/"))
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "wrong-message-recipient",
                 format!(
                     "message `{subject}` belongs to `{}`, not `{actor}`",
@@ -613,7 +613,7 @@ pub async fn post_message_claim(
         // A stream item's lifecycle is this member's record, not a graph claim.
         if message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
             if request.expected_subject.is_some() {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "expected-subject-unsupported",
                     format!("`{subject}` is a stream item: it has no graph claim to compare with"),
                 )));

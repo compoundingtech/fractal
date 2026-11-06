@@ -43,7 +43,7 @@ pub fn person_asks_for_reconcile(connection: &Connection) -> Result<Vec<ClaimRec
 }
 
 /// The ask's structured request in canonical form, or null for a free-text ask.
-fn canonical_request(input: &PersonAskRequest) -> Result<Value, St3Error> {
+fn canonical_request(input: &PersonAskRequest) -> Result<Value, FractalError> {
     input
         .request
         .as_ref()
@@ -75,10 +75,10 @@ fn deadline_and_default(
     structured: &Value,
     default_ms: Option<u64>,
     now: u128,
-) -> Result<Option<AskDeadline>, St3Error> {
+) -> Result<Option<AskDeadline>, FractalError> {
     let Some(default_ms) = default_ms else {
         if input.deadline_ms.is_some() || input.default_answer.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "ask-deadlines-off",
                 "this fleet has not turned on ask deadlines yet ([asks] deadlines), so an ask cannot name a deadline or a default answer",
             ));
@@ -89,14 +89,14 @@ fn deadline_and_default(
     if input.deadline_ms.is_some()
         && !(MIN_ASK_DEADLINE_MS..=MAX_ASK_DEADLINE_MS).contains(&deadline_ms)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-ask-deadline",
             "an ask's deadline must be between 1m and 30d",
         ));
     }
     if let Some(default) = &input.default_answer {
         if structured.is_null() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-default-answer",
                 "a free-text ask has no named answers; at its deadline it resolves as timed out",
             ));
@@ -144,7 +144,7 @@ fn resolve_answer(
     ask: Option<&ClaimRecord>,
     input: &PersonStepResponse,
     cancel: bool,
-) -> Result<(Option<Value>, String), St3Error> {
+) -> Result<(Option<Value>, String), FractalError> {
     let request = if cancel {
         None
     } else {
@@ -155,7 +155,7 @@ fn resolve_answer(
             return Ok((None, input.summary.clone()));
         };
         if cancel || answer.id.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-person-answer",
                 if cancel {
                     "a cancelled ask has no answer"
@@ -226,13 +226,13 @@ fn send_answer_tx(
     summary: &str,
     answer: Option<&Value>,
     authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     send_response_tx(tx, origin, ask, response, summary, answer, authorization, false)
 }
 
 /// Tells the asker of an ask whose deadline applied its default that the person had answered
 /// before the deadline on another member, so that answer stands instead. Sent once.
-fn send_overridden_default_tx(tx: &Transaction<'_>, origin: &str, ask: &ClaimRecord, response: &ClaimRecord) -> Result<(), St3Error> {
+fn send_overridden_default_tx(tx: &Transaction<'_>, origin: &str, ask: &ClaimRecord, response: &ClaimRecord) -> Result<(), FractalError> {
     let summary = response.body["fields"]["summary"].as_str().unwrap_or_default().to_owned();
     let answer = response.body["fields"].get("answer").filter(|answer| answer.is_object()).cloned();
     send_response_tx(tx, origin, ask, response, &summary, answer.as_ref(), None, true)
@@ -248,7 +248,7 @@ fn send_response_tx(
     answer: Option<&Value>,
     authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
     overrides_default: bool,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(requester) = ask.actor.as_deref() else {
         return Ok(());
     };
@@ -339,28 +339,28 @@ pub struct PersonAskPass {
 
 pub trait PersonWorkStore {
     /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
-    fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error>;
+    fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
     fn finish_person_step(
             &self,
             input: &PersonStepResponse,
             cancel: bool,
-        ) -> Result<StepRunView, St3Error>;
+        ) -> Result<StepRunView, FractalError>;
     fn finish_person_step_authorized(
             &self,
             input: &PersonStepResponse,
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
-        ) -> Result<StepRunView, St3Error>;
+        ) -> Result<StepRunView, FractalError>;
     /// A sender withdraws only its own informational update, through the same
     /// cancellation claim and transaction as an ask. It never releases the sender's work.
-    fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, St3Error>;
+    fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, FractalError>;
     fn finish_person_step_kind(
             &self,
             input: &PersonStepResponse,
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
             update_only: bool,
-        ) -> Result<StepRunView, St3Error>;
+        ) -> Result<StepRunView, FractalError>;
     /// The images an ask's request carries, found by the ask's person step, with who asked and
     /// whom it asks: what a blob read needs to authorize the person looking at them.
     fn ask_images(&self, step_subject: &str) -> Result<Option<AskImages>>;
@@ -376,7 +376,7 @@ pub trait PersonWorkStore {
     /// Brings a person information they asked for. Nothing waits on an update: it stays on the
     /// person's home until they open or read it, and it is refused unless `about` names the
     /// person's own run or step, or their message to the poster.
-    fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error>;
+    fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
     /// Nothing an ask waited on disappears silently: when its requester, originating step or
     /// owning run ends, the requester hears once that the ask is gone, and the person gets one
     /// update saying so.
@@ -392,13 +392,13 @@ pub trait PersonWorkStore {
             reason: &str,
             idempotency_key: &str,
             structured: &Value,
-        ) -> Result<StepRunView, St3Error>;
-    fn ask_person_in_new_run(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error>;
+        ) -> Result<StepRunView, FractalError>;
+    fn ask_person_in_new_run(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
 }
 
 impl PersonWorkStore for Store {
 
-    fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error> {
+    fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
         if !input.person.starts_with("person/")
             || input.person.matches('/').count() != 1
             || input.person == "person/"
@@ -407,7 +407,7 @@ impl PersonWorkStore for Store {
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-person-ask",
                 "a person ask needs a person, title, reason and idempotency key",
             ));
@@ -434,7 +434,7 @@ impl PersonWorkStore for Store {
             let structured = canonical_request(input)?;
             let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-step-run", "the asking step does not exist"))?;
+                .ok_or_else(|| FractalError::new("missing-step-run", "the asking step does not exist"))?;
             // A revision moves a step into the run's new generation, and its worker may still
             // name it by the predecessor subject, as the seat's environment does. Work actions
             // accept that name; so does an ask, and only the claimant may ask from either.
@@ -450,9 +450,9 @@ impl PersonWorkStore for Store {
                     || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
                     || !same_deadline(&existing.body, input) {
-                    return Err(St3Error::new("idempotency-conflict", "this ask key already names a different question"));
+                    return Err(FractalError::new("idempotency-conflict", "this ask key already names a different question"));
                 }
-                return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask is no longer retained"));
+                return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask is no longer retained"));
             }
             let legacy_origin = input.legacy_request.as_ref().map(|id| -> Result<bool> {
                 let legacy = tx.query_row("SELECT body FROM claims WHERE id=?1 AND kind='attention.requested' AND actor=?2", params![id, input.actor], |row| row.get::<_, String>(0)).optional()?;
@@ -476,7 +476,7 @@ impl PersonWorkStore for Store {
                 || origin.claimant.as_deref() != Some(input.actor.as_str())
                 || origin.claim_incarnation != input.incarnation
                 || origin.claim_expires_at_unix_ms.is_none_or(|expiry| expiry <= now_ms()))) {
-                return Err(St3Error::new("stale-work-ask", format!(
+                return Err(FractalError::new("stale-work-ask", format!(
                     "only the current claimant and incarnation of live work can ask a person; expected incarnation `{}`, given `{}`",
                     origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
             }
@@ -491,7 +491,7 @@ impl PersonWorkStore for Store {
             let pause = append_claim_tx(tx, &self.origin, &origin_subject, "step-run.state", Some("daemon/runtime"),
                 &json!({"fields": {"status": "waiting-person", "reason": subject, "attempt": origin.attempt}}), &[claim.id], None).map_err(claim_append_error)?;
             project_mission_run_update(tx, &pause)?;
-            step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask could not be projected"))
+            step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
         }).map_err(internal)?
     }
 
@@ -499,11 +499,11 @@ impl PersonWorkStore for Store {
             &self,
             input: &PersonStepResponse,
             cancel: bool,
-        ) -> Result<StepRunView, St3Error> {
+        ) -> Result<StepRunView, FractalError> {
         self.finish_person_step_authorized(input, cancel, None)
     }
 
-    fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, St3Error> {
+    fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, FractalError> {
         self.finish_person_step_kind(input, true, None, true)
     }
 
@@ -512,7 +512,7 @@ impl PersonWorkStore for Store {
             input: &PersonStepResponse,
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
-        ) -> Result<StepRunView, St3Error> {
+        ) -> Result<StepRunView, FractalError> {
         self.finish_person_step_kind(input, cancel, authorization, false)
     }
 
@@ -522,11 +522,11 @@ impl PersonWorkStore for Store {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
             update_only: bool,
-        ) -> Result<StepRunView, St3Error> {
+        ) -> Result<StepRunView, FractalError> {
         if let Some(authorization) = authorization
             && (authorization.scope != "write.assistant.answers" || authorization.owner != input.actor || cancel)
         {
-            return Err(St3Error::new("forbidden", "assistant authorization does not bind this person answer"));
+            return Err(FractalError::new("forbidden", "assistant authorization does not bind this person answer"));
         }
         #[cfg(feature = "test-support")]
         let _gate = match authorization {
@@ -546,18 +546,18 @@ impl PersonWorkStore for Store {
                 super::assistant_write::authorize_grant(tx, &self.origin, authorization)).transpose()?;
             let subject = normalize_step_run(&input.subject);
             let mut view = step(tx, &subject).map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-step-run", "the person step does not exist"))?;
+                .ok_or_else(|| FractalError::new("missing-step-run", "the person step does not exist"))?;
             let ask = request(tx, &subject).map_err(internal)?;
             if update_only && ask.as_ref().is_none_or(|ask| !is_update(ask)) {
-                return Err(St3Error::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
+                return Err(FractalError::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
             }
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
                     && ask.body["fields"]["person"] == authorization.owner
                     && view.assigned_to.as_deref() == Some(authorization.owner.as_str()))
-                    .ok_or_else(|| St3Error::new("forbidden", "assistant answers require an owner-assigned person ask"))?;
+                    .ok_or_else(|| FractalError::new("forbidden", "assistant answers require an owner-assigned person ask"))?;
                 if structured_request(ask)?.is_none() || input.answer.as_ref().and_then(|answer| answer.id.as_ref()).is_none() {
-                    return Err(St3Error::new("forbidden", "assistant answers require a supported named answer"));
+                    return Err(FractalError::new("forbidden", "assistant answers require a supported named answer"));
                 }
             }
             // Checked after authority and fences below; a replay compares against it first.
@@ -569,7 +569,7 @@ impl PersonWorkStore for Store {
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, kind], claim_from_row).optional().map_err(internal)? {
                 if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(response_actor) {
                     let Ok((answer, summary)) = &resolved else {
-                        return Err(St3Error::new("idempotency-conflict", "this response key already has another answer"));
+                        return Err(FractalError::new("idempotency-conflict", "this response key already has another answer"));
                     };
                     let mut response_evidence = input.evidence.clone();
                     if let Some(proof) = &input.delegation { super::delegation::add_evidence(tx, &mut response_evidence, proof)?; }
@@ -578,42 +578,42 @@ impl PersonWorkStore for Store {
                         || existing.body["fields"]["answer"] != answer.clone().unwrap_or_default()
                         || existing.body["fields"]["attempt"].as_u64() != Some(view.attempt as u64)
                         || input.episode.as_ref().is_some_and(|episode| existing.body["fields"]["episode"] != *episode) {
-                        return Err(St3Error::new("idempotency-conflict", "this response key already has another summary"));
+                        return Err(FractalError::new("idempotency-conflict", "this response key already has another summary"));
                     }
                     return Ok(view);
                 }
             }
             if cancel {
                 if ask.as_ref().and_then(|a| a.actor.as_deref()) != Some(input.actor.as_str()) {
-                    return Err(St3Error::new("forbidden", "only the requester can cancel its ask"));
+                    return Err(FractalError::new("forbidden", "only the requester can cancel its ask"));
                 }
             } else if let Some(proof) = &input.delegation {
                 if !input.actor.starts_with("agent/") || view.assigned_to.as_deref() != Some(&proof.person) || input.episode.as_deref() != Some(&proof.episode) {
-                    return Err(St3Error::new("delegation-refused", "delegation needs the assigned person and exact asking episode"));
+                    return Err(FractalError::new("delegation-refused", "delegation needs the assigned person and exact asking episode"));
                 }
             } else if !input.actor.starts_with("person/") || view.assigned_to.as_deref() != Some(input.actor.as_str()) {
-                return Err(St3Error::new("forbidden", "only the assigned person can complete this step"));
+                return Err(FractalError::new("forbidden", "only the assigned person can complete this step"));
             }
             apply_effective_step_state(tx, &mut view, now_ms()).map_err(internal)?;
             if view.status != "ready"
                 || ask.as_ref().is_some_and(|a| input.episode.as_ref().is_some_and(|e| e != &a.id))
                 || ask.as_ref().map(|a| current(tx, a, now_ms())).transpose().map_err(internal)?.is_some_and(|live| !live) {
-                return Err(St3Error::new("stale-fence", "this person step is no longer waiting in that episode"));
+                return Err(FractalError::new("stale-fence", "this person step is no longer waiting in that episode"));
             }
             if ask.is_none() && input.episode.as_ref().is_some_and(|episode| episode != &format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch)) {
-                return Err(St3Error::new("stale-fence", "this authored person step has moved to another episode"));
+                return Err(FractalError::new("stale-fence", "this authored person step has moved to another episode"));
             }
             if !cancel && super::adhoc_work::pending_handoff(tx, &view)? {
-                return Err(St3Error::new("handoff-not-acknowledged", "read and acknowledge the current handoff note before closing this step"));
+                return Err(FractalError::new("handoff-not-acknowledged", "read and acknowledge the current handoff note before closing this step"));
             }
             // Closing a handed-off step closes the spontaneous work and needs evidence; answering an
             // ask an agent made from that work closes only the ask, which is the person's answer.
             if !cancel && ask.is_none() && super::adhoc_work::is_adhoc(tx, &view.run).map_err(internal)? && input.evidence.is_empty() {
-                return Err(St3Error::new("work-needs-evidence", "close spontaneous work with --evidence"));
+                return Err(FractalError::new("work-needs-evidence", "close spontaneous work with --evidence"));
             }
             let (answer, summary) = resolved?;
             if summary.trim().is_empty() {
-                return Err(St3Error::new("invalid-person-response", "a response needs a summary"));
+                return Err(FractalError::new("invalid-person-response", "a response needs a summary"));
             }
             let evidence = ask.as_ref().map(|a| vec![a.id.clone()]).unwrap_or_default();
             let mut body = json!({"fields": {"attempt": view.attempt, "status": if cancel { "cancelled" } else { "completed" },
@@ -629,7 +629,7 @@ impl PersonWorkStore for Store {
                 body["fields"]["assistant_session_actor"] = json!(authorization.actor);
             }
             if let Some(proof) = &input.delegation {
-                if cancel { return Err(St3Error::new("delegation-refused", "cancelling another agent's ask is outside the delegation list")); }
+                if cancel { return Err(FractalError::new("delegation-refused", "cancelling another agent's ask is outside the delegation list")); }
                 body["fields"]["acted_for"] = json!(proof.person);
                 body["fields"]["delegation"] = json!(proof);
                 let mut response_evidence = input.evidence.clone();
@@ -642,7 +642,7 @@ impl PersonWorkStore for Store {
             // stored time decides, so it is checked here, and refusing rolls this write back.
             if !cancel && deadlines
                 && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline)) {
-                return Err(St3Error::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
+                return Err(FractalError::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
             }
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
@@ -658,7 +658,7 @@ impl PersonWorkStore for Store {
                     }
                 }
             }
-            step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the person step disappeared"))
+            step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the person step disappeared"))
         }).map_err(internal)?
     }
 
@@ -852,15 +852,15 @@ impl PersonWorkStore for Store {
         Ok(true)
     }
 
-    fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error> {
+    fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
         if input.step.is_some() || input.new_run.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "ambiguous-ask-owner",
                 "an update names the work it is about in its request, not with a step or new run",
             ));
         }
         if input.deadline_ms.is_some() || input.default_answer.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-ask-deadline",
                 "an update waits for nobody, so it has no deadline or default answer",
             ));
@@ -876,10 +876,10 @@ impl PersonWorkStore for Store {
                 &stable_input
             };
             if !declaration_live(tx, &input.actor).map_err(internal)? {
-                return Err(St3Error::new("missing-ask-owner", "the agent posting an update must have a live declaration"));
+                return Err(FractalError::new("missing-ask-owner", "the agent posting an update must have a live declaration"));
             }
             if !person_asked(tx, &input.person, &input.actor, &about).map_err(internal)? {
-                return Err(St3Error::new("update-not-asked", format!(
+                return Err(FractalError::new("update-not-asked", format!(
                     "{} did not ask for `{about}`: an update is about the person's own run or step, or their message to you",
                     input.person)));
             }
@@ -932,7 +932,7 @@ impl PersonWorkStore for Store {
             reason: &str,
             idempotency_key: &str,
             structured: &Value,
-        ) -> Result<StepRunView, St3Error> {
+        ) -> Result<StepRunView, FractalError> {
         let about = structured["about"].as_str().unwrap_or_default();
         {
             let identity = serde_json::to_string(&(actor, person, about, idempotency_key)).map_err(internal)?;
@@ -942,32 +942,32 @@ impl PersonWorkStore for Store {
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.body["fields"]["title"] != title || existing.body["fields"]["reason"] != reason
                     || existing.body["fields"]["request"] != *structured {
-                    return Err(St3Error::new("idempotency-conflict", "this update key already names another update"));
+                    return Err(FractalError::new("idempotency-conflict", "this update key already names another update"));
                 }
-                return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the update is no longer retained"));
+                return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the update is no longer retained"));
             }
             let mission_id = format!("person-update/{}", &hash[..32]);
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"update\" {{ assigned-to {:?}; goal {:?}; }} }}", title, person, reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
-            let mission = intent.missions.remove(&mission_id).ok_or_else(|| St3Error::new("internal", "the update mission could not be parsed"))?;
+            let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the update mission could not be parsed"))?;
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(actor),
                 &with_request(json!({"fields": {"run": format!("mission-run/person-update/{}", &hash[..32]),
                     "generation": format!("run-generation/{generation}"), "person": person, "title": title,
                     "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission}}), structured),
                 &[], None).map_err(claim_append_error)?;
             project(tx, &claim)?;
-            step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the update could not be projected"))
+            step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the update could not be projected"))
         }
     }
 
-    fn ask_person_in_new_run(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error> {
+    fn ask_person_in_new_run(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
         let name = input
             .new_run
             .as_deref()
             .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| St3Error::new("missing-ask-owner", "specify --step or --new-run"))?;
+            .ok_or_else(|| FractalError::new("missing-ask-owner", "specify --step or --new-run"))?;
         if input.step.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "ambiguous-ask-owner",
                 "choose either --step or --new-run",
             ));
@@ -983,11 +983,11 @@ impl PersonWorkStore for Store {
                 &stable_input
             };
             if !declaration_live(tx, &input.actor).map_err(internal)? {
-                return Err(St3Error::new("missing-ask-owner", "the requester must have a live declaration"));
+                return Err(FractalError::new("missing-ask-owner", "the requester must have a live declaration"));
             }
             let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner=?1 AND status IN ('claimed','working'))",
                 [&input.actor], |row| row.get(0)).map_err(internal)?;
-            if active { return Err(St3Error::new("ambiguous-ask-owner", "use --step while you hold claimed work")); }
+            if active { return Err(FractalError::new("ambiguous-ask-owner", "use --step while you hold claimed work")); }
             let desired = current_desired_row(tx, &input.actor).map_err(internal)?.unwrap();
             // A top-level seat's ask survives its re-declaration, so asking again with the same key
             // after a restart or harness change finds the same ask instead of raising another.
@@ -1000,14 +1000,14 @@ impl PersonWorkStore for Store {
                 if existing.body["fields"]["person"] != input.person || existing.body["fields"]["title"] != input.title || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
                     || !same_deadline(&existing.body, input) {
-                    return Err(St3Error::new("idempotency-conflict", "this ask key already names another question"));
+                    return Err(FractalError::new("idempotency-conflict", "this ask key already names another question"));
                 }
-                return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask is no longer retained"));
+                return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask is no longer retained"));
             }
             let mission_id = format!("person-ask/{}", &hash[..32]);
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}", input.title, input.person, input.reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
-            let mission = intent.missions.remove(&mission_id).ok_or_else(|| St3Error::new("internal", "the person mission could not be parsed"))?;
+            let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the person mission could not be parsed"))?;
             let run = format!("mission-run/person-ask/{}", &hash[..32]);
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
@@ -1017,7 +1017,7 @@ impl PersonWorkStore for Store {
                     "attempt": 1, "status": "ready", "mission_spec": mission, "owner_run": desired.owner_run,
                     "owner_generation": desired.owner_generation, "requester_declaration": desired.claim_id, "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
-            step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask could not be projected"))
+            step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
         }).map_err(internal)?
     }
 }
