@@ -83,6 +83,14 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Membership projection generation inventory (PR #5381)
+
+`fractal_store::store::ordered_membership` owns `lv-h3b5ec217e92b`.
+The upsert binds one fixed metadata key and one checked nonnegative `i64` generation;
+it replaces one local scalar, never replicated input or a growing result.
+The lexical inventory supports only transitional exceptions, not bounded-value exemptions.
+Keep this site registered while the producer owns the metadata representation and reclamation review.
+
 ### Carried-step review fixture inventory (PR #5343)
 
 The `fractal_store::references::step_review::tests` maintainer owns both
@@ -96,6 +104,10 @@ raw JSON, subject, kind and timestamp TEXT values and their index keys. Inline
 storage matches the existing identity fixture; its exact-wire TODO must preserve
 pending-replica semantics through any reference/chunk conversion.
 Neither exception creates a production writer or proves encoded byte/cost bounds.
+
+`fractal_missions::store::missions::run_review` owns reader `lv-hed575cdba946`; its `tests` module owns deletion fixture `lv-he933d1015ed6`.
+Existing inline run/step keys and creation-claim JSON detect missing projections. Reference/chunk and reclamation changes must preserve these fail-closed regressions.
+Neither exception adds a production writer or size/cost guarantee.
 
 ### Cold runtime reduction inventory (PR #1706)
 
@@ -430,3 +442,22 @@ removed: the page-cost test uses the empty replay-order table already created by
 normal file-backed initialization. The production table and its existing inline
 claim-ID representation are unchanged; their producer's representation work stays
 with `fractal_store::store`.
+
+## Dormant loop review history
+
+For [agent-review preparation #4850](https://github.com/compoundingtech/fractal/issues/4850),
+`fractal_missions::store::missions::run_review` owns `lv-hde8dcd507000`.
+The read-only sink binds a loop subject TEXT key and reads existing claim-kind/body
+TEXT values. It adds no writer; inline history remains necessary to validate all
+round references. Its maintainer must trace these keys and bodies into the eventual
+bounded/reference representation; this exception proves neither size nor cost.
+
+## Historical collection review fixture
+
+For [agent-review preparation #4850](https://github.com/compoundingtech/fractal/issues/4850),
+`fractal_reconcile::reconcile::tests::agent_review_loop_branches` owns
+`lv-h71aa3a6171e0`. This in-memory fixture restores legacy mission JSON because
+current publication rejects for-each syntax. The UPDATE binds body, mission-ID
+and revision TEXT values; no production writer changes. The maintainer must
+preserve this historical regression through referenced storage/reclamation work.
+Inline storage here proves neither encoded size nor execution-cost bounds.

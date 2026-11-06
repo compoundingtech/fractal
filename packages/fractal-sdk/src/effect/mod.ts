@@ -233,6 +233,8 @@ export interface ConversationChunk {
   readonly id?: string
   readonly replace: boolean
   readonly hasMore: boolean
+  readonly olderCursor?: string
+  readonly sessionId?: string
   readonly entries: readonly (ConversationEntry | UnrecognizedEntry)[]
   /** Raw page evidence before decoding/filtering; only explicit has_more=false proves emptiness. */
   readonly observation?: { readonly empty: boolean }
@@ -387,6 +389,8 @@ export const decodeConversationChunk = (
   id: frame.id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
+  ...(frame.older_cursor === undefined ? {} : { olderCursor: frame.older_cursor }),
+  sessionId: frame.session_id,
   ...(frame.header !== null && typeof frame.header === 'object' && !Array.isArray(frame.header)
     ? { header: Object.fromEntries(Object.entries(frame.header)) } : {}),
   ...(frame.replace || frame.items.length > 0
@@ -406,7 +410,7 @@ const RETRY_DELAY = '1 second'
 
 /** How one kind of follow talks on the socket. */
 interface FollowProtocol<A> {
-  /** Interruptible setup before admission or socket registration, with shared failure reporting. */
+  /** Scoped decoder setup runs alongside transport; only data frames wait for it. */
   readonly prepare?: Effect.Effect<void, FollowFailure>
   readonly subscribe: (args: {
     readonly stream: CollectionStream
@@ -653,14 +657,25 @@ const make = (options: FractalOptions) =>
             emit({ _tag: 'Observed', value })
           }
           const protocol = makeProtocol(observe)
+          let decoderReady = protocol.prepare === undefined
+          let stopped = false
+          // Projected terminal frames are complete replacements (client-v0 terminal protocol).
+          // Retain at most one cold screen; raw PTY deltas never use this follow path.
+          let pendingScreen: Extract<CollectionFrame, { kind: 'screen' }> | undefined
+          const resetProtocol = () => {
+            pendingScreen = undefined
+            protocol.reset()
+          }
           // Status writes precede the terminal FollowEvent so no consumer teardown races a verdict.
           const fail = (error: FollowFailure, status = syncStatusFromFailure(error)) => {
+            if (stopped) return
             setSync(status)
             endAttempt('failed')
             emit({ _tag: 'Failed', error })
             stop()
           }
           const stop = () => {
+            stopped = true
             endAttempt('disposed')
             followKeys.delete(id)
             fresheners.delete(id)
@@ -668,7 +683,7 @@ const make = (options: FractalOptions) =>
               freshnessTable.delete(key)
               publishFreshness()
             }
-            protocol.reset()
+            resetProtocol()
             channel.unregister(id)
             if (open.get(key)?.id === id) {
               open.delete(key)
@@ -676,6 +691,22 @@ const make = (options: FractalOptions) =>
               reportFollows()
             }
             Queue.endUnsafe(queue)
+          }
+          const decodeFrame = (frame: CollectionFrame) => {
+            if (stopped) return
+            const started =
+              options.onDiagnostics === undefined || spec._tag === 'Window'
+                ? undefined
+                : performance.now()
+            let value: A | DecodeFailure | undefined
+            try {
+              value = protocol.onData(frame)
+            } finally {
+              if (started !== undefined)
+                options.onDiagnostics?.({ _tag: 'Decode', elapsedMs: performance.now() - started })
+            }
+            if (value instanceof DecodeFailure) fail(value)
+            else if (value !== undefined) observe(value)
           }
           // Register cleanup before the interruptible budget latch: cancellation while the
           // first probe is pending must remove routing/freshness entries too.
@@ -688,13 +719,6 @@ const make = (options: FractalOptions) =>
               publishSync()
             }
           }))
-          if (protocol.prepare !== undefined) {
-            const ready = yield* protocol.prepare.pipe(Effect.match({
-              onSuccess: () => true,
-              onFailure: (error) => { fail(error); return false },
-            }))
-            if (!ready) return
-          }
           const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
           // Under `'advertised'`, no follow admits before the connect probe fixes the budget:
           // a subscribe cannot send before that probe opens the socket anyway.
@@ -708,10 +732,11 @@ const make = (options: FractalOptions) =>
           open.set(key, {
             id,
             evict: () => {
+              stopped = true
               endAttempt('disposed')
               applyFreshness({ _tag: 'Evicted' })
               emit({ _tag: 'Stale' })
-              protocol.reset()
+              resetProtocol()
               channel.unregister(id)
               open.delete(key)
               reportFollows()
@@ -724,6 +749,7 @@ const make = (options: FractalOptions) =>
           const context = yield* Effect.context()
           const subscribe = ({ stream, id: wireId }: { readonly stream: CollectionStream; readonly id: string }) =>
             Effect.suspend(() => {
+              if (stopped) return Effect.void
               endAttempt('superseded')
               // The early-connect roster subscribe answers an identical first window subscribe.
               const adopted = spec._tag === 'Window'
@@ -757,8 +783,9 @@ const make = (options: FractalOptions) =>
               probeEligible: spec._tag !== 'Terminal',
               onRejected: (message, code) => fail(new Rejected({ code, message })),
               onDrop: () => {
+                if (stopped) return
                 endAttempt('dropped')
-                protocol.reset()
+                resetProtocol()
                 applyFreshness({
                   _tag: 'SocketDropped',
                   attempt: 1,
@@ -767,9 +794,10 @@ const make = (options: FractalOptions) =>
                 emit({ _tag: 'Stale' })
               },
               onFrame: (frame) => {
+                if (stopped) return
                 if (frame.kind === 'resync') {
                   options.onDiagnostics?.({ _tag: 'Resync' })
-                  protocol.reset()
+                  resetProtocol()
                   applyFreshness({
                     _tag: 'Resync',
                     ...(frame.code === undefined ? {} : { code: frame.code }),
@@ -789,6 +817,7 @@ const make = (options: FractalOptions) =>
                     return
                   }
                   if (isSubscriptionLimit(frame)) {
+                    resetProtocol()
                     applyFreshness({ _tag: 'Retry' })
                     const retried = admission.serverLimit(key, lane)
                     reportFollows()
@@ -804,7 +833,7 @@ const make = (options: FractalOptions) =>
                     return
                   }
                   if (isTransientCode(frame.code)) {
-                    protocol.reset()
+                    resetProtocol()
                     applyFreshness({
                       _tag: 'Retry',
                       ...(frame.code === undefined ? {} : { code: frame.code }),
@@ -829,28 +858,25 @@ const make = (options: FractalOptions) =>
                   )
                   return
                 }
-                const started =
-                  options.onDiagnostics === undefined || spec._tag === 'Window'
-                    ? undefined
-                    : performance.now()
-                let value: A | DecodeFailure | undefined
-                try {
-                  value = protocol.onData(frame)
-                } finally {
-                  if (started !== undefined)
-                    options.onDiagnostics?.({
-                      _tag: 'Decode',
-                      elapsedMs: performance.now() - started,
-                    })
-                }
-                if (value instanceof DecodeFailure) {
-                  fail(value)
-                  return
-                }
-                if (value !== undefined) observe(value)
+                if (!decoderReady && frame.kind === 'screen') pendingScreen = frame
+                else decodeFrame(frame)
               },
             },
           })
+          // Transport admission and attach must never wait for an optional codec chunk.
+          // Only the latest complete screen waits; control frames invalidate it synchronously.
+          if (protocol.prepare !== undefined && !stopped) {
+            yield* Effect.forkIn(protocol.prepare.pipe(Effect.match({
+              onSuccess: () => {
+                if (stopped) return
+                decoderReady = true
+                const screen = pendingScreen
+                pendingScreen = undefined
+                if (screen !== undefined) decodeFrame(screen)
+              },
+              onFailure: (error) => fail(error),
+            })), scope)
+          }
         }),
       )
 

@@ -475,6 +475,29 @@
       "retired"
     ]}, {"type": "string"}], "description": "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`."},
     "AgentLifecycle": {"anyOf": [{"enum": ["standing", "owner", "bounded"]}, {"type": "string"}], "description": "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown."},
+    "DeclaredPriority": {"anyOf": [{"enum": ["background", "normal"]}, {"type": "string"}], "description": "Declared priority, not process priority. Readers retain future values as Unknown."},
+    "DeclaredLane": {"anyOf": [{"enum": ["check", "build"]}, {"type": "string"}], "description": "Unordered declared lane. Readers retain future values as Unknown."},
+    "DeclaredBudgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu_seconds": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "memory_max": {"type": "string"},
+        "disk_max": {"type": "string"},
+        "token_budget": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      },
+      "description": "Declared CPU seconds and input-plus-output tokens per seat incarnation or mission run, and peak memory/disk footprints. Scope labels create no counters, resets, aggregation, reservations or enforcement."
+    },
+    "DeclaredAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"$ref": "#/$defs/DeclaredPriority"},
+        "lane": {"$ref": "#/$defs/DeclaredLane"},
+        "budgets": {"$ref": "#/$defs/DeclaredBudgets"}
+      },
+      "description": "Declared admission — declared, not enforced. st stores and returns these values. They do not change scheduling, admission, process priority or resource limits. Empty budgets and the empty group are omitted."
+    },
     "AgentReachability": {"anyOf": [{"enum": ["local", "remote", "unreachable", "unknown", "reachable", "indeterminate"]}, {"type": "string"}], "description": "Whether the daemon can currently reach the agent runtime."},
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
     "ErrorCode": {"anyOf": [{"enum": [
@@ -618,7 +641,7 @@
     "ArrangementBody": {"oneOf": [{"$ref": "#/$defs/ArrangementBodyV1"}, {"$ref": "#/$defs/ArrangementBodyV2"}]},
     "ArrangementResolved": {"type": "object", "additionalProperties": false, "required": ["parents", "folders"], "properties": {"parents": {"type": "object", "additionalProperties": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}}, "folders": {"type": "object", "additionalProperties": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}}}},
     "Arrangement": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "owner", "body", "deleted"], "properties": {"kind": {"const": "arrangement"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "body": {"$ref": "#/$defs/ArrangementBody"}, "deleted": {"const": false}, "resolved": {"$ref": "#/$defs/ArrangementResolved"}}}]},
-    "ArrangementOperation": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["op", "name"], "properties": {"op": {"const": "create"}, "name": {"$ref": "#/$defs/ArrangementName"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "name"], "properties": {"op": {"const": "rename"}, "name": {"$ref": "#/$defs/ArrangementName"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id", "name", "parent", "key"], "properties": {"op": {"const": "folder.create"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}, "name": {"$ref": "#/$defs/ArrangementName"}, "parent": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}, "key": {"$ref": "#/$defs/ArrangementKey"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id", "name"], "properties": {"op": {"const": "folder.rename"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}, "name": {"$ref": "#/$defs/ArrangementName"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id", "parent", "key"], "properties": {"op": {"const": "folder.move"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}, "parent": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}, "key": {"$ref": "#/$defs/ArrangementKey"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id"], "properties": {"op": {"const": "folder.delete"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "subject", "folder", "key"], "properties": {"op": {"const": "subject.place"}, "subject": {"$ref": "#/$defs/ArrangementSubject"}, "folder": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}, "key": {"$ref": "#/$defs/ArrangementKey"}}}, {"type": "object", "additionalProperties": false, "required": ["op"], "properties": {"op": {"const": "retire"}}}]},
+    "ArrangementOperation": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["op", "name"], "properties": {"op": {"const": "create"}, "name": {"$ref": "#/$defs/ArrangementName"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "name"], "properties": {"op": {"const": "rename"}, "name": {"$ref": "#/$defs/ArrangementName"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id", "name", "parent", "key"], "properties": {"op": {"const": "folder.create"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}, "name": {"$ref": "#/$defs/ArrangementName"}, "parent": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}, "key": {"$ref": "#/$defs/ArrangementKey"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id", "name"], "properties": {"op": {"const": "folder.rename"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}, "name": {"$ref": "#/$defs/ArrangementName"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id", "parent", "key"], "properties": {"op": {"const": "folder.move"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}, "parent": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}, "key": {"$ref": "#/$defs/ArrangementKey"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "id"], "properties": {"op": {"const": "folder.delete"}, "id": {"$ref": "#/$defs/ArrangementFolderId"}}}, {"type": "object", "additionalProperties": false, "required": ["op", "subject", "folder", "key"], "properties": {"op": {"const": "subject.place"}, "subject": {"$ref": "#/$defs/ArrangementSubject"}, "folder": {"oneOf": [{"$ref": "#/$defs/ArrangementFolderId"}, {"type": "null"}]}, "key": {"$ref": "#/$defs/ArrangementKey"}}}, {"type": "object", "additionalProperties": false, "required": ["op"], "properties": {"op": {"const": "membership.migrate"}}}, {"type": "object", "additionalProperties": false, "required": ["op"], "properties": {"op": {"const": "retire"}}}]},
     "ArrangementEditParameters": {"type": "object", "additionalProperties": false, "required": ["subject", "owner", "operations"], "properties": {"subject": {"$ref": "#/$defs/ArrangementId"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "version": {"type": "integer", "minimum": 0, "maximum": 255}, "operations": {"type": "array", "minItems": 1, "maxItems": 1024, "items": {"$ref": "#/$defs/ArrangementOperation"}}}},
     "ArrangementPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "arrangements"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/Arrangement"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
     "OrderedMembershipPosition": {"type": "object", "additionalProperties": false, "required": ["bucket", "key"], "properties": {"bucket": {"type": ["string", "null"]}, "key": {"$ref": "#/$defs/ArrangementKey"}}},
@@ -1691,6 +1714,7 @@
           "properties": {
             "id": {"$ref": "#/$defs/MissionId"},
             "kind": { "const": "mission" },
+            "declared_admission": {"$ref": "#/$defs/DeclaredAdmission"},
             "title": { "type": "string" },
             "state": {"$ref": "#/$defs/MissionState"},
             "presentation": { "$ref": "#/$defs/MissionPresentation", "description": "st's presentation of this mission: its word, who must act, each step, the stuck step and what a person can do (docs/clients/ui-contract.md, Mission). Absent on older daemons and until st has a published agents roster." },
@@ -2198,6 +2222,7 @@
           "properties": {
             "id": {"$ref": "#/$defs/AgentId"},
             "kind": { "const": "agent" },
+            "declared_admission": {"$ref": "#/$defs/DeclaredAdmission"},
             "name": { "type": "string" },
             "state": {"$ref": "#/$defs/AgentState"},
             "reachability": {"$ref": "#/$defs/AgentReachability"},
@@ -2396,6 +2421,7 @@
         "id": { "$ref": "#/$defs/Id" },
         "revision": { "type": "string" },
         "accountable": { "type": "string", "pattern": "^person/[A-Za-z0-9_.-]+$" },
+        "declared_admission": {"$ref": "#/$defs/DeclaredAdmission"},
         "tree": { "type": "object" },
         "kdl": { "type": "string" },
         "revisions": { "type": "array", "items": { "type": "string" } }

@@ -261,6 +261,7 @@ export function signatureMark(provenance: unknown): string | undefined {
 
 /** The lines Fractal adds beside a delivery for the agent (fractal-drivers `ding`). */
 const FRACTAL_DELIVERY_NOTES = [
+  'Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.',
   'Answer the person in this conversation; people have no inbox, so do not reply with st.',
   "The person reads replies in st, not in the agent's session.",
   '(dictated by voice; it may contain transcription mistakes)',

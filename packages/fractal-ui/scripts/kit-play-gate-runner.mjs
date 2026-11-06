@@ -185,6 +185,9 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         row.strict = guard?.records ?? []
         const probes = await page?.evaluate(() => window.__kitFilterBenchmark ?? []).catch(() => []) ?? []
         if (probes.length) row.filterBenchmark = probes
+        const prepends = await page?.evaluate(() => window.__kitPrependBenchmark ?? []).catch(() => []) ?? []
+        if (prepends.length) row.prependBenchmark = prepends
+        for (const prepend of prepends) console.log(`HISTORY_PREPEND_DIAGNOSTIC ${JSON.stringify({ id, ...prepend })}`)
         // Keep the original elapsed definition (before page.close) for comparison.
         row.elapsedSeconds = (performance.now() - caseStarted) / 1000
         const closeStarted = performance.now()

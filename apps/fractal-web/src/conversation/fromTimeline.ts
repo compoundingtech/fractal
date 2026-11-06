@@ -473,6 +473,7 @@ export class LiveTimeline {
   private reindex = false
   /** Only a replace page describes the older-history edge. */
   hasOlder = false
+  olderCursor: string | undefined
   /** Native replace-page evidence, never an empty filtered projection. */
   observation: { readonly empty: boolean } | undefined
   header: FixtureConversationChunk['header']
@@ -513,6 +514,7 @@ export class LiveTimeline {
     }
     if (frame.replace) {
       this.hasOlder = frame.hasMore || frame.entries.some(entry => entry.type === 'truncation')
+      this.olderCursor = frame.olderCursor
       this.observation = frame.observation
     } else if (
       (frame.entries.length > 0 || frame.observation?.empty === false) &&
@@ -585,6 +587,22 @@ export class LiveTimeline {
         for (const [id, results] of newResults) this.indexResults(id, Array.from(results.values()))
     }
     return changed
+  }
+
+  /** Merge an older served page without replacing revisions received by the live follow. */
+  prepend(frame: FixtureConversationChunk): void {
+    const pageIds = new Set(frame.entries.map(entry => entry.id))
+    this.apply({ ...frame, replace: false })
+    if (pageIds.size > 0) {
+      this.ordered = [
+        ...Array.from(pageIds, id => this.entries.get(id)!),
+        ...this.ordered.filter(entry => !pageIds.has(entry.id)),
+      ]
+      this.reindex = true
+      this.dirtyFrom = 0
+    }
+    this.olderCursor = frame.olderCursor
+    this.hasOlder = frame.olderCursor !== undefined
   }
 
   /** Merge a frame's invocations once, avoiding quadratic shifts for reverse-arriving calls. */

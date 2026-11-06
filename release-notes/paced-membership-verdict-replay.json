@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep historical signature-verdict replay off ordinary replication exchanges",
+  "replay": {"status": "changed", "detail": "Ordinary judgment slices verify newly signed claims only and advance at most one dependency-requeue page. The existing paced signature worker drains historical verdicts after membership or dependency changes."},
+  "schema": {"status": "none", "detail": "No database schema or stored-state changes."},
+  "rules": {"status": "none", "detail": "Trust roots, signature validation and pending-verdict rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "No replication wire changes."},
+  "downtime": {"status": "none", "detail": "No additional restart or state reset is needed after deploying the updated binary."},
+  "manual": {"status": "none", "detail": "Existing queued verdicts are resumed automatically by the paced signature worker."},
+  "recovery": {"status": "none", "detail": "Durable queues and cursors retain unfinished work across cancellation or restart."}
+}

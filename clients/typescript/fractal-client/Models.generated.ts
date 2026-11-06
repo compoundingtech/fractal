@@ -107,6 +107,7 @@ export type Agent = ResourceHeader & {
   current_session_id?: string | null;
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
+  declared_admission?: DeclaredAdmission;
   delivery?: (AgentDelivery | null);
   down_since?: (Timestamp | null);
   driver?: string | null;
@@ -175,6 +176,7 @@ export type AgentCreateParameters = {
 
 export type AgentDeclaration = {
   accountable?: string;
+  declared_admission?: DeclaredAdmission;
   id: Id;
   kdl: string;
   revision: string;
@@ -571,6 +573,8 @@ export type ArrangementOperation = ({
   key: ArrangementKey;
   op: "subject.place";
   subject: ArrangementSubject;
+} | {
+  op: "membership.migrate";
 } | {
   op: "retire";
 });
@@ -1560,6 +1564,23 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DeclaredAdmission = {
+  budgets?: DeclaredBudgets;
+  lane?: DeclaredLane;
+  priority?: DeclaredPriority;
+};
+
+export type DeclaredBudgets = {
+  cpu_seconds?: number;
+  disk_max?: string;
+  memory_max?: string;
+  token_budget?: number;
+};
+
+export type DeclaredLane = ("check" | "build" | string);
+
+export type DeclaredPriority = ("background" | "normal" | string);
+
 export type DeclaredResource = {
   kind: "uri" | "subject";
   name: string;
@@ -2301,6 +2322,7 @@ export type MessageStatusFrom = {
 
 export type Mission = ResourceHeader & {
   active_runs?: number;
+  declared_admission?: DeclaredAdmission;
   id?: MissionId;
   kind: "mission";
   mission_revision: Revision;

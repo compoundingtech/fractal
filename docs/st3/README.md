@@ -46,7 +46,7 @@ Use these documents for implementation details:
 - [Shell completion](cli-completion/spec.md) defines live entity candidates, their descriptions,
   and short-name resolution.
 - [Lanes](lanes.md) defines the ordered lanes a mission run works through, such as the merge
-  train, and `st lanes`.
+  train, and `fractal lanes`.
 - [Attachments](attachments.md) defines the images a message carries between machines: where the
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
@@ -54,9 +54,9 @@ Use these documents for implementation details:
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
   allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and
-  `/v1/plugins/github/*` with `st gh prs|pr|checks`.
+  `/v1/plugins/github/*` with `fractal gh prs|pr|checks`.
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
-- [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
+- [Suspending a seat](suspend.md) explains `fractal agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
 - [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
   message a restarted seat is sent with that handoff and the live state of its work.
@@ -65,7 +65,7 @@ Use these documents for implementation details:
 - [Binding an agent to a person's terminal](terminal-binding.md) explains `bind-terminal`: running a native harness in a shell the person already has open.
 - [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
 - [Delivery probes](delivery-probes.md) describes token-free native-channel probes, per-direction
-  read latency, overdue attention, and the replicated results in `st doctor`.
+  read latency, overdue attention, and the replicated results in `fractal doctor`.
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
   and tests their harnesses run, on Linux and macOS, and what needs root. It also explains how
   stopping a seat ends every process the seat started, and what a host without systemd misses.
@@ -79,7 +79,7 @@ Use these documents for implementation details:
 - [Managed harness access](harness-access.md) explains install permissions and per-seat overrides.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
-- [Demos](demos.md) explains `st demo play`: a seeded, scripted demo in the terminal interface,
+- [Demos](demos.md) explains `fractal demo play`: a seeded, scripted demo in the terminal interface,
   in its own instance, with timed and key-paced beats and no model tokens.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate Fractal on one machine
   with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
@@ -92,11 +92,11 @@ Use these documents for implementation details:
 - [Gate evidence](gate-evidence.md) explains signed test and review records, local checks and CI verification.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
-- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN` and `st missions blocked`:
+- [What a run waits on](waiting-on.md) explains `fractal missions waiting-on RUN` and `fractal missions blocked`:
   each open step's wait, a run's stalled verdict, and the fleet's blocked runs by cause, read in
   milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
-  mission run summaries, and the five-minute performance report in `st doctor`.
+  mission run summaries, and the five-minute performance report in `fractal doctor`.
 - [Running Fractal with omp](omp.md) covers omp seat setup, behavior, and known limits.
 - [Product roadmap](roadmap.md) records accepted future work.
 - [CLI reference](../site/reference/cli.md) introduces the command surface and exact installed help.
@@ -120,6 +120,6 @@ idle with no prompt and takes no turn until a person types or a message is poste
 as a message that names a ready step, and the step's goals and constraints say what the work is.
 A seat that sits idle holding a claimed step, with nothing set to wake it, gets one message naming
 the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
-Fractal's only other text for agents is the skill that `st skill` prints, which describes how to use Fractal
+Fractal's only other text for agents is the skill that `fractal skill` prints, which describes how to use Fractal
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.
 - [Manual onboarding test rig](onboarding-test-rig.md) documents release-archive fixtures and disposable Linux/macOS guest preparation.

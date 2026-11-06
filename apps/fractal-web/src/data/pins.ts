@@ -1,7 +1,8 @@
 import { PINS_ARRANGEMENT_UUID } from '@fractal/client'
 import type { ActionOf, Arrangement, CollectionStream, FractalClient, OrderedMembership, OrderedMembershipOperation } from '@fractal/client'
-import { Schema } from 'effect'
-import { Arrangement as ArrangementSchema, OrderedMembershipPage, ArrangementMembershipEditParameters } from '@fractal/client/schema'
+import { Effect, Schema } from 'effect'
+import { Arrangement as ArrangementSchema, OrderedMembershipPage } from '@fractal/client/schema/read'
+import { loadArrangementSchema } from './lazySdk.ts'
 import { selectionParts } from '../folders/client.ts'
 
 export type PinsGateway = Pick<FractalClient, 'discover' | 'arrangementsGet' | 'arrangementsMemberships' | 'arrangementEdit' | 'arrangementMembershipEdit' | 'collectionStream'>
@@ -19,7 +20,6 @@ export interface PinsState {
 }
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isPage = Schema.is(Schema.toEncoded(OrderedMembershipPage))
-const isEdit = Schema.is(Schema.toEncoded(ArrangementMembershipEditParameters))
 const hasCode = (error: unknown, code: string): boolean => typeof error === 'object' && error !== null &&
   'response' in error && typeof error.response === 'object' && error.response !== null && 'code' in error.response && error.response.code === code
 export const pinsSelection = (actor: string): { owner: string; subject: string } => {
@@ -128,6 +128,9 @@ export const followPins = async ({ gateway, onState, signal, v2ReadersReady = fa
     close,
     refresh,
     edit: async (identity, operations, createIdentity) => {
+      if (closed || !ready || busy || !writable) throw new TypeError('Pins must be synced, writable and idle before editing')
+      const { ArrangementMembershipEditParameters } = await Effect.runPromise(loadArrangementSchema)
+      const isEdit = Schema.is(Schema.toEncoded(ArrangementMembershipEditParameters))
       if (closed || !ready || busy || !writable) throw new TypeError('Pins must be synced, writable and idle before editing')
       const parameters = { ...selection, operations }
       if (!isEdit(parameters)) throw new TypeError('Invalid Pins membership operations')

@@ -15988,7 +15988,7 @@ fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, St3Er
 
 /// Every value of the first column `sql` returns for `value`, without nulls.
 fn string_column_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     value: &str,
 ) -> Result<Vec<String>, St3Error> {
@@ -16245,8 +16245,9 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
 }
 
 /// The generations of one run: projected, created by claims, or named by its asks.
-fn run_generation_ids_tx(
-    transaction: &Transaction<'_>,
+#[doc(hidden)]
+pub fn run_generation_ids_tx(
+    transaction: &Connection,
     run: &str,
 ) -> Result<BTreeSet<String>, St3Error> {
     let subject = format!("mission-run/{run}");
@@ -20733,6 +20734,15 @@ pub fn apply_effective_step_state(
 
 pub type EffectiveStepOwner = (String, String, String, String, String, String);
 
+pub(crate) fn step_claim_expired(view: &StepRunView, snapshot_unix_ms: u128) -> bool {
+    matches!(
+        view.status.as_str(),
+        "claimed" | "working" | "verifying" | "blocked"
+    ) && view
+        .claim_expires_at_unix_ms
+        .is_some_and(|expiry| expiry <= snapshot_unix_ms)
+}
+
 pub fn apply_effective_step_state_with_owner(
     connection: &Connection,
     view: &mut StepRunView,
@@ -20785,13 +20795,7 @@ pub fn apply_effective_step_state_with_owner(
         view.claim_expires_at_unix_ms = None;
         return Ok(());
     }
-    if matches!(
-        view.status.as_str(),
-        "claimed" | "working" | "verifying" | "blocked"
-    ) && view
-        .claim_expires_at_unix_ms
-        .is_some_and(|expiry| expiry <= snapshot_unix_ms)
-    {
+    if step_claim_expired(view, snapshot_unix_ms) {
         view.status = "ready".into();
         view.blocked_reason = Some("the worker lease expired".into());
         // Expiry is a new readiness episode even before a repair writes it. Old
@@ -21208,7 +21212,7 @@ fn terminalize_projected_run_tree_tx(
 }
 
 pub fn step_owner_is_terminal_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<bool, St3Error> {
     let owner = transaction
