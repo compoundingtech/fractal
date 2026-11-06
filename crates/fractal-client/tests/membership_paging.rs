@@ -43,7 +43,7 @@ fn authoritative_pages_complete_without_new_whole_host_frame() {
         assert_eq!(j.page(a, last).unwrap(), Progress::Complete);
         assert_eq!(j.complete().unwrap().len(), 2);
         assert!(!j.is_stale());
-        assert_eq!(j.stream(&frame(9, 1)).unwrap(), Progress::Ignored);
+        assert_eq!(j.stream(&frame(9, 2)).unwrap(), Progress::Ignored);
         assert!(!j.is_stale());
         assert_eq!(j.stream(&frame(11, 2)).unwrap(), Progress::Restart);
         assert!(j.is_stale());
@@ -125,7 +125,7 @@ async fn typed_entrypoints_send_explicit_selectors() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = vec![0; 4096]; let n = socket.read(&mut request).await.unwrap();
         let request = String::from_utf8_lossy(&request[..n]);
-        assert!(request.starts_with("GET /v1/client/arrangements/ada/id/memberships?person=person%2Fada&paging_contract=collection-v1&cursor=membership-v1%2Fnext&limit=1 "));
+        assert!(request.starts_with("GET /v1/client/arrangements/ada/id/memberships?person=person/ada&paging_contract=collection-v1&cursor=membership-v1/next&limit=1 "), "{request}");
         let body = serde_json::to_string(&page(10, 0, 0, false)).unwrap();
         socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         let (socket, _) = listener.accept().await.unwrap();

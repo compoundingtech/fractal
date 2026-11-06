@@ -1058,7 +1058,7 @@ mod tests {
         }
         async fn matches_stream(state: &AppState, page: &Value) {
             let request: CollectionSubscribe = serde_json::from_value(json!({
-                "id":"epoch","collection":"ordered-memberships","person":"person/ada",
+                "kind":"subscribe","id":"epoch","collection":"ordered-memberships","person":"person/ada",
                 "subject":SUBJECT,"limit":1,"paging_contract":"collection-v1"
             })).unwrap();
             let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
