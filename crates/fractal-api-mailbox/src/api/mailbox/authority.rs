@@ -143,11 +143,12 @@ fn physical_wrapper(
         .into_iter()
         .next()
         .ok_or_else(|| refused("seat no longer declared"))?;
-    let member = desired
-        .member
+    let member = state
+        .store
+        .mailbox_member_of(&desired)
+        .map_err(internal)?
         .ok_or_else(|| refused("seat intentionally stopped"))?;
-    if desired.kind == "stop"
-        || member.host != state.node
+    if member.host != state.node
         || member.driver.as_deref() != Some("claude")
     {
         return Err(refused("Claude primary belongs to another live seat"));
@@ -1007,10 +1008,10 @@ pub fn with_argv_channel<T>(
     let desired = state.store.desired_subjects_named(std::slice::from_ref(&fence.subject))
         .map_err(internal)?.into_iter().next()
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = desired.member.ok_or_else(|| refused("the seat is intentionally stopped"))?;
+    let member = state.store.mailbox_member_of(&desired).map_err(internal)?
+        .ok_or_else(|| refused("the seat is intentionally stopped"))?;
     if member.driver.is_some() { return Ok(None); }
-    if desired.kind == "stop"
-        || member.kind != crate::model::MemberKind::Agent
+    if member.kind != crate::model::MemberKind::Agent
         || member.host != state.node
         || member.terminal_binding.is_some()
         || !matches!(&member.launch, crate::model::LaunchSpec::Argv(argv) if !argv.is_empty())
@@ -1171,10 +1172,12 @@ fn with_authority_mode<T>(
         .into_iter()
         .next()
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = desired
-        .member
+    let member = state
+        .store
+        .mailbox_member_of(&desired)
+        .map_err(internal)?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
-    if desired.kind == "stop" || member.host != state.node {
+    if member.host != state.node {
         return Err(refused("the seat is stopped or belongs to another host"));
     }
     let provider = member

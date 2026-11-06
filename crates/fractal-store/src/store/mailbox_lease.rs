@@ -93,6 +93,20 @@ fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberS
     serde_json::from_str(&member).map(Some).map_err(internal)
 }
 
+/// The member a seat's selected declaration authorizes its mailbox for: the declared member, or
+/// for a stop a run declared, the member that stop ended, which the reconciler may still be
+/// running past its stop (`stopping_seat`). `None` when the seat is intentionally stopped.
+pub fn mailbox_member(
+    connection: &Connection,
+    subject: &str,
+    desired: &DesiredRow,
+) -> Result<Option<MemberSpec>, FractalError> {
+    if desired.kind == "stop" {
+        return super::stopping_seat::stopping_member(connection, subject).map_err(internal);
+    }
+    desired.member.as_deref().map(serde_json::from_str).transpose().map_err(internal)
+}
+
 pub fn check_lease_fence(
     connection: &Connection,
     fence: &Fence,
@@ -114,22 +128,15 @@ pub fn check_lease_fence(
     let desired = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member: Option<MemberSpec> = desired
-        .member
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(internal)?;
-    if desired.kind == "stop"
-        || member.as_ref().is_none_or(|member| {
-            member.driver.as_deref() != Some(&owner.provider)
-                || member.host != host
-                || member
-                    .terminal_binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.agent_incarnation() != fence.incarnation)
-        })
-    {
+    let member = mailbox_member(connection, &fence.subject, &desired)?;
+    if member.as_ref().is_none_or(|member| {
+        member.driver.as_deref() != Some(&owner.provider)
+            || member.host != host
+            || member
+                .terminal_binding
+                .as_ref()
+                .is_some_and(|binding| binding.agent_incarnation() != fence.incarnation)
+    }) {
         return Err(refused(
             "the lease's declared provider was stopped or replaced",
         ));
@@ -149,11 +156,9 @@ pub fn check_argv_declaration(
     let desired = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the argv seat is no longer declared"))?;
-    let current: MemberSpec = desired.member.as_deref()
-        .map(serde_json::from_str).transpose().map_err(internal)?
+    let current = mailbox_member(connection, &fence.subject, &desired)?
         .ok_or_else(|| refused("the argv seat is intentionally stopped"))?;
-    if desired.kind == "stop"
-        || current.kind != MemberKind::Agent
+    if current.kind != MemberKind::Agent
         || current.host != host
         || current.driver.is_some()
         || current.terminal_binding.is_some()
