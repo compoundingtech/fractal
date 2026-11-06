@@ -963,6 +963,7 @@
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
+            "resolved_by": { "$ref": "#/$defs/Id", "description": "The actor of the accepted claim that resolved this item. Absent when no attributed resolution is retained; never inferred from the recipient." },
             "launch_id": { "$ref": "#/$defs/Id" },
             "variant_id": { "$ref": "#/$defs/Id" },
             "message_id": { "$ref": "#/$defs/Id" },

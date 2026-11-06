@@ -125,7 +125,7 @@ async fn alerts_resolve_dismisses_only_the_exact_granted_denial_source() {
         1
     );
     let index = state.store.index().unwrap();
-    retained_owner_item(
+    let item = retained_owner_item(
         app.clone(),
         &denial.id,
         "invented denied call",
@@ -137,6 +137,7 @@ async fn alerts_resolve_dismisses_only_the_exact_granted_denial_source() {
         ],
     )
     .await;
+    assert_eq!(item["resolved_by"], "agent/alder.helper");
     assert_eq!(
         state.store.index().unwrap(),
         index,
@@ -260,6 +261,7 @@ async fn alerts_withdraw_resolves_its_own_update_source_and_refuses_other_source
     )
     .await;
     assert_eq!(item["update"]["type"], "update");
+    assert_eq!(item["resolved_by"], "agent/alder.helper");
     assert_eq!(
         state.store.index().unwrap(),
         index,
