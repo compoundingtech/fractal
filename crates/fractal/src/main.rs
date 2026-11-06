@@ -4088,7 +4088,7 @@ enum WorkCommand {
     /// Acknowledge the exact handoff note before claiming or completing its work.
     Acknowledge(WorkAcknowledgeArgs),
 
-    /// Ask a person through a runtime step owned by live work.
+    /// Ask a person independently, or block specific work with --step.
     ///
     /// Puts a structured request on the person's home.
     Ask(WorkAskArgs),
@@ -4243,9 +4243,11 @@ struct WorkAskArgs {
     /// to 4). It is uploaded to this member and read by the person through the ask.
     #[arg(long = "attach", value_name = "FILE", requires = "request")]
     attach: Vec<PathBuf>,
+    /// Block this claimed step until the person answers. Omit for an independent ask.
     #[arg(long, conflicts_with = "new_run")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
     step: Option<String>,
+    /// Explicit name for an independent ask; never consumes agent work capacity.
     #[arg(long, conflicts_with = "step")]
     new_run: Option<String>,
     /// How long the person has to answer, such as `4h` or `2d`. At the deadline the ask
@@ -7694,6 +7696,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             }));
             spawn_publication_evidence(store.clone());
             tokio::spawn(build_transport_observation_index(store.clone()));
+            tokio::spawn(build_operation_claim_digests(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -9279,7 +9282,7 @@ async fn run_devices_fabric(
             fabric
                 .expose_socket(
                     &service,
-                    &fractal_client::default_unix_socket(
+                    &fractal_socket_discovery::default_unix_socket(
                         &config.client_gateway_socket,
                         &config.client_gateway_socket,
                     ),
@@ -20549,6 +20552,47 @@ async fn build_transport_observation_index(store: Arc<Store>) {
             Ok(Err(error)) if maintenance_contention(&error) => {}
             error => {
                 stderr_message("st", format_args!("transport observation index build stopped: {error:?}"));
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// This starts only after both APIs serve. Each page reads up to 32 operation claims on a
+/// reader, then joins the managed background writer queue only to insert their keys, and
+/// yields for 100 ms. The operation audit reads bodies until the last page marks it ready.
+async fn build_operation_claim_digests(store: Arc<Store>) {
+    use smallclaims::store::operation_claim_digests as digests;
+    let started = Instant::now();
+    fractal_daemon::otel::record_index_migration(digests::NAME, false, None, None);
+    loop {
+        let page_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<digests::Page>> {
+            if digests::ready(&page_store.readers.get())? {
+                return Ok(None);
+            }
+            digests::advance(&page_store.readers, &page_store.connection).map(Some)
+        }).await;
+        match result {
+            Ok(Ok(None)) => {
+                fractal_daemon::otel::record_index_migration(digests::NAME, true, None, None);
+                return;
+            }
+            Ok(Ok(Some(page))) => {
+                fractal_daemon::otel::record_index_migration(
+                    digests::NAME,
+                    page.ready,
+                    Some(page.write_hold),
+                    page.ready.then(|| started.elapsed()),
+                );
+                if page.ready {
+                    return;
+                }
+            }
+            Ok(Err(error)) if maintenance_contention(&error) => {}
+            error => {
+                stderr_message("st", format_args!("operation claim digest backfill stopped: {error:?}"));
                 return;
             }
         }

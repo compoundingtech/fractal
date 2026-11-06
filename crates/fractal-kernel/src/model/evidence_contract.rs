@@ -1,4 +1,4 @@
-use super::{St3Error, valid_word};
+use super::{FractalError, valid_word};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -21,12 +21,12 @@ pub struct EvidenceContract {
     evidence_contract: BTreeMap<String, EvidenceSpec>,
 }
 
-fn invalid(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-evidence-contract", message)
+fn invalid(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-evidence-contract", message)
 }
 
 impl EvidenceType {
-    fn validate(self, value: &str) -> Result<(), St3Error> {
+    fn validate(self, value: &str) -> Result<(), FractalError> {
         if value.trim().is_empty() {
             return Err(invalid("evidence values must not be blank"));
         }
@@ -54,7 +54,7 @@ impl EvidenceType {
 }
 
 impl EvidenceContract {
-    pub fn new(fields: impl IntoIterator<Item = (String, EvidenceSpec)>) -> Result<Self, St3Error> {
+    pub fn new(fields: impl IntoIterator<Item = (String, EvidenceSpec)>) -> Result<Self, FractalError> {
         let mut evidence_contract = BTreeMap::new();
         for (name, spec) in fields {
             if !valid_word(&name) {
@@ -83,7 +83,7 @@ impl EvidenceContract {
     }
 
     /// Validate fields.evidence, not the claim-reference evidence envelope.
-    pub fn validate_evidence(&self, evidence: &Map<String, Value>) -> Result<(), St3Error> {
+    pub fn validate_evidence(&self, evidence: &Map<String, Value>) -> Result<(), FractalError> {
         for name in evidence.keys() {
             if !self.evidence_contract.contains_key(name) {
                 return Err(invalid(format!("unexpected evidence field `{name}`")));

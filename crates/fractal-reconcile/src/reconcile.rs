@@ -8701,6 +8701,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     .filter(|reason| !reason.is_empty())
                                     .map(str::to_owned)
                             }) {
+                            // The driver stopped a provider it could no longer serve: the
+                            // harness refused nothing (#4743).
+                            Some(reason)
+                                if reason == fractal_drivers::provider_session::DRIVER_STOPPED =>
+                            {
+                                (
+                                    "resume-exited".into(),
+                                    "the driver stopped the resumed provider before it bound its native session"
+                                        .into(),
+                                )
+                            }
                             Some(reason) => (
                                 "harness-refused".into(),
                                 format!("the harness ended before it bound the session: {reason}"),
@@ -14612,7 +14623,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && current.owner_generation.as_deref() == Some(run.generation.as_str())
                 && current.owner_step.as_deref() != owner_step
             {
-                return Err(crate::model::St3Error::new(
+                return Err(crate::model::FractalError::new(
                     "duplicate-runtime-subject",
                     format!(
                         "mission run `{}` declares runtime `{}` in more than one mission or step",
@@ -16048,7 +16059,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_schedule_work_with_start(
         &self, schedule: &DesiredSubject,
         mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, u64)
-            -> Result<MissionRunView, crate::model::St3Error>,
+            -> Result<MissionRunView, crate::model::FractalError>,
     ) -> Result<()> {
         self.store
             .owned_desired_guard(schedule)
@@ -16366,7 +16377,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_subscription_mission_with_start(
         &self, item: &DesiredSubject, held: &[crate::model::AttentionRequestView],
         mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, &str, &str)
-            -> Result<MissionRunView, crate::model::St3Error>,
+            -> Result<MissionRunView, crate::model::FractalError>,
     ) -> Result<()> {
         let Some(spec) = crate::graph::subscription_spec(&item.desired) else {
             return Ok(());
@@ -19759,7 +19770,7 @@ fn step_path_of_subject(subject: &str) -> Option<&str> {
 /// Whether a mission run could not start only because this host lacks a claim that replication
 /// can still deliver, such as a mission revision, an owner run, or an input's claim published on
 /// another host, or because transient SQLite contention prevented the start.
-fn start_waits_for_replication(error: &crate::model::St3Error) -> bool {
+fn start_waits_for_replication(error: &crate::model::FractalError) -> bool {
     matches!(
         error.code,
         "missing-mission" | "missing-mission-run" | "missing-resource-input-version" | "internal"
@@ -20840,6 +20851,8 @@ pub fn now_ms() -> u128 {
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     #![cfg_attr(not(test), allow(unused, dead_code))]
+    mod agent_review_loop_branches;
+
     #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
@@ -20910,6 +20923,7 @@ pub mod tests {
     mod helper_launcher;
     mod bounded_loop_reads;
     mod incremental_deadlines;
+    mod resume_harness_end;
     #[cfg(test)]
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
@@ -49698,7 +49712,7 @@ mission "fresh" state="ready" {
             anchor: Option<&str>,
             actor: &str,
             key: &str,
-        ) -> Result<crate::model::ClaimRecord, crate::model::St3Error> {
+        ) -> Result<crate::model::ClaimRecord, crate::model::FractalError> {
             self.store
                 .move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
                     agent: SEAT.into(),
@@ -49711,7 +49725,7 @@ mission "fresh" state="ready" {
                 })
         }
 
-        fn work(&self, step: &str, action: &str, key: &str) -> Result<(), crate::model::St3Error> {
+        fn work(&self, step: &str, action: &str, key: &str) -> Result<(), crate::model::FractalError> {
             self.store
                 .work_action(
                     step,
