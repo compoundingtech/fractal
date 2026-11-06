@@ -73,6 +73,7 @@ pub fn world() -> World {
         settled: true,
         active_missions: None,
         inbox_alerts: None,
+        person_ask_counts: None,
         attention: Load::Ready(attention()),
         agents: Load::Ready(agents()),
         missions: Load::Ready(missions()),

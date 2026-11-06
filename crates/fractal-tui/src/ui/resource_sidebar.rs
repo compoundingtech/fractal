@@ -381,8 +381,7 @@ impl Sidebar {
         self.inventory_partial = world.inventory_partial.iter()
             .filter(|name| ["machines", "sessions"].contains(&name.as_str())).cloned().collect();
         self.agents = world.agents.items().iter().map(|agent| {
-            let asks = world.attention.items().iter()
-                .filter(|item| item.is_alert() && item.is_in(&agent.id)).count();
+            let asks = world.person_ask_counts.as_ref().and_then(|counts| counts.get(&agent.id)).copied().unwrap_or(0);
             let details = &agent.details;
             let extras = [
                 details.harness_state.clone(), details.model.clone(), details.effort.clone(),
@@ -1321,5 +1320,17 @@ mod tests {
         let shown = |id: &str| frame.context_rows.iter().any(|(rect, subject, _)| subject == id && rect.intersects(frame.glass_sidebar));
         assert!(shown(&agents[0]) && shown("mission/build"), "the agent keeps its own row beside its runs");
         assert!(frame.context_rows.iter().any(|(rect, subject, _)| subject == "mission/build" && rect.height == 2));
+    }
+    #[test]
+    fn agent_metadata_omits_unknown_counts_and_draws_the_proven_count() {
+        let mut world = super::super::demo::test_world();
+        let agent = world.agents.items()[0].id.clone();
+        world.person_ask_counts = None;
+        let mut sidebar = Sidebar::default();
+        sidebar.observe(&world);
+        assert!(!sidebar.agents[&agent].extras.as_deref().unwrap_or("").contains("open ask"));
+        world.person_ask_counts = Some(BTreeMap::from([(agent.clone(), 2)]));
+        sidebar.observe(&world);
+        assert!(sidebar.agents[&agent].extras.as_deref().unwrap().contains("2 open asks"));
     }
 }

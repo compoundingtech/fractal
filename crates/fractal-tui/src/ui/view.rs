@@ -86,6 +86,9 @@ pub struct World {
     /// Server alert total only when the attention rows are an incomplete window.
     #[serde(skip)]
     pub inbox_alerts: Option<usize>,
+    /// Exact open work asks per agent, absent when attention is unread or bounded.
+    #[serde(skip)]
+    pub person_ask_counts: Option<BTreeMap<String, usize>>,
     pub attention: Load<Vec<Attention>>,
     pub agents: Load<Vec<Agent>>,
     #[serde(skip)]

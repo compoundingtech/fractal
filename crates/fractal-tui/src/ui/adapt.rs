@@ -265,6 +265,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
                 summary.host_id == attention.host_id && summary.store_index >= attention.store_index
             }))
             .and_then(|(summary, _)| summary.alerts.map(|alerts| alerts as usize)),
+        person_ask_counts: person_ask_counts(model, person, extras),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         related_runs: extras.related_runs.clone(),
@@ -377,6 +378,32 @@ fn tier(id: &str) -> Option<Tier> {
         "later" => Some(Tier::Later),
         _ => None,
     }
+}
+
+/// Count actual person-step asks, not other alerts or person-held mission runs. An incomplete
+/// attention window cannot prove a per-agent count, even when its global alert total is known.
+fn person_ask_counts(model: &Model, person: &str, extras: &Extras) -> Option<BTreeMap<String, usize>> {
+    if !extras.attention_live || model.now.snapshot.is_none() || model.now.truncated {
+        return None;
+    }
+    let mut counts = BTreeMap::new();
+    for item in model.attention().filter(|item| item.person_id == person && item.state == "open"
+        && item.attention_kind == "person-step" && item.update.is_none()) {
+        if let Some(id) = &item.conversation_id {
+            *counts.entry(id.clone()).or_default() += 1;
+        }
+        for (index, id) in item.conversation_ids.iter().enumerate() {
+            if Some(id) != item.conversation_id.as_ref() && !item.conversation_ids[..index].contains(id) {
+                *counts.entry(id.clone()).or_default() += 1;
+            }
+        }
+        if item.conversation_id.is_none() && item.conversation_ids.is_empty()
+            && let Some(id) = item.requester_id.as_ref().filter(|id| id.starts_with("agent/"))
+                .or_else(|| item.source_id.starts_with("agent/").then_some(&item.source_id)) {
+            *counts.entry(id.clone()).or_default() += 1;
+        }
+    }
+    Some(counts)
 }
 
 /// Who Fractal names, as a person reads it: an agent by its label and id, Fractal's own
@@ -1057,6 +1084,34 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_counts_only_complete_current_person_work_asks_without_duplicate_conversations() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now = window(vec![
+            row("attention/ask", "person-step", serde_json::json!({
+                "conversation_id":"agent/example", "conversation_ids":["agent/example","agent/peer","agent/peer"]})),
+            row("attention/legacy", "person-step", serde_json::json!({"requester_id":"agent/example"})),
+            row("attention/other", "person-step", serde_json::json!({"person_id":"person/other","requester_id":"agent/example"})),
+            row("attention/closed", "person-step", serde_json::json!({"state":"resolved","requester_id":"agent/example"})),
+            row("attention/gate", "gate", serde_json::json!({"requester_id":"agent/example"})),
+            row("attention/prompt", "prompt", serde_json::json!({"requester_id":"agent/example"})),
+            row("attention/update", "person-step", serde_json::json!({"requester_id":"agent/example",
+                "update":{"version":1,"type":"update","about":"message/example","subjects":[]}})),
+        ]);
+        let mut extras = Extras { attention_live: true, ..Extras::default() };
+        let expected = BTreeMap::from([("agent/example".into(), 2), ("agent/peer".into(), 1)]);
+        assert_eq!(person_ask_counts(&model, "person/example", &extras), Some(expected));
+        model.now.truncated = true;
+        assert_eq!(person_ask_counts(&model, "person/example", &extras), None);
+        model.now.truncated = false;
+        extras.attention_live = false;
+        assert_eq!(person_ask_counts(&model, "person/example", &extras), None);
+        extras.attention_live = true;
+        model.now.snapshot = None;
+        assert_eq!(person_ask_counts(&model, "person/example", &extras), None);
+    }
 
     #[test]
     fn tab_badge_inbox_uses_summary_only_for_truncated_attention() {

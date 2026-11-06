@@ -1216,6 +1216,8 @@ not the time its roster row happened to change.
 Agent sidebar entries show harness/model/effort, last activity and open asks, followed by two-line
 mission rows. Finished runs start folded under a device-persisted “Finished” toggle; opening a
 mission row navigates to its mission. Late ETA text is red; person holds say “waiting on you”.
+Open-ask metadata counts only open work asks to the current person; other alert kinds do not
+inflate it. An unread or truncated attention window omits the count rather than showing a lower bound.
 The singleton-only index cannot replace the general seat-offer index; daemon cost probes cover this route.
 Roll out the daemon before callers. Rust, Swift and TypeScript clients turn this route's HTTP 404
 into typed `unsupported-capability` (including an empty older-router response), never empty rows.
