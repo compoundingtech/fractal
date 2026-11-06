@@ -1,11 +1,11 @@
 #![allow(unused_imports)]
-use crate::model::{IntentInput, St3Error};
+use crate::model::{IntentInput, FractalError};
 use std::collections::BTreeMap;
 use crate::provenance::*;
 use crate::parse_intent;
 use crate::store::Store;
 
-pub fn publish(store: &Store, source: &str, key: &str) -> Result<(), St3Error> {
+pub fn publish(store: &Store, source: &str, key: &str) -> Result<(), FractalError> {
     let intent = parse_intent(source, "orchard").unwrap();
     let preview = store
         .mission(
