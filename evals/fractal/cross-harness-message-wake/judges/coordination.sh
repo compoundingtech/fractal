@@ -26,13 +26,13 @@ jq -e '
 messages_to() {
   local recipient=$1
   jq -s 'add | unique_by(.subject)' \
-    <(st3 conversations ls "$recipient" --json) \
-    <(st3 conversations ls "$recipient" --archive --json)
+    <(fractal conversations ls "$recipient" --json) \
+    <(fractal conversations ls "$recipient" --archive --json)
 }
 
 require_lifecycle() {
   local subject=$1 claims
-  claims="$(st3 trace show "$subject" --json --limit 100 | jq -s '.')"
+  claims="$(fractal trace show "$subject" --json --limit 100 | jq -s '.')"
   jq -e 'map(.kind) | index("message.delivered") != null and index("message.read") != null' \
     <<<"$claims" >/dev/null
 }

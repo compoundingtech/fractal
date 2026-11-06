@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refine dormant loop reviewer checks for branches and empty legacy collections",
+  "replay": {"status": "none", "detail": "Reads existing history only; projections are unchanged."},
+  "schema": {"status": "none", "detail": "No schema or parser changes."},
+  "rules": {"status": "none", "detail": "Internal helpers only; public parsers still reject agent review."},
+  "compatibility": {"status": "none", "detail": "Declared keep/discard children retain responsibility without counting as rounds. Empty historical for-each snapshots no longer require a child for their entry-state attempt; missing item rounds still fail closed. Old nested loops sharing history paths remain fail-closed."},
+  "downtime": {"status": "none", "detail": "No production caller or runtime effect."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert unused preparation; no data recovery."}
+}
