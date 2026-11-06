@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v16.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -93,6 +93,16 @@ fn the_corpus_includes_every_registry_kind() {
             "add {kind} to a versioned corpus"
         );
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_subject_note_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()["note.set"], 0).unwrap();
+    fractal_schema::registry()
+        .validate_claim(&input.subject, &input.kind, &input.fields)
+        .unwrap();
+    assert_eq!(input.actor.as_deref(), Some(PERSON));
 }
 
 #[test]
@@ -999,6 +1009,12 @@ impl World {
             }
             let actor = if spec.kind == "deploy.go-consumed" { "agent/example-executor" } else { "agent/example-manager" };
             (fields, Some(actor.to_owned()))
+        } else if spec.kind == "note.set" {
+            (Map::from_iter([
+                ("target".into(), json!("agent/run-0/worker-0")),
+                ("text".into(), json!(self.fresh("note"))),
+                ("audience".into(), json!("agent")),
+            ]), Some(PERSON.to_owned()))
         } else {
             let mut fields = Map::new();
             for (name, field) in &spec.fields {
@@ -1046,6 +1062,7 @@ impl World {
             "message" => format!("message/{}", self.fresh("message")),
             "mission" => format!("mission/convergence-{small}"),
             "mission-run" => format!("mission-run/convergence-{small}"),
+            "note" => format!("note/{PERSON}/0192f3c4-7a1e-7c3a-9b2d-{small:012x}"),
             "observer" => format!("observer/run-0/watch-{small}"),
             "person" => PERSON.to_owned(),
             "planning-session" => format!("planning-session/{}", self.fresh("session")),
@@ -2014,7 +2031,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v17.json"
         }))
         .unwrap(),
     )
