@@ -1148,53 +1148,6 @@ fn test_capability_checkpoint() {
 #[cfg(not(debug_assertions))]
 fn test_capability_checkpoint() {}
 
-pub fn archive_resolved_message(
-    catalog_root: &Path,
-    selector: &AgentSelector,
-    this_host: &str,
-    filename: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        is_message_filename(filename),
-        "invalid message filename {filename:?}"
-    );
-    let identity = selector_reference(selector);
-    let agent = match optional_agent_handle(catalog_root, selector, this_host)? {
-        Some(agent) => agent,
-        None => {
-            let discovered = crate::discover(catalog_root);
-            if crate::catalog_transaction::catalog_transition(catalog_root)?.is_none()
-                && !catalog_root.join(crate::catalog_lock::CONTROL_DIR).exists()
-                && discovered.specs.is_empty()
-                && discovered.errors.is_empty()
-            {
-                return archive_msg(
-                    &catalog_root.join(identity).join("inbox"),
-                    &catalog_root.join(identity).join("archive"),
-                    filename,
-                );
-            }
-            anyhow::bail!(
-                "no agent '{identity}' found in catalog {}",
-                catalog_root.display()
-            )
-        }
-    };
-    if let Some(capability) = agent.capability.as_ref() {
-        let inbox = open_message_box(capability, &["resources", "inbox"], false)?
-            .context("message inbox does not exist")?;
-        let archive = open_message_box(capability, &["resources", "archive"], true)?
-            .context("created archive capability is missing")?;
-        archive_msg(
-            &crate::directory::retained_dir_path(&inbox)?,
-            &crate::directory::retained_dir_path(&archive)?,
-            filename,
-        )
-    } else {
-        archive_msg(&inbox_dir(&agent.path), &archive_dir(&agent.path), filename)
-    }
-}
-
 fn open_message_box(
     agent: &File,
     components: &[&str],

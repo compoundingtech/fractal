@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Removes unused workspace Rust message declared_selector, with_resolved_agent_dir and archive_inbox helpers and hooks required_by_codex, required_by_pi and required_by_omp catalog aggregators. No repository caller uses these exports. Per-agent hook predicates, current message operations and old-hook compatibility paths remain."
+    "detail": "Removes unused workspace Rust message declared_selector, with_resolved_agent_dir, archive_resolved_message and archive_inbox helpers, identity address_book, and hooks required_by_codex, required_by_pi and required_by_omp catalog aggregators. No repository caller uses these exports. Shared identity resolution, per-agent hook predicates, current message operations and old-hook compatibility paths remain."
   },
   "downtime": {
     "status": "none",
