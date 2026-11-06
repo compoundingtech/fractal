@@ -144,7 +144,7 @@ pub struct Plan {
     pub materialize: BTreeSet<String>,
 }
 
-pub fn manual_member(connection: &Connection, member: &Member) -> Result<bool, St3Error> {
+pub fn manual_member(connection: &Connection, member: &Member) -> Result<bool, FractalError> {
     manual_member_at(connection, member, None)
 }
 
@@ -152,14 +152,14 @@ pub fn manual_member_at(
     connection: &Connection,
     member: &Member,
     at: Option<u64>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     Ok(member.manual_rollout
         || claim(connection, &member.claim, at)?
             .and_then(|c| serde_json::from_value::<DesiredSubject>(c.body).ok())
             .is_some_and(|desired| crate::rollout::manual(&desired)))
 }
 
-pub fn subject(name: &str) -> Result<String, St3Error> {
+pub fn subject(name: &str) -> Result<String, FractalError> {
     let name = name.strip_prefix("owned-set/").unwrap_or(name);
     if name.is_empty()
         || name
@@ -167,7 +167,7 @@ pub fn subject(name: &str) -> Result<String, St3Error> {
             .any(|part| part.is_empty() || part == "." || part == "..")
         || name.chars().any(|c| c.is_whitespace() || c == '@')
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-owned-set",
             "set needs a nonempty graph name",
         ));
@@ -175,7 +175,7 @@ pub fn subject(name: &str) -> Result<String, St3Error> {
     Ok(format!("owned-set/{name}"))
 }
 
-pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Error> {
+pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
     smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
     let connection_key = connection as *const Connection as usize;
     if let Some(rows) = SNAPSHOT_ROWS.with(|slot| {
@@ -220,7 +220,7 @@ pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Er
             updated_at: chrono::DateTime::from_timestamp_millis(
                 accepted.parse().map_err(internal)?,
             )
-            .ok_or_else(|| St3Error::new("invalid-set-time", "invalid receipt time"))?
+            .ok_or_else(|| FractalError::new("invalid-set-time", "invalid receipt time"))?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             receipt,
             blockers: Vec::new(),
@@ -242,7 +242,7 @@ fn known_members(
     connection: &Connection,
     set: &str,
     at: Option<u64>,
-) -> Result<BTreeMap<String, Member>, St3Error> {
+) -> Result<BTreeMap<String, Member>, FractalError> {
     let mut history = rows(connection, at)?
         .into_iter()
         .filter(|v| v.id == set)
@@ -262,7 +262,7 @@ fn known_members(
     Ok(members)
 }
 
-fn stop_declaration(subject: &str) -> Result<DesiredSubject, St3Error> {
+fn stop_declaration(subject: &str) -> Result<DesiredSubject, FractalError> {
     let source = if let Some(name) = subject.strip_prefix("schedule/") {
         format!(
             "version 2\nschedule {} {{ stop }}\n",
@@ -277,7 +277,7 @@ fn stop_declaration(subject: &str) -> Result<DesiredSubject, St3Error> {
     crate::graph::parse_internal_intent(&source, "unused")?
         .subjects
         .remove(subject)
-        .ok_or_else(|| St3Error::new("invalid-set-member", "invalid retirement subject"))
+        .ok_or_else(|| FractalError::new("invalid-set-member", "invalid retirement subject"))
 }
 
 /// A complete winning membership also retires subjects learned only from losing branches.
@@ -286,7 +286,7 @@ pub fn effective_members(
     connection: &Connection,
     view: &View,
     at: Option<u64>,
-) -> Result<BTreeMap<String, (Member, bool, bool)>, St3Error> {
+) -> Result<BTreeMap<String, (Member, bool, bool)>, FractalError> {
     let mut members = BTreeMap::new();
     for (subject, member) in known_members(connection, &view.id, at)? {
         if view.receipt.members.contains_key(&subject)
@@ -345,7 +345,7 @@ fn one_shot_retirement(
     subject: &str,
     member: &Member,
     at: Option<u64>,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let Some(declaration) = claim(connection, &member.claim, at)? else {
         return Ok(None);
     };
@@ -369,7 +369,7 @@ pub fn one_shot_retirement_owner(
     connection: &Connection,
     desired: &DesiredSubject,
     origin: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let Some(set) = owner(connection, &desired.subject, None)? else {
         return Ok(None);
     };
@@ -392,7 +392,7 @@ pub fn claim(
     connection: &Connection,
     id: &str,
     at: Option<u64>,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     connection.query_row(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE id=?1 AND store_index<=?2 AND NOT EXISTS
@@ -401,7 +401,7 @@ pub fn claim(
     ).optional().map_err(internal)
 }
 
-pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Error> {
+pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
     let rows = rows(connection, at)?;
     let references: BTreeMap<_, _> = rows.iter().map(|v| (reference(v), v)).collect();
     let mut winners: BTreeMap<String, View> = BTreeMap::new();
@@ -508,7 +508,7 @@ pub fn owner(
     connection: &Connection,
     member: &str,
     at: Option<u64>,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let owners: BTreeSet<_> = rows(connection, at)?
         .into_iter()
         .filter(|v| {
@@ -517,7 +517,7 @@ pub fn owner(
         .map(|v| v.id)
         .collect();
     if owners.len() > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "owned-set-conflict",
             format!("{member} has conflicting set owners"),
         ));
@@ -530,7 +530,7 @@ pub fn owner(
 pub fn owners_at(
     connection: &Connection,
     at: Option<u64>,
-) -> Result<BTreeMap<String, BTreeSet<String>>, St3Error> {
+) -> Result<BTreeMap<String, BTreeSet<String>>, FractalError> {
     let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
     for view in rows(connection, at)? {
         for member in view.receipt.members.keys().chain(view.receipt.retired.keys()) {
@@ -540,9 +540,9 @@ pub fn owners_at(
     Ok(owners)
 }
 
-pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3Error> {
+pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), FractalError> {
     if let Some(set) = owner(connection, member, None)? {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "set-managed-subject",
             format!("{member} is managed by {set}; publish its declaration through that set"),
         ));
@@ -555,14 +555,14 @@ pub fn conflicts_at(
     connection: &Connection,
     member: &str,
     at: Option<u64>,
-) -> Result<Option<Vec<String>>, St3Error> {
+) -> Result<Option<Vec<String>>, FractalError> {
     let Some(set) = owner(connection, member, at)? else {
         return Ok(None);
     };
     let view = selected(connection, at)?
         .into_iter()
         .find(|v| v.id == set)
-        .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+        .ok_or_else(|| FractalError::new("owned-set-pending", "missing owning set"))?;
     Ok(Some(if view.blockers.is_empty() {
         Vec::new()
     } else {
@@ -570,13 +570,13 @@ pub fn conflicts_at(
     }))
 }
 
-pub fn guard_member(connection: &Connection, member: &str) -> Result<(), St3Error> {
+pub fn guard_member(connection: &Connection, member: &str) -> Result<(), FractalError> {
     if owner(connection, member, None)?.is_none() {
         let staged: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND json_extract(body,'$.owned_set') IS NOT NULL)",
             [member], |row|row.get(0)).map_err(internal)?;
         if staged {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "owned-set-pending",
                 "staged member awaits its owning set revision",
             ));
@@ -586,15 +586,15 @@ pub fn guard_member(connection: &Connection, member: &str) -> Result<(), St3Erro
         let view = selected(connection, None)?
             .into_iter()
             .find(|v| v.id == set)
-            .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+            .ok_or_else(|| FractalError::new("owned-set-pending", "missing owning set"))?;
         if !view.blockers.is_empty() {
-            return Err(St3Error::new("owned-set-pending", view.blockers.join("; ")));
+            return Err(FractalError::new("owned-set-pending", view.blockers.join("; ")));
         }
     }
     Ok(())
 }
 
-pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(), St3Error> {
+pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(), FractalError> {
     let subject = format!(
         "mission/{}",
         mission.strip_prefix("mission/").unwrap_or(mission)
@@ -606,7 +606,7 @@ pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(),
             .find(|v| v.id == set)
             .unwrap();
         if !view.receipt.members.contains_key(&subject) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "mission-retired",
                 format!("{subject} was retired by {set}"),
             ));
@@ -619,12 +619,12 @@ pub fn plan_tx(
     transaction: &Transaction<'_>,
     input: &NormalizedIntent,
     options: &Options,
-) -> Result<Plan, St3Error> {
+) -> Result<Plan, FractalError> {
     let set = subject(&options.set)?;
     if let Some(policy) = &options.rollout {
         policy
             .validate()
-            .map_err(|e| St3Error::new("invalid-rollout-policy", e.to_string()))?;
+            .map_err(|e| FractalError::new("invalid-rollout-policy", e.to_string()))?;
     }
     if options.source.repository.split('/').count() != 2
         || options.source.repository.split('/').any(str::is_empty)
@@ -633,7 +633,7 @@ pub fn plan_tx(
         || !matches!(options.source.sha.len(), 40 | 64)
         || !options.source.sha.bytes().all(|b| b.is_ascii_hexdigit())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-set-source",
             "source needs repository, full branch ref and immutable hex SHA",
         ));
@@ -649,7 +649,7 @@ pub fn plan_tx(
                 || s.owner_step.is_some()
         })
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unsupported-set-member",
             "owned sets manage top-level agents, missions and schedules only",
         ));
@@ -918,7 +918,7 @@ pub fn plan_tx(
             changes.insert(s.clone(), "retiring".into());
             if m.kind == "mission" {
                 let c = claim(transaction, &m.claim, None)?.ok_or_else(|| {
-                    St3Error::new("owned-set-pending", "missing mission reference")
+                    FractalError::new("owned-set-pending", "missing mission reference")
                 })?;
                 let spec: MissionSpec = serde_json::from_value(c.body).map_err(internal)?;
                 let spec = crate::mission::retired_mission(spec)?;
@@ -1016,10 +1016,10 @@ pub fn plan_tx(
     })
 }
 
-pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
+pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), FractalError> {
     if !plan.preview.blockers.is_empty() {
         return Err(
-            St3Error::new("owned-set-refused", plan.preview.blockers.join("; "))
+            FractalError::new("owned-set-refused", plan.preview.blockers.join("; "))
                 .with_detail("preview", json!(plan.preview)),
         );
     }
@@ -1027,13 +1027,13 @@ pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
         return Ok(());
     }
     if options.expected_subjects != plan.preview.expected_subjects {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-subject",
             "owned-set member heads changed; preview again",
         ));
     }
     if plan.preview.empty && !options.allow_empty {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-owned-set",
             "intentional empty membership needs --allow-empty",
         )
@@ -1042,7 +1042,7 @@ pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
     if plan.preview.mass_retirement
         && options.confirm_retire.as_deref() != Some(&plan.preview.digest)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "mass-retirement-refused",
             "retirement requires confirmation of this exact preview",
         )
@@ -1057,7 +1057,7 @@ pub fn commit_tx(
     plan: &Plan,
     actor: Option<&str>,
     batch: &str,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     let mut members = BTreeMap::new();
     let mut retired = plan.retired.clone();
     for (s, change) in &plan.preview.changes {
@@ -1080,7 +1080,7 @@ pub fn commit_tx(
         } else {
             let row = current_desired_row_tx(transaction, s)
                 .map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-set-member", s.clone()))?;
+                .ok_or_else(|| FractalError::new("missing-set-member", s.clone()))?;
             Member {
                 one_shot: plan
                     .intent
@@ -1141,7 +1141,7 @@ pub fn commit_tx(
 }
 
 /// Rebuild the existing desired and mission projections through exact set member references.
-pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     for view in selected(transaction, None)? {
         if !view.blockers.is_empty() {
             continue;
@@ -1214,14 +1214,14 @@ pub fn desired_at(connection: &Connection, s: &str, at: u64) -> Result<Option<De
     }))
 }
 
-pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error> {
+pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), FractalError> {
     let revision: Revision = serde_json::from_value(body["fields"]["body"].clone())
-        .map_err(|e| St3Error::new("invalid-owned-set", e.to_string()))?;
+        .map_err(|e| FractalError::new("invalid-owned-set", e.to_string()))?;
     if subject(subject_name)? != subject_name
         || body["fields"]["revision"].as_str()
             != Some(&canonical_hash(&revision).map_err(internal)?)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-owned-set",
             "set revision has invalid identity/hash",
         ));
@@ -1231,7 +1231,7 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error
         .keys()
         .any(|s| revision.retired.contains_key(s))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-owned-set",
             "a member cannot be live and retired",
         ));
@@ -1242,7 +1242,7 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error
             || m.claim.is_empty()
             || m.revision.is_empty()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-owned-set",
                 "invalid member reference",
             ));
@@ -1253,7 +1253,7 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error
         || !matches!(revision.source.sha.len(), 40 | 64)
         || !revision.source.sha.bytes().all(|b| b.is_ascii_hexdigit())
     {
-        return Err(St3Error::new("invalid-owned-set", "invalid source"));
+        return Err(FractalError::new("invalid-owned-set", "invalid source"));
     }
     Ok(())
 }
@@ -1269,7 +1269,7 @@ impl Store {
     /// Fence an external effect prepared from a declaration against the selected set.
     /// Effect callers must enter outside an enclosing read snapshot and wait for this
     /// method to return before writing or performing the effect.
-    pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), St3Error> {
+    pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), FractalError> {
         smallclaims::sqlite::debug_assert_no_pinned_read();
         smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
         smallclaims::touched::note_read(|| desired.subject.clone());
@@ -1286,7 +1286,7 @@ impl Store {
         }
         if let Some(current) = retirements::terminal_selection(&self.readers.get(), desired)? {
             return if current { Ok(()) } else {
-                Err(St3Error::new("stale-set-member", "terminal retirement replaced this declaration"))
+                Err(FractalError::new("stale-set-member", "terminal retirement replaced this declaration"))
             };
         }
         // A negative probe is not authorization. Start another current snapshot for the full
@@ -1298,14 +1298,14 @@ impl Store {
                     let view = selected(&connection, None)?
                         .into_iter()
                         .find(|v| v.id == set)
-                        .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+                        .ok_or_else(|| FractalError::new("owned-set-pending", "missing owning set"))?;
                     if !view.blockers.is_empty() {
-                        return Err(St3Error::new("owned-set-pending", view.blockers.join("; ")));
+                        return Err(FractalError::new("owned-set-pending", view.blockers.join("; ")));
                     }
                     let members = effective_members(&connection, &view, None)?;
                     let member = members.get(&desired.subject);
                     if member.is_none_or(|(m, _, _)| m.revision != desired_revision(desired)) {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-set-member",
                             "declaration changed since this effect was prepared",
                         ));
@@ -1316,7 +1316,7 @@ impl Store {
                         [&desired.subject], |row| row.get(0),
                     ).map_err(internal)?;
                     if staged {
-                        return Err(St3Error::new("owned-set-pending", "staged member awaits its owning set revision"));
+                        return Err(FractalError::new("owned-set-pending", "staged member awaits its owning set revision"));
                     }
                 }
                 Ok(())

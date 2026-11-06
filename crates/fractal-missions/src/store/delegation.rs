@@ -14,7 +14,7 @@ pub fn add_evidence(
     connection: &Connection,
     evidence: &mut Vec<String>,
     proof: &DelegationProof,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     // The instruction is a person's message, which the messages shard refuses: it is always a
     // graph claim. Only a delegated step's target may be a stream item (`message_sent_in`).
     let instruction = message_sent(connection, &proof.message)?;
@@ -30,16 +30,16 @@ pub trait DelegationStore {
     fn delegated_update_request(
             &self,
             proof: &DelegationProof,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
     fn delegation_evidence(
             &self,
             evidence: &mut Vec<String>,
             proof: &DelegationProof,
-        ) -> Result<(), St3Error>;
+        ) -> Result<(), FractalError>;
     fn set_delegation_policy(
             &self,
             input: &DelegationPolicyRequest,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
 }
 
 impl DelegationStore for Store {
@@ -47,7 +47,7 @@ impl DelegationStore for Store {
     fn delegated_update_request(
             &self,
             proof: &DelegationProof,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         let request = claim_by_id_tx(&self.readers.get(), &proof.episode)
             .map_err(internal)?
             .filter(|claim| {
@@ -65,14 +65,14 @@ impl DelegationStore for Store {
             &self,
             evidence: &mut Vec<String>,
             proof: &DelegationProof,
-        ) -> Result<(), St3Error> {
+        ) -> Result<(), FractalError> {
         add_evidence(&self.readers.get(), evidence, proof)
     }
 
     fn set_delegation_policy(
             &self,
             input: &DelegationPolicyRequest,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         self.append_claim(&ClaimInput {
             subject: input.person.clone(),
             kind: "person.delegation-set".into(),

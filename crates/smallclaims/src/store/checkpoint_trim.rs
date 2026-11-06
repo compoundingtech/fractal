@@ -71,43 +71,69 @@ pub type TrimLogHook = Box<dyn FnMut(&str) + Send>;
 /// while it goes on, unless a test sets another interval. Both are reset once when the run stops.
 pub const TRIM_VIEW_REFOLD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// What a trim's run owes the views and the replication snapshot: a refold and a new snapshot at
-/// most every [`TRIM_VIEW_REFOLD_INTERVAL`] while it deletes, and when it stops, however it stops,
-/// one forget and a snapshot built from nothing.
+/// How many deleted envelopes a trim's run holds for the replication snapshot before it patches
+/// it without waiting for the interval, so the run's heap stays fixed whatever the history
+/// (tests/checkpoint_memory.rs). A paced run deletes about this many in a minute and a half.
+pub const TRIM_SNAPSHOT_PATCH_ENVELOPES: usize = 4_096;
+
+/// What a trim's run owes the views and the replication snapshot: a refold and a patched
+/// snapshot at most every [`TRIM_VIEW_REFOLD_INTERVAL`] while it deletes, and when it stops,
+/// however it stops, one forget of the views and one more patch.
 ///
 /// A chunk deletes the payloads of envelopes the checkpoint still lists, so the inventory's
 /// identities and digests stay as they were; a snapshot from before the chunk still answers for
 /// them, and export skips a payload that is gone. Rebuilding after every chunk only made each
-/// exchange wait for an inventory build that the next chunk made stale again.
+/// exchange wait for an inventory build that the next chunk made stale again. Which payloads the
+/// snapshot holds is patched from the envelopes the chunks deleted, so it is exact after each
+/// catch-up and after the stop without loading the inventory from nothing: that load took the
+/// first exchange after a run's stop tens of seconds, and every other exchange queued behind it.
 struct TrimViews<'a> {
     store: &'a Store,
     interval: std::time::Duration,
     refolded: std::time::Instant,
     pending: bool,
+    /// Envelopes deleted since the last patch.
+    trimmed: Vec<ReplicaEnvelopeId>,
 }
 
 impl<'a> TrimViews<'a> {
     fn new(store: &'a Store) -> Self {
         let interval = std::time::Duration::from_micros(store.trim_view_refold_micros.load(Ordering::Acquire));
-        Self { store, interval, refolded: std::time::Instant::now(), pending: false }
+        Self { store, interval, refolded: std::time::Instant::now(), pending: false, trimmed: Vec::new() }
     }
 
-    /// A chunk deleted rows: if the last catch-up is an interval old, replication builds its
-    /// next snapshot on from the last one and the views refold.
-    fn deleted(&mut self) {
+    /// A chunk deleted rows: if the last catch-up is an interval old, replication patches its
+    /// snapshot, builds the next one on from it, and the views refold. Between catch-ups the
+    /// snapshot is also patched whenever enough deleted envelopes are held.
+    fn deleted(&mut self, envelopes: &[EnvelopeTombstone]) {
         self.pending = true;
+        self.trimmed.extend(envelopes.iter().map(|envelope| ReplicaEnvelopeId {
+            writer: envelope.writer.clone(),
+            sequence: envelope.sequence,
+            hash: envelope.envelope_hash.clone(),
+        }));
         if self.refolded.elapsed() >= self.interval {
-            self.store.replica_inventory_changed();
+            self.patch_snapshot();
             self.store.runtime.claims_trimmed();
             self.refolded = std::time::Instant::now();
+        } else if self.trimmed.len() >= TRIM_SNAPSHOT_PATCH_ENVELOPES {
+            self.patch_snapshot();
         }
     }
 
-    /// The run stopped: forget the views once, if it deleted anything, and build the next
-    /// replication snapshot from nothing, so which payloads it holds and its counts are exact.
+    /// The run stopped: forget the views once, if it deleted anything, and patch the replication
+    /// snapshot, so which payloads it holds and its counts are exact.
     fn stopped(&mut self) {
         if std::mem::take(&mut self.pending) {
-            self.store.replica_rows_changed();
+            self.store.runtime.forget_views();
+            self.patch_snapshot();
+        }
+    }
+
+    fn patch_snapshot(&mut self) {
+        let trimmed = std::mem::take(&mut self.trimmed);
+        if self.store.mark_payloads_trimmed(&trimmed).is_err() {
+            // A snapshot that cannot be patched is built from nothing instead.
             self.store.forget_replication_snapshot();
         }
     }
@@ -752,10 +778,10 @@ impl Store {
     pub fn adopt_checkpoint(
         &self,
         manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>, St3Error> {
+    ) -> Result<Vec<CheckpointAction>, FractalError> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         if self.trims_locally() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "trim-is-local",
                 "this member trims locally ([trim] local), so it adopts no checkpoint manifest",
             ));
@@ -770,7 +796,7 @@ impl Store {
     pub /* sqlite-large-value-flow: allow-for-now flow-h3436182aecc1 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn restore_checkpoint_history(
         &self,
         manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>, St3Error> {
+    ) -> Result<Vec<CheckpointAction>, FractalError> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let occupied: bool = self
             .readers
@@ -784,7 +810,7 @@ impl Store {
             )
             .map_err(internal)?;
         if occupied {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-history-exists",
                 "checkpoint restore requires empty checkpoint state",
             ));
@@ -796,7 +822,7 @@ impl Store {
         &self,
         manifest: &CheckpointManifest,
         require_newest: bool,
-    ) -> Result<Vec<CheckpointAction>, St3Error> {
+    ) -> Result<Vec<CheckpointAction>, FractalError> {
         let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let claims = self.checkpoint_claims().map_err(internal)?;
@@ -808,7 +834,7 @@ impl Store {
                 .next_back()
                 .is_some_and(|newest| *newest > manifest.cut_unix_ms)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-superseded",
                 format!(
                     "`{}` is older than the newest stable checkpoint here; a node adopts only \
@@ -819,7 +845,7 @@ impl Store {
         }
         let certificates = certificates(&claims, &manifest.checkpoint);
         let Some(certificate) = chosen_certificate(&certificates) else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-not-stable",
                 format!(
                     "`{}` is not stable on this node; it adopts a checkpoint once it holds \
@@ -829,7 +855,7 @@ impl Store {
             ));
         };
         if certificate.terms.cut_unix_ms != manifest.cut_unix_ms {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-manifest-invalid",
                 "the manifest's cut is not the certified one",
             ));
@@ -1296,7 +1322,7 @@ impl Store {
             // replication at once, and leaves the views serving until a refold is due: their
             // folds from nothing take seconds, longer than a chunk and its pause.
             if !envelopes.is_empty() || !claims.is_empty() {
-                views.deleted();
+                views.deleted(&envelopes);
             }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();

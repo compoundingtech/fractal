@@ -89,7 +89,7 @@ pub(super) async fn plan_waiting_for_proof(
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "checkpoint-proof-in-progress",
                 "a checkpoint proof is running; retry shortly",
             )));
@@ -282,10 +282,10 @@ pub async fn replication_receive(
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let projection_was_healthy = !store
             .replication_projection_needs_recovery()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
@@ -300,20 +300,20 @@ pub async fn replication_receive(
         )?;
         if store
             .observes_transport_to(&request.peer)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
         {
             store
                 .record_transport_observation(&request.peer, "up", None, None)
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
             let admission = store
                 .validate_replication_backlog()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             let repairs = store
                 .apply_replication_repairs()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -361,7 +361,7 @@ pub async fn replication_receive(
         let projected = projection.unwrap_or(false);
         let store_index = store
             .index()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
         let quiet_only = projection_was_healthy
@@ -371,7 +371,7 @@ pub async fn replication_receive(
             && admission.invalid == 0
             && store
                 .claims_since_only_quiet_notifications(before_index)
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         Ok((
             ReplicationReceiveResponse {
@@ -566,7 +566,7 @@ pub async fn shard_replication_receive(
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = replication_shard(&state, &shard)?;
     let response = blocking_action(move || {
-        let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
+        let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         let before_index = store.index().map_err(internal)?;
         let receipt = store.receive_replication_exchange_via(
             &request.peer,

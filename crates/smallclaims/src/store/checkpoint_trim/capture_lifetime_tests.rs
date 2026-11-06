@@ -35,11 +35,11 @@ impl Runtime for CaptureRuntime {
 
     fn schema_digest(&self) -> String { Plain.schema_digest() }
 
-    fn classify_replicated_claim(&self, connection: &Connection, batch: &ReplicaBatch, claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, St3Error> {
+    fn classify_replicated_claim(&self, connection: &Connection, batch: &ReplicaBatch, claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, FractalError> {
         Plain.classify_replicated_claim(connection, batch, claim)
     }
 
-    fn append_claim(&self, store: &Store, input: &ClaimInput) -> Result<(ClaimRecord, bool), St3Error> {
+    fn append_claim(&self, store: &Store, input: &ClaimInput) -> Result<(ClaimRecord, bool), FractalError> {
         Plain.append_claim(store, input)
     }
 
@@ -52,15 +52,15 @@ impl Runtime for CaptureRuntime {
         Plain.append_claim_tx(tx, origin, subject, kind, actor, body, predecessors, forced_batch)
     }
 
-    fn project_incremental(&self, tx: &Transaction<'_>, origin: &str, through: u64) -> Result<IncrementalProjection, St3Error> {
+    fn project_incremental(&self, tx: &Transaction<'_>, origin: &str, through: u64) -> Result<IncrementalProjection, FractalError> {
         Plain.project_incremental(tx, origin, through)
     }
 
-    fn replay_from_nothing(&self, tx: &Transaction<'_>) -> Result<(), St3Error> {
+    fn replay_from_nothing(&self, tx: &Transaction<'_>) -> Result<(), FractalError> {
         Plain.replay_from_nothing(tx)
     }
 
-    fn after_projection(&self, tx: &Transaction<'_>) -> Result<(), St3Error> {
+    fn after_projection(&self, tx: &Transaction<'_>) -> Result<(), FractalError> {
         Plain.after_projection(tx)
     }
 
