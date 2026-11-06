@@ -288,6 +288,9 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
             if m.validate().is_err() || m.subject() != subject {
                 continue;
             }
+            if fractal_schema::notice::validate_registration(&m, hash).is_err() {
+                continue;
+            }
             registrations.entry(hash.to_owned()).or_insert((m, c));
         }
         if let Some((hash, (m, c))) = registrations.first_key_value() {
@@ -333,11 +336,19 @@ pub fn prepare(
             "use schema register to publish a registration",
         ));
     }
+    let reserved = fractal_schema::notice::is_reserved_subject(&input.subject)
+        || fractal_schema::notice::is_reserved_kind(&input.kind);
+    if reserved {
+        return Err(fail("notices unavailable: native graph authority admission is not enabled"));
+    }
     if !input.subject.starts_with("custom/") {
         return Ok(None);
     }
     flush(tx).map_err(internal)?;
     let Some((hash, m, state)) = registration(tx, &input.subject).map_err(internal)? else {
+        if reserved {
+            return Err(fail("notices unavailable: pinned registration is not available"));
+        }
         if input.fields.contains_key("_registration") {
             return Err(fail("registration is not available"));
         }
@@ -357,12 +368,16 @@ pub fn prepare(
     let creation = history.iter().find(|c| {
         c.kind == m.creation_kind && fields(c).get("_registration") == Some(&json!(hash))
     });
-    validate_fact(tx, &m, &input.kind, input.actor.as_deref(), &f, creation)
+    if input.subject.starts_with("custom/attention/source/") && creation.is_some() {
+        return Err(fail("notices unavailable: producer input is immutable"));
+    }
+    validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation)
         .map_err(|e| fail(e.to_string()))?;
     Ok(Some(f))
 }
 fn validate_fact(
     connection: &Connection,
+    subject: &str,
     m: &Manifest,
     kind: &str,
     actor: Option<&str>,
@@ -381,6 +396,10 @@ fn validate_fact(
     anyhow::ensure!(
         actor.starts_with("agent/") || actor.starts_with("person/"),
         "typed actor must be a person or agent"
+    );
+    anyhow::ensure!(
+        !fractal_schema::notice::is_reserved_subject(subject) && !fractal_schema::notice::is_reserved_kind(kind),
+        "notices unavailable: native graph authority admission is not enabled"
     );
     match spec.authority {
         Authority::Creator => {
@@ -535,6 +554,12 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
+        if fractal_schema::notice::is_reserved_subject(subject) {
+            let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});
+            tx.execute("INSERT OR REPLACE INTO custom_sources VALUES(?1,'','','','unavailable',?2,NULL,NULL,0,'0')",
+                params![subject, canonical_json_text(&body)?])?;
+            return Ok(());
+        }
         let history = claims(tx, subject)?;
         if let Some(c) = history
             .iter()
@@ -564,7 +589,7 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let mut error = None;
     let mut valid = Vec::new();
     for c in &pinned {
-        match validate_fact(tx, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
+        match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
             Ok(()) => valid.push(c.clone()),
             Err(e) => {
                 error = Some(e.to_string());
@@ -760,6 +785,7 @@ impl Store {
         let m = &request.manifest;
         let bytes = serde_json::to_vec(m).map_err(internal)?;
         let hash = hex::encode(Sha256::digest(&bytes));
+        fractal_schema::notice::validate_registration(m, &hash).map_err(typed)?;
         let name = format!("doc/custom-kinds/{}.v{}/{}", m.kind, m.version, hash);
         self.put_document_as(
             &name,
@@ -789,6 +815,9 @@ impl Store {
         self.readers.get().prepare("SELECT subject,hash,manifest,state,error FROM custom_registrations ORDER BY subject")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?)))?.map(|r|{let(s,h,m,state,error)=r?;Ok(json!({"id":s,"registration":h,"manifest":serde_json::from_str::<Value>(&m)?,"state":state,"error":error}))}).collect()
     }
     pub fn custom_subject(&self, subject: &str) -> Result<Option<Value>> {
+        if fractal_schema::notice::is_reserved_subject(subject) {
+            anyhow::bail!("notices unavailable: reserved raw notice rows require the native notice reader");
+        }
         source(&self.readers.get(), subject)
     }
     /// Which of these subjects are registered custom sources, in one read.
@@ -824,16 +853,16 @@ impl Store {
         let connection = self.readers.get();
         let query = match (kind, version) {
             (Some(_), Some(_)) => {
-                "SELECT body FROM custom_sources WHERE kind=?1 AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND kind=?1 AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
             }
             (Some(_), None) => {
-                "SELECT body FROM custom_sources WHERE kind=?1 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND kind=?1 AND subject>?3 ORDER BY subject LIMIT ?4"
             }
             (None, Some(_)) => {
-                "SELECT body FROM custom_sources WHERE json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
             }
             (None, None) => {
-                "SELECT body FROM custom_sources WHERE subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT body FROM custom_sources WHERE subject NOT LIKE 'custom/attention/source/%' AND subject NOT LIKE 'custom/attention/snapshot/%' AND subject NOT LIKE 'custom/attention/control/%' AND subject>?3 ORDER BY subject LIMIT ?4"
             }
         };
         let texts = connection
