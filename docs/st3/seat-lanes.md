@@ -151,8 +151,17 @@ empties on its own. The lane outlives it until the seat stops for good (above).
 
 ## The host guard
 
-The kernel OOM-kills inside a lane on purpose. A host guard that counts every `oom_kill` in the user
-slice would read that as a fault, so it counts only the kills outside lanes:
+The kernel OOM-kills inside a lane on purpose. `scripts/fractal-test` names such a kill, which
+otherwise leaves only a bare exit: before a check that builds, it reads the `oom_kill` count in
+`memory.events` of each memory limit the check runs under (its own cap, else the seat's lane it runs
+in, and builds.slice, where the host's sccache server compiles), and a check that fails while one grew
+says `killed by the lane's memory limit (SLICE): N OOM kills at memory.max X while it ran`. Only the
+innermost limit that counted kills is named, since a kill counts in every cgroup above it too. A
+limit is shared with what else runs under it (builds.slice with every run's compiles, a lane with the
+run's other checks and the seat's harness), so a kill it names may be theirs.
+
+A host guard that counts every `oom_kill` in the user slice would read a lane's kills as a fault, so
+it counts only the kills outside lanes:
 
 ```
 oom_kill(user.slice/user-UID.slice/memory.events)
