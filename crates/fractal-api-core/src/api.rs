@@ -90,6 +90,7 @@ use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, Pe
 #[cfg(test)]
 use crate::model::IntentInput;
 use crate::store::Store;
+use crate::store::local_commits;
 
 pub mod wire_names;
 pub mod seat_freshness;
@@ -6634,17 +6635,12 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
-        // The writer's callback only wakes this task; whether the commit holds a claim this
-        // node wrote is read here, off the writer.
-        let commits = Arc::new(tokio::sync::Notify::new());
-        let _observer = {
-            let commits = Arc::clone(&commits);
-            store.observe_commits(move |_| commits.notify_one())
-        };
+        // Whether a commit holds a claim this node wrote is read off the writer, once for every
+        // refresher that pauses on it.
+        let mut local = store.local_commits();
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
-        let mut look = AgentRosterLook::default();
         loop {
             let started = tokio::time::Instant::now();
             // Every claim at or before this index is in the fold below or an earlier one.
@@ -6659,7 +6655,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            agent_roster_pause(&store, &commits, &mut look, started.elapsed(), folded_through).await;
+            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
             if store.agent_roster_refresh_failed() {
@@ -6671,102 +6667,25 @@ pub fn start_agent_roster(state: &AppState) {
 }
 
 /// Why the refresher's pause between two refreshes ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentRosterPauseEnd {
-    Full,
-    FreshRead,
-    LocalClaim,
-}
-
-/// The most claims one look for a claim this node wrote reads. A longer run, as through a
-/// replication catch-up, is read a run of this many at a time, each on its own blocking task,
-/// so no read grows with the catch-up and none of it is skipped. There is no index by origin.
-const AGENT_ROSTER_LOCAL_SCAN: u64 = 10_000;
-
-/// The refresher's one look for a claim this node wrote, kept from one pause to the next: a
-/// pause that ends while a look is queued or running leaves it here, and the next pause waits
-/// on it rather than start another, so a congested blocking pool never holds more than one.
-#[derive(Default)]
-struct AgentRosterLook {
-    running: Option<tokio::task::JoinHandle<anyhow::Result<(u64, bool, bool)>>>,
-    /// How many looks have started, for tests.
-    started: u64,
-}
+type AgentRosterPauseEnd = local_commits::PauseEnd;
 
 /// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
 /// however often readers ask or this node writes, and at least the minimum pause; then the rest
 /// of the full pause, unless a reader waits for a fresh roster or this node commits a claim after
-/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
-/// one more fold at the minimum pause, never a missed one). Either then waits for one fold, not
-/// the rest of the pause: a person waiting to see their own write is not left waiting up to a
-/// second for the next timed fold. Commits that hold only claims other nodes wrote keep the full
-/// pause, so a busy replication stream does not fold the roster any more often.
+/// `through`, an index the refresh has surely folded. Either then waits for one fold, not the
+/// rest of the pause: a person waiting to see their own write is not left waiting up to a second
+/// for the next timed fold. A local claim waits twice the fold, so a stream of local writes keeps
+/// a cheap refresh to a third of a core. Commits that hold only claims other nodes wrote keep the
+/// full pause, so a busy replication stream does not fold the roster any more often. See
+/// [`local_commits::pause_after_fold`].
 async fn agent_roster_pause(
     store: &Arc<Store>,
-    commits: &tokio::sync::Notify,
-    look: &mut AgentRosterLook,
+    local: &mut local_commits::LocalCommits,
     folded: Duration,
     through: u64,
 ) -> AgentRosterPauseEnd {
-    agent_roster_pause_scanning(store, commits, look, folded, through, AGENT_ROSTER_LOCAL_SCAN).await
-}
-
-/// [`agent_roster_pause`], reading at most `scan` claims per look. `commits` is woken by every
-/// commit; a wake starts one look on the blocking pool, and at most one runs at a time, in this
-/// pause or carried over from an earlier one. The timer and fresh reads are still served while it
-/// runs, so a busy pool or a slow read never holds the pause past its end. Wakes during a look
-/// leave their permit for the next one.
-async fn agent_roster_pause_scanning(
-    store: &Arc<Store>,
-    commits: &tokio::sync::Notify,
-    look: &mut AgentRosterLook,
-    folded: Duration,
-    mut through: u64,
-    scan: u64,
-) -> AgentRosterPauseEnd {
-    let start = |look: &mut AgentRosterLook, through: u64| {
-        let reader = Arc::clone(store);
-        look.started += 1;
-        look.running = Some(tokio::task::spawn_blocking(move || {
-            let index = reader.index()?;
-            let upto = index.min(through.saturating_add(scan));
-            if upto <= through {
-                return anyhow::Ok((through, false, false));
-            }
-            Ok((upto, reader.first_local_commit_after(through, upto)?.is_some(), upto < index))
-        }));
-    };
-    let pause = folded.max(AGENT_ROSTER_FRESH_PAUSE);
-    tokio::time::sleep(pause).await;
-    let rest = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause));
-    tokio::pin!(rest);
-    loop {
-        tokio::select! {
-            () = &mut rest => return AgentRosterPauseEnd::Full,
-            () = store.fresh_agent_roster_wanted() => return AgentRosterPauseEnd::FreshRead,
-            // A commit during the refresh or the minimum pause left its wake: it is read here.
-            () = commits.notified(), if look.running.is_none() => start(look, through),
-            read = async { look.running.as_mut().expect("polled only while looking").await },
-                if look.running.is_some() => {
-                look.running = None;
-                match read {
-                    // A look carried over from an earlier pause may end at or before `through`:
-                    // what it found, the refresh since has folded.
-                    Ok(Ok((upto, true, _))) if upto > through => return AgentRosterPauseEnd::LocalClaim,
-                    Ok(Ok((upto, _, more))) if upto > through => {
-                        through = upto;
-                        // The rest of a long run is read at once, with no commit to wait for.
-                        if more {
-                            start(look, through);
-                        }
-                    }
-                    Ok(Ok(_)) => {}
-                    // The full pause still ends this one; a failed read costs only the shortcut.
-                    Ok(Err(_)) | Err(_) => {}
-                }
-            }
-        }
-    }
+    let pace = local_commits::Pace { floor: AGENT_ROSTER_FRESH_PAUSE, full: AGENT_ROSTER_REFRESH_PAUSE };
+    local_commits::pause_after_fold(local, store.fresh_agent_roster_wanted(), pace, folded, through).await
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no

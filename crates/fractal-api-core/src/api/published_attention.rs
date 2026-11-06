@@ -17,6 +17,11 @@ use std::collections::HashMap;
 /// selection a window waits for is computed during the pause, once.
 const ATTENTION_LIST_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
+/// The shortest pause a claim this node commits cuts [`ATTENTION_LIST_REFRESH_PAUSE`] to, so a
+/// very cheap refresh cannot turn a burst of local writes into many refreshes a second. The pause
+/// still lasts twice the refresh, so a stream of local writes keeps it to a third of a core.
+const ATTENTION_LIST_LOCAL_PAUSE: Duration = Duration::from_millis(100);
+
 /// How often the rows are evaluated again with no claim: eligibility and grace periods read the
 /// clock. The same period collection windows used to reread attention on.
 const ATTENTION_LIST_CLOCK: Duration = Duration::from_secs(30);
@@ -56,8 +61,15 @@ pub fn start_attention_list(state: &AppState) {
         }
         let _stopped = Stopped(store.clone());
         let idle = ATTENTION_LIST_IDLE.as_millis() as u64;
+        // Whether a commit holds a claim this node wrote is read off the writer, once for every
+        // refresher that pauses on it.
+        let mut local = store.local_commits();
         loop {
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the refresh below or an earlier one.
+            let refreshed_through = store.index().unwrap_or(u64::MAX);
+            #[cfg(test)]
+            store.extension::<tests::Passes>().0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let reader = store.clone();
             let summary_state = state.clone();
             // Attention folds only while windows read it (they reread it every clock period),
@@ -155,7 +167,11 @@ pub fn start_attention_list(state: &AppState) {
             }
             // The pause bounds this task's work, but a window waiting for a summary selection
             // does not wait through it: each wake computes the selections waiting then.
-            let pause = tokio::time::Instant::now() + started.elapsed().max(ATTENTION_LIST_REFRESH_PAUSE);
+            let paused = tokio::time::Instant::now();
+            let pause = paused + started.elapsed().max(ATTENTION_LIST_REFRESH_PAUSE);
+            // A claim this node commits that the refresh has not read cuts the pause, so its
+            // writer sees it after one refresh; claims other nodes wrote keep the full pause.
+            let local_floor = (paused + (started.elapsed() * 2).max(ATTENTION_LIST_LOCAL_PAUSE)).min(pause);
             let mut woken = false;
             let mut roster_arrived = false;
             loop {
@@ -194,6 +210,10 @@ pub fn start_attention_list(state: &AppState) {
                 }
                 tokio::select! {
                     () = tokio::time::sleep_until(pause) => break,
+                    () = local.after_until(refreshed_through, local_floor) => {
+                        woken = true;
+                        break;
+                    }
                     () = wake.notified() => woken = true,
                     // With no shared counts (as the daemon starts, or after views are
                     // forgotten) every summary waits for the complete roster they count agents
@@ -663,6 +683,102 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// How many times the refresher began a refresh, for tests.
+    #[derive(Default)]
+    pub(super) struct Passes(pub(super) AtomicUsize);
+
+    fn passes(store: &Store) -> usize {
+        store.extension::<Passes>().0.load(Ordering::Acquire)
+    }
+
+    async fn until_within(limit: Duration, what: &str, done: impl Fn() -> bool) {
+        let deadline = tokio::time::Instant::now() + limit;
+        while !done() {
+            assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    /// The refresher of a fresh store, started, its first refresh's pause long run out.
+    async fn quiet_refresher(root: &std::path::Path) -> AppState {
+        let state = crate::api::published_lists::tests_shared_client_v0_tests::app_state(root);
+        state.store.bind_fleet(crate::test_support::PAUSE_FLEET).unwrap();
+        start_attention_list(&state);
+        until_within(Duration::from_secs(10), "the first refresh", || passes(&state.store) >= 1).await;
+        tokio::time::sleep(ATTENTION_LIST_REFRESH_PAUSE + ATTENTION_LIST_REFRESH_PAUSE / 2).await;
+        state
+    }
+
+    /// A claim this node commits during the refresher's pause ends it at its floor, so its writer
+    /// sees it after one refresh; however fast this node writes, refreshes come no faster than
+    /// the floor, and a cheap one pauses twice as long as it took.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_claim_this_node_commits_cuts_the_attention_pause_to_its_floor() {
+        let root = tempfile::tempdir().unwrap();
+        let state = quiet_refresher(root.path()).await;
+        let store = &state.store;
+        // The first claim wakes a refresh, as the daemon's commit event does; the second lands in
+        // that refresh's pause, with no event of its own.
+        let before = passes(store);
+        crate::test_support::note_local_claim(store, "message/attention-pause-first");
+        state.event_notify.send_modify(|events| *events += 1);
+        until_within(Duration::from_secs(2), "the refresh the first claim wakes", || passes(store) > before).await;
+        let refreshed = tokio::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let wrote = tokio::time::Instant::now();
+        crate::test_support::note_local_claim(store, "message/attention-pause-second");
+        until_within(Duration::from_secs(2), "the refresh the second claim cuts to", || passes(store) > before + 1).await;
+        let (waited, apart) = (wrote.elapsed(), refreshed.elapsed());
+        assert!(waited < Duration::from_millis(400), "the claim waited {waited:?}, not the floor");
+        assert!(apart >= ATTENTION_LIST_LOCAL_PAUSE, "two refreshes {apart:?} apart");
+        tokio::time::sleep(ATTENTION_LIST_REFRESH_PAUSE + ATTENTION_LIST_REFRESH_PAUSE / 2).await;
+        let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let burst = std::thread::spawn({
+            let (store, writing) = (Arc::clone(store), Arc::clone(&writing));
+            move || {
+                let mut written = 0;
+                while writing.load(Ordering::Acquire) {
+                    crate::test_support::note_local_claim(&store, &format!("message/attention-pause-burst-{written}"));
+                    written += 1;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                written
+            }
+        });
+        let (before, began) = (passes(store), tokio::time::Instant::now());
+        tokio::time::sleep(ATTENTION_LIST_REFRESH_PAUSE + ATTENTION_LIST_REFRESH_PAUSE / 2).await;
+        let (refreshes, span) = (passes(store) - before, began.elapsed());
+        writing.store(false, Ordering::Release);
+        assert!(burst.join().unwrap() > 20, "the burst kept writing");
+        let most = (span.as_millis() / ATTENTION_LIST_LOCAL_PAUSE.as_millis()) as usize + 2;
+        assert!(refreshes <= most, "{refreshes} refreshes in {span:?}, at most {most}");
+        assert!(refreshes >= 4, "local writes did cut the pause: {refreshes} refreshes in {span:?}");
+    }
+
+    /// Claims another node wrote keep the full pause, so replication refreshes attention no more
+    /// often than before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replicated_claims_keep_the_full_attention_pause() {
+        let root = tempfile::tempdir().unwrap();
+        let state = quiet_refresher(&root.path().join("reader")).await;
+        let reader = &state.store;
+        let writer = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+        let through = reader.index().unwrap();
+        let (before, began) = (passes(reader), tokio::time::Instant::now());
+        for round in 0..6 {
+            crate::test_support::note_local_claim(&writer, &format!("message/attention-pause-replicated-{round}"));
+            crate::test_support::replicate(&writer, reader);
+            state.event_notify.send_modify(|events| *events += 1);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let (refreshes, span) = (passes(reader) - before, began.elapsed());
+        assert!(reader.index().unwrap() > through, "the writer's claims reached the reader");
+        assert_eq!(reader.first_local_commit_after(through, reader.index().unwrap()).unwrap(), None);
+        let most = (span.as_millis() / ATTENTION_LIST_REFRESH_PAUSE.as_millis()) as usize + 2;
+        assert!(refreshes <= most, "{refreshes} refreshes in {span:?} of replicated claims, at most {most}");
+    }
 
     #[test]
     fn a_prompt_card_reads_its_seat_and_no_other_card_reads_one() {

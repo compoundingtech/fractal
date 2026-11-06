@@ -91,6 +91,7 @@ pub mod rollouts;
 pub mod refresh_intake;
 pub mod refresh;
 pub mod publication;
+pub mod local_commits;
 pub mod publication_facts;
 pub mod seat_status;
 pub mod stop_deferral;

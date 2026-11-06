@@ -1572,7 +1572,7 @@ async fn wait_published(store: &Store) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_fresh_read_cuts_the_refresher_pause_short_and_commits_keep_it() {
+async fn a_fresh_read_or_a_claim_this_node_commits_cuts_the_refresher_pause_short() {
     let root = tempfile::tempdir().unwrap();
     let state = app_state(root.path());
     let store = &state.store;
@@ -1580,11 +1580,12 @@ async fn a_fresh_read_cuts_the_refresher_pause_short_and_commits_keep_it() {
     ready_run(store, "garden/tend", "tend-1");
     start_published_work(&state);
     wait_published(store).await;
-    // A commit just after a fold waits out the pause before the next fold.
+    // A claim this node commits just after a fold waits only the floor, not the whole pause.
     let committed = tokio::time::Instant::now();
     ready_run(store, "garden/tend", "tend-2");
     wait_published(store).await;
-    assert!(committed.elapsed() >= REFRESH_PAUSE - Duration::from_millis(100), "{:?}", committed.elapsed());
+    assert!(committed.elapsed() >= FRESH_PAUSE - Duration::from_millis(50), "{:?}", committed.elapsed());
+    assert!(committed.elapsed() < REFRESH_PAUSE / 2, "{:?}", committed.elapsed());
     // A fresh read just after a fold asks for the next one at once.
     ready_run(store, "garden/tend", "tend-3");
     let asked = tokio::time::Instant::now();
@@ -1988,4 +1989,163 @@ fn eta_v3_trigger_layout_preserves_samples_and_published_card_values() {
         results.push((samples, eta));
     }
     assert_eq!(results[0], results[1]);
+}
+
+/// One list's refresher, as [`start_published_lists`] spawns it.
+struct Refresher<R: 'static> {
+    list: fn(&Store) -> &PublishedList<R>,
+    name: &'static str,
+    label: &'static str,
+    fold: Fold<R>,
+}
+
+impl<R: Send + Sync + 'static> Refresher<R> {
+    fn start(&self, store: &Arc<Store>) {
+        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, false);
+    }
+
+    fn folds(&self, store: &Store) -> usize {
+        (self.list)(store).folds()
+    }
+
+    /// Start it, and wait until its first fold's pause has long run out.
+    async fn start_quiet(&self, store: &Arc<Store>) {
+        self.start(store);
+        until_within(Duration::from_secs(10), "the first fold", || self.folds(store) >= 1).await;
+        tokio::time::sleep(REFRESH_PAUSE + REFRESH_PAUSE / 2).await;
+    }
+}
+
+fn missions_refresher() -> Refresher<MissionRows> {
+    Refresher { list: |store| store.published_missions_list(), name: "missions", label: "published_list.missions", fold: fold_missions }
+}
+
+fn work_refresher() -> Refresher<WorkRows> {
+    Refresher { list: |store| store.published_work_list(), name: "work", label: "published_list.work", fold: fold_work }
+}
+
+fn runtimes_refresher() -> Refresher<crate::store::runtime_list::RuntimeRows> {
+    Refresher { list: |store| store.published_runtime_list(), name: "runtimes", label: "runtimes/refresh", fold: fold_runtimes }
+}
+
+async fn until_within(limit: Duration, what: &str, done: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + limit;
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// A claim this node commits during a fold's pause ends the pause at its floor, not the full
+/// second, so its writer sees it after one fold; and however fast this node writes, folds come no
+/// faster than the floor allows.
+async fn a_claim_this_node_commits_cuts_the_pause<R: Send + Sync + 'static>(refresher: Refresher<R>) {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    refresher.start_quiet(&store).await;
+    // The first claim wakes a fold; the second lands in that fold's pause.
+    let before = refresher.folds(&store);
+    crate::test_support::note_local_claim(&store, "message/pause-first");
+    until_within(Duration::from_secs(2), "the fold the first claim wakes", || refresher.folds(&store) > before).await;
+    let folded = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let wrote = tokio::time::Instant::now();
+    crate::test_support::note_local_claim(&store, "message/pause-second");
+    until_within(Duration::from_secs(2), "the fold the second claim cuts to", || refresher.folds(&store) > before + 1).await;
+    let (waited, apart) = (wrote.elapsed(), folded.elapsed());
+    assert!(waited < Duration::from_millis(400), "{}: the claim waited {waited:?}, not the floor", refresher.name);
+    assert!(apart >= FRESH_PAUSE, "{}: two folds {apart:?} apart", refresher.name);
+    // A burst of local writes: the pause is cut every time, never below the floor.
+    tokio::time::sleep(REFRESH_PAUSE + REFRESH_PAUSE / 2).await;
+    let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let burst = std::thread::spawn({
+        let (store, writing) = (Arc::clone(&store), Arc::clone(&writing));
+        move || {
+            let mut written = 0;
+            while writing.load(std::sync::atomic::Ordering::Acquire) {
+                crate::test_support::note_local_claim(&store, &format!("message/pause-burst-{written}"));
+                written += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            written
+        }
+    });
+    let (before, began) = (refresher.folds(&store), tokio::time::Instant::now());
+    tokio::time::sleep(REFRESH_PAUSE + REFRESH_PAUSE / 2).await;
+    let (folds, span) = (refresher.folds(&store) - before, began.elapsed());
+    writing.store(false, std::sync::atomic::Ordering::Release);
+    assert!(burst.join().unwrap() > 20, "the burst kept writing");
+    let most = (span.as_millis() / FRESH_PAUSE.as_millis()) as usize + 2;
+    assert!(folds <= most, "{}: {folds} folds in {span:?}, at most {most}", refresher.name);
+    assert!(folds >= 4, "{}: local writes did cut the pause: {folds} folds in {span:?}", refresher.name);
+}
+
+/// Claims another node wrote move the cut all the time on a busy fleet: they keep the full pause,
+/// so replication folds the list no more often than before.
+async fn replicated_claims_keep_the_full_pause<R: Send + Sync + 'static>(refresher: Refresher<R>) {
+    let root = tempfile::tempdir().unwrap();
+    let writer = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    let reader = crate::test_support::fleet_member(&root.path().join("reader"), "reader");
+    refresher.start_quiet(&reader).await;
+    let through = reader.index().unwrap();
+    let (before, began) = (refresher.folds(&reader), tokio::time::Instant::now());
+    for round in 0..6 {
+        crate::test_support::note_local_claim(&writer, &format!("message/pause-replicated-{round}"));
+        crate::test_support::replicate(&writer, &reader);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let (folds, span) = (refresher.folds(&reader) - before, began.elapsed());
+    assert!(reader.index().unwrap() > through, "the writer's claims reached the reader");
+    assert_eq!(reader.first_local_commit_after(through, reader.index().unwrap()).unwrap(), None);
+    let most = (span.as_millis() / REFRESH_PAUSE.as_millis()) as usize + 2;
+    assert!(folds <= most, "{}: {folds} folds in {span:?} of replicated claims, at most {most}", refresher.name);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_this_node_commits_cuts_the_missions_pause_to_its_floor() {
+    a_claim_this_node_commits_cuts_the_pause(missions_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_claims_keep_the_full_missions_pause() {
+    replicated_claims_keep_the_full_pause(missions_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_this_node_commits_cuts_the_work_pause_to_its_floor() {
+    a_claim_this_node_commits_cuts_the_pause(work_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_claims_keep_the_full_work_pause() {
+    replicated_claims_keep_the_full_pause(work_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_this_node_commits_cuts_the_runtimes_pause_to_its_floor() {
+    a_claim_this_node_commits_cuts_the_pause(runtimes_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_claims_keep_the_full_runtimes_pause() {
+    replicated_claims_keep_the_full_pause(runtimes_refresher()).await;
+}
+
+/// Every refresher on a store pauses on one scanner: a commit is read once, however many hold it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_refresher_on_a_store_shares_one_look_at_each_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    let holders: Vec<_> = (0..5).map(|_| store.local_commits()).collect();
+    let mut waiting = holders[4].clone();
+    assert_eq!(holders[0].looks(), 0, "a scanner starts with nothing to read");
+    let through = store.index().unwrap();
+    crate::test_support::note_local_claim(&store, "message/pause-shared");
+    tokio::time::timeout(Duration::from_secs(5), waiting.after(through)).await.expect("the claim was found");
+    for holder in &holders {
+        assert_eq!(holder.looks(), 1, "one look for every holder");
+    }
+    // Once every holder is gone, the next one starts a scanner of its own.
+    drop((holders, waiting));
+    assert_eq!(store.local_commits().looks(), 0);
 }

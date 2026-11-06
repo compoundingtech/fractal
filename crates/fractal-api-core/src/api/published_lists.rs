@@ -21,12 +21,14 @@ use std::collections::HashMap;
 use smallclaims::store::now_ms;
 
 /// The shortest pause between two folds of one collection. A fold also pauses as long as it
-/// took, so a refresher never takes more than about half a core.
+/// took, so a refresher never takes more than about half a core. A fresh read, or a claim this
+/// node commits, cuts it short to [`FRESH_PAUSE`].
 const REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause when a fresh read waits: the rest of [`REFRESH_PAUSE`] is cut short for it,
-/// never this, so fresh reads however frequent fold at most this often, and a fold still pauses
-/// as long as it took.
+/// The shortest pause when a fresh read waits, or this node commits a claim: the rest of
+/// [`REFRESH_PAUSE`] is cut short for either, never below this, so fresh reads or local writes
+/// however frequent fold at most this often. A fold still pauses as long as it took, and twice as
+/// long for a local claim.
 const FRESH_PAUSE: Duration = Duration::from_millis(100);
 
 /// The most rows one snapshot refolds. More changed rows refold in chunks, each at its own cut,
@@ -306,12 +308,17 @@ fn spawn<R: Send + Sync + 'static>(
         // ungoverned list's windows fold on read and follow commits again.
         let _withdraw = Withdraw { store: Arc::clone(&store), list, name };
         let fresh = list(&store).fresh_requests();
+        // Whether a commit holds a claim this node wrote is read off the writer, once for every
+        // refresher that pauses on it.
+        let mut local = store.local_commits();
         let mut failures = 0;
         loop {
             // A fresh request from before this fold is served by it: drop it, so it cannot cut
             // the next pause short. One made during the fold stays, and cuts that pause.
             let _ = futures_util::FutureExt::now_or_never(fresh.notified());
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the fold below or an earlier one.
+            let folded_through = store.index().unwrap_or(u64::MAX);
             list(&store).note_fold();
             let reader = store.clone();
             let folded = tokio::task::spawn_blocking(move || {
@@ -393,10 +400,11 @@ fn spawn<R: Send + Sync + 'static>(
                 }
             }
             // Pause as long as the fold took, and at least the fresh floor; then the rest of the
-            // full pause, unless a fresh read waits for the list. Commits keep the full pause.
-            let pause = started.elapsed().max(FRESH_PAUSE);
-            tokio::time::sleep(pause).await;
-            let _ = tokio::time::timeout(REFRESH_PAUSE.saturating_sub(pause), fresh.notified()).await;
+            // full pause, unless a fresh read waits for the list or this node commits a claim the
+            // fold has not read. Claims other nodes wrote keep the full pause.
+            let pace = local_commits::Pace { floor: FRESH_PAUSE, full: REFRESH_PAUSE };
+            local_commits::pause_after_fold(&mut local, fresh.notified(), pace, started.elapsed(), folded_through)
+                .await;
             let deadline = list(&store).newest().and_then(|newest| newest.valid_until_unix_ms);
             let mut wait = deadline.map(|deadline| {
                 Duration::from_millis(deadline.saturating_sub(now_ms()).min(u64::MAX as u128) as u64)
