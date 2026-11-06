@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fleet compatibility tests check committed shard claims after outbox drain, independently of when replication seals local batches.",
+  "replay": {"status": "none", "detail": "Test synchronization only; daemon replay behavior is unchanged."},
+  "schema": {"status": "none", "detail": "No database schema or migration changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or fleet coordination changes."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or runtime changes. The existing baseline and current-build drain assertions wait for their complete observable postcondition."},
+  "downtime": {"status": "none", "detail": "No service changes or interruption."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Runtime rollback and roll-forward behavior is unchanged."}
+}

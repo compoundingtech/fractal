@@ -8067,8 +8067,12 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.start().await;
     let mut rolled_back = before.clone();
     if release_drains_outbox {
-        wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
-        assert_eq!(shard_file_holds(&o, "o"), (1, 1), "the release drained the queued item to its shard");
+        // Local appends commit claims before replication seals their envelopes. A standalone
+        // member need not seal again after the drain, so count the queued item's claim directly.
+        wait_until("the baseline drains its outbox into the shard", 60, || async {
+            outbox(&o).is_empty() && shard_file_items(&o, left) == 1
+        }).await;
+        assert_eq!(shard_file_items(&o, left), 1, "the release drained the queued item to its shard");
         rolled_back.push((left.to_owned(), "sent".to_owned()));
     }
     assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
@@ -8085,7 +8089,9 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    wait_until("the upgraded member drains the outbox", 60, || async { outbox(&o).is_empty() }).await;
+    wait_until("the upgraded member drains the outbox into the shard", 60, || async {
+        outbox(&o).is_empty() && stream_items(&o, left).await == 1
+    }).await;
     assert_eq!(stream_items(&o, left).await, 1);
     assert_eq!(graph_messages(&o, left).await, 0);
     before.push((left.to_owned(), "sent".to_owned()));
@@ -8221,6 +8227,18 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
+}
+
+/// Count committed shard claims, including local appends not yet sealed for replication.
+/// Read from the file because published baselines do not expose the fixture-only shard route.
+fn shard_file_items(node: &Node, subject: &str) -> u64 {
+    rusqlite::Connection::open_with_flags(
+        node.state_dir().join("shards/messages/claims.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT COUNT(*) FROM claims WHERE subject=?1", [subject], |row| row.get(0))
+    .unwrap()
 }
 
 /// What `node`'s messages shard file holds of `writer`: the envelopes it received, and the claims
