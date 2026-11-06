@@ -57,7 +57,7 @@ final class MembershipPagingTests: XCTestCase {
             XCTAssertThrowsError(try join.append(page(), attempt: token))
             XCTAssertNil(join.complete)
         }
-        for incoming in [try frame(10, epoch: nil), try frame(10, contract: nil), try frame(10, contract: "future")] {
+        for incoming in [try frame(10, epoch: nil), try frame(10, epoch: ""), try frame(10, contract: nil), try frame(10, contract: "future")] {
             XCTAssertThrowsError(try MembershipPagingJoin.validate(incoming))
         }
     }
@@ -70,14 +70,16 @@ final class MembershipPagingTests: XCTestCase {
         let old = join.beginAttempt(), token = join.beginAttempt()
         XCTAssertThrowsError(try join.append(page(), attempt: old))
         XCTAssertEqual(try join.append(page(exact), attempt: token)?.count, 1)
+        let rollback = join.beginAttempt(); XCTAssertThrowsError(try join.append(page(exact - 1), attempt: rollback))
+        XCTAssertEqual(join.complete?.count, 1)
         XCTAssertThrowsError(try join.observe(frame(exact, count: 2)))
-        for response in [try page(count: 2), try page(count: 2, duplicate: true)] {
+        for response in [try page(.max, count: 2), try page(.max, count: 2, duplicate: true)] {
             let token = join.beginAttempt()
             XCTAssertThrowsError(try join.append(response, attempt: token))
         }
         let token2 = join.beginAttempt()
-        XCTAssertNil(try join.append(page(exact, count: 2, more: true), attempt: token2))
-        XCTAssertThrowsError(try join.append(page(exact, count: 2), attempt: token2))
+        XCTAssertNil(try join.append(page(.max, count: 2, more: true), attempt: token2))
+        XCTAssertThrowsError(try join.append(page(.max, count: 2), attempt: token2))
     }
     func testWholeAttemptErrorsAndMissingPageContract() throws {
         for code in [ErrorCode.membershipCollectionChanged, .membershipFrontierReset] {

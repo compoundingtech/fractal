@@ -30,7 +30,7 @@ public struct MembershipPagingJoin {
     }
     private mutating func invalidate() { attempt = nil; staged = nil; rows = []; members = []; isStale = true }
     public static func validate(contract: String?, membership: OrderedMembershipState?) throws {
-        guard contract == "collection-v1", membership?.epoch != nil else { throw MembershipPagingFailure.refused }
+        guard contract == "collection-v1", let epoch = membership?.epoch, !epoch.isEmpty else { throw MembershipPagingFailure.refused }
     }
     public static func validate(_ frame: OrderedMembershipCollectionFrame) throws {
         if frame.kind == "resync" { throw MembershipPagingFailure.restart }
@@ -84,6 +84,11 @@ public struct MembershipPagingJoin {
             guard let state = page.membership else { throw MembershipPagingFailure.refused }
             let incoming = try frontier(response.snapshot, state)
             guard page.filters["person"] == person else { throw MembershipPagingFailure.restart }
+            if let published {
+                if !incoming.sameScope(published) { self.published = nil; throw MembershipPagingFailure.restart }
+                try compare(incoming, published)
+                guard incoming.index >= published.index else { throw MembershipPagingFailure.restart }
+            }
             if let staged { try compare(incoming, staged); guard incoming.index == staged.index else { throw MembershipPagingFailure.restart } }
             if let stream {
                 if !incoming.sameScope(stream) { self.stream = nil; throw MembershipPagingFailure.restart }
@@ -92,7 +97,7 @@ public struct MembershipPagingJoin {
             }
             staged = incoming
             for row in page.items {
-                guard row.container == container, members.insert(row.member).inserted else { throw MembershipPagingFailure.inconsistent }
+                guard row.id == row.member, row.container == container, members.insert(row.member).inserted else { throw MembershipPagingFailure.inconsistent }
                 if let previous = rows.last {
                     let left = [previous.position.bucket ?? "", previous.position.key, previous.member]
                     let right = [row.position.bucket ?? "", row.position.key, row.member]
