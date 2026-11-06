@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS local_custom_dirty (subject TEXT PRIMARY KEY);
 -- must reach their consumers even when the changed claim is not custom/.
 -- Every use names the claim IDs, so each branch must look its claims up by ID. The unary
 -- plus keeps the planner from walking every doc.bound claim through claims_kind_index.
-CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
+DROP VIEW IF EXISTS custom_claim_invalidations;
+CREATE VIEW custom_claim_invalidations AS
  SELECT id,subject FROM claims
  WHERE (subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%')
  OR EXISTS(SELECT 1 FROM custom_dependencies WHERE source=claims.subject)
@@ -43,11 +44,7 @@ CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
  SELECT binding.id,registration.subject FROM claims AS binding JOIN claims AS registration
  ON registration.kind='custom.st3-kinds.registered'
  AND substr(json_extract(registration.body,'$.fields.document'),1,length(binding.subject)+1)=binding.subject||'@'
- WHERE +binding.kind='doc.bound'
- UNION ALL
- SELECT claims.id,custom_sources.subject FROM claims JOIN custom_sources
- ON custom_sources.subject LIKE 'custom/attention/%'
- WHERE claims.kind='intent.desired' AND claims.subject LIKE 'agent/%';
+ WHERE +binding.kind='doc.bound';
 CREATE TRIGGER IF NOT EXISTS custom_document_insert AFTER INSERT ON documents BEGIN
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=NEW.name ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=NEW.name||'@'||NEW.hash ON CONFLICT(subject) DO NOTHING;

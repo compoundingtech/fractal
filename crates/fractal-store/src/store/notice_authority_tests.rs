@@ -240,3 +240,53 @@ fn notice_owned_runtime_liveness_mutations_match_rebuild() {
         }).unwrap().unwrap();
     }
 }
+
+#[test]
+fn notice_only_runtime_dependency_chain_queues_revalidation() {
+    for mutation in ["unrelated", "parent-step", "ancestor-run", "ancestor-generation"] {
+        let store = linked_store();
+        store.connection.batched(|tx| -> Result<()> {
+            for name in ["owner", "ancestor", "unrelated"] {
+                tx.execute("INSERT INTO mission_runs VALUES(?1,?1,'revision',?1,'revision',?1,
+                    NULL,'.','person/example','{}','run','running','normal','0','0')", [name])?;
+                tx.execute("INSERT INTO run_generations VALUES(?1,?1,'revision',NULL,'running',
+                    'person/example','Fixture','0','0')", [name])?;
+                tx.execute("INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,
+                    status,attempt,goals,created_at_unix_ms,updated_at_unix_ms)
+                    VALUES('step-run/'||?1,?1,?1,'build','hash','working',1,'[]','0','0')", [name])?;
+            }
+            tx.execute("UPDATE mission_runs SET parent_step_run='step-run/ancestor',
+                root_run_id='ancestor' WHERE id='owner'", [])?;
+            tx.execute("UPDATE desired SET owner_run='mission-run/owner',
+                owner_generation='run-generation/owner' WHERE subject=?1", [RUNTIME])?;
+            tx.execute("INSERT INTO desired(subject,kind,revision,claim_id,body)
+                SELECT 'agent/example/unrelated',kind,revision,claim_id,'{}' FROM desired WHERE subject=?1", [RUNTIME])?;
+            custom::flush(tx)?;
+            assert_eq!(custom::source(tx, SNAPSHOT)?.unwrap()["state"], "ready");
+            let queued = |tx: &Transaction<'_>| -> Result<i64> {
+                Ok(tx.query_row("SELECT count(*) FROM local_custom_dirty", [], |r| r.get(0))?)
+            };
+            assert_eq!(queued(tx)?, 0);
+            if mutation == "unrelated" {
+                for sql in [
+                    "UPDATE mission_runs SET status='completed' WHERE id='unrelated'",
+                    "UPDATE step_runs SET status='completed' WHERE subject='step-run/unrelated'",
+                    "UPDATE run_generations SET id='unrelated-next' WHERE id='unrelated'",
+                    "UPDATE desired SET body='{\"children\":[]}' WHERE subject='agent/example/unrelated'",
+                ] {
+                    tx.execute(sql, [])?;
+                    assert_eq!(queued(tx)?, 0, "{sql}");
+                }
+                return Ok(());
+            }
+            tx.execute(match mutation {
+                "parent-step" => "UPDATE step_runs SET status='completed' WHERE subject='step-run/ancestor'",
+                "ancestor-run" => "UPDATE mission_runs SET status='completed' WHERE id='ancestor'",
+                _ => "DELETE FROM run_generations WHERE id='ancestor'",
+            }, [])?;
+            assert!(queued(tx)? > 0);
+            custom::flush(tx)?;
+            assert_links_fail_closed_like_rebuild(tx)
+        }).unwrap().unwrap();
+    }
+}

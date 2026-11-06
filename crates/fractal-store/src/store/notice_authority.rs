@@ -6,6 +6,24 @@ use fractal_schema::{custom::Manifest, notice};
 /// Watch the projection tables used by declaration_live, not only newly authored claims.
 /// Retirement, owned declarations and ancestor-run liveness can change without intent.desired.
 pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()> {
+    let run_id = |column: &str| format!(
+        "CASE WHEN {column} LIKE 'mission-run/%' THEN substr({column},13) ELSE {column} END"
+    );
+    // Keep missing dependencies in the traversal: their later insertion can restore liveness.
+    // BEFORE triggers retain the old chain when deleting or replacing one of its links.
+    let chain = format!(
+        "WITH RECURSIVE notice_runs(id) AS (
+         SELECT {owner} FROM desired WHERE kind='agent' AND owner_run IS NOT NULL AND EXISTS(
+          SELECT 1 FROM json_each(desired.body,'$.children') WHERE json_extract(value,'$.name')='notice-runtime')
+         UNION SELECT {parent} FROM notice_runs n JOIN mission_runs r ON r.id=n.id
+          LEFT JOIN step_runs s ON s.subject=r.parent_step_run
+          LEFT JOIN desired d ON d.subject=substr(r.parent_step_run,10)
+          WHERE r.parent_step_run IS NOT NULL AND coalesce(s.run_id,d.owner_run) IS NOT NULL
+         UNION SELECT {root} FROM notice_runs n JOIN mission_runs r ON r.id=n.id
+          WHERE r.parent_step_run IS NULL AND r.root_run_id IS NOT NULL)",
+        owner=run_id("owner_run"), parent=run_id("coalesce(s.run_id,d.owner_run)"),
+        root=run_id("r.root_run_id"),
+    );
     for (table, columns) in [
         ("desired", &["subject", "kind", "body", "owner_run", "owner_generation"][..]),
         ("mission_runs", &["id", "status", "current_generation_id", "parent_step_run", "root_run_id"][..]),
@@ -14,20 +32,33 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
     ] {
         for action in ["INSERT", "UPDATE", "DELETE"] {
             let references = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
-            let relevant = if table == "desired" {
-                references.iter().map(|row| format!(
-                    "({row}.subject LIKE 'agent/%' OR {row}.kind IN ('schedule','subscription'))"
-                )).collect::<Vec<_>>().join(" OR ")
-            } else {
-                "EXISTS(SELECT 1 FROM desired WHERE kind='agent' AND owner_run IS NOT NULL AND EXISTS(
-                 SELECT 1 FROM json_each(desired.body,'$.children') WHERE json_extract(value,'$.name')='notice-runtime'))".into()
-            };
+            let relevant = references.iter().map(|row| {
+                let dependency = match table {
+                    "desired" => format!(
+                        "EXISTS(SELECT 1 FROM json_each({row}.body,'$.children')
+                          WHERE json_extract(value,'$.name')='notice-runtime')
+                         OR EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
+                          WHERE r.parent_step_run='step-run/'||{row}.subject)"
+                    ),
+                    "mission_runs" => format!("EXISTS({chain} SELECT 1 FROM notice_runs WHERE id={row}.id)"),
+                    "step_runs" => format!(
+                        "EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
+                         WHERE r.parent_step_run={row}.subject)"
+                    ),
+                    _ => format!(
+                        "EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
+                         WHERE r.current_generation_id={row}.id)"
+                    ),
+                };
+                format!("({dependency})")
+            }).collect::<Vec<_>>().join(" OR ");
             let changed = if action == "UPDATE" {
                 columns.iter().map(|column| format!("OLD.{column} IS NOT NEW.{column}"))
                     .collect::<Vec<_>>().join(" OR ")
             } else { "1".into() };
             connection.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS notice_authority_{table}_{action} AFTER {action} ON {table}
+                "DROP TRIGGER IF EXISTS notice_authority_{table}_{action};
+                 CREATE TRIGGER notice_authority_{table}_{action} BEFORE {action} ON {table}
                  WHEN ({relevant}) AND ({changed}) BEGIN
                  INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
                  WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING; END;"
