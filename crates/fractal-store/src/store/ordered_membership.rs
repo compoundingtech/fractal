@@ -508,6 +508,8 @@ fn query_items(connection: &Connection, container: &str, after: Option<(&str,&st
 }
 
 impl Store {
+    /// Nonpersistent identity shared by pages and stream metadata for this opened store.
+    pub fn ordered_membership_lifetime(&self) -> u128 { self.ordered_membership_lifetime }
     pub fn edit_ordered_memberships(&self, input: &ClaimInput, expected: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {
         if input.kind != "ordered-membership.edited" { return Err(St3Error::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
         if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }

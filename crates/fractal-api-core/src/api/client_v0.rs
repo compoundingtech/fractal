@@ -196,7 +196,7 @@ fn collection_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
 pub enum CollectionRevision {
     Owner(u64),
     Membership(fractal_schema::ordered_membership::State),
-    ScopedMembership(fractal_schema::ordered_membership::State, u64),
+    ScopedMembership(fractal_schema::ordered_membership::State, u64, u128),
 }
 
 pub struct CollectionSubscription {

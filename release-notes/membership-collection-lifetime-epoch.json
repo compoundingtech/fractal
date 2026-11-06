@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Scope membership frontiers to the serving store lifetime as well as projection generation",
+  "replay": {"status": "none", "detail": "No replay or rebuild is required."},
+  "schema": {"status": "none", "detail": "The local State and canonical graph schema are unchanged. The store-open nonce is nonpersistent API identity."},
+  "rules": {"status": "none", "detail": "Existing authorization applies."},
+  "compatibility": {"status": "none", "detail": "Pages and opted stream snapshot/changes frames encode the same opaque epoch from the opened store nonce and transactional projection generation. Epochs are equality-only; generation and index alone are not cross-lifetime frontiers."},
+  "downtime": {"status": "none", "detail": "Normal daemon rollout only."},
+  "manual": {"status": "none", "detail": "No manual action is required. Daemon restart, store reopen/replacement and restore make old cursors incomparable even at equal host, index and persisted generation."},
+  "recovery": {"status": "none", "detail": "The exact membership-frontier-reset 409 code maps to the typed client reset/restart path and discards all staged pages. Same-process reopen/restore tests compare page and stream metadata and use changed restored rows at equal index. No capability is advertised here."}
+}

@@ -235,7 +235,7 @@ async fn collection_memberships(state: AppState, owner: String, subject: String,
             let mut current_epoch = String::new();
             let after = cursor.as_ref().map(|cursor| (cursor.after.bucket.as_str(), cursor.after.key.as_str(), cursor.after.member.as_str()));
             let page = reader.store.ordered_membership_page_checked(&container, after, limit + 1, |_, generation, state| {
-                current_epoch = epoch(generation);
+                current_epoch = epoch(reader.store.ordered_membership_lifetime(), generation);
                 if state.changed_index > index { return Err(error(INCONSISTENT)); }
                 cursor.as_ref().map_or(Ok(()), |cursor| cursor.check_frontier(&snapshot, &current_epoch, state))
             })?;
@@ -1038,6 +1038,71 @@ mod tests {
         }
         assert_eq!(seen, vec![json!("resource/a"), json!("resource/b"), json!("resource/c")]);
         assert!(cursor.is_empty(), "the terminal page must finish without a restart");
+    }
+
+    #[tokio::test]
+    async fn collection_epoch_matches_stream_and_changes_on_reopen_and_restore_at_equal_index() {
+        const PATH: &str = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        async fn populated(root: &std::path::Path, reversed: bool) -> (AppState, Value) {
+            let state = test_state_named(root, "collection-epoch-lifetime");
+            let session = ClientSession::local(Some("person/ada")).unwrap();
+            create_v2(&state, &session).await;
+            for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+            edit_memberships(&state, &session, &membership_request(&state, "epoch-layout", json!([
+                {"op":"place","member":"resource/a","bucket":null,"key":if reversed {"a1"} else {"a0"}},
+                {"op":"place","member":"resource/b","bucket":null,"key":if reversed {"a0"} else {"a1"}}
+            ]))).await.unwrap();
+            let (status, page) = membership_json(&state, PATH, "person/ada").await;
+            assert_eq!(status, StatusCode::OK);
+            (state, page)
+        }
+        async fn matches_stream(state: &AppState, page: &Value) {
+            let request: CollectionSubscribe = serde_json::from_value(json!({
+                "id":"epoch","collection":"ordered-memberships","person":"person/ada",
+                "subject":SUBJECT,"limit":1,"paging_contract":"collection-v1"
+            })).unwrap();
+            let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
+            let (_, rows, _, pinned) = collection_items(state,
+                &ClientSession::local(Some("person/ada")).unwrap(), &request, permit).await.unwrap();
+            let mut frame = json!({});
+            super::super::add_membership(&mut frame, &request, pinned);
+            assert_eq!(frame["paging_contract"], page["value"]["paging_contract"]);
+            assert_eq!(frame["membership"], page["value"]["membership"]);
+            assert_eq!(rows, page["value"]["items"].as_array().unwrap().to_owned());
+        }
+        let original = tempfile::tempdir().unwrap();
+        let replacement = tempfile::tempdir().unwrap();
+        let (state, first) = populated(original.path(), false).await;
+        matches_stream(&state, &first).await;
+        let generation = state.store.ordered_membership_page(SUBJECT, None, 1).unwrap().generation;
+        let lifetime = state.store.ordered_membership_lifetime();
+        let token = first["value"]["page"]["next_cursor"].as_str().unwrap().to_owned();
+        drop(state);
+        // Reopening in the same process models a fresh serving lifetime, without timing guesses.
+        let state = test_state_named(original.path(), "collection-epoch-lifetime");
+        assert_ne!(state.store.ordered_membership_lifetime(), lifetime);
+        assert_eq!(state.store.ordered_membership_page(SUBJECT, None, 1).unwrap().generation, generation);
+        let (_, reopened) = membership_json(&state, PATH, "person/ada").await;
+        assert_eq!(reopened["snapshot"]["store_index"], first["snapshot"]["store_index"]);
+        assert_eq!(reopened["value"]["membership"]["changed_index"], first["value"]["membership"]["changed_index"]);
+        assert_ne!(reopened["value"]["membership"]["epoch"], first["value"]["membership"]["epoch"]);
+        matches_stream(&state, &reopened).await;
+        let (status, refusal) = membership_json(&state, &format!("{PATH}&cursor={token}"), "person/ada").await;
+        assert_eq!((status.as_u16(), refusal["code"].as_str()), (409, Some(membership_paging::RESET)));
+        drop(state);
+        let (state, different) = populated(replacement.path(), true).await;
+        assert_eq!(different["snapshot"]["store_index"], first["snapshot"]["store_index"]);
+        assert_eq!(different["value"]["membership"]["changed_index"], first["value"]["membership"]["changed_index"]);
+        assert_ne!(different["value"]["items"], first["value"]["items"]);
+        drop(state); // Closing all handles checkpoints each fixture before copying the database.
+        std::fs::copy(replacement.path().join("graph.db"), original.path().join("graph.db")).unwrap();
+        let restored = test_state_named(original.path(), "collection-epoch-lifetime");
+        let (_, page) = membership_json(&restored, PATH, "person/ada").await;
+        assert_eq!(page["value"]["items"], different["value"]["items"]);
+        assert_ne!(page["value"]["membership"]["epoch"], reopened["value"]["membership"]["epoch"]);
+        matches_stream(&restored, &page).await;
+        let (status, refusal) = membership_json(&restored, &format!("{PATH}&cursor={token}"), "person/ada").await;
+        assert_eq!((status.as_u16(), refusal["code"].as_str()), (409, Some(membership_paging::RESET)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

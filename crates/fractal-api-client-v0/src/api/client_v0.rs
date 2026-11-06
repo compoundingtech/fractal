@@ -865,7 +865,7 @@ async fn collection_items_with_windows(
                     )?;
                     let has_more = page.items.len() > limit;
                     return Ok(Ok(Some((snapshot, page.items, has_more,
-                        Some(CollectionRevision::ScopedMembership(page.state, page.generation))))));
+                        Some(CollectionRevision::ScopedMembership(page.state, page.generation, state.store.ordered_membership_lifetime()))))));
                 }
                 let at = snapshot.created_at.clone();
                 // Inventory invalidation is owner-scoped, independent of truncation and
@@ -1291,13 +1291,13 @@ async fn deliver_collection(
 fn add_membership(frame: &mut Value, request: &CollectionSubscribe, pinned: Option<CollectionRevision>) {
     let (membership, generation) = match pinned {
         Some(CollectionRevision::Membership(state)) => (state, None),
-        Some(CollectionRevision::ScopedMembership(state, generation)) => (state, Some(generation)),
+        Some(CollectionRevision::ScopedMembership(state, generation, lifetime)) => (state, Some((generation, lifetime))),
         _ => return,
     };
     frame["membership"] = json!({"container":request.subject, "live_count":membership.live_count, "changed_index":membership.changed_index});
-    if let Some(generation) = generation {
+    if let Some((generation, lifetime)) = generation {
         frame["paging_contract"] = json!(membership_paging::CONTRACT);
-        frame["membership"]["epoch"] = json!(membership_paging::epoch(generation));
+        frame["membership"]["epoch"] = json!(membership_paging::epoch(lifetime, generation));
     }
 }
 

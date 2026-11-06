@@ -57,10 +57,9 @@ pub fn error(code: &'static str) -> ApiError {
     }
 }
 
-/// A process nonce and transactional local projection generation, opaque on the wire.
-pub fn epoch(generation: u64) -> String {
-    static BOOT: std::sync::LazyLock<uuid::Uuid> = std::sync::LazyLock::new(uuid::Uuid::new_v4);
-    format!("{}/{generation}", *BOOT)
+/// Store-open nonce and transactional projection generation, opaque and equality-only.
+pub fn epoch(lifetime: u128, generation: u64) -> String {
+    format!("{lifetime:032x}/{generation}")
 }
 
 /// Unknown selectors and use on another collection are never silent legacy fallback.
@@ -159,7 +158,7 @@ mod tests {
     const SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000101";
     fn cursor() -> Cursor {
         Cursor { version: 1, host_id: "host/example".into(), projection_version: "v0".into(),
-            epoch: epoch(1), person: "person/ada".into(), subject: SUBJECT.into(), limit: 200,
+            epoch: epoch(1, 1), person: "person/ada".into(), subject: SUBJECT.into(), limit: 200,
             changed_index: 42, live_count: 4096,
             after: After { bucket: String::new(), key: "a0".into(), member: "resource/example".into() } }
     }
@@ -217,7 +216,8 @@ mod tests {
         for (changed_index, live_count, expected) in [(43, 4096, CHANGED), (42, 4095, INCONSISTENT), (41, 4096, INCONSISTENT)] {
             assert_eq!(cursor.check_frontier(&snapshot, &cursor.epoch, State { changed_index, live_count }).unwrap_err().code, expected);
         }
-        assert_eq!(cursor.check_frontier(&snapshot, &epoch(2), state).unwrap_err().code, RESET);
+        assert_eq!(cursor.check_frontier(&snapshot, &epoch(1, 2), state).unwrap_err().code, RESET);
+        assert_eq!(cursor.check_frontier(&snapshot, &epoch(2, 1), state).unwrap_err().code, RESET);
         snapshot.host_id = "other".into();
         assert_eq!(cursor.check_frontier(&snapshot, &cursor.epoch, state).unwrap_err().code, RESET);
         snapshot.host_id = cursor.host_id.clone();
