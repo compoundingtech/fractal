@@ -23,6 +23,14 @@ successful change detection; failure and cancellation still fail. Main and manua
 require execution when web inputs changed. Evidence-skipped queue work is followed by
 the exact-source hosted proof described above.
 
+Sidebar fixture validation is part of the required `genie-freshness` check on pull requests
+and merge groups, before the TypeScript and web consumers. Each executing Rust test
+partition also runs it before nextest. The generator source is `fleet.yml.genie.ts`;
+regenerate with `nix develop .#genie --command genie`. The gate runs
+`node --test scripts/check-sidebar-fixtures.test.mjs` and
+`node scripts/check-sidebar-fixtures.mjs`, with failures stopping the lane. Local and
+signed freshness evidence runs the same commands through `scripts/ci-genie-freshness`.
+
 ### Swift client execution
 
 `swift-client` is an optional, path-filtered Workspace CI lane on GitHub-hosted Linux.
