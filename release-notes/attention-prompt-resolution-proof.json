@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve native prompt attention locators from exact accepted diagnostic answer actors",
+  "replay": {"status": "none", "detail": "Read-only helper binds the native-prompt-answer operation, source subject and original episode evidence."},
+  "schema": {"status": "none", "detail": "No tables or indexes added. Main approved claims_operation_index lookup under fractal_store::store::attention_prompt_resolution: exact operation, 1 MiB JSON parse cap, scalar-only output bounded to 4096-byte identity and 40-byte timestamp. Source-site inventory lv-h7f62645b6f58 records the dynamic query sink."},
+  "rules": {"status": "none", "detail": "Authorizes only the person addressed at accepted native answer admission, or admitted delegated acted_for person with matching delegation episode; preserves the actual actor. Never reads current ownership."},
+  "compatibility": {"status": "none", "detail": "No wire changes. Native diagnostics have seven-day retention: missing receipts return None, never imply resolution. Durable harness-question.resolved compact receipts have actor/key digests and no attributable person, so cannot prove actor identity. Parent integrates SourceResolution, registry and endpoint dispatch."},
+  "downtime": {"status": "none", "detail": "Normal deployment; no migration."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "Read-only change; rollback does not change stored claims."}
+}
