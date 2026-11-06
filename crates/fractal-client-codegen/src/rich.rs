@@ -293,8 +293,9 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
                 .cloned(),
         );
     }
-    if discriminators.len() != 1 {
-        // Independent properties constrain one object, not a shared tagged union.
+    if discriminators.len() != 1 || discriminators.iter().any(|key| !base["required"]
+        .as_array().is_some_and(|names| names.contains(&json!(key)))) {
+        // Optional discriminators and independent properties constrain one object.
         if !is_object(&base)
             || base.get("const").is_some()
             || base.get("enum").is_some()
@@ -312,12 +313,6 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         return Ok(base);
     }
     let key = discriminators.into_iter().next().unwrap();
-    if !base["required"]
-        .as_array()
-        .is_some_and(|names| names.contains(&json!(key)))
-    {
-        bail!("conditional discriminator `{key}` must be required");
-    }
     let tag = resolve(&base["properties"][&key], defs)?.clone();
     let (domain, open) = match open_enum(&tag) {
         Some(known) => (known, true),
@@ -1901,6 +1896,24 @@ mod tests {
                 {"if": {"properties": {"phase": {"const": "ready"}}}, "then": true}
             ]
         }}})
+    }
+
+    #[test]
+    fn optional_discriminator_preserves_legacy_and_checks_selected_metadata() {
+        let schema = json!({"x-st-integers": "json-safe", "$defs": {"Entry": {
+            "type": "object", "properties": {
+                "contract": {"const": "collection-v1"},
+                "membership": {"type": "object", "properties": {"epoch": {"type": "string"}}}
+            },
+            "allOf": [{"if": {"required": ["contract"], "properties": {"contract": {"const": "collection-v1"}}},
+                "then": {"required": ["membership"], "properties": {"membership": {"required": ["epoch"]}}}}]
+        }}});
+        let normalized = normalize(&schema["$defs"]["Entry"], &Map::new()).unwrap();
+        assert!(normalized.get("oneOf").is_none());
+        assert_eq!(normalized["x-st-conditions"].as_array().unwrap().len(), 1);
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("conditional object relationship"));
+        assert!(generated.contains("[\"epoch\"]"));
     }
 
     #[test]

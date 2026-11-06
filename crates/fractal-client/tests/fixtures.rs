@@ -1106,6 +1106,30 @@ fn ordered_membership_envelopes_decode_and_missing_buckets_fail_before_a_request
 }
 
 #[test]
+fn collection_membership_metadata_and_restart_codes_decode_without_losing_legacy_fields() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let page: OrderedMembershipPage = serde_json::from_value(fixture["collection_v1"]["page"].clone()).unwrap();
+    assert_eq!(page.paging_contract.as_deref(), Some("collection-v1"));
+    let metadata = page.membership.unwrap();
+    assert_eq!(metadata.epoch.as_deref(), Some("opaque-epoch/1"));
+    assert_eq!(metadata.changed_index, 1842);
+    let fractal_client::CollectionEvent::MembershipSnapshot { paging_contract, membership, .. } =
+        fractal_client::CollectionEvent::from_frame(fixture["collection_v1"]["frame"].clone()).unwrap()
+    else { panic!("collection snapshot must use production membership decoding") };
+    assert_eq!(paging_contract.as_deref(), Some("collection-v1"));
+    assert_eq!(membership, metadata);
+    for (raw, code) in [
+        ("invalid-membership-cursor", ErrorCode::InvalidMembershipCursor),
+        ("membership-collection-changed", ErrorCode::MembershipCollectionChanged),
+        ("membership-frontier-reset", ErrorCode::MembershipFrontierReset),
+        ("unsupported-membership-paging-contract", ErrorCode::UnsupportedMembershipPagingContract),
+        ("membership-frontier-inconsistent", ErrorCode::MembershipFrontierInconsistent),
+    ] {
+        assert_eq!(serde_json::from_value::<ErrorCode>(serde_json::json!(raw)).unwrap(), code);
+    }
+}
+
+#[test]
 fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
     let bytes = fixture("timeline-relay-omission.json");
     let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
