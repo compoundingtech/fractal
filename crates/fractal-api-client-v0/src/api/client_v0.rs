@@ -10129,11 +10129,15 @@ mod tests {
             assert_eq!(runtimes.len(), 1);
             assert_eq!(runtimes[0]["owner_id"], "agent/visible-owner");
             assert!(runtime_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap().is_empty());
-            assert!(terminal_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap().is_empty());
+            let terminals = terminal_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap();
+            assert_eq!(terminals.len(), 1);
+            assert!(!serde_json::to_string(&terminals).unwrap().contains("notice-secret"));
         }
         assert!(runtime_resources_for_id(&state, &snapshot, &session, "runtime/notice-secret", false).unwrap().is_empty());
         let cards = crate::api::client_agent_resources(&state.store, true, &snapshot.created_at, snapshot.store_index).unwrap();
-        assert!(!cards.iter().any(|card| card["id"] == owner));
+        assert!(cards.iter().any(|card| card["id"] == owner));
+        assert!(!serde_json::to_string(&cards).unwrap().contains("notice-secret"));
+        assert!(!serde_json::to_string(&cards).unwrap().contains(&hidden.id));
         let id = crate::api::managed_session_id(owner, "notice-secret");
         assert!(crate::api::managed_session_owner_at(&state.store, snapshot.store_index, &id).unwrap().is_none());
         assert!(crate::api::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, &id, owner).unwrap().is_none());

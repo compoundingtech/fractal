@@ -717,7 +717,7 @@ impl SeatsStore for Store {
             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         let names = if history { names } else {
-            self.current_view_candidates(&connection, names, index, true)?
+            self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
         };
         drop(connection);
         let folded = previous.iter().flat_map(|previous| previous.items.iter())
@@ -1048,7 +1048,7 @@ impl SeatsStore for Store {
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
-                        self.current_view_candidates(&connection, names, index, true)?
+                        self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
                     };
                     if let Some(covered) = &previous.covered {
                         names.retain(|name| covered.contains(name));
@@ -1088,7 +1088,7 @@ impl SeatsStore for Store {
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
-                            self.current_view_candidates(&connection, names, index, true)?
+                            self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
                         };
                         changed.extend(names.difference(covered).cloned());
                         None

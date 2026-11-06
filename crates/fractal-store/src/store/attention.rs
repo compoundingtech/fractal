@@ -40,9 +40,18 @@ impl Store {
                 .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
-        let names = if generic { self.generic_status_subject_names_at(names, index)? } else { names };
+        let names = if generic {
+            names.into_iter().filter_map(|name| {
+                if fractal_schema::notice::is_reserved_subject(&name) { return None; }
+                if name.starts_with("agent/") { return Some(Ok(name)); }
+                match self.generic_status_subject_visible_at(&name, index) {
+                    Ok(true) => Some(Ok(name)), Ok(false) => None, Err(error) => Some(Err(error)),
+                }
+            }).collect::<Result<BTreeSet<_>>>()?
+        } else { names };
         // The view and status passes share what they read of each subject.
-        let mut reads = card_fold::CardReads::new(index);
+        let mut reads = if generic { card_fold::CardReads::for_generic_reads(index) }
+            else { card_fold::CardReads::new(index) };
         let names = if history { names } else {
             self.current_view_candidates_with(&connection, names, index, true, &mut reads)?
         };
@@ -51,7 +60,7 @@ impl Store {
         let mut kept = HashMap::new();
         let mut missing = Vec::new();
         for name in &names {
-            match self.kept_subject_status(name, index, mode) {
+            match self.kept_subject_status(name, index, mode, generic) {
                 Some((status, _)) => {
                     kept.insert(name.clone(), status);
                 }
@@ -60,7 +69,7 @@ impl Store {
         }
         for (name, (status, action)) in self.agent_card_statuses(&connection, &missing, index, &mut reads)? {
             if newest {
-                self.keep_subject_status(&name, index, mode, &status, &action);
+                self.keep_subject_status(&name, index, mode, &status, &action, generic);
             }
             kept.insert(name, status);
         }

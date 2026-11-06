@@ -1701,11 +1701,13 @@ pub struct SubjectCache {
     through: u64,
     conflicts: u64,
     views: HashMap<String, ViewEntry>,
+    serving_views: HashMap<String, ViewEntry>,
     pub statuses: HashMap<String, StatusEntry>,
     summary_statuses: HashMap<String, StatusEntry>,
     runtime_statuses: HashMap<String, StatusEntry>,
     // Summary and full statuses never share entries: their provenance/harness fields differ.
     card_statuses: HashMap<String, StatusEntry>,
+    serving_card_statuses: HashMap<String, StatusEntry>,
 }
 
 const AGENT_CARD_STATUS_LIMIT: usize = 4096;
@@ -5040,14 +5042,16 @@ impl Store {
                 .query_row(/* sqlite-large-value: allow-for-now lv-h021ae8b69609 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))?;
             if conflicts != cache.conflicts {
                 cache.views.clear();
+                cache.serving_views.clear();
                 cache.statuses.clear();
                 cache.summary_statuses.clear();
                 cache.runtime_statuses.clear();
                 cache.card_statuses.clear();
+                cache.serving_card_statuses.clear();
                 cache.conflicts = conflicts;
-            } else if !cache.views.is_empty() || !cache.statuses.is_empty()
+            } else if !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
                 || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
-                || !cache.card_statuses.is_empty() {
+                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
                     "SELECT subject, actor, kind IN ('work.claimed','work.progress')
@@ -5081,6 +5085,7 @@ impl Store {
                 cache
                     .views
                     .retain(|subject, entry| !runtime_stale(subject, &entry.owners));
+                cache.serving_views.retain(|subject, entry| !runtime_stale(subject, &entry.owners));
                 cache
                     .statuses
                     .retain(|subject, entry| !stale(subject, &entry.owners));
@@ -5089,6 +5094,7 @@ impl Store {
                     !runtime_stale(subject, &entry.owners) && !runtime_work_actors.contains(subject)
                 });
                 cache.card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.serving_card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
             }
             cache.through = store_index;
         }
@@ -5105,21 +5111,21 @@ impl Store {
         newest: bool,
         claims: ClaimsReduction,
     ) -> Result<(SubjectStatus, Option<PlannedAction>)> {
-        if let Some(kept) = self.kept_subject_status(subject, store_index, claims) {
+        if let Some(kept) = self.kept_subject_status(subject, store_index, claims, false) {
             return Ok(kept);
         }
         let (status, action) =
             subject_status_at(connection, subject, Some(store_index), None, claims)?
                 .expect("a reduction without an owner filter always has a status");
         if newest {
-            self.keep_subject_status(subject, store_index, claims, &status, &action);
+            self.keep_subject_status(subject, store_index, claims, &status, &action, false);
         }
         Ok((status, action))
     }
 
     /// `subject`'s kept status reduction, if one holds at `store_index`.
     fn kept_subject_status(
-        &self, subject: &str, store_index: u64, claims: ClaimsReduction,
+        &self, subject: &str, store_index: u64, claims: ClaimsReduction, serving_card: bool,
     ) -> Option<(SubjectStatus, Option<PlannedAction>)> {
         let cache = self.fractal
             .subject_cache
@@ -5131,6 +5137,7 @@ impl Store {
             ClaimsReduction::Full => &cache.statuses,
             ClaimsReduction::Summary => &cache.summary_statuses,
             ClaimsReduction::Runtime => &cache.runtime_statuses,
+            ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
         };
         entries.get(subject)
@@ -5145,7 +5152,7 @@ impl Store {
     /// Keep a reduction read at the newest applied snapshot, `store_index`.
     fn keep_subject_status(
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
-        status: &SubjectStatus, action: &Option<PlannedAction>,
+        status: &SubjectStatus, action: &Option<PlannedAction>, serving_card: bool,
     ) {
         let mut cache = self.fractal
             .subject_cache
@@ -5165,6 +5172,7 @@ impl Store {
             ClaimsReduction::Full => &mut cache.statuses,
             ClaimsReduction::Summary => &mut cache.summary_statuses,
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
+            ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
@@ -5202,6 +5210,14 @@ impl Store {
         self.current_view_candidates_with(connection, subjects, store_index, owners, &mut reads)
     }
 
+    /// Native serving membership uses the same reserved-row-free inputs as serving cards.
+    pub fn current_view_candidates_for_generic_reads(
+        &self, connection: &Connection, subjects: BTreeSet<String>, index: u64, owners: bool,
+    ) -> Result<BTreeSet<String>> {
+        let mut reads = card_fold::CardReads::for_generic_reads(index);
+        self.current_view_candidates_with(connection, subjects, index, owners, &mut reads)
+    }
+
     /// [`Self::current_view_candidates`], reading the runtimes it has no answer for a chunk at
     /// a time into `reads`.
     fn current_view_candidates_with(
@@ -5226,9 +5242,8 @@ impl Store {
                     continue;
                 }
                 // Without the owner checks, only an answer that used no declaration applies.
-                let known = cache
-                    .views
-                    .get(&subject)
+                let views = if reads.hide_reserved { &cache.serving_views } else { &cache.views };
+                let known = views.get(&subject)
                     .filter(|entry| entry.head <= store_index && (owners || !entry.declared))
                     .map(|entry| entry.history);
                 match known {
@@ -5253,7 +5268,8 @@ impl Store {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 if cache.through == store_index {
-                    cache.views.insert(subject.clone(), entry);
+                    let views = if reads.hide_reserved { &mut cache.serving_views } else { &mut cache.views };
+                    views.insert(subject.clone(), entry);
                 }
             }
             if !history {

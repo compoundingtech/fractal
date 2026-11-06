@@ -1179,7 +1179,7 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
 }
 
 #[test]
-fn notice_terminal_resources_exclude_contaminated_ordinary_owners_before_reduction() {
+fn notice_terminal_resources_keep_native_owners_and_strip_reserved_rows() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/notice-terminal";
     observe_runtime(&store, subject, "running", "one");
@@ -1196,11 +1196,19 @@ fn notice_terminal_resources_exclude_contaminated_ordinary_owners_before_reducti
     }).unwrap().unwrap();
     store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
     let cut = store.index().unwrap();
-    SUBJECT_REDUCTIONS.with(|count| count.set(0));
-    for owner in [None, Some(subject)] {
-        assert!(store.terminal_resource_status_at(owner, cut, true).unwrap().subjects.is_empty());
+    let names = BTreeSet::from([subject.to_owned()]);
+    let raw = store.agent_card_status_at(Some(&names), cut, false).unwrap();
+    assert!(serde_json::to_string(&raw).unwrap().contains("notice-secret"));
+    for history in [false, true] {
+        for owner in [None, Some(subject)] {
+            let visible = store.terminal_resource_status_at(owner, cut, history).unwrap();
+            assert_eq!(visible.subjects.len(), 1);
+            assert_eq!(visible.subjects[0].actual.as_ref().unwrap()["incarnation_id"], "one");
+            let shown = serde_json::to_string(&visible).unwrap();
+            assert!(!shown.contains("notice-secret"));
+            assert!(!shown.contains(&hidden.id));
+        }
     }
-    assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
     assert_eq!(store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap().subjects.len(), 1);
     assert!(store.claim_by_id(&hidden.id).unwrap().is_some());
     assert_eq!(store.status_history(Some(subject), None, Some(cut)).unwrap().subjects.len(), 1);
