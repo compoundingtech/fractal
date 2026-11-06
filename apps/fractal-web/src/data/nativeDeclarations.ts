@@ -7,6 +7,8 @@ export interface NativeDeclarations {
   readonly revision: string
   readonly bindings: readonly { readonly kind: string; readonly count: number }[]
   readonly declaredModel?: string
+  /** The harness `effort` the declaration asks for; it may differ from what the running session uses. */
+  readonly declaredEffort?: string
 }
 const scalar = Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null])
 const nodeSchema = Schema.Struct({
@@ -21,6 +23,7 @@ const references: Readonly<Record<string, true>> = { workspace: true, checkout: 
 export const projectNativeDeclarations = ({ declaration }: { readonly declaration: AgentDeclaration }): NativeDeclarations | undefined => {
   const counts = new Map<string, number>()
   let declaredModel: string | undefined
+  let declaredEffort: string | undefined
   let remaining = 2048
   const visit = (value: unknown, depth: number, parent?: string): boolean => {
     if (--remaining < 0 || depth > 32) return false
@@ -37,11 +40,16 @@ export const projectNativeDeclarations = ({ declaration }: { readonly declaratio
       const model = node.arguments?.[0]
       if (typeof model === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model) && model !== '.unknown') declaredModel = model
     }
+    if (depth === 2 && parent === 'harness' && node.name === 'effort') {
+      const effort = node.arguments?.[0]
+      if (typeof effort === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$/.test(effort)) declaredEffort = effort
+    }
     return (node.children ?? []).every(child => visit(child, depth + 1, node.name))
   }
   if (!visit(declaration.tree, 0)) return undefined
   return { agentRef: declaration.id, revision: declaration.revision,
     bindings: [...counts].map(([kind, count]) => ({ kind, count })),
     ...(declaredModel === undefined ? {} : { declaredModel }),
+    ...(declaredEffort === undefined ? {} : { declaredEffort }),
   }
 }

@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, AgentRelatedRuns, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@fractal/client/schema'
+import { Agent, AgentRelatedRuns, Attention as AttentionCodec, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
@@ -14,6 +14,8 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { unsupportedSubjectReader } from '../data/subjectReadPort.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
+import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
+import type { NativeDetailsSource } from '../data/nativeDetailsSource.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
@@ -151,6 +153,55 @@ it('draws served related runs under the host row in server order without joins, 
   } finally {
     folders.mockRestore()
   }
+})
+
+it('draws harness, observed model, declared effort and exact open asks under the host row, omitting unreported facts', async () => {
+  const seatAt = (revision: string) => openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example-meta', name: 'Meta', host_id: 'host/example-meta', runtime_ids: [], reachability: 'reachable',
+    state: 'running', harness_state: 'working', blocked_on: null, fault: null, revision, updated_at: '2026-10-20T12:00:00Z', driver: 'omp',
+    usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 2,
+      context: { used_tokens: 10, window_tokens: 100, used_percent: 10, observed_at_unix_ms: 3000, model: 'observed-model' } },
+  }))
+  const bare = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example-bare', name: 'Bare', host_id: 'host/example-meta', runtime_ids: [], reachability: 'reachable',
+    state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z' }))
+  const card = (id: string, fields: Record<string, unknown> = {}) => decodeUnknownSync(AttentionCodec)({ kind: 'attention', id, source_id: 'step-run/example/ask',
+    requester_id: 'agent/example-meta', conversation_id: 'agent/example-meta', person_id: 'person/operator', attention_kind: 'person-step', title: 'Example ask',
+    detail: 'Example', priority: 'normal', state: 'open', actions: ['work.done'], revision: '1', requested_at: '2026-10-20T12:00:00Z', updated_at: '2026-10-20T12:00:00Z', ...fields })
+  // Two asks to the person; a gate, a resolved ask and another agent's ask are not this row's asks.
+  const cards = [card('attention/a'), card('attention/b'), card('attention/gate', { attention_kind: 'human-gate', actions: ['review.approve'] }),
+    card('attention/resolved', { state: 'resolved' }), card('attention/other', { conversation_id: 'agent/example-elsewhere', requester_id: 'agent/example-elsewhere' })]
+  const attention = Atom.make<Feed<readonly Attention[]>>(observed({ value: cards })).pipe(Atom.keepAlive)
+  const declared = new Map<string, Atom.Writable<Feed<NativeDeclarations>>>()
+  const declarations = vi.fn(({ agentRef, revision }: { readonly agentRef: string; readonly revision: string }) => {
+    const key = `${agentRef}\n${revision}`
+    if (!declared.has(key)) declared.set(key, Atom.make<Feed<NativeDeclarations>>(waiting).pipe(Atom.keepAlive))
+    return declared.get(key)!
+  })
+  const nativeDetails: NativeDetailsSource = { usagePeriod: () => Atom.make(waiting), rawDeclarations: () => Atom.make(waiting), declarations, retry: () => {}, refresh: () => {} }
+  source = { ...source, attention, nativeDetails, subjectReads: { ...source.subjectReads, relatedRuns: unsupportedSubjectReader<AgentRelatedRuns>('Not under test') } }
+  registry.set(agents, observed({ value: [seatAt('7'), bare] }))
+  await mount(1440)
+  const row = (ref: string) => roster().querySelector(`[data-wf-agent-ref="${ref}"]`)!.closest('[role="row"]')!
+  const fields = () => [...row('agent/example-meta').querySelectorAll('[data-agent-metadata] [data-meta-field]')].map(field => [field.getAttribute('data-meta-field'), field.textContent])
+  expect(declarations).toHaveBeenCalledWith({ agentRef: 'agent/example-meta', revision: '7' })
+  // An unread declaration draws no effort; harness state and last activity stay on the row's own lines.
+  expect(fields()).toEqual([['harness', 'omp'], ['model', 'observed-model'], ['asks', '2 asks']])
+  expect(row('agent/example-bare').querySelector('[data-agent-metadata]')).toBeNull()
+  await act(async () => registry.set(declared.get('agent/example-meta\n7')!, observed({ value: { agentRef: 'agent/example-meta', revision: '7', bindings: [], declaredEffort: 'high' } })))
+  expect(fields()).toEqual([['harness', 'omp'], ['model', 'observed-model'], ['effort', 'high effort'], ['asks', '2 asks']])
+  // A newer row revision reads its declaration again; the last declared effort stays drawn meanwhile.
+  await act(async () => registry.set(agents, observed({ value: [seatAt('8'), bare] })))
+  expect(declarations).toHaveBeenCalledWith({ agentRef: 'agent/example-meta', revision: '8' })
+  expect(fields()).toContainEqual(['effort', 'high effort'])
+  await act(async () => registry.set(declared.get('agent/example-meta\n8')!, { _tag: 'Unavailable', reason: 'ungranted', detail: 'Example refusal' }))
+  expect(fields().map(([field]) => field)).toEqual(['harness', 'model', 'asks'])
+  // Bounded or missing attention is no count at all, never a lower bound.
+  await act(async () => registry.set(attention, { ...observed({ value: cards }), coverage: { _tag: 'Partial' } }))
+  expect(fields().map(([field]) => field)).toEqual(['harness', 'model'])
+  await act(async () => registry.set(attention, observed({ value: [card('attention/a')] })))
+  expect(fields()).toContainEqual(['asks', '1 ask'])
+  await act(async () => registry.set(attention, { _tag: 'Unavailable', reason: 'failed', detail: 'Example failure' }))
+  expect(fields().map(([field]) => field)).toEqual(['harness', 'model'])
 })
 
 it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {

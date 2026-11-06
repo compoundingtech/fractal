@@ -3,6 +3,7 @@ import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { prefetchChangelog } from '../changelog/load.ts'
 import { sidebarRow, sidebarSubagentRow, subagentRowId } from './sidebarRow.ts'
 import { LiveRelatedRuns } from './LiveRelatedRuns.tsx'
+import { LiveAgentMetadata } from './LiveAgentMetadata.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
@@ -77,7 +78,7 @@ const emptyAgents: readonly Agent[] = []
 /** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
 const RosterFrozenAt = React.createContext<number | undefined>(undefined)
 
-/** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. Host rows draw their served related runs beneath. */
+/** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. Host rows draw their metadata and served related runs beneath. */
 const LiveSidebarAgentRow = React.memo((props: {
   readonly agentRef: string
   readonly childId?: string
@@ -107,7 +108,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   }, [props.select, props.agentRef, requestThreadFocus])
   if (item === undefined) return null
   const row = <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
-  return props.childId === undefined ? <>{row}<LiveRelatedRuns agentRef={props.agentRef} now={frozenAt} /></> : row
+  return props.childId === undefined ? <>{row}<LiveAgentMetadata agentRef={props.agentRef} harness={item.harness} model={item.model} frozen={stale} /><LiveRelatedRuns agentRef={props.agentRef} now={frozenAt} /></> : row
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
