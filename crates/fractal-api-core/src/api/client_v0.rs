@@ -52,6 +52,7 @@ pub mod published_missions;
 pub mod collection_ivm;
 pub mod summary;
 pub mod assistant;
+pub mod related_runs;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 

@@ -134,6 +134,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(agent_declaration),
         )
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
+        .route("/v1/client/agent-related-runs/{*id}", get(related_runs::get))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
         .route("/v1/client/harness-questions", get(harness_questions::list))
