@@ -10,6 +10,7 @@ mod rich;
 mod notice;
 mod notice_schema;
 mod swift_notice;
+mod notice_descriptors;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -88,6 +89,11 @@ fn main() -> Result<()> {
     output(
         &root.join("clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift"),
         &swift_notice::models(&schema)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_descriptors.generated.rs"),
+        &format_rust(&notice_descriptors::models(&schema)?)?,
         check,
     )?;
     output(

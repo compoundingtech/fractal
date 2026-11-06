@@ -781,7 +781,7 @@ pub async fn client_sessions_detail(
                     .as_ref()
                     .ok_or_else(|| remote_unavailable_for_owner(&state, &remote_host))?;
                 if !client_v0::acting_party(&session) {
-                    return Err(ApiError::bad(St3Error::new(
+                    return Err(ApiError::bad(FractalError::new(
                         "forbidden",
                         "remote session detail requires a concrete person or agent",
                     )));
@@ -826,7 +826,7 @@ pub async fn client_sessions_detail(
             let relay = state.client_relay.as_ref()
                 .ok_or_else(|| remote_unavailable_for_owner(&state, &remote_host))?;
             if !client_v0::acting_party(&session) {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "forbidden",
                     "remote session detail requires a concrete person or agent",
                 )));
@@ -1232,7 +1232,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
 }
 
 fn client_message_page_too_large() -> ApiError {
-    ApiError::bad(St3Error::new(
+    ApiError::bad(FractalError::new(
         "response-too-large",
         "a message and its page envelope cannot fit the advertised response byte limit; pagination cannot omit it",
     ))
@@ -1376,7 +1376,7 @@ pub async fn client_launches_detail(
     let (snapshot, value) = blocking_store(move || {
         state.store.read_snapshot(|index| {
             let value = client_launch_detail_at(&state, &id, query.history)?.ok_or_else(|| {
-                anyhow::anyhow!(St3Error::new(
+                anyhow::anyhow!(FractalError::new(
                     "not-found",
                     format!(
                         "launch `{}` does not exist",

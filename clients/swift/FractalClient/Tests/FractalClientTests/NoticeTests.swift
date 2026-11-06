@@ -64,4 +64,18 @@ final class NoticeTests: XCTestCase {
         for value in ["relative/path", "https://bad host", "https://example.test/%xy", "https://example.test\n"] { XCTAssertThrowsError(try NoticeLinkUrl(value), value) }
         XCTAssertNoThrow(try NoticeLinkUrl("https://[::1]/a?b=c#fragment"))
     }
+    func testNullableControlsAndParameters() throws {
+        let fixture = try fixtures(), snapshot = try XCTUnwrap(fixture["snapshot"] as? [String: Any])
+        let id = try XCTUnwrap(snapshot["id"])
+        let timestamp = try XCTUnwrap((fixture["valid_timestamps"] as? [String])?.first)
+        try roundTrip(NoticeSeenParameters.self, ["notice_id": id])
+        try roundTrip(NoticeDismissParameters.self, ["notice_id": id])
+        for until in [NSNull(), timestamp] as [Any] {
+            try roundTrip(NoticeSnoozeParameters.self, ["notice_id": id, "until": until])
+            let seen = try replace(snapshot, ["seen_at"][...], until)
+            try roundTrip(NoticeSnapshot.self, seen)
+        }
+        try roundTrip(NoticeFence.self, ["notice_id": id, "source_revision": "v1", "control_revision": NSNull()])
+        try roundTrip(NoticeFence.self, ["notice_id": id, "source_revision": "v1", "control_revision": "control-v1"])
+    }
 }
