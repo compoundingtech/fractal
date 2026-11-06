@@ -7,11 +7,11 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "New triggers, no schema-version change: replica_envelopes, checkpoint_envelopes and retired_envelopes delete meta key replication_inventory_epoch on any change but an append (envelope deletes and rewrites, inserts below the tail, every tombstone and retired-ledger change). Each open writes a fresh epoch. A new file, <database>.replication-inventory, is written at a clean daemon stop (305 MB and 0.8 s for 4.5M identities) and removed by the next start's first snapshot."
+    "detail": "New triggers, no schema-version change: replica_envelopes, checkpoint_envelopes and retired_envelopes count every change but an append (envelope deletes and rewrites, inserts below the tail, every tombstone and retired-ledger change) in meta key replication_inventory_changes. Opening a store writes nothing new. A new file, <database>.replication-inventory, is written at a clean daemon stop (305 MB and 0.8 s for 4.5M identities) and removed by the next start's first snapshot."
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rules or digest changes; the inventory, its digests and the wire format are unchanged. Mixed-version safe: the file is local to one member; peers on any build exchange as before. An older binary never reads the file, and its writes fire the triggers, which live in the database, so a change it makes ends the epoch and the next start of this build reads the store."
+    "detail": "No checkpoint rules or digest changes; the inventory, its digests and the wire format are unchanged. Mixed-version safe: the file is local to one member; peers on any build exchange as before. An older binary never reads the file, and its writes fire the triggers, which live in the database, so a change it makes moves the count and the next start of this build reads the store."
   },
   "compatibility": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Swapping back is supported: an older build ignores the file and keeps the triggers, whose cost is one meta probe per changed inventory row. Deleting the file is always safe."
+    "detail": "Swapping back is supported: an older build ignores the file and keeps the triggers, whose cost is one meta update per changed inventory row (checkpoint and trim rows already update meta per row through the existing inventory generation triggers). Deleting the file is always safe."
   }
 }

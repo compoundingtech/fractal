@@ -7,23 +7,26 @@
 //! first snapshot after the next open reads it back and extends it by the envelopes appended
 //! since, as a running process extends its own.
 //!
-//! The file is trusted only while nothing changed the inventory but appends. Each open writes a
-//! fresh epoch into `meta`, and triggers delete it on any change to what the inventory lists or
-//! which payloads it holds: deleting or rewriting an envelope, inserting one below the tail, and
-//! any change to the checkpoint tombstones or the retired ledger. They are in the database, so
-//! they fire for every binary that writes it, an older one too. A shutdown saves only while its
-//! own open's epoch is still there, and the next open reads the file only when the epoch it
-//! found is the one the file names and its own epoch is still there when it reads. The file
-//! also names the envelope at its last row, which a store restored from a copy would not hold.
-//! Reading consumes it, so a process that stops without saving leaves none behind.
+//! The file is trusted only while nothing changed the inventory but appends. Triggers count
+//! every other change in `meta`: deleting or rewriting an envelope, inserting one below the
+//! tail, and any change to the checkpoint tombstones or the retired ledger. They are in the
+//! database, so they count for every binary that writes it, an older one too. A snapshot keeps
+//! the count it was read at, and loses it when a change it does not take in (a trim's deleted
+//! payloads) lands under it. A stop saves only while the count is the snapshot's, and the next
+//! open reads the file only while the count is still the file's. The file also names the
+//! envelope at its last row, which a store restored from a copy would not hold. Reading
+//! consumes it, so a process that stops without saving leaves none behind.
 use super::*;
 use std::io::{Read as _, Write as _};
 
-const EPOCH: &str = "replication_inventory_epoch";
-const MAGIC: &[u8; 32] = b"fractal replication inventory 01";
+const CHANGES: &str = "replication_inventory_changes";
+const MAGIC: &[u8; 32] = b"fractal replication inventory 02";
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
-    let forget = format!(/* sqlite-large-value: allow-for-now lv-h73fc1394f8ea owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='{EPOCH}';");
+    let count = format!(
+        /* sqlite-large-value: allow-for-now lv-h3ebd622ad4da owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('{CHANGES}','1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1;"
+    );
     for (table, event, condition) in [
         ("replica_envelopes", "DELETE", ""),
         (
@@ -44,37 +47,18 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
         ("retired_envelopes", "UPDATE", ""),
     ] {
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h6a059130c899 owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_saved_inventory_{event} AFTER {event} ON {table}
-             {condition} BEGIN {forget} END;"
+            /* sqlite-large-value: allow-for-now lv-h4b84af8077fd owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_saved_inventory_{event} AFTER {event} ON {table}
+             {condition} BEGIN {count} END;"
         ))?;
     }
     Ok(())
 }
 
-/// Replace the epoch the last open wrote with a fresh one, and return the one it replaces.
-pub(super) fn rotate_epoch(connection: &Connection) -> Result<(Option<String>, String)> {
-    let previous = connection
-        .query_row(
-            "SELECT value FROM meta WHERE key=?1",
-            [EPOCH],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("draw an inventory epoch: {error}"))?;
-    let epoch = hex::encode(bytes);
-    connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hcc1be495eace owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [EPOCH, epoch.as_str()],
-    )?;
-    Ok((previous, epoch))
-}
-
-fn current_epoch(connection: &Connection) -> Result<Option<String>> {
+/// How many changes other than appends the inventory has had.
+pub(super) fn changes(connection: &Connection) -> Result<i64> {
     Ok(connection
-        .prepare_cached("SELECT value FROM meta WHERE key=?1")?
-        .query_row(/* sqlite-large-value: allow-for-now lv-had5f2ddeb015 owner=smallclaims::store::saved_inventory TODO=trace-statement-and-value-representation */ [EPOCH], |row| row.get::<_, String>(0))
-        .optional()?)
+        .prepare_cached("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1),0)")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h9adce74dc7c8 owner=smallclaims::store::saved_inventory TODO=trace-statement-and-value-representation */ [CHANGES], |row| row.get(0))?)
 }
 
 fn anchor(connection: &Connection, rowid: i64) -> Result<Option<ReplicaEnvelopeId>> {
@@ -99,7 +83,7 @@ pub fn path(database: &Path) -> PathBuf {
 
 /// What a saved inventory says about the store it was saved from.
 struct Header {
-    epoch: String,
+    changes: i64,
     inventory_generation: i64,
     max_envelope_rowid: i64,
     envelope_rows: u64,
@@ -123,17 +107,17 @@ impl Store {
             return Ok(InventorySave::Skipped("the store is in memory"));
         }
         let destination = path(&self.path);
-        // Hold the build lock, so a build that read the store earlier cannot replace the
-        // snapshot this saves, nor a trim's patch land after it.
-        let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
         let Some(snapshot) = crate::read_budget::lock_sync(&self.replication_snapshot)?.clone() else {
             return Ok(InventorySave::Skipped("no replication snapshot was built since the start"));
         };
+        let Some(counted) = snapshot.inventory_changes else {
+            return Ok(InventorySave::Skipped("a change other than an append landed under the snapshot"));
+        };
         let changed = |connection: &Connection| -> Result<Option<&'static str>> {
-            Ok(if current_epoch(connection)?.as_deref() != Some(self.inventory_epoch.as_str()) {
-                Some("a change other than an append, or another open of the store, ended this start's epoch")
+            Ok(if changes(connection)? != counted {
+                Some("a change other than an append landed since the snapshot")
             } else if inventory_generation::current(connection)? != snapshot.inventory_generation {
-                Some("the inventory changed since the last snapshot")
+                Some("the inventory changed since the snapshot")
             } else {
                 None
             })
@@ -141,7 +125,7 @@ impl Store {
         let (changed_before, header) = self.read_snapshot_unindexed(|| {
             let connection = self.readers.get();
             let header = Header {
-                epoch: self.inventory_epoch.clone(),
+                changes: counted,
                 inventory_generation: snapshot.inventory_generation,
                 max_envelope_rowid: snapshot.max_envelope_rowid,
                 envelope_rows: snapshot.envelope_rows as u64,
@@ -169,20 +153,15 @@ impl Store {
 
     /// The inventory the last clean shutdown saved, as a snapshot the next build extends, when
     /// it still describes this store; `None` when there is none or it does not. Consumes the
-    /// file either way. Runs inside the build's read snapshot.
+    /// file either way. Runs inside the build's read snapshot, which reads `changes` too.
     pub(super) fn saved_replication_snapshot(
         &self,
         connection: &Connection,
+        changes_now: i64,
     ) -> Result<Option<ReplicationSnapshot>> {
-        let Some(found) = self
-            .saved_inventory_epoch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        else {
-            // Only the first build of an open reads the file.
+        if self.shared_memory {
             return Ok(None);
-        };
+        }
         let source = path(&self.path);
         let file = match std::fs::File::open(&source) {
             Ok(file) => file,
@@ -204,8 +183,7 @@ impl Store {
                 return Ok(None);
             }
         };
-        let describes = found.as_deref() == Some(header.epoch.as_str())
-            && current_epoch(connection)?.as_deref() == Some(self.inventory_epoch.as_str())
+        let describes = header.changes == changes_now
             && header.inventory_generation == inventory_generation::current(connection)?
             && header.retired_authoritative == retired::authoritative(connection)?
             && header.max_envelope_rowid <= max_envelope_rowid(connection)?
@@ -220,6 +198,7 @@ impl Store {
             max_envelope_rowid: header.max_envelope_rowid,
             envelope_rows: header.envelope_rows as usize,
             inventory_generation: header.inventory_generation,
+            inventory_changes: Some(header.changes),
             inventory,
             buckets,
             // The digest states before each range are rebuilt by the build that extends it.
@@ -285,7 +264,7 @@ fn write(destination: &Path, header: &Header, snapshot: &ReplicationSnapshot) ->
     };
     let inventory = &snapshot.inventory;
     out.write_all(MAGIC)?;
-    put_text(&mut out, &header.epoch)?;
+    put_u64(&mut out, header.changes as u64)?;
     put_u64(&mut out, header.inventory_generation as u64)?;
     put_u64(&mut out, header.max_envelope_rowid as u64)?;
     put_u64(&mut out, header.envelope_rows)?;
@@ -388,7 +367,7 @@ fn read(
     let mut magic = [0; 32];
     input.read_exact(&mut magic)?;
     anyhow::ensure!(&magic == MAGIC, "not a replication inventory this build reads");
-    let epoch = get_text(&mut input)?;
+    let changes = get_u64(&mut input)? as i64;
     let inventory_generation = get_u64(&mut input)? as i64;
     let max_envelope_rowid = get_u64(&mut input)? as i64;
     let envelope_rows = get_u64(&mut input)?;
@@ -448,7 +427,7 @@ fn read(
     anyhow::ensure!(inner.read(&mut [0])? == 0, "the file runs on past its digest");
     Ok((
         Header {
-            epoch,
+            changes,
             inventory_generation,
             max_envelope_rowid,
             envelope_rows,

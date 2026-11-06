@@ -104,9 +104,10 @@ fn a_change_beyond_appends_after_the_save_makes_the_next_open_read_the_store() {
     assert_matches_the_store(&store, &snapshot);
 }
 
-/// Any change but an append during the run ends its epoch, so it saves nothing.
+/// A change other than an append after the last snapshot was read makes a stop save nothing;
+/// a full read after it takes it in, and saves.
 #[test]
-fn a_change_beyond_appends_during_the_run_leaves_nothing_to_save() {
+fn a_change_beyond_appends_after_the_last_snapshot_leaves_nothing_to_save() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cedar.sqlite3");
     let store = open(&path);
@@ -120,14 +121,47 @@ fn a_change_beyond_appends_during_the_run_leaves_nothing_to_save() {
             [],
         )
         .unwrap();
-    store.replication_snapshot().unwrap();
     assert!(matches!(store.save_replication_inventory().unwrap(), saved_inventory::InventorySave::Skipped(_)));
     assert!(!saved_inventory::path(&path).exists());
+    store.replication_snapshot().unwrap();
+    assert_eq!(store.save_replication_inventory().unwrap(), saved_inventory::InventorySave::Saved);
 }
 
-/// An open that does not read the file, such as another process's, ends the epoch it names.
+/// A payload deleted under a snapshot without changing what it lists (as a trim does) is not
+/// taken in by extending it, so the extended snapshot is not saved either.
 #[test]
-fn an_open_between_the_save_and_the_next_read_retires_the_saved_inventory() {
+fn an_extension_over_a_payload_change_is_not_saved() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    let store = open(&path);
+    write_notes(&store, "history", 40);
+    store.replication_snapshot().unwrap();
+    let connection = store.connection.write();
+    // As a trim deletes a payload its checkpoint lists: the identity stays, as a tombstone.
+    connection
+        .execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h452c69f7277e owner=smallclaims::store::saved_inventory_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes(writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
+             SELECT writer, sequence, envelope_hash, 0, 'invented-checkpoint' FROM replica_envelopes
+             WHERE rowid=(SELECT MIN(rowid) FROM replica_envelopes);",
+        )
+        .unwrap();
+    drop(connection);
+    store.replication_snapshot().unwrap();
+    let connection = store.connection.write();
+    connection
+        .execute(/* sqlite-large-value: allow-for-now lv-h7adac784a2b7 owner=smallclaims::store::saved_inventory_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelopes WHERE rowid=(SELECT MIN(rowid) FROM replica_envelopes)", [])
+        .unwrap();
+    drop(connection);
+    write_notes(&store, "after-the-trim", 1);
+    let snapshot = store.replication_snapshot().unwrap();
+    assert_eq!(snapshot.inventory_changes, None);
+    assert!(matches!(store.save_replication_inventory().unwrap(), saved_inventory::InventorySave::Skipped(_)));
+}
+
+/// Opening the store writes nothing, so an open that does not build a snapshot, such as a
+/// tool's, leaves the saved inventory for the next one that does.
+#[test]
+fn an_open_between_the_save_and_the_next_read_leaves_the_saved_inventory() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cedar.sqlite3");
     {
@@ -140,7 +174,7 @@ fn an_open_between_the_save_and_the_next_read_retires_the_saved_inventory() {
     let store = open(&path);
     FULL_INVENTORY_LOADS.with(|count| count.set(0));
     let snapshot = store.replication_snapshot().unwrap();
-    assert_eq!(full_loads(), 1);
+    assert_eq!(full_loads(), 0);
     assert_matches_the_store(&store, &snapshot);
 }
 
