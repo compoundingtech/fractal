@@ -43,7 +43,7 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
             );
 
             let intent = crate::graph::parse_intent(&source, "alder").unwrap();
-            let (subject, kind, body) = if let Some(desired) = intent.subjects.get("agent/new") {
+            let (subject, kind, mut body) = if let Some(desired) = intent.subjects.get("agent/new") {
                 (
                     "agent/new",
                     "intent.desired",
@@ -56,6 +56,11 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
                     serde_json::to_value(&intent.missions["new"]).unwrap(),
                 )
             };
+            // Canonical mission serialization omits empty budgets; direct authors can
+            // still submit that field explicitly, and it must count as authored.
+            if kind == "mission.published" && child == "declared-budgets {}" {
+                body["declared_budgets"] = json!({});
+            }
             let error = store
                 .append_claim(&ClaimInput {
                     subject: subject.into(),
