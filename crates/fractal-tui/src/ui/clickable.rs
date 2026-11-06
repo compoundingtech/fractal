@@ -58,6 +58,7 @@ impl Ui {
             Hit::Row(_) => "select row".into(),
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
+            Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
             Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
@@ -105,7 +106,7 @@ impl Ui {
             && self.context.is_none()
             && !self.home_open()
             && !self.palette_open()
-            && !matches!(hit, Hit::Composer | Hit::Resize)
+            && !matches!(hit, Hit::Composer | Hit::Resize | Hit::SidebarResize)
             && self.click_focuses_split(point.0, point.1)
         {
             left = "focus split; click again to act".into();
