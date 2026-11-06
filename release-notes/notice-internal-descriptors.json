@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Generate private notice descriptor and direct native decoder insertion content from shared schema metadata, with cross-language control-model parity tests.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "changed", "detail": "Adds internal codegen metadata only; notice wire shapes are unchanged." },
+  "rules": { "status": "none", "detail": "No coordination rules change." },
+  "compatibility": { "status": "none", "detail": "No public Resource arm, collection, capability, action constructor, watch command or SDK transport support is registered. Private decoder insertion content is compiled in conformance tests." },
+  "downtime": { "status": "none", "detail": "No deployment outage." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "No durable state changes." }
+}
