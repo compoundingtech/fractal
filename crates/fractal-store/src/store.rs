@@ -1051,6 +1051,8 @@ CREATE INDEX IF NOT EXISTS claims_person_ask_owner_index ON claims(json_extract(
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_origin_step_index ON claims(json_extract(body, '$.fields.origin_step'))
 WHERE kind='work.person-asked';
+CREATE INDEX IF NOT EXISTS claims_person_ask_recipient_index
+ON claims(json_extract(body, '$.fields.person')) WHERE kind='work.person-asked';
 
 CREATE TABLE IF NOT EXISTS mission_run_requests (
     operation_id TEXT PRIMARY KEY,
@@ -1165,6 +1167,7 @@ CREATE TABLE IF NOT EXISTS mission_runs (
     updated_at_unix_ms TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mission_runs_mission_index ON mission_runs(mission_id, created_at_unix_ms);
+CREATE INDEX IF NOT EXISTS mission_runs_requester_index ON mission_runs(requester);
 -- Additive seek-index migration: schema installation runs for existing stores too.
 -- Distinct mission keys, latest headers and live-state probes never fold run history.
 CREATE INDEX IF NOT EXISTS mission_runs_collection_latest_index
