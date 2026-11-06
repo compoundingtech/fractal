@@ -135,7 +135,7 @@ fn v2_folder_cycles_noops_and_exact_folder_operations() {
     intent.node = fractal_sidebar::model::NodeRef::Folder { id: inner.into() };
     intent.parent = fractal_sidebar::model::Parent::Root {};
     intent.before = Some(fractal_sidebar::model::NodeRef::Folder { id: outer.into() });
-    assert_eq!(serde_json::to_value(plan_v2(&a, &members, &intent).unwrap()).unwrap(), json!({"folders":[{"op":"folder.move","id":inner,"parent":null,"key":"Zz"}],"memberships":[]}));
+    assert_eq!(serde_json::to_value(plan_v2(&a, &members, &intent).unwrap()).unwrap(), json!({"folders":[{"op":"folder.move","id":inner,"parent":null,"key":"ZU"}],"memberships":[]}));
     intent.parent = fractal_sidebar::model::Parent::Folder { id: inner.into() };
     assert!(matches!(plan_v2(&a, &members, &intent), Err(V2Refusal::Move { refusal: MoveRefusal::SelfMove { .. } })));
 }
@@ -150,8 +150,8 @@ fn v2_minimal_rekey_can_choose_backward_and_preserves_sibling_order() {
     let members = root_members(&a, &["Zz", "a0", "a0", "a0", "b00"]);
     let edit = plan_v2(&a, &members, &drop_member(&members[4].member, None, Some(&members[2].member))).unwrap();
     assert_eq!(serde_json::to_value(edit).unwrap(), json!({"folders":[],"memberships":[
-        {"op":"place","member":members[4].member,"bucket":null,"key":"Zzk"},
-        {"op":"place","member":members[1].member,"bucket":null,"key":"ZzV"}
+        {"op":"place","member":members[4].member,"bucket":null,"key":"Zzf"},
+        {"op":"place","member":members[1].member,"bucket":null,"key":"ZzL"}
     ]}));
 }
 
@@ -169,4 +169,22 @@ fn v2_refuses_oversized_atomic_rekeys_and_payloads_without_truncation() {
     members[2].member = format!("agent/test/{}", "x".repeat(fractal_schema::ordered_membership::MAX_EDIT_BYTES));
     let target = members[0].position.bucket.as_deref();
     assert!(matches!(plan_v2(&a, &members, &drop_member(&members[2].member, target, Some(&members[0].member))), Err(V2Refusal::TooManyBytes { bytes }) if bytes > fractal_schema::ordered_membership::MAX_EDIT_BYTES));
+}
+
+#[test]
+fn bounded_max_length_gap_rekeys_only_the_six_required_siblings() {
+    let (a, _) = input(&fixture()["cases"][1]);
+    let prefix = format!("a0{}", "0".repeat(fractal_schema::ordered_membership::MAX_KEY_BYTES - 3));
+    let lower = format!("{prefix}1");
+    let upper = format!("{prefix}z");
+    let mut keys = vec![lower.as_str(); 13]; keys.extend([upper.as_str(), "b00"]);
+    let members = root_members(&a, &keys);
+    let edit = plan_v2(&a, &members, &drop_member(&members[14].member, None, Some(&members[7].member))).unwrap();
+    assert_eq!(edit.memberships.len(), 7);
+    for operation in edit.memberships {
+        let fractal_schema::ordered_membership::Operation::Place { member, key, .. } = operation else { panic!("Place only") };
+        assert_ne!(member, members[13].member, "the upper bound must not be rekeyed");
+        assert!(key.len() <= fractal_schema::ordered_membership::MAX_KEY_BYTES && fractal_schema::arrangements::valid_key(&key));
+        assert!(lower < key && key < upper);
+    }
 }

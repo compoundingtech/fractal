@@ -25,7 +25,7 @@
         "subject:agent/test/b": {"node": {"_tag": "Subject", "subject": "agent/test/b"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "key": "a0", "revision": "claim/test-2", "source": "person", "children": []},
         "subject:machine/retained": {"node": {"_tag": "Subject", "subject": "machine/retained"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "key": "Zz", "revision": "claim/test-3", "source": "person", "children": []}
       }, "arrangementRevision": "claim/test-2", "deletedFolders": ["00000000-0000-7000-8000-00000000000d"]}, "moves": [
-        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "machine/retained", "bucket": "00000000-0000-7000-8000-00000000000b", "key": "a1"}, {"op": "place", "member": "agent/test/b", "bucket": "00000000-0000-7000-8000-00000000000b", "key": "a2"}]}}
+        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "machine/retained", "bucket": "00000000-0000-7000-8000-00000000000b", "key": "aL"}, {"op": "place", "member": "agent/test/b", "bucket": "00000000-0000-7000-8000-00000000000b", "key": "af"}]}}
       ], "rollup": {
         "folder:00000000-0000-7000-8000-00000000000a": {"needsYou": 1, "display": "Always"}, "folder:00000000-0000-7000-8000-00000000000b": {"needsYou": 1, "display": "Always"}
       }, "effects": [], "wireActions": []}]
@@ -55,7 +55,7 @@
         "subject:machine/retained": {"node": {"_tag": "Subject", "subject": "machine/retained"}, "parent": {"_tag": "Root"}, "shownUnder": {"_tag": "Root"}, "key": "Zz", "revision": "claim/test-3", "source": "person", "children": []}
       }, "arrangementRevision": "claim/test-3", "deletedFolders": []}, "moves": [
         {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "machine/retained", "bucket": "00000000-0000-7000-8000-00000000000a", "key": "a0V"}]}},
-        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "agent/test/a", "bucket": null, "key": "Zy"}]}}
+        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "agent/test/a", "bucket": null, "key": "ZU"}]}}
       ], "rollup": {"folder:00000000-0000-7000-8000-00000000000a": {"needsYou": 2, "display": "Always"}}, "effects": [], "wireActions": []}]
     }
   ]
