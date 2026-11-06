@@ -527,7 +527,7 @@ their existing authenticated HTTP(S) gateway transport remains available.
 
 ### Tailnet carrier
 
-`st up` listens on two different Unix sockets. `fractal.sock` is the privileged trusted-local API;
+`fractal up` listens on two different Unix sockets. `fractal.sock` is the privileged trusted-local API;
 `fractal-client.sock` is the paired-only client gateway backed by `fabric_router`. The latter rejects
 ordinary requests without a paired bearer credential, except for public capability negotiation
 and pairing completion. The socket
@@ -542,7 +542,7 @@ During migration, default readers fall back to the corresponding `st3.sock` or
 legacy names beside the new default sockets so older clients keep working.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal -->
 
-Without an explicit `--client-gateway-socket`, a private `st up --state-dir DIR` derives its
+Without an explicit `--client-gateway-socket`, a private `fractal up --state-dir DIR` derives its
 gateway as `DIR/fractal-client.sock`, even when `--socket` is also supplied. With only `--socket`,
 the gateway is `fractal-client.sock` beside that socket. If this derived path equals the shared
 default gateway (including symlinked ancestors above directories not yet created), startup
@@ -590,7 +590,7 @@ HTTPS route after every rollout, then make an authenticated paired-client read.
 This provides tailnet-only HTTPS and WebSocket transport at the host's Tailscale name while the
 gateway continues to enforce the same paired credential, scopes, terminal subprotocol, and
 attachment capability. Begin pairing over the trusted local socket with, for example,
-`st devices --as person/alex pair "Alex iPhone"`; complete pairing from the remote device over
+`fractal devices --as person/alex pair "Alex iPhone"`; complete pairing from the remote device over
 the served gateway. To remove the carrier without changing graph credentials or daemon state:
 
 ```sh
@@ -745,7 +745,7 @@ string, not the operational resource union's discriminator. This list route does
 accepts `agent/garden/interactive` or `garden/interactive`; encode the path parameter when using
 a raw HTTP client. It requires only `read.projections`, not declaration or terminal-control scope.
 Rust exposes `Client::agent_workspace_get(id)`; Swift and TypeScript expose `agentWorkspaceGet`.
-The CLI is `st agents workspace agent/garden/interactive [--json]`.
+The CLI is `fractal agents workspace agent/garden/interactive [--json]`.
 
 The response is `Envelope<AgentWorkspace>`:
 
@@ -829,7 +829,7 @@ route use the labelled, redacted structured JSON view; a missing mission remains
 
 ### Usage over a period
 
-The optional `agent_messages` field adds a **daily estimate**, also shown by `st usage` and
+The optional `agent_messages` field adds a **daily estimate**, also shown by `fractal usage` and
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
 Receipts and duplicate send claims add no messages. Bodies are never classified. After an
@@ -896,7 +896,7 @@ not report a value leaves it out. Selection uses quota observation time, indepen
 context refresh and publication time. Within an hour of the account's freshest observation,
 the highest weekly reading in the latest reported reset window wins; ties use source time
 and seat identity. A new reset window can lower the reading, and an older high reading
-outside the hour cannot override it. This same selection serves `st usage`, terminal UI, iOS,
+outside the hour cannot override it. This same selection serves `fractal usage`, terminal UI, iOS,
 account pools and the limits policy. The policy tests freshness against the selected source
 time, so a recent low publication cannot freshen an old high observation. Claim kinds and
 client fields remain compatible with older clients.
@@ -907,7 +907,7 @@ identified account, including exhausted accounts with no seats, remain visible. 
 use the same stable declared label as publishers, including older generic provider labels.
 Partial reports without a weekly percentage do not replace or refresh a prior weekly source.
 The durable reading survives member restarts. Consumers must check its original measurement time
-and reset window; missing or stale evidence is unknown, never zero. `st doctor` reports missing,
+and reset window; missing or stale evidence is unknown, never zero. `fractal doctor` reports missing,
 stale, future-dated or already-reset weekly evidence for active accounts as `account-limits`.
 See [account limits](../accounts.md#at-the-limit) for the policy and external backstop behavior.
 Rows also carry optional `native_session_id` (the provider's session UUID, fenced by incarnation)
@@ -934,7 +934,7 @@ Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms
 
 ### Objectives and budgets
 
-`GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
+`GET /v1/client/slo` lists every objective and budget, the rows `fractal slo ls` prints. It requires
 `read.projections`. The value is `SloList { as_of_unix_ms, otel_ui_url?, rows }`; `otel_ui_url` is where a person reads the exported observation history, present only when the daemon's `[observations.otlp]` sets `ui_url` (an http or https address; an older daemon rejects the key, so set it once every member runs this build), and a client shows it as a link beside the rows. An objective is a target with
 windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
 phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
@@ -1021,7 +1021,7 @@ Fabric both reach, so Fractal cannot tell them apart; `tailscale` when Tailscale
 whether it is `connected` now with how many open `streams`, `since` and `last_seen`, and what it
 `follows`: windows by name, `conversation:ID` and `terminal:ID`. Another member's clients are on
 that member's list. The Rust method is `Client::clients_list()`, Swift `clientsList()` and
-TypeScript `clientsList()`. `st clients` (or `--json`) prints the list, and `st devices ls` adds
+TypeScript `clientsList()`. `fractal clients` (or `--json`) prints the list, and `fractal devices ls` adds
 "connected now" or "last seen" with the reported build to each paired device.
 
 
@@ -1078,7 +1078,7 @@ person-step attention card then includes the same `request`; a card without one 
 ask, and clients should not infer answers from its title. A card with `update` instead brings
 information the person asked for and asks nothing: show it, and send `work.done` with
 `answer: {"id": "read"}` (its `action_parameters` already carry it) when the person opens it
-or presses read. Agents post updates with `st work update`.
+or presses read. Agents post updates with `fractal work update`.
 
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
@@ -1094,8 +1094,8 @@ typed answer from the `work` resource's `person_answers`.
 Only the assigned person or a session explicitly delegated by that person completes it. The
 requester may instead use `work.cancel-ask`. Completion resumes a live origin in the same attempt
 with a new readiness epoch; the response and evidence stay on the source. CLI equivalents are
-`st work ask --for PERSON --title TEXT --reason TEXT --step STEP --as AGENT --idempotency-key KEY`
-(or `--new-run NAME`) and `st work done STEP --as PERSON --summary TEXT`.
+`fractal work ask --for PERSON --title TEXT --reason TEXT --step STEP --as AGENT --idempotency-key KEY`
+(or `--new-run NAME`) and `fractal work done STEP --as PERSON --summary TEXT`.
 
 A `human-gate` card answers its gate with `review.approve` and, by its `review_mode`, either
 `review.reject` (`approve`) or `review.request-changes` (`feedback`); the other is refused.
@@ -1215,7 +1215,7 @@ and `approver_id`, and `state` (`open` or `closed`). `entries` are in lane order
 `entry_id`, a short `label` without the prefix, `position`, the status the run recorded (`waiting`,
 `held`, `ready`, or `running`) with its `detail`, exact `head`, marker, and time, who joined it and
 when, and who approved it. `recent` lists joins, leaves, moves, and approvals, newest first. The
-`st missions tree` view carries the open lanes as `lanes`. [Lanes](../lanes.md) explains the model.
+`fractal missions tree` view carries the open lanes as `lanes`. [Lanes](../lanes.md) explains the model.
 The tree lists at most 200 active runs, steps per run, unstarted missions and agents, and standing
 queues up to 1000 queued runs. When a fleet has more, `truncated` names each part that was cut
 with how many it `shown` of the `total`.
@@ -1518,7 +1518,7 @@ in `GET /v1/health`; the field is absent without the stream. A page read that al
 `messages_next_after`, `messages_has_more` and `messages_frontier`; their `store_index` is the
 stream's own. An owner-filtered page has no stream items, and a read without `messages_after`
 gets the graph's page unchanged. A stream item arriving wakes a waiting page read, so
-`st conversations wait` ends on a stream reply. The legacy
+`fractal conversations wait` ends on a stream reply. The legacy
 `GET /v1/events` keeps its array shape, returns at most 200 rows, and reports continuation in
 `X-ST-Next-After`, `X-ST-Has-More`, and `X-ST-Frontier`; owner filters and subject filters
 during migration require the page endpoint. CLI condition, restart, and harness waits use pages.
@@ -1533,7 +1533,7 @@ continue returning their existing `oldest_cursor` and `newest_cursor` resync det
 replacement without an old cursor returns a continuation at least at the current frontier, so the
 next request cannot loop on the upgrade floor. Raw event consumers exit with status 6 on
 `cursor-gap` and print the floor/frontier. Trace followers also print an explicit
-`st trace show ... --after-index FRONTIER --follow` continuation command on the same endpoint.
+`fractal trace show ... --after-index FRONTIER --follow` continuation command on the same endpoint.
 Inspect retained claims before opting into that continuation: the reported gap is never replayed.
 Without `--after-index`, trace displays its bounded history then starts following at the observed
 global frontier, even if that subject has no claims or its newest claim predates the floor.
@@ -1591,10 +1591,10 @@ submits the runtime resource ID as `target_id` and copies its `incarnation_id` a
 `agent.start` takes `{ "agent": "agent/NAME" }`. These require `control.runtimes` and the
 same authority as `agent.create`: the session's concrete person, or a local agent acting as
 itself (free mode).
-Stop publishes the same desired stop as `st agents stop`, even if no runtime is live, and
+Stop publishes the same desired stop as `fractal agents stop`, even if no runtime is live, and
 preserves the immutable declaration. A nonblank `reason` is kept in that stop and returns in
 the agent's `end_reason` with the actor once the seat has stopped. Start restores the unambiguous preceding agent
-declaration with its original identity and host, like `st agents start` without overrides.
+declaration with its original identity and host, like `fractal agents start` without overrides.
 Mission-owned agents must instead be changed through their mission. Both actions copy the
 selected desired claim ID into `fence.runtime_desired_revision`, reject stale fences, and
 use the normal audited action receipt/idempotency key; exact retries return the saved result.
@@ -1746,12 +1746,12 @@ and launch control. The begin request may narrow that default with `scopes`, a n
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
 `read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
-`full_control`, is rejected with a validation error. `st devices --as person/alex pair
+`full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so
 the device can observe but every attention, launch, and other action returns `403`. For an
 intentionally trusted device that needs Chat sends, mission/work actions, runtime control, and
 terminal input, the initiating person
-must use `st devices --as person/alex pair --full-control "Alex iPhone"` on the trusted local
+must use `fractal devices --as person/alex pair --full-control "Alex iPhone"` on the trusted local
 socket. The selected concrete scopes are sealed into that pairing; existing limited devices are
 not silently upgraded and must be re-paired, then revoked when no longer needed. Revocation takes
 effect for every subsequent request, including a new bounded terminal WebSocket exchange.
@@ -1909,7 +1909,7 @@ historical bodies, redacted or not, require `read.declarations`; `read.projectio
 does not authorize this endpoint. Default limited pairing never grants `read.declarations`.
 Full-control pairing does, so grant it only to a trusted device whose holder may explicitly
 inspect declaration secrets; revoke or re-pair existing devices to change their sealed scopes.
-Likewise, `st subject show agent/NAME --kdl` redacts environment values; add
+Likewise, `fractal subject show agent/NAME --kdl` redacts environment values; add
 `--show-env-values` to include them. KDL is a normalized representation of the applied
 desired state, not a recovery of authored whitespace or comments.
 
@@ -1944,8 +1944,8 @@ offers the same bounded change read for clients that cannot open WebSockets.
 The projected terminal protocol sends complete screens: each screen replaces every earlier one,
 so a client that falls behind skips to the latest screen. Full-fidelity applications use the raw
 PTY transport below instead. Interactive attach from a terminal on the owning host
-(`pty attach`, `st terminals attach`) is a different, privileged path that passes raw bytes. On that
-host, `st terminals attach` reads the PTY session from the local daemon
+(`pty attach`, `fractal terminals attach`) is a different, privileged path that passes raw bytes. On that
+host, `fractal terminals attach` reads the PTY session from the local daemon
 (`GET /v1/sessions/local-terminal/{subject}`, which writes nothing) and connects to that session
 itself. Before it sends a byte, the socket's kernel-reported peer and the PTY record must match the
 runtime incarnation. Through an HTTP endpoint, or with a daemon that lacks that route, it uses the
@@ -1957,21 +1957,21 @@ it, as the local user. It prints that Fractal was not consulted, and the kernel-
 be the PTY daemon the registry records. With no such session it says, after that second, which
 daemon it is still waiting for.
 
-`st terminals attach` to a terminal on another fleet host first tries the same raw path over Fabric,
+`fractal terminals attach` to a terminal on another fleet host first tries the same raw path over Fabric,
 as the configured person. The CLI checks that the gateway grants that person `terminal.read` and
 `terminal.control`, and reads the owner, PTY session, and runtime incarnation from its local daemon.
 It then dials the owner's Fabric NodeID, which the owner's member record advertises or, in a
 config-peer fleet, the one trusted Fabric peer with the owner's name, ignoring case. The protocol is
-`st3/pty/FLEET_ID`, which `st terminals expose-fabric` has the owner's Fabric forward to the owner
+`st3/pty/FLEET_ID`, which `fractal terminals expose-fabric` has the owner's Fabric forward to the owner
 daemon's terminal socket, `STATE_DIR/run/terminals.sock`: one connection per tunnel, with no process
 or pipe per attach. The daemon serves that socket on a thread and runtime of its own, and an attach
 reads only the PTY registry and the kernel's socket peer, so a daemon busy with its store or other
 requests does not delay it. A stopped, crashed or restarting daemon refuses new tunnels, and each
 daemon restart, including every deploy, ends its live remote attaches; the CLI reconnects with the
-same incarnation once the daemon answers again. `st terminals expose-fabric --exec`, and any
-exposure made before the terminal socket existed, has Fabric run `st terminals serve-fabric
+same incarnation once the daemon answers again. `fractal terminals expose-fabric --exec`, and any
+exposure made before the terminal socket existed, has Fabric run `fractal terminals serve-fabric
 --stdio` for each tunnel instead, which needs no daemon and behaves the same otherwise; running
-`st terminals expose-fabric` again replaces either kind. The CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
+`fractal terminals expose-fabric` again replaces either kind. The CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
 `{"op":"route","name":RUNTIME_ID,"subject":SUBJECT,"incarnation":INCARNATION}`. The owner refuses
 a name that is not one file under its PTY root and a session that is not tagged as the subject's.
 It refuses a session whose kernel-reported socket peer and PTY record do not match the incarnation.
@@ -2424,9 +2424,10 @@ immutable person in the subject. Operations are tagged by `op`:
 | `folder.move` | `id`, `parent: null \| folder ID`, `key` |
 | `folder.delete` | `id` |
 | `subject.place` | `subject`, `folder: null \| folder ID`, `key` |
+| `membership.migrate` | none (existing identity, sole operation) |
 | `retire` | none |
 
-Each atomic edit may touch a register at most once; retirement must be its only operation.
+Each atomic edit may touch a register at most once; retirement or migration must be its only operation.
 
 Creation declares the name and may atomically include folders and placements. Null
 placement folders unfile subjects; changing the key reorders them. Include any necessary
@@ -2535,10 +2536,44 @@ when importing its custom sidebar history into arrangements.
 New arrangements opt into a folder-only body with `arrangement.edit` parameters
 `{subject, owner, version: 2, operations: [{op: "create", name}]}`. Version is accepted only
 on creation; omission creates v1. A v2 body retains the versioned name and folder registers
-but has no `placements`. Existing v1 bodies and `subject.place` behavior remain supported:
-this primitive does not migrate historical winners or convert an existing arrangement.
-If offline v1 and v2 creates collide on one identity, retained unrepaired v1 creation or
-placement authority preserves the v1 layout; the v2 pair records remain retained but inactive.
+but has no `placements`. Unmigrated v1 bodies and `subject.place` remain supported.
+If offline v1 and v2 creates collide on one unmigrated identity, retained unrepaired v1
+creation or placement authority preserves v1; v2 pairs remain retained but inactive.
+
+#### Migrating existing placement authority
+
+Discover granted capability `arrangement-placement-migration` version 1. Select the
+existing canonical arrangement identity before migrating (migration never creates or
+reselects an arrangement). Submit `arrangement.edit` with
+`{subject, owner, operations: [{op: "membership.migrate"}]}` and no `version` field.
+Migration must be the sole operation. Observe the same arrangement resource with
+`body.version: 2`; its owner, name, folder IDs, parents, keys and tombstones are unchanged.
+Each historical placement becomes a pair retaining the original claim revision,
+canonical winner and actor provenance, including retired and not-yet-known members.
+Migration writes a retained authority marker, not fresh placement winners.
+
+The marker and backfill commit in one writer transaction: an interrupted request leaves
+v1 intact or v2 fully active. Retry the exact action ID/idempotency key for its receipt.
+Independent migration reruns are harmless and do not overwrite subsequent pair edits.
+After cutover all placement readers/streams use the membership API below. V1-only
+strict readers receive an explicit v2 body without `placements`, not an empty v1 fallback.
+Local `subject.place` actions are refused with `invalid-arrangement-operations`.
+A racing local action either commits before cutover and is included, or is refused.
+Late replicated/offline v1 placement claims remain decodable and are routed into the
+same ordered pair LWW reducer using their original winners; they cannot revert to v1.
+Retained historical placement registers are replay-boundary sources only, never
+an active v2 read/write authority. Existing membership writes compete in that same reducer.
+
+Checkpoint rules advance from 25 to 26. Shared projection identity
+`st3.shared-projections.slo-breach-episodes-declared-resource-edges-arrangement-placement-migration.v1`
+distinguishes migration-aware peers/checkpoint witnesses. The retained `st3` digest
+namespace is a compatibility identity, not a package name: the operation contract lives
+in `fractal-schema`, projection/replay in `fractal-store`, and arrangement admission in
+`fractal-seats`. Upgrade participating Fractal daemons before migrating or sealing
+new checkpoints; older daemons may quarantine the new operation. There is no new drop
+rule, irreversible claim rewrite or automatic binary rollback. Keep a pre-upgrade backup.
+
+#### Membership pages and actions
 
 **Lock-step reader rollout:** upgrade every client that reads an owner's arrangement list
 or collection stream to a version-2-aware decoder **before creating that owner's first v2
@@ -2596,7 +2631,7 @@ same host without becoming shared projection or checkpoint authority.
 
 `agent.create` takes `name`, `harness` (`claude`, `codex`, `omp`, `pi`, `opencode`), optional `host`,
 `model`, `effort`, `workspace`, `repo`, `base`, `branch`, `remove_at_run_end`, `description`, and `message`. Names are stable seat identities as
-in `st agents new`. Workspace paths are absolute on the selected host; omission asks that host for
+in `fractal agents new`. Workspace paths are absolute on the selected host; omission asks that host for
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
@@ -2675,7 +2710,7 @@ claims authored by that host. Reconciliation observes Git directories for plain 
 reads never inspect another host's disk or scan the filesystem. Suggestions include currently
 declared agents only and can be empty before the owning host reconciles a plain workspace.
 Rust exposes `host_repositories`; TypeScript and Swift expose `hostRepositories`.
-The same read is `st agents repos [--host HOST] [--json]`.
+The same read is `fractal agents repos [--host HOST] [--json]`.
 
 `terminal.create` takes a nonempty display `name` (up to 160 bytes), optional `host` and absolute
 `cwd`. An omitted directory uses the selected daemon's directory. It declares a standalone PTY
@@ -2707,7 +2742,7 @@ recorded for the message's signature (`verified`, `unsigned`, `held` or `invalid
 the last two), and for a signed one the `signer`, the `key` and the `device` the key was granted to,
 by the label it was given when it paired (`example phone (secure enclave)`). Clients show it beside the
 sender; an `unsigned` message is usually just older than signing and shows nothing. An agent's
-message carries none. `GET /v1/messages/read/{id}` (`st conversations read`) and `st subject show`
+message carries none. `GET /v1/messages/read/{id}` (`fractal conversations read`) and `fractal subject show`
 for a message give the same object.
 
 Messages tagged `dictated` carry a delivery-only line explaining that voice transcription may
@@ -2744,14 +2779,14 @@ background refresher last published; no read folds the roster itself. Each page 
 that roster's own cut in its `snapshot` (`store_index`, `created_at`) and when it was folded
 (`published_at`). That cut can be older than the request, by about a second plus one fold.
 
-An ordinary first page answers immediately from the latest publication, including `st agents ls`
-and `st agents tree`, which no longer send `fresh=true`. Existing callers may still pass
+An ordinary first page answers immediately from the latest publication, including `fractal agents ls`
+and `fractal agents tree`, which no longer send `fresh=true`. Existing callers may still pass
 `fresh=true`: its legacy behavior is unchanged. It requests a refresh and waits up to two
 seconds for a publication at or after the request cut, returns the retained publication
 promptly after a failed latest attempt with no newer attempt in flight, and uses the existing
 unchanged-card proof. Rust keeps `agents_list_fresh`; current-work `fresh=true` is unchanged.
 
-Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+Ordinary `fractal agents ls` and `fractal agents tree` read the latest published roster without
 requesting a refresh. Immediately after starting or changing an agent they can show the
 earlier roster; after daemon startup the roster may still be being prepared. When you need
 to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
@@ -2879,7 +2914,7 @@ retryable, with `details.reason: "work-list-ended"`. With `fresh=true`, the daem
 two seconds for a publication at or after the store index when the request arrived; if none
 comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fresh"` and the
 `wanted_cut` and `newest_cut`, and never older rows as fresh. On the wire these answers carry
-`code: "internal"`; `details.reason` tells them apart. `st work ls` asks for a fresh first page and
+`code: "internal"`; `details.reason` tells them apart. `fractal work ls` asks for a fresh first page and
 asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
 attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
@@ -2897,7 +2932,7 @@ owner returns an empty page. State filtering uses the projected state, including
 `unreachable` when runtime authority is unavailable. `history=true` (CLI `--all`)
 retains its existing meaning; filters do not add stopped history by themselves.
 
-The CLI equivalent is `st terminals ls --owner agent/example/worker --state running --json`.
+The CLI equivalent is `fractal terminals ls --owner agent/example/worker --state running --json`.
 Rust exposes `terminals_list_filtered`, Swift `terminalsListFiltered`, and TypeScript
 `terminalsListFiltered`. Existing list methods, ordering, default limit (50), maximum
 limit (200), and unfiltered paging are unchanged. Filtered pages echo `owner` and `state`
@@ -3240,3 +3275,30 @@ If the standby restarts while the primary is down, the standby cannot take over 
 
 Hosted validation must run `cargo run -p fractal-client-codegen -- --check`. Generated
 files remain generated; do not hand-edit clients for open JSON observation detail.
+
+## External quota source v1
+
+The daemon accepts optional `[quota_source]` configuration with `url` (an absolute
+HTTP(S) snapshot URL without embedded credentials) and `refresh_seconds` (default
+30, range 1–3600). Only the operator selects the URL; client request parameters
+never override it. Redirects are refused. Sources need no change signal.
+
+`GET /v1/client/quota` requires `read.projections` and uses the normal client-v0
+envelope. Its value is `{state:"disabled"}`, `{state:"unavailable",refresh_seconds,reason}`,
+or `{state:"available",refresh_seconds,snapshot}`. Requests share one in-flight
+fetch and its success or failure for a refresh window; there is no daemon poller.
+Errors never return an old snapshot as available. HTTP reads have a five-second
+deadline and a 1 MiB body limit.
+Unavailable reasons distinguish `transport` from `invalid_snapshot`.
+
+The source returns the following JSON snapshot (unknown additive fields allowed):
+Its machine-readable contract is [quota-source-v1.schema.json](schemas/quota-source-v1.schema.json).
+`{"schema_version":1,"generated_at":"2026-01-01T00:00:00Z","freshness_horizon_seconds":60,"accounts":[{"id":"team","provider":"example","label":"Team","observed_at":"2026-01-01T00:00:00Z","governing_window_id":"week","windows":[{"id":"week","label":"Weekly","used_percent":72,"resets_at":null}]}]}`.
+Timestamps are RFC3339. Account IDs and per-account window IDs are nonempty and
+unique. Producer array ordering is presentation ordering. Governing IDs must name
+a published window or be null (unknown); consumers never infer governing policy
+from the largest percentage. Percentages are nonnegative, may exceed 100, and
+null means unknown, not zero. Null reset means unknown. Freshness expires after
+the positive horizon, both for snapshot generation and each account observation;
+consumers must label expired readings stale. Unsupported versions are unavailable.
+
