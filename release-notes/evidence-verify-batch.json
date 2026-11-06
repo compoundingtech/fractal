@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal-test --status, which the pre-push hook runs, now asks the accepted base's evidence verifier every question in one process, using the new `scripts/evidence-verify --batch`. Before, it ran one verifier process per check, and each process checked the signature of every record of the tree before keeping its own. On a busy build host that spent most of two minutes checking the same signatures seven times. Within one process, each record's signature is now checked once per key list. The memo is keyed by the record and the key lists' contents, lives in memory only, and is never written to disk. On a build host at load 15, the six ordinary checks of a signed tree took 15 s in one batch. Each answer is byte for byte the one a run of its own gives.",
+  "replay": {"status": "none", "detail": "Scripts only; nothing in the daemon changes."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or migrations."},
+  "rules": {"status": "none", "detail": "No checkpoint rule, registry or coordinated member upgrade change. The verifier's decisions are unchanged."},
+  "compatibility": {"status": "changed", "detail": "New verifier option `--batch`; every other invocation is unchanged. fractal-test asks a base whose verifier lacks it one process per check, as before."},
+  "downtime": {"status": "none", "detail": "No service change."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Reverting restores one verifier process per check."}
+}
