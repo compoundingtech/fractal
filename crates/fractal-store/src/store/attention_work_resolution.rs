@@ -95,7 +95,7 @@ fn person_sql() -> String {
 
 /// Ask recipients come from the immutable ask. Authored person steps have a fenced
 /// generation:attempt:epoch episode; their accepted answer carries admission-validated
-/// person/explicit/assistant authority. Neither path reads today's assignment.
+/// person, delegation or assistant authority. Neither path reads today's assignment.
 /// Like standing_responses, only an on-time person answer can replace a deadline default.
 pub fn person_step_resolution_at(
     connection: &Connection, source_id: &str, person: &str, episode: &str,
