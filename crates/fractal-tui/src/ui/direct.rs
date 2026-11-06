@@ -486,14 +486,14 @@ mod tests {
     /// Time the real attach path to a live seat, read only: the runtime read Fractal TUI makes, the
     /// route (local socket or Fabric), and the first screen of a PEEK, which sends no input and
     /// resizes nothing. Run by hand against a real daemon and fleet:
-    /// `STUI_PROBE_SUBJECT=agent/... STUI_PROBE_PERSON=person/... cargo test -p fractal-tui
+    /// `FRACTAL_TUI_PROBE_SUBJECT=agent/... FRACTAL_TUI_PROBE_PERSON=person/... cargo test -p fractal-tui
     /// live_direct_probe -- --ignored --nocapture`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "reads a live seat through the real daemon and Fabric"]
     async fn live_direct_probe() {
-        let subject = std::env::var("STUI_PROBE_SUBJECT").expect("STUI_PROBE_SUBJECT");
-        let person = std::env::var("STUI_PROBE_PERSON").expect("STUI_PROBE_PERSON");
-        let runtime = std::env::var("STUI_PROBE_RUNTIME").expect("STUI_PROBE_RUNTIME");
+        let subject = std::env::var("FRACTAL_TUI_PROBE_SUBJECT").expect("FRACTAL_TUI_PROBE_SUBJECT");
+        let person = std::env::var("FRACTAL_TUI_PROBE_PERSON").expect("FRACTAL_TUI_PROBE_PERSON");
+        let runtime = std::env::var("FRACTAL_TUI_PROBE_RUNTIME").expect("FRACTAL_TUI_PROBE_RUNTIME");
         let endpoint = crate::environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
             .unwrap()
             .map(PathBuf::from);
@@ -501,12 +501,12 @@ mod tests {
         let client = Client::discovered_unix_as(identity, person);
         let started = Instant::now();
         // Fractal TUI's own feed already holds an agent's incarnation and host, so a real attach reads
-        // no runtime. With STUI_PROBE_INCARNATION and STUI_PROBE_OWNER (from `st agents show
+        // no runtime. With FRACTAL_TUI_PROBE_INCARNATION and FRACTAL_TUI_PROBE_OWNER (from `fractal agents show
         // AGENT --json`: value.incarnation_id, value.host_id) the probe does the same; without
         // them it makes the runtime read, which a busy daemon can take seconds to answer.
         let (name, incarnation, owner, terminal) = match (
-            std::env::var("STUI_PROBE_INCARNATION"),
-            std::env::var("STUI_PROBE_OWNER"),
+            std::env::var("FRACTAL_TUI_PROBE_INCARNATION"),
+            std::env::var("FRACTAL_TUI_PROBE_OWNER"),
         ) {
             (Ok(incarnation), Ok(owner)) => (
                 runtime.trim_start_matches("runtime/").to_owned(),

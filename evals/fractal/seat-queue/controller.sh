@@ -18,7 +18,7 @@ started_runs=()
 cleanup() {
   local run
   for run in "${started_runs[@]}"; do
-    st3 missions cancel "$run" \
+    fractal missions cancel "$run" \
       --reason "the seat queue controller is cleaning up after an early exit" \
       --as "$REQUESTER" >/dev/null 2>&1 || true
   done
@@ -57,7 +57,7 @@ checkpoint() {
 wait_for_worker() {
   local deadline=$((SECONDS + 300)) snapshot
   while (( SECONDS < deadline )); do
-    snapshot="$(st3 agents show "$WORKER" --all --json 2>/dev/null || true)"
+    snapshot="$(fractal agents show "$WORKER" --all --json 2>/dev/null || true)"
     if jq -e '
       .value.state == "running"
       and .value.reachability == "reachable"
@@ -76,7 +76,7 @@ render_fixture() {
 }
 
 step_state() {
-  st3 work show "$1" --json | jq -er '.value.state'
+  fractal work show "$1" --json | jq -er '.value.state'
 }
 
 wait_for_step() {
@@ -94,7 +94,7 @@ wait_for_step() {
 
 queue_snapshot() {
   local name=$1
-  st3 agents queue "$WORKER" --json >"$GENERATED/queue-$name.json"
+  fractal agents queue "$WORKER" --json >"$GENERATED/queue-$name.json"
   checkpoint "queue-$name"
 }
 
@@ -167,7 +167,7 @@ wait_for_worker
 checkpoint seat-idle
 
 for label in alpha bravo charlie; do
-  st3 apply "$GENERATED/$label.kdl" --as "$REQUESTER" >/dev/null
+  fractal apply "$GENERATED/$label.kdl" --as "$REQUESTER" >/dev/null
 done
 
 # Start order is the default queue order: alpha, then bravo, then charlie.
@@ -200,7 +200,7 @@ queue_snapshot before-move
 
 # Another agent moves the last run ahead of bravo while the seat holds
 # alpha's draft.
-st3 agents queue move "$WORKER" "$charlie" --before "$bravo" \
+fractal agents queue move "$WORKER" "$charlie" --before "$bravo" \
   --reason "charlie's notes are needed before bravo's" \
   --as "$MOVER" --json >"$GENERATED/move.json"
 jq -e --arg mover "$MOVER" '.actor == $mover and .kind == "agent.queue.moved"' "$GENERATED/move.json" >/dev/null \
@@ -231,7 +231,7 @@ jq -e --arg alpha "$alpha" '.value.runs[0].mission_run_id == $alpha and .value.r
   || fail "alpha was not the waiting head run when charlie was claimed"
 
 # Release alpha's gate while the seat still holds charlie's work.
-st3 alerts approve "$alpha_sign_off" \
+fractal alerts approve "$alpha_sign_off" \
   --as "$REQUESTER" \
   --reason "the alpha draft is signed off" >/dev/null
 checkpoint sign-off-approved
@@ -259,7 +259,7 @@ wait_for_step "$bravo_work" completed
 checkpoint bravo-completed
 
 for run in "$alpha" "$bravo" "$charlie"; do
-  st3 trace wait "$run" --for completed --timeout 2m >/dev/null
+  fractal trace wait "$run" --for completed --timeout 2m >/dev/null
 done
 queue_snapshot finished
 jq -e '.value.runs == [] and .value.current_work_ids == []' "$GENERATED/queue-finished.json" >/dev/null \

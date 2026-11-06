@@ -1,14 +1,14 @@
 # What a run waits on
 
-`st missions waiting-on RUN` answers why one run is not moving. `st missions blocked` lists every
+`fractal missions waiting-on RUN` answers why one run is not moving. `fractal missions blocked` lists every
 blocked run in the fleet, one line each, grouped by cause. Both answer in milliseconds, so you can
 ask them as often as you like.
 
 ```sh
-st missions waiting-on mission-run/example/build/1
-st missions waiting-on mission-run/example/build/1 --quiet 45m --json
-st missions blocked
-st missions blocked --quiet 2h
+fractal missions waiting-on mission-run/example/build/1
+fractal missions waiting-on mission-run/example/build/1 --quiet 45m --json
+fractal missions blocked
+fractal missions blocked --quiet 2h
 ```
 
 The HTTP reads are `GET /v1/mission-runs/{run}/waiting-on` and `GET /v1/blocked-runs`. Both take
@@ -26,7 +26,7 @@ Neither read folds claims or replays history. They read state Fractal already ke
 - For one run, one primary-key read of the run and a range of its own `step_runs` rows. This
   names the steps that are finished or not yet ready. Its cost is the run's own steps.
 
-`st missions show RUN` builds a presentation from each step's whole history. On a large store that
+`fractal missions show RUN` builds a presentation from each step's whole history. On a large store that
 costs minutes of daemon CPU, so it is the wrong tool for "why is this stuck".
 
 When a daemon publishes no lists (`ST3_PUBLISHED_LISTS=off`), both reads refuse with HTTP 503
@@ -69,10 +69,10 @@ The quiet limit is 30 minutes by default: the time Fractal waits before it nudge
 The run's cause is its first open step's kind in the order of the cause table. The reason names
 that step, whom it waits on, and for how long.
 
-`st missions blocked` lists every run with open work whose verdict is stalled or waiting. A stalled
+`fractal missions blocked` lists every run with open work whose verdict is stalled or waiting. A stalled
 run is listed under its stuck step's cause; a waiting one under its first cause. Within a cause,
 the longest blocked run comes first.
 
 A run with no open step, only steps not yet ready (such as one waiting on `--after` before its
-first step opens), is not in the work list. `st missions blocked` does not list it, and
-`st missions waiting-on` says it has no open step.
+first step opens), is not in the work list. `fractal missions blocked` does not list it, and
+`fractal missions waiting-on` says it has no open step.
