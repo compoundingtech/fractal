@@ -33,6 +33,8 @@ pub enum WorkerIngressGenerationCheck {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_source: Option<QuotaSourceConfig>,
     pub node: String,
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +138,16 @@ pub struct Config {
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
 }
+
+/// An operator-selected external quota source; clients cannot override its URL.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaSourceConfig {
+    pub url: String,
+    #[serde(default = "quota_refresh_seconds")]
+    pub refresh_seconds: u64,
+}
+fn quota_refresh_seconds() -> u64 { 30 }
 
 /// `[github]`: an explicit token file, or gateway-authorized requests with a sekrets profile.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -493,6 +505,11 @@ pub fn set_daemon_config(path: Option<&Path>) {
     let _ = DAEMON_CONFIG.set(path.map(Path::to_path_buf));
 }
 
+pub fn reload_daemon_quota() -> Result<Option<QuotaSourceConfig>> {
+    let Some(path) = DAEMON_CONFIG.get() else { return Ok(None) };
+    Ok(Config::load_unvalidated(path.as_deref())?.quota_source)
+}
+
 /// The daemon's `[limits]` as the config file says now, so an edit applies without a restart.
 /// `None` outside a daemon.
 pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
@@ -643,6 +660,7 @@ impl Default for Config {
         let socket = runtime_dir.join("fractal.sock");
         let client_gateway_socket = runtime_dir.join("fractal-client.sock");
         Self {
+            quota_source: None,
             node: host_name(),
             access_mode: None,
             claude_primary_ownership: None,

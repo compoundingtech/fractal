@@ -46,6 +46,7 @@ pub mod inventory;
 pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
+pub mod quota;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -110,6 +111,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
