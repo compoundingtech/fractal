@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "TUI test helpers, scratch names and phone sample data use current Fractal terminology.",
+  "replay": {"status": "none", "detail": "No graph replay changes."},
+  "schema": {"status": "none", "detail": "No persisted or wire schema changes."},
+  "rules": {"status": "none", "detail": "No authority changes."},
+  "compatibility": {"status": "none", "detail": "Only test-local names and invented sample data change; live state paths and legacy-slug compatibility assertions remain."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No durable state changes to recover."}
+}
