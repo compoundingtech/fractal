@@ -651,7 +651,7 @@ pub async fn revise_planning_session(
         .map_err(ApiError::bad)?;
     record_planning_event(
         &state,
-        &response,
+        &session,
         "planning-session.revision-requested",
         Some(&request.actor),
         BTreeMap::from([(
@@ -1143,7 +1143,7 @@ pub async fn cancel_planning_session(
         .map_err(ApiError::bad)?;
     record_planning_event(
         &state,
-        &response,
+        &session,
         "planning-session.cancelled",
         Some(&request.actor),
         BTreeMap::from([
@@ -1213,7 +1213,13 @@ fn record_planning_event(
             kind: kind.into(),
             actor: actor.map(normalize_message_party),
             fields,
-            evidence: Vec::new(),
+            evidence: if matches!(kind, "planning-session.revision-requested" | "planning-session.cancelled") {
+                match session.preview.as_ref() {
+                    Some(preview) => state.store.planning_preview_claim_id(&session.id, &preview.hash)
+                        .map_err(ApiError::bad)?.into_iter().collect(),
+                    None => Vec::new(),
+                }
+            } else { Vec::new() },
             expected_subject: None,
             idempotency_key: Some(idempotency_key.into()),
         })
