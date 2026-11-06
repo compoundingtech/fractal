@@ -96,6 +96,9 @@ pub trait SeatsStore {
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool>;
+    /// Whether this node committed a claim an agent card reads after store index `after`, through
+    /// `through`. Claims other nodes wrote, and local claims about any other subject, are false.
+    fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool>;
     /// The last claim that can change an agent's status: one about an agent, or about the run
     /// or generation that owns it, whose row decides the agent's projection layer. Steps,
     /// gates, subscriptions and diagnostics commit far more often and change no agent status.
@@ -467,9 +470,7 @@ impl SeatsStore for Store {
             // A card reads claims about its agent, the runs, generations and steps that own or
             // queue agents, and messages; work activity is read by actor on step claims. A
             // claim about any other subject, of any kind, changes no card.
-            if !["agent/", "mission-run/", "run-generation/", "step-run/", "message/"]
-                .iter().any(|prefix| subject.starts_with(prefix))
-            {
+            if !agent_card_input_subject(&subject) {
                 continue;
             }
             if self.fractal.claim_registry().claim(&kind).is_none() {
@@ -562,6 +563,21 @@ impl SeatsStore for Store {
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?);
         }
         Ok(AgentResourcesChange::Delta(delta))
+    }
+
+    fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject FROM claims WHERE store_index>?1 AND store_index<=?2 AND origin=?3",
+        )?;
+        for subject in statement.query_map(params![after as i64, through as i64, self.origin()],
+            |row| row.get::<_, String>(0))?
+        {
+            if agent_card_input_subject(&subject?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {

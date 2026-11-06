@@ -2629,6 +2629,7 @@ dependencies = [
  "fractal-feed",
  "fractal-mission-ui",
  "fractal-schema",
+ "fractal-sidebar",
  "fractal-terminal-direct",
  "fractal-ui-model",
  "image",

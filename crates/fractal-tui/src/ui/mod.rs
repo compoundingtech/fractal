@@ -49,7 +49,6 @@ mod drafts_store;
 mod prefs;
 mod recent;
 mod resource_sidebar;
-mod arrangement_keys;
 mod observed_resources;
 mod pty;
 pub mod requests;

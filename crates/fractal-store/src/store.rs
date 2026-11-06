@@ -36,6 +36,8 @@ pub mod identities;
 // Prepared internally; no accepted gate kind or production caller dispatches here.
 #[allow(dead_code)]
 pub(crate) mod agent_review_answer;
+#[allow(dead_code)]
+pub(crate) mod agent_review_decode;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
@@ -259,6 +261,9 @@ mod message_outbox_tests;
 pub mod relayed_closes;
 #[cfg(test)]
 mod relayed_closes_tests;
+pub mod stream_mirror;
+#[cfg(test)]
+mod stream_mirror_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -18702,8 +18707,9 @@ pub struct RecordedSeatMove {
     pub view: SeatQueueMoveView,
 }
 
-/// The durable facts that order one seat's queue: when each run joined, every
-/// recorded move in graph order, and which joined runs are still live.
+/// The durable facts that order one seat's queue: when each live run and each
+/// finished run the live order depends on joined, every recorded move in graph
+/// order, and which joined runs are still live.
 #[derive(Default)]
 pub struct SeatQueueInputs {
     pub joins: Vec<QueueJoin>,
@@ -18800,8 +18806,9 @@ pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
 /// Read seat-queue inputs for one seat or the whole roster. A live run is queued
 /// while its current generation has a step for the seat, and it keeps the join
 /// time of its first such step in any generation. Runs that are no longer
-/// queued are read only when a move names them, because a run that never
-/// anchors or receives a move cannot change the relative order of the others.
+/// queued are read only when the live order can depend on them
+/// ([`seat_queue::order_anchors`]): a seat that has moved its queue a thousand
+/// times names hundreds of finished runs, and a claim reads this under the writer.
 pub fn seat_queue_inputs_tx(
     connection: &Connection,
     agent: Option<&str>,
@@ -18822,7 +18829,7 @@ pub fn named_run_probes() -> usize {
 }
 
 /// [`seat_queue_inputs_tx`], keeping only `seats` when given: every move and join is still read
-/// in one pass, but only those seats' named runs are probed, one query each.
+/// in one pass, but only those seats' order anchors are probed, one query each.
 pub fn seat_queue_inputs_of_tx(
     connection: &Connection,
     agent: Option<&str>,
@@ -18903,16 +18910,12 @@ pub fn seat_queue_inputs_of_tx(
         seats.retain(|seat, _| only.contains(seat));
     }
     for (seat, inputs) in &mut seats {
-        let named = inputs
+        let moves = inputs
             .moves
             .iter()
-            .flat_map(|recorded| {
-                std::iter::once(recorded.movement.run.clone())
-                    .chain(recorded.movement.anchor.clone())
-            })
-            .filter(|run| !inputs.live.contains(run))
-            .collect::<BTreeSet<_>>();
-        for run in named {
+            .map(|recorded| recorded.movement.clone())
+            .collect::<Vec<_>>();
+        for run in seat_queue::order_anchors(&moves, &inputs.live) {
             let Some(run_id) = run.strip_prefix("mission-run/") else {
                 continue;
             };

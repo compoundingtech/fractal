@@ -1869,6 +1869,9 @@ pub struct Agent {
     /// Placement handoff phase and the sources still holding its fence.
     #[serde(default)]
     pub handoff: Option<AgentHandoff>,
+    /// The seat's declaration is a stop but its process still runs. An older daemon omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping: Option<AgentStopping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<Value>,
     /// The resources the seat's current declaration names. An older daemon omits them.
@@ -1884,6 +1887,12 @@ pub enum AgentLifecycle {
     Bounded,
     #[serde(other)]
     Unknown,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentStopping {
+    /// Why the stop waits: mail it had not read, or work it held in another run, when the stop
+    /// was declared. `None` while the stop has not been deferred.
+    pub held: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentHandoff {
