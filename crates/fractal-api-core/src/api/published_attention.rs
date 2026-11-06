@@ -664,6 +664,7 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PersonWorkStore;
 
     #[test]
     fn controls_filter_authoritative_rows_and_publish_the_snooze_wake() {

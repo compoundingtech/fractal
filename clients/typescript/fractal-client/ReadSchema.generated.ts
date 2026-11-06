@@ -1351,6 +1351,18 @@ export const AttentionPresentation = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionPresentation = typeof AttentionPresentation.Type
 export type AttentionPresentationEncoded = typeof AttentionPresentation.Encoded
 
+export const AttentionPresentationControl = /*#__PURE__*/ (() => Schema.Struct({
+  "dismissed": Schema.Boolean,
+  /** Canonical control-register revision; null before the first control. */
+  "revision": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Canonical control-register revision; null before the first control." }),
+  /** Server UTC snooze deadline; null explicitly clears snooze. */
+  "snoozed_until": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Server UTC snooze deadline; null explicitly clears snooze." }),
+  /** Fingerprint of native source semantics, excluding delivery and presentation. */
+  "source_revision": Revision
+}).annotate({ identifier: "AttentionPresentationControl" }))()
+export type AttentionPresentationControl = typeof AttentionPresentationControl.Type
+export type AttentionPresentationControlEncoded = typeof AttentionPresentationControl.Encoded
+
 export const AttentionTargetState = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "since": optionalKey(Timestamp),
@@ -1435,6 +1447,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "person_id": Id,
   /** st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons. */
   "presentation": optionalKey(AttentionPresentation),
+  /** Person-owned presentation state and its source/control fences; absent on older daemons. */
+  "presentation_control": optionalKey(AttentionPresentationControl),
   "preview": Schema.OptionFromOptionalNullOr(LaunchPreview, NULL_NONE),
   "preview_token": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "priority": Schema.Literals(["critical","high","normal","low"]),
