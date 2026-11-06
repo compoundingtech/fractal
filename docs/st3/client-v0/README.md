@@ -3253,3 +3253,17 @@ null means unknown, not zero. Null reset means unknown. Freshness expires after
 the positive horizon, both for snapshot generation and each account observation;
 consumers must label expired readings stale. Unsupported versions are unavailable.
 
+Accounts may additionally publish `history`, an array of at most four series:
+`{"id":"daily-spend","label":"Daily spend","unit":"USD","points":[{"at":"2025-12-30T00:00:00Z","value":2.5},{"at":"2025-12-31T00:00:00Z","value":null}]}`.
+Each series has a nonempty account-local unique ID and unit, and 1–128 points in
+strictly increasing RFC3339 timestamp order. Values are finite, nonnegative and
+in the declared unit. Null is an unknown sample, never a zero or interpolated
+value. The source owns bucket semantics, labels, units and safe attribution;
+publish separate series for daily spend, token counts or quota percentages.
+Absent/empty history means not supplied. This is additive within schema v1;
+older readers ignore it. The daemon validates and preserves history unchanged.
+The TUI renders each series as a recent-sample sparkline, scaled to its visible
+maximum, with explicit date range, sample count, latest value and unit. Zero is
+the baseline, `?` preserves gaps, and narrow panes show the most recent samples
+without aggregating or filling missing observations.
+

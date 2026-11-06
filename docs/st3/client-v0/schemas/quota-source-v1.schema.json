@@ -10,6 +10,22 @@
     "accounts": {"type": "array", "items": {"$ref": "#/$defs/account"}}
   },
   "$defs": {
+    "history": {
+      "type": "object", "required": ["id", "label", "unit", "points"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "label": {"type": "string"},
+        "unit": {"type": "string", "minLength": 1},
+        "points": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/point"}}
+      }
+    },
+    "point": {
+      "type": "object", "required": ["at"],
+      "properties": {
+        "at": {"type": "string", "format": "date-time"},
+        "value": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
     "account": {
       "type": "object",
       "required": ["id", "provider", "label", "observed_at", "windows"],
@@ -19,7 +35,8 @@
         "label": {"type": "string"},
         "observed_at": {"type": "string", "format": "date-time"},
         "governing_window_id": {"type": ["string", "null"]},
-        "windows": {"type": "array", "items": {"$ref": "#/$defs/window"}}
+        "windows": {"type": "array", "items": {"$ref": "#/$defs/window"}},
+        "history": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/history"}}
       }
     },
     "window": {

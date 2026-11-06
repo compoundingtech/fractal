@@ -64,6 +64,19 @@ async fn fetch(url: &str) -> anyhow::Result<QuotaSnapshot> {
             if let Some(at) = &window.resets_at { chrono::DateTime::parse_from_rfc3339(at)?; }
         }
         anyhow::ensure!(account.governing_window_id.as_ref().is_none_or(|id| windows.contains(id)), "unknown governing window");
+        anyhow::ensure!(account.history.len() <= 4, "too many history series");
+        let mut series = BTreeSet::new();
+        for history in &account.history {
+            anyhow::ensure!(!history.id.is_empty() && series.insert(&history.id) && !history.unit.is_empty(), "invalid history identity or unit");
+            anyhow::ensure!((1..=128).contains(&history.points.len()), "history requires 1..128 points");
+            let mut previous = None;
+            for point in &history.points {
+                let at = chrono::DateTime::parse_from_rfc3339(&point.at)?;
+                anyhow::ensure!(previous.is_none_or(|previous| at > previous), "history timestamps must increase");
+                anyhow::ensure!(point.value.is_none_or(|value| value.is_finite() && value >= 0.0), "invalid history value");
+                previous = Some(at);
+            }
+        }
     }
     Ok(snapshot)
 }
@@ -103,6 +116,31 @@ mod tests {
     fn fixture_matches_published_schema() {
         let schema: Value = serde_json::from_str(include_str!("../../../../../docs/st3/client-v0/schemas/quota-source-v1.schema.json")).unwrap();
         jsonschema::validator_for(&schema).unwrap().validate(&fixture()).unwrap();
+    }
+    #[tokio::test]
+    async fn history_is_optional_bounded_and_preserved() {
+        let schema: Value = serde_json::from_str(include_str!("../../../../../docs/st3/client-v0/schemas/quota-source-v1.schema.json")).unwrap();
+        let mut body = fixture();
+        let history = json!([{"id":"daily","label":"Daily spend","unit":"USD","points":[
+            {"at":"2025-12-29T00:00:00Z","value":0},{"at":"2025-12-30T00:00:00Z","value":null},
+            {"at":"2025-12-31T00:00:00Z","value":12.5}]}]);
+        body["accounts"][0]["history"] = history.clone();
+        jsonschema::validator_for(&schema).unwrap().validate(&body).unwrap();
+        let (url, _, task) = source(body.clone()).await;
+        let value = Source::default().read(&url, 30).await;
+        assert_eq!(serde_json::to_value(value).unwrap()["snapshot"]["accounts"][0]["history"], history);
+        task.abort();
+        for invalid in 0..4 {
+            let mut body = body.clone();
+            match invalid {
+                0 => body["accounts"][0]["history"][0]["points"] = json!(vec![history[0]["points"][0].clone(); 129]),
+                1 => body["accounts"][0]["history"] = json!(vec![history[0].clone(); 5]),
+                2 => body["accounts"][0]["history"][0]["points"][1]["at"] = json!("2025-12-28T00:00:00Z"),
+                _ => body["accounts"][0]["history"][0]["points"][0]["value"] = json!(-1),
+            }
+            let (url, _, task) = source(body).await;
+            assert!(fetch(&url).await.is_err()); task.abort();
+        }
     }
     #[tokio::test]
     async fn coalesces_success_and_failure() {

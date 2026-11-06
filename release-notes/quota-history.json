@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "External quota accounts may supply bounded history series, displayed as dated TUI sparklines with explicit units and unknown gaps.",
+  "replay": {"status": "none", "detail": "Read-only source data."},
+  "schema": {"status": "changed", "detail": "Add optional account history to quota-source v1: at most four series, each containing 1..128 chronological points."},
+  "rules": {"status": "none", "detail": "No checkpoint changes."},
+  "compatibility": {"status": "none", "detail": "Existing snapshots omit history; older readers ignore the additive field."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "none", "detail": "Publish history from the configured external source to display trends."},
+  "recovery": {"status": "none", "detail": "Omit history or revert."}
+}

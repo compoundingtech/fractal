@@ -80,8 +80,29 @@ impl Quota {
                 let marker = if account.governing_window_id.as_ref() == Some(&window.id) { "*" } else { " " };
                 row(&mut doc, &format!(" {marker} {}", window.label), Some(window), "");
             }
+            if account.history.is_empty() { doc.field("history", "?", width, theme::dim()); }
+            for history in &account.history { draw_history(&mut doc, history, width); }
         }
         doc
+    }
+}
+
+fn draw_history(doc: &mut Doc, history: &fractal_client::quota::QuotaHistory, width: usize) {
+    let visible = history.points.len().min(width.saturating_sub(10));
+    let points = &history.points[history.points.len() - visible..];
+    let maximum = points.iter().filter_map(|point| point.value).fold(0.0_f64, f64::max);
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let sparkline: String = points.iter().map(|point| match point.value {
+        None => '?',
+        Some(value) => LEVELS[if maximum == 0.0 { 0 } else { (value / maximum * 7.0).round() as usize }],
+    }).collect();
+    doc.field("history", &format!("{} ({})", history.label, history.unit), width, theme::label());
+    doc.field("trend", &sparkline, width, theme::label());
+    if let (Some(first), Some(last)) = (points.first(), points.last()) {
+        let date = |at: &str| chrono::DateTime::parse_from_rfc3339(at)
+            .map_or_else(|_| "?".into(), |at| at.format("%Y-%m-%d").to_string());
+        doc.field("range", &format!("{} .. {} · last {visible}/{} samples", date(&first.at), date(&last.at), history.points.len()), width, theme::dim());
+        doc.field("latest", &last.value.map_or_else(|| "?".into(), |value| format!("{value:.2} {}", history.unit)), width, theme::label());
     }
 }
 
@@ -97,6 +118,23 @@ mod tests {
         quota.complete(Ok(QuotaSource::Disabled), now);
         assert!(!quota.wanted(true, true, now));
         assert!(quota.wanted(true, true, now + Duration::from_secs(30)));
+    }
+    #[test]
+    fn history_preserves_zero_gaps_and_recent_sample_bounds() {
+        let mut history = fractal_client::quota::QuotaHistory {
+            id: "daily".into(), label: "Daily spend".into(), unit: "USD".into(),
+            points: vec![
+                fractal_client::quota::QuotaHistoryPoint { at: "2025-12-30T00:00:00Z".into(), value: Some(0.0) },
+                fractal_client::quota::QuotaHistoryPoint { at: "2025-12-31T00:00:00Z".into(), value: None },
+            ],
+        };
+        let mut doc = Doc::default(); draw_history(&mut doc, &history, 70);
+        let text = doc.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("▁?") && text.contains("latest    ?") && !text.contains("0.00 USD"));
+        history.points = vec![history.points[0].clone(); 128];
+        let mut doc = Doc::default(); draw_history(&mut doc, &history, 20);
+        assert!(doc.lines.iter().all(|line| line.width() <= 20));
+        assert!(doc.lines.iter().any(|line| line.to_string().contains("10/128")));
     }
     #[test]
     fn renders_distinct_source_states_without_zero_usage() {
@@ -119,7 +157,11 @@ mod tests {
         let snapshot = serde_json::json!({"schema_version":1,"generated_at":"2026-01-01T00:00:00Z","freshness_horizon_seconds":60,
             "accounts":[{"id":"team","provider":"example","label":"Team","observed_at":"2026-01-01T00:00:00Z",
             "governing_window_id":"week","windows":[{"id":"week","label":"Weekly","used_percent":72,"resets_at":"2026-01-01T05:30:00Z"},
-            {"id":"session","label":"Session","used_percent":null,"resets_at":null}]}]});
+            {"id":"session","label":"Session","used_percent":null,"resets_at":null}],
+            "history":[{"id":"daily-spend","label":"Daily spend","unit":"USD","points":[
+                {"at":"2025-12-27T00:00:00Z","value":0},{"at":"2025-12-28T00:00:00Z","value":2},
+                {"at":"2025-12-29T00:00:00Z","value":null},{"at":"2025-12-30T00:00:00Z","value":6},
+                {"at":"2025-12-31T00:00:00Z","value":8}]}]}]});
         let app = Router::new().route("/quota", get(move || { let snapshot = snapshot.clone(); async move { Json(snapshot) } }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/quota", listener.local_addr().unwrap());
