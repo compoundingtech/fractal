@@ -193,7 +193,7 @@ export class MembershipPaging {
         for (let field = 0; field < a.length; field++) {
             if (a[field] === b[field]) continue;
             const x = this.encoder.encode(a[field]), y = this.encoder.encode(b[field]);
-            for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] < y[i];
+            for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i]! < y[i]!;
             return x.length < y.length;
         }
         return false;
@@ -269,8 +269,9 @@ export class MembershipPaging {
         }
         this.attempt = next;
         for (const row of page.items) {
+            const previous = this.rows.at(-1);
             if (row.container !== this.container || row.id !== row.member || this.ids.has(row.member)
-                || (this.rows.length > 0 && !this.precedes(this.rows[this.rows.length - 1], row))) {
+                || (previous !== undefined && !this.precedes(previous, row))) {
                 throw new Error('membership-frontier-inconsistent');
             }
             this.ids.add(row.member); this.rows.push(row);

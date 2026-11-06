@@ -114,7 +114,11 @@ async fn typed_entrypoints_send_explicit_selectors() {
         let body = serde_json::to_string(&page(10, 0, 0, false)).unwrap();
         socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         let (socket, _) = listener.accept().await.unwrap();
-        let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let mut websocket = tokio_tungstenite::accept_hdr_async(socket, |_: &Request, mut response: Response| {
+            response.headers_mut().insert("sec-websocket-protocol", "fractal.client.collections.v0".parse().unwrap());
+            Ok(response)
+        }).await.unwrap();
         let command: Value = serde_json::from_str(websocket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(command, json!({"kind":"subscribe","id":"scoped","collection":"ordered-memberships","person":"person/ada","subject":"container","limit":1,"paging_contract":"collection-v1"}));
     });
