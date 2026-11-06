@@ -77,7 +77,7 @@ mod tests {
         // Original observations may already be reclaimed; the accepted receipt binds them.
         let proof = prompt_resolution_at(&conn, "agent/seat", "person/ada", "observed-1").unwrap().unwrap();
         assert_eq!((proof.claim_id.as_str(),proof.resolved_by.as_str(),proof.person.as_str(),proof.resolved_at_unix_ms), ("answer","person/ada","person/ada",456));
-        for (source,person,episode) in [("agent/foreign","person/ada","observed-1"),("agent/seat","person/foreign","observed-1"),("agent/seat","person/ada","observed-stale")] {
+        for (source,person,episode) in [("agent/foreign","person/ada","observed-1"),("agent/seat","person/intruder","observed-1"),("agent/seat","person/ada","observed-stale")] {
             assert!(prompt_resolution_at(&conn, source, person, episode).unwrap().is_none());
         }
     }
@@ -111,13 +111,13 @@ mod tests {
         let conn = connection();
         answer(&conn, "person/ada", "observed-1", json!({"code":"native-prompt-answered","status":"deny"}));
         // Bob's newer accepted answer arrives first; Ada's older answer arrives later.
-        conn.execute("INSERT INTO claims SELECT 'bob',0,subject,kind,'person/bob',body,'457',batch_id FROM claims WHERE id='answer'", []).unwrap();
+        conn.execute("INSERT INTO claims SELECT 'bob',0,subject,kind,'person/blair',body,'457',batch_id FROM claims WHERE id='answer'", []).unwrap();
         assert!(prompt_resolution_at(&conn, "agent/seat", "person/ada", "observed-1").unwrap().is_none());
-        let proof = prompt_resolution_at(&conn, "agent/seat", "person/bob", "observed-1").unwrap().unwrap();
-        assert_eq!((proof.claim_id.as_str(),proof.resolved_by.as_str()), ("bob","person/bob"));
+        let proof = prompt_resolution_at(&conn, "agent/seat", "person/blair", "observed-1").unwrap().unwrap();
+        assert_eq!((proof.claim_id.as_str(),proof.resolved_by.as_str()), ("bob","person/blair"));
         conn.execute("UPDATE claims SET store_index=10-store_index", []).unwrap();
         assert!(prompt_resolution_at(&conn, "agent/seat", "person/ada", "observed-1").unwrap().is_none());
-        assert_eq!(prompt_resolution_at(&conn, "agent/seat", "person/bob", "observed-1").unwrap().unwrap().claim_id, "bob");
+        assert_eq!(prompt_resolution_at(&conn, "agent/seat", "person/blair", "observed-1").unwrap().unwrap().claim_id, "bob");
     }
 
     #[test]
