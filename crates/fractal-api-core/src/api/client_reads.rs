@@ -703,8 +703,8 @@ pub async fn client_agents_detail(
                     else if operation.result.as_ref().is_some_and(|result| result["phase"] == "unknown") { "unknown" }
                     else if operation.finished { "completed" }
                     else if operation.dispatched { "running" } else { "queued" };
-                let (running_jobs, revoked_running_jobs) = store.runtime_start_counts()?;
-                let (unresolved_jobs, revoked_unresolved_jobs) = store.unresolved_runtime_start_counts()?;
+                let (running_jobs, revoked_running_jobs) = store.runtime_start_counts_for(subject)?;
+                let (unresolved_jobs, revoked_unresolved_jobs) = store.unresolved_runtime_start_counts_for(subject)?;
                 item["runtime_start"] = json!({
                     "operation_id": operation.id, "phase": phase,
                     "worker_running": operation.dispatched && !operation.finished,

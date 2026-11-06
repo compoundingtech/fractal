@@ -14,6 +14,78 @@ use axum::http::Request;
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn agent_card_runtime_start_counts_are_subject_scoped() {
+    use crate::store::runtime_starts_tests_shared_seats::{operation, publish};
+
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    publish(
+        store,
+        "version 2\nagent \"example/one\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/two\" { workspace \"/tmp\"; command \"true\" }",
+        "subject-counts",
+    );
+    let mut one = operation(
+        "start-one", "agent/example/one",
+        store.selected_desired_token("agent/example/one").unwrap(),
+    );
+    let mut two = operation(
+        "start-two", "agent/example/two",
+        store.selected_desired_token("agent/example/two").unwrap(),
+    );
+    for start in [&mut one, &mut two] {
+        assert_eq!(
+            store.admit_runtime_start(start, 2).unwrap(),
+            crate::store::RuntimeStartAdmission::Admitted,
+        );
+    }
+    assert!(store.dispatch_runtime_start(&two.id, 2).unwrap());
+    store.revoke_runtime_start(&two.id, "stop-two").unwrap();
+    assert_eq!(store.runtime_start_counts().unwrap(), (1, 1));
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (2, 1));
+
+    let app = router(state.clone());
+    // Subject one is queued while subject two is revoked but still running.
+    for (subject, running, revoked) in [("one", 0, 0), ("two", 1, 1)] {
+        let (status, card) = get_request(
+            app.clone(), &format!("/v1/client/agents/agent/example/{subject}"),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{card}");
+        let start = &card["runtime_start"];
+        assert_eq!(start["running_jobs"], running, "{card}");
+        assert_eq!(start["revoked_running_jobs"], revoked, "{card}");
+        assert_eq!(start["unresolved_jobs"], 1, "{card}");
+        assert_eq!(start["revoked_unresolved_jobs"], revoked, "{card}");
+    }
+
+    // A returned revoked producer stays unresolved without becoming another
+    // subject's unresolved operation (including through the OR terms in PENDING).
+    store.finish_runtime_start(
+        &two.id, &json!({"error": "producer not closed", "producer_closed": false}),
+    ).unwrap();
+    store.runtime_start_applied(&two.id).unwrap();
+    assert_eq!(store.runtime_start_counts().unwrap(), (0, 0));
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (2, 1));
+    for (subject, revoked) in [("one", 0), ("two", 1)] {
+        let (status, card) = get_request(
+            app.clone(), &format!("/v1/client/agents/agent/example/{subject}"),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{card}");
+        let start = &card["runtime_start"];
+        assert_eq!(start["running_jobs"], 0, "{card}");
+        assert_eq!(start["revoked_running_jobs"], 0, "{card}");
+        assert_eq!(start["unresolved_jobs"], 1, "{card}");
+        assert_eq!(start["revoked_unresolved_jobs"], revoked, "{card}");
+    }
+    assert_eq!(
+        store.runtime_start_counts_for("agent/example/missing").unwrap(), (0, 0),
+    );
+    assert_eq!(
+        store.unresolved_runtime_start_counts_for("agent/example/missing").unwrap(), (0, 0),
+    );
+}
+
+#[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

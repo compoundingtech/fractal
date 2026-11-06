@@ -209,8 +209,14 @@ pub trait RuntimeStartsStore {
         ) -> Result<RuntimeStartAdmission>;
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool>;
     fn runtime_start_failure(&self, subject: &str) -> Result<Option<String>>;
+    /// Owner-local totals across all subjects: running calls and revoked running calls.
     fn runtime_start_counts(&self) -> Result<(u64, u64)>;
+    /// Owner-local totals across all subjects: unresolved and revoked unresolved operations.
     fn unresolved_runtime_start_counts(&self) -> Result<(u64, u64)>;
+    /// Running calls and revoked running calls for exactly one subject.
+    fn runtime_start_counts_for(&self, subject: &str) -> Result<(u64, u64)>;
+    /// Unresolved and revoked unresolved operations for exactly one subject.
+    fn unresolved_runtime_start_counts_for(&self, subject: &str) -> Result<(u64, u64)>;
     fn runtime_start_revoked(&self, id: &str) -> Result<bool>;
     fn runtime_start_intent_current(&self, id: &str) -> Result<bool>;
     fn revoke_runtime_start(&self, id: &str, request: &str) -> Result<()>;
@@ -845,6 +851,22 @@ impl RuntimeStartsStore for Store {
         self.readers.get().query_row(
             /* sqlite-large-value: allow-for-now lv-h80e6229504f6 owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE {PENDING}"),
             [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(Into::into)
+    }
+
+    fn runtime_start_counts_for(&self, subject: &str) -> Result<(u64, u64)> {
+        smallclaims::touched::note_read(|| format!("local-runtime-start:{subject}"));
+        self.readers.get().query_row(
+            "SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE subject=?1 AND finished=0 AND dispatched=1",
+            [subject], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(Into::into)
+    }
+
+    fn unresolved_runtime_start_counts_for(&self, subject: &str) -> Result<(u64, u64)> {
+        smallclaims::touched::note_read(|| format!("local-runtime-start:{subject}"));
+        self.readers.get().query_row(
+            &format!("SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE subject=?1 AND ({PENDING})"),
+            [subject], |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(Into::into)
     }
 
