@@ -22,7 +22,9 @@ pub use identities::*;
 use bytes::Bytes;
 use fractal_socket_discovery::default_unix_socket;
 #[cfg(test)]
-use fractal_socket_discovery::{unix_socket_answers, unix_socket_path_fits};
+use fractal_socket_discovery::{
+    runtime_or_published_socket, unix_socket_answers, unix_socket_path_fits,
+};
 use futures_util::{SinkExt as _, StreamExt as _};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Method, Request};
