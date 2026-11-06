@@ -19008,7 +19008,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         });
         self.incremental.evaluated(&item, reads, None);
-        if matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
+        if watch_error.borrow().is_some() || matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
             self.incremental.touch("launch-identity");
         }
         watch_error.into_inner().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
