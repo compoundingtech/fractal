@@ -85,6 +85,17 @@ zero-prefixed UUID family. New case names use `synthetic-case-N`, labels use
 Unknown schema keywords fail closed, so extending the behavior format requires
 updating its validator and public-identity policy together.
 
+The web runner `apps/fractal-web/src/folders/sidebarBehavior.unit.test.ts` loads
+these vectors through `scripts/sidebar-behavior-fixtures.mjs`, which runs the
+shared schema/public-data gate before returning a fixture. It exercises the
+production arrangement conversion, sidebar adapter and optimistic editor.
+Its explicit divergence table pins both golden and native outcomes where
+legacy web catalog-seat visibility, drop targets or Unfiled ordering differ;
+no dormant seats are synthesized to make the goldens pass. The pure semantic
+rollup remains covered by the shared-view runner, not the web adapter.
+Run the focused web suite in the web dev shell with
+`CI=1 pnpm --dir apps/fractal-web exec vitest run src/folders/sidebarBehavior.unit.test.ts`.
+
 From the repository root with Node 24 and Corepack (or `nix develop .#web`):
 
 ```sh
