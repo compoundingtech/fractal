@@ -531,26 +531,31 @@ async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_
     let burst = std::thread::spawn({
         let (store, writing) = (Arc::clone(&store), Arc::clone(&writing));
         move || {
-            let mut written = 0;
+            let (mut written, mut last_write) = (0, None);
             while writing.load(std::sync::atomic::Ordering::Acquire) {
                 roster_pause_note(&store, &format!("message/roster-pause-burst-{written}"));
+                last_write = Some(Instant::now());
                 written += 1;
                 std::thread::sleep(Duration::from_millis(5));
             }
-            written
+            last_write
         }
     });
     let mut look = AgentRosterLook::default();
+    let mut last_started = Instant::now();
     for folded in [Duration::ZERO, Duration::ZERO, Duration::from_millis(250), Duration::ZERO] {
-        let through = store.index().unwrap();
         let started = Instant::now();
+        last_started = started;
+        let through = store.index().unwrap();
         assert_eq!(agent_roster_pause(&store, &commits, &mut look, folded, through).await, AgentRosterPauseEnd::LocalClaim);
         let paused = started.elapsed();
         assert!(paused >= folded.max(AGENT_ROSTER_FRESH_PAUSE), "{folded:?}: {paused:?}");
         assert!(paused < folded.max(AGENT_ROSTER_FRESH_PAUSE) + Duration::from_millis(200), "{folded:?}: {paused:?}");
     }
     writing.store(false, std::sync::atomic::Ordering::Release);
-    assert!(burst.join().unwrap() > 20, "the burst kept writing");
+    // The burst was still writing when the last pause began, however slowly each write went.
+    let last_write = burst.join().unwrap().expect("the burst wrote");
+    assert!(last_write > last_started, "the burst kept writing into the last pause");
 }
 
 /// A local write behind a run of replicated claims longer than one look still ends the pause
