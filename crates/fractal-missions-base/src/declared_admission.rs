@@ -3,7 +3,8 @@ use crate::declaration_syntax::{
     ensure_bare, ensure_no_children, ensure_no_properties, reject_unknown_children, unique_child,
 };
 use crate::model::{
-    DeclaredAdmission, DeclaredBudgets, DeclaredLane, DeclaredPriority, MissionSpec, NormalizedIntent, St3Error,
+    DeclaredAdmission, DeclaredBudgets, DeclaredLane, DeclaredPriority, MissionSpec,
+    NormalizedIntent, St3Error,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -30,25 +31,44 @@ struct Scope<'a>(&'a str, &'a str);
 
 impl Scope<'_> {
     fn error(self, field: &str, requirement: &str) -> St3Error {
-        St3Error::new("invalid-declared-admission", format!("{} '{}' {field} {requirement}", self.0, self.1))
-            .with_detail("subject", self.1)
-            .with_detail("field", field)
+        St3Error::new(
+            "invalid-declared-admission",
+            format!("{} '{}' {field} {requirement}", self.0, self.1),
+        )
+        .with_detail("subject", self.1)
+        .with_detail("field", field)
     }
 
     fn number(self, field: &str, value: Option<u64>) -> Result<u64, St3Error> {
-        value.filter(|v| (1..=MAX_SAFE_INTEGER).contains(v)).ok_or_else(|| self.error(field, INTEGER))
+        value
+            .filter(|v| (1..=MAX_SAFE_INTEGER).contains(v))
+            .ok_or_else(|| self.error(field, INTEGER))
     }
 
     fn size(self, field: &str, value: Option<&str>) -> Result<(), St3Error> {
         let value = value.ok_or_else(|| self.error(field, SIZE))?;
-        let power = value.as_bytes().last().and_then(|b| b"KMGT".iter().position(|suffix| suffix == b));
-        let (digits, power) = power.map_or((value, 0), |p| (&value[..value.len() - 1], p as u32 + 1));
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.bytes().all(|b| b == b'0') {
+        let power = value
+            .as_bytes()
+            .last()
+            .and_then(|b| b"KMGT".iter().position(|suffix| suffix == b));
+        let (digits, power) =
+            power.map_or((value, 0), |p| (&value[..value.len() - 1], p as u32 + 1));
+        if digits.is_empty()
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+            || digits.bytes().all(|b| b == b'0')
+        {
             return Err(self.error(field, SIZE));
         }
-        digits.parse::<u64>().ok().and_then(|v| v.checked_mul(1024_u64.pow(power))).ok_or_else(|| {
-            self.error(field, "must fit in 18446744073709551615 bytes after applying the size suffix")
-        })?;
+        digits
+            .parse::<u64>()
+            .ok()
+            .and_then(|v| v.checked_mul(1024_u64.pow(power)))
+            .ok_or_else(|| {
+                self.error(
+                    field,
+                    "must fit in 18446744073709551615 bytes after applying the size suffix",
+                )
+            })?;
         Ok(())
     }
 
@@ -65,9 +85,10 @@ impl Scope<'_> {
             return Err(self.error("declared_lane", "must be check or build"));
         }
         if let Some(b) = budgets {
-            for (field, value) in
-                [("declared_budgets.cpu_seconds", b.cpu_seconds), ("declared_budgets.token_budget", b.token_budget)]
-            {
+            for (field, value) in [
+                ("declared_budgets.cpu_seconds", b.cpu_seconds),
+                ("declared_budgets.token_budget", b.token_budget),
+            ] {
                 if let Some(value) = value {
                     self.number(field, Some(value))?;
                 }
@@ -84,8 +105,16 @@ impl Scope<'_> {
         Ok(())
     }
 
-    fn decode<T: DeserializeOwned>(self, value: &Value, field: &str, requirement: &str) -> Result<Option<T>, St3Error> {
-        value.get(field).map(|v| T::deserialize(v).map_err(|_| self.error(field, requirement))).transpose()
+    fn decode<T: DeserializeOwned>(
+        self,
+        value: &Value,
+        field: &str,
+        requirement: &str,
+    ) -> Result<Option<T>, St3Error> {
+        value
+            .get(field)
+            .map(|v| T::deserialize(v).map_err(|_| self.error(field, requirement)))
+            .transpose()
     }
 
     fn fields(self, value: &Value) -> Result<DeclaredAdmission, St3Error> {
@@ -94,7 +123,9 @@ impl Scope<'_> {
         let budgets = value
             .get("declared_budgets")
             .map(|value| {
-                let object = value.as_object().ok_or_else(|| self.error("declared_budgets", "must be an object"))?;
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| self.error("declared_budgets", "must be an object"))?;
                 for (key, value) in object {
                     let field = format!("declared_budgets.{key}");
                     match key.as_str() {
@@ -105,21 +136,34 @@ impl Scope<'_> {
                         _ => return Err(self.error(&field, "is not a recognized declared budget")),
                     }
                 }
-                Ok::<_, St3Error>(DeclaredBudgets::deserialize(value).expect("validated budget fields"))
+                Ok::<_, St3Error>(
+                    DeclaredBudgets::deserialize(value).expect("validated budget fields"),
+                )
             })
             .transpose()?;
         self.validate(priority.as_ref(), lane.as_ref(), budgets.as_ref())?;
-        Ok(DeclaredAdmission { priority, lane, budgets: budgets.filter(|b| !b.is_empty()) })
+        Ok(DeclaredAdmission {
+            priority,
+            lane,
+            budgets: budgets.filter(|b| !b.is_empty()),
+        })
     }
 
-    fn consistent(self, typed: &DeclaredAdmission, canonical: &DeclaredAdmission) -> Result<(), St3Error> {
+    fn consistent(
+        self,
+        typed: &DeclaredAdmission,
+        canonical: &DeclaredAdmission,
+    ) -> Result<(), St3Error> {
         for (field, agrees) in [
             ("declared_priority", typed.priority == canonical.priority),
             ("declared_lane", typed.lane == canonical.lane),
             ("declared_budgets", typed.budgets == canonical.budgets),
         ] {
             if !agrees {
-                return Err(self.error(field, "must agree between the typed member and canonical declaration"));
+                return Err(self.error(
+                    field,
+                    "must agree between the typed member and canonical declaration",
+                ));
             }
         }
         Ok(())
@@ -132,10 +176,22 @@ impl Scope<'_> {
     // Canonical root children and budget leaves share duplicate and shape validation.
     fn children(self, value: &Value, budget: bool) -> Result<Map<String, Value>, St3Error> {
         let mut fields = Map::new();
-        for child in value.get("children").and_then(Value::as_array).into_iter().flatten() {
+        for child in value
+            .get("children")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let name = child.get("name").and_then(Value::as_str).unwrap_or("");
-            let rules = if budget { BUDGETS.as_slice() } else { FIELDS.as_slice() };
-            let key = rules.iter().find(|(syntax, _)| *syntax == name).map(|(_, key)| *key);
+            let rules = if budget {
+                BUDGETS.as_slice()
+            } else {
+                FIELDS.as_slice()
+            };
+            let key = rules
+                .iter()
+                .find(|(syntax, _)| *syntax == name)
+                .map(|(_, key)| *key);
             let Some(key) = key else {
                 if budget {
                     return Err(self.error(
@@ -145,11 +201,17 @@ impl Scope<'_> {
                 }
                 continue;
             };
-            let field = if budget { format!("declared_budgets.{key}") } else { key.into() };
+            let field = if budget {
+                format!("declared_budgets.{key}")
+            } else {
+                key.into()
+            };
             if fields.contains_key(key) {
                 return Err(self.error(&field, "must occur once"));
             }
-            let decorated = child.get("properties").is_some_and(|v| v.as_object().is_none_or(|v| !v.is_empty()))
+            let decorated = child
+                .get("properties")
+                .is_some_and(|v| v.as_object().is_none_or(|v| !v.is_empty()))
                 || child.get("type").is_some();
             if decorated {
                 return Err(self.error(&field, SCALAR));
@@ -162,7 +224,8 @@ impl Scope<'_> {
                 Value::Object(self.children(child, true)?)
             } else {
                 let children = child.get("children");
-                let has_children = children.is_some_and(|v| v.as_array().map_or(budget, |v| !v.is_empty()));
+                let has_children =
+                    children.is_some_and(|v| v.as_array().map_or(budget, |v| !v.is_empty()));
                 if args.is_none_or(|v| v.len() != 1) || has_children {
                     return Err(self.error(&field, SCALAR));
                 }
@@ -179,7 +242,10 @@ fn scalar(node: &KdlNode) -> Result<&KdlValue, St3Error> {
     ensure_no_children(node)?;
     let name = node.name().value();
     let [entry] = node.entries() else {
-        return Err(St3Error::new("wrong-argument-count", format!("child `{name}` needs one scalar")));
+        return Err(St3Error::new(
+            "wrong-argument-count",
+            format!("child `{name}` needs one scalar"),
+        ));
     };
     if entry.ty().is_some() {
         return Err(St3Error::new(
@@ -191,33 +257,58 @@ fn scalar(node: &KdlNode) -> Result<&KdlValue, St3Error> {
 }
 
 fn string<T: DeserializeOwned>(node: &KdlNode) -> Result<T, St3Error> {
-    let value = scalar(node)?
-        .as_string()
-        .ok_or_else(|| St3Error::new("expected-string", format!("child `{}` needs one string", node.name().value())))?;
+    let value = scalar(node)?.as_string().ok_or_else(|| {
+        St3Error::new(
+            "expected-string",
+            format!("child `{}` needs one string", node.name().value()),
+        )
+    })?;
     // String and the open string enums accept every string; author validation follows.
-    Ok(T::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value))
-        .expect("string or open string enum"))
+    Ok(
+        T::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value))
+            .expect("string or open string enum"),
+    )
 }
 
 fn integer(node: &KdlNode, scope: Scope<'_>, field: &str) -> Result<u64, St3Error> {
     let KdlValue::Integer(value) = scalar(node)? else {
-        return Err(St3Error::new("expected-integer", format!("child `{}` needs one integer", node.name().value())));
+        return Err(St3Error::new(
+            "expected-integer",
+            format!("child `{}` needs one integer", node.name().value()),
+        ));
     };
     scope.number(field, u64::try_from(*value).ok())
 }
 
 /// Parse strict KDL; retain empty-block presence until the publication compatibility gate.
-pub fn parse(document: &KdlDocument, kind: &str, subject: &str) -> Result<DeclaredAdmission, St3Error> {
+pub fn parse(
+    document: &KdlDocument,
+    kind: &str,
+    subject: &str,
+) -> Result<DeclaredAdmission, St3Error> {
     let scope = Scope(kind, subject);
-    let priority = unique_child(document, "declared-priority")?.map(string).transpose()?;
-    let lane = unique_child(document, "declared-lane")?.map(string).transpose()?;
+    let priority = unique_child(document, "declared-priority")?
+        .map(string)
+        .transpose()?;
+    let lane = unique_child(document, "declared-lane")?
+        .map(string)
+        .transpose()?;
     let budgets = unique_child(document, "declared-budgets")?
         .map(|node| {
             ensure_bare(node)?;
             let mut budgets = DeclaredBudgets::default();
             if let Some(body) = node.children() {
-                reject_unknown_children(body, &BUDGETS.map(|(name, _)| name), "declared-budgets", subject)?;
-                let number = |name, field| unique_child(body, name)?.map(|n| integer(n, scope, field)).transpose();
+                reject_unknown_children(
+                    body,
+                    &BUDGETS.map(|(name, _)| name),
+                    "declared-budgets",
+                    subject,
+                )?;
+                let number = |name, field| {
+                    unique_child(body, name)?
+                        .map(|n| integer(n, scope, field))
+                        .transpose()
+                };
                 budgets.cpu_seconds = number("cpu-seconds", "declared_budgets.cpu_seconds")?;
                 budgets.token_budget = number("token-budget", "declared_budgets.token_budget")?;
                 budgets.memory_max = unique_child(body, "memory-max")?.map(string).transpose()?;
@@ -227,7 +318,11 @@ pub fn parse(document: &KdlDocument, kind: &str, subject: &str) -> Result<Declar
         })
         .transpose()?;
     scope.validate(priority.as_ref(), lane.as_ref(), budgets.as_ref())?;
-    Ok(DeclaredAdmission { priority, lane, budgets })
+    Ok(DeclaredAdmission {
+        priority,
+        lane,
+        budgets,
+    })
 }
 
 /// Author validation is separate from the open enums used by historical readers.
@@ -246,10 +341,14 @@ pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), St3Error> {
         let scope = Scope(&desired.kind, &desired.subject);
         let canonical = scope.desired(&desired.desired)?;
         if let Some(member) = &desired.member {
-            let (priority, lane, budgets) =
-                (member.declared_priority.as_ref(), member.declared_lane.as_ref(), member.declared_budgets.as_ref());
+            let (priority, lane, budgets) = (
+                member.declared_priority.as_ref(),
+                member.declared_lane.as_ref(),
+                member.declared_budgets.as_ref(),
+            );
             scope.validate(priority, lane, budgets)?;
-            let typed = DeclaredAdmission::from_declaration(priority, lane, budgets).unwrap_or_default();
+            let typed =
+                DeclaredAdmission::from_declaration(priority, lane, budgets).unwrap_or_default();
             scope.consistent(&typed, &canonical)?;
         }
     }
@@ -265,12 +364,22 @@ fn validate_mission(mission: &MissionSpec) -> Result<(), St3Error> {
         mission.declared_lane.as_ref(),
         mission.declared_budgets.as_ref(),
     )?;
-    let source = |source: Option<&str>| source.map(|s| validate_declaration_source(s, &mission.subject)).transpose();
+    let source = |source: Option<&str>| {
+        source
+            .map(|s| validate_declaration_source(s, &mission.subject))
+            .transpose()
+    };
     source(mission.declarations_kdl.as_deref())?;
     for step in mission.steps.values() {
         source(step.declarations_kdl.as_deref())?;
         let nested = std::iter::once(step.nested_mission.as_deref()).chain(
-            step.loop_spec.iter().flat_map(|s| [Some(s.round.as_ref()), s.on_keep.as_deref(), s.on_discard.as_deref()]),
+            step.loop_spec.iter().flat_map(|s| {
+                [
+                    Some(s.round.as_ref()),
+                    s.on_keep.as_deref(),
+                    s.on_discard.as_deref(),
+                ]
+            }),
         );
         for nested in nested.flatten() {
             validate_mission(nested)?;
@@ -295,7 +404,11 @@ fn validate_declaration_source(source: &str, owner: &str) -> Result<(), St3Error
                         .and_then(|e| e.value().as_string())
                         .unwrap_or("");
                     let prefix = format!("{kind}/");
-                    let subject = if name.starts_with(&prefix) { name.to_owned() } else { format!("{prefix}{name}") };
+                    let subject = if name.starts_with(&prefix) {
+                        name.to_owned()
+                    } else {
+                        format!("{prefix}{name}")
+                    };
                     parse(children, kind, &subject)?;
                 }
                 walk(children)?;
@@ -304,17 +417,29 @@ fn validate_declaration_source(source: &str, owner: &str) -> Result<(), St3Error
         Ok(())
     }
     let document = source.parse::<KdlDocument>().map_err(|e| {
-        Scope("mission", owner).error("declared_admission", &format!("must contain valid declaration KDL: {e}"))
+        Scope("mission", owner).error(
+            "declared_admission",
+            &format!("must contain valid declaration KDL: {e}"),
+        )
     })?;
     walk(&document)
 }
 
 /// Validate new claim input before typed decoding can discard nulls or unknown keys.
 pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), St3Error> {
-    let payload = body.get("fields").and_then(|f| f.get("body")).unwrap_or(body);
+    let payload = body
+        .get("fields")
+        .and_then(|f| f.get("body"))
+        .unwrap_or(body);
     match kind {
         "intent.desired" => {
-            let scope = Scope(payload.get("kind").and_then(Value::as_str).unwrap_or("agent"), subject);
+            let scope = Scope(
+                payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent"),
+                subject,
+            );
             let canonical = scope.desired(payload.get("desired").unwrap_or(&Value::Null))?;
             if let Some(member) = payload.get("member").filter(|v| !v.is_null()) {
                 scope.consistent(&scope.fields(member)?, &canonical)?;
@@ -327,7 +452,10 @@ pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), St3
 }
 
 fn validate_mission_json(owner: &str, value: &Value) -> Result<(), St3Error> {
-    let subject = value.get("subject").and_then(Value::as_str).unwrap_or(owner);
+    let subject = value
+        .get("subject")
+        .and_then(Value::as_str)
+        .unwrap_or(owner);
     Scope("mission", subject).fields(value)?;
     let source = |node: &Value| {
         node.get("declarations_kdl")
@@ -336,33 +464,55 @@ fn validate_mission_json(owner: &str, value: &Value) -> Result<(), St3Error> {
             .transpose()
     };
     source(value)?;
-    for step in value.get("steps").and_then(Value::as_object).into_iter().flat_map(|s| s.values()) {
+    for step in value
+        .get("steps")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|s| s.values())
+    {
         source(step)?;
-        let nested = std::iter::once(step.get("nested_mission"))
-            .chain(["round", "on_keep", "on_discard"].map(|key| step.get("loop_spec").and_then(|s| s.get(key))));
+        let nested = std::iter::once(step.get("nested_mission")).chain(
+            ["round", "on_keep", "on_discard"]
+                .map(|key| step.get("loop_spec").and_then(|s| s.get(key))),
+        );
         for nested in nested.flatten().filter(|v| !v.is_null()) {
             validate_mission_json(subject, nested)?;
         }
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse_fields(source: &str) -> Result<DeclaredAdmission, St3Error> {
-        parse(&source.parse::<KdlDocument>().unwrap(), "agent", "agent/example")
+        parse(
+            &source.parse::<KdlDocument>().unwrap(),
+            "agent",
+            "agent/example",
+        )
     }
 
     #[test]
     fn strict_syntax_table() {
         for (source, code) in [
-            ("declared-priority \"normal\"\ndeclared-priority \"normal\"", "duplicate-child"),
-            ("declared-lane \"check\"\ndeclared-lane \"build\"", "duplicate-child"),
-            ("declared-budgets {}\ndeclared-budgets {}", "duplicate-child"),
+            (
+                "declared-priority \"normal\"\ndeclared-priority \"normal\"",
+                "duplicate-child",
+            ),
+            (
+                "declared-lane \"check\"\ndeclared-lane \"build\"",
+                "duplicate-child",
+            ),
+            (
+                "declared-budgets {}\ndeclared-budgets {}",
+                "duplicate-child",
+            ),
             ("declared-priority", "wrong-argument-count"),
-            ("declared-priority \"normal\" \"background\"", "wrong-argument-count"),
+            (
+                "declared-priority \"normal\" \"background\"",
+                "wrong-argument-count",
+            ),
             ("declared-lane #null", "expected-string"),
             ("declared-priority 1", "expected-string"),
             ("declared-lane \"check\" extra=\"x\"", "unknown-property"),
@@ -373,20 +523,53 @@ mod tests {
             ("declared-budgets extra=\"x\" {}", "unexpected-value"),
             ("(meta)declared-budgets {}", "unexpected-type"),
             ("declared-budgets { unknown 1; }", "unknown-child"),
-            ("declared-budgets { cpu-seconds 1; cpu-seconds 2; }", "duplicate-child"),
-            ("declared-budgets { token-budget 1; token-budget 2; }", "duplicate-child"),
-            ("declared-budgets { memory-max \"1\"; memory-max \"2\"; }", "duplicate-child"),
-            ("declared-budgets { disk-max \"1\"; disk-max \"2\"; }", "duplicate-child"),
+            (
+                "declared-budgets { cpu-seconds 1; cpu-seconds 2; }",
+                "duplicate-child",
+            ),
+            (
+                "declared-budgets { token-budget 1; token-budget 2; }",
+                "duplicate-child",
+            ),
+            (
+                "declared-budgets { memory-max \"1\"; memory-max \"2\"; }",
+                "duplicate-child",
+            ),
+            (
+                "declared-budgets { disk-max \"1\"; disk-max \"2\"; }",
+                "duplicate-child",
+            ),
             ("declared-budgets { cpu-seconds; }", "wrong-argument-count"),
-            ("declared-budgets { cpu-seconds 1 2; }", "wrong-argument-count"),
-            ("declared-budgets { cpu-seconds \"1\"; }", "expected-integer"),
+            (
+                "declared-budgets { cpu-seconds 1 2; }",
+                "wrong-argument-count",
+            ),
+            (
+                "declared-budgets { cpu-seconds \"1\"; }",
+                "expected-integer",
+            ),
             ("declared-budgets { token-budget 1.5; }", "expected-integer"),
-            ("declared-budgets { token-budget #null; }", "expected-integer"),
+            (
+                "declared-budgets { token-budget #null; }",
+                "expected-integer",
+            ),
             ("declared-budgets { memory-max 1; }", "expected-string"),
-            ("declared-budgets { disk-max \"8G\" {}; }", "unexpected-children"),
-            ("declared-budgets { cpu-seconds 1 extra=2; }", "unknown-property"),
-            ("declared-budgets { (meta)cpu-seconds 1; }", "unexpected-type"),
-            ("declared-budgets { cpu-seconds (meta)1; }", "unexpected-type"),
+            (
+                "declared-budgets { disk-max \"8G\" {}; }",
+                "unexpected-children",
+            ),
+            (
+                "declared-budgets { cpu-seconds 1 extra=2; }",
+                "unknown-property",
+            ),
+            (
+                "declared-budgets { (meta)cpu-seconds 1; }",
+                "unexpected-type",
+            ),
+            (
+                "declared-budgets { cpu-seconds (meta)1; }",
+                "unexpected-type",
+            ),
         ] {
             assert_eq!(parse_fields(source).unwrap_err().code, code, "{source}");
         }
@@ -399,20 +582,24 @@ mod tests {
                 parse_fields(&format!("declared-budgets {{ {child} {value}; }}")).unwrap();
             }
             for value in ["0", "-1", "9007199254740992", "18446744073709551616"] {
-                let error = parse_fields(&format!("declared-budgets {{ {child} {value}; }}")).unwrap_err();
+                let error =
+                    parse_fields(&format!("declared-budgets {{ {child} {value}; }}")).unwrap_err();
                 let field = format!("declared_budgets.{}", child.replace('-', "_"));
                 assert_eq!(error.code, "invalid-declared-admission");
                 assert_eq!(error.details["subject"], "agent/example");
                 assert_eq!(error.details["field"], field);
                 assert_eq!(
                     error.message,
-                    format!("agent 'agent/example' {field} must be an integer from 1 to 9007199254740991")
+                    format!(
+                        "agent 'agent/example' {field} must be an integer from 1 to 9007199254740991"
+                    )
                 );
             }
         }
-        for (source, field) in
-            [("declared-priority \"urgent\"", "declared_priority"), ("declared-lane \"other\"", "declared_lane")]
-        {
+        for (source, field) in [
+            ("declared-priority \"urgent\"", "declared_priority"),
+            ("declared-lane \"other\"", "declared_lane"),
+        ] {
             let error = parse_fields(source).unwrap_err();
             assert_eq!(error.code, "invalid-declared-admission");
             assert_eq!(error.details["field"], field);
@@ -437,10 +624,18 @@ mod tests {
             ] {
                 parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}")).unwrap();
             }
-            for value in ["", "0", "00G", "-1", "+1", "1.5G", "8g", "8GB", "1P", " 1", "1 ", "１G", "G"] {
-                let error = parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}")).unwrap_err();
+            for value in [
+                "", "0", "00G", "-1", "+1", "1.5G", "8g", "8GB", "1P", " 1", "1 ", "１G", "G",
+            ] {
+                let error = parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}"))
+                    .unwrap_err();
                 assert_eq!(error.code, "invalid-declared-admission", "{value}");
-                assert!(error.message.ends_with("must be a positive size such as 8G or 512M"), "{value}");
+                assert!(
+                    error
+                        .message
+                        .ends_with("must be a positive size such as 8G or 512M"),
+                    "{value}"
+                );
             }
             for value in [
                 "18446744073709551616",
@@ -450,7 +645,8 @@ mod tests {
                 "16777216T",
                 "18446744073709551615T",
             ] {
-                let error = parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}")).unwrap_err();
+                let error = parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}"))
+                    .unwrap_err();
                 let field = format!("declared_budgets.{}", child.replace('-', "_"));
                 assert_eq!(error.code, "invalid-declared-admission");
                 assert_eq!(error.details["field"], field);
@@ -467,18 +663,45 @@ mod tests {
     #[test]
     fn typed_authoring_rejects_future_enums_and_invalid_budgets() {
         assert!(
-            validate("mission", "mission/test", Some(&DeclaredPriority::Unknown("future".into())), None, None).is_err()
+            validate(
+                "mission",
+                "mission/test",
+                Some(&DeclaredPriority::Unknown("future".into())),
+                None,
+                None
+            )
+            .is_err()
         );
         assert!(
-            validate("mission", "mission/test", None, Some(&DeclaredLane::Unknown("future".into())), None).is_err()
+            validate(
+                "mission",
+                "mission/test",
+                None,
+                Some(&DeclaredLane::Unknown("future".into())),
+                None
+            )
+            .is_err()
         );
         for budgets in [
-            DeclaredBudgets { cpu_seconds: Some(0), ..DeclaredBudgets::default() },
-            DeclaredBudgets { token_budget: Some(MAX_SAFE_INTEGER + 1), ..DeclaredBudgets::default() },
-            DeclaredBudgets { memory_max: Some("0".into()), ..DeclaredBudgets::default() },
-            DeclaredBudgets { disk_max: Some("16777216T".into()), ..DeclaredBudgets::default() },
+            DeclaredBudgets {
+                cpu_seconds: Some(0),
+                ..DeclaredBudgets::default()
+            },
+            DeclaredBudgets {
+                token_budget: Some(MAX_SAFE_INTEGER + 1),
+                ..DeclaredBudgets::default()
+            },
+            DeclaredBudgets {
+                memory_max: Some("0".into()),
+                ..DeclaredBudgets::default()
+            },
+            DeclaredBudgets {
+                disk_max: Some("16777216T".into()),
+                ..DeclaredBudgets::default()
+            },
         ] {
-            let error = validate("mission", "mission/test", None, None, Some(&budgets)).unwrap_err();
+            let error =
+                validate("mission", "mission/test", None, None, Some(&budgets)).unwrap_err();
             assert_eq!(error.code, "invalid-declared-admission");
             assert_eq!(error.details["subject"], "mission/test");
         }
@@ -502,7 +725,10 @@ mod tests {
         let parsed = parse_fields("declared-priority \"background\"\ndeclared-lane \"build\"\ndeclared-budgets { cpu-seconds 300; memory-max \"0008G\"; disk-max \"20G\"; token-budget 100000; }").unwrap();
         let json = serde_json::to_value(&parsed).unwrap();
         assert_eq!(json["budgets"]["memory_max"], "0008G");
-        assert_eq!(serde_json::from_value::<DeclaredAdmission>(json).unwrap(), parsed);
+        assert_eq!(
+            serde_json::from_value::<DeclaredAdmission>(json).unwrap(),
+            parsed
+        );
     }
 }
 
@@ -520,12 +746,30 @@ mod claim_tests {
             (json!({"declared_lane": null}), "declared_lane"),
             (json!({"declared_budgets": null}), "declared_budgets"),
             (json!({"declared_budgets": []}), "declared_budgets"),
-            (json!({"declared_budgets": {"cpu_seconds": null}}), "declared_budgets.cpu_seconds"),
-            (json!({"declared_budgets": {"cpu_seconds": 1.5}}), "declared_budgets.cpu_seconds"),
-            (json!({"declared_budgets": {"token_budget": "1"}}), "declared_budgets.token_budget"),
-            (json!({"declared_budgets": {"memory_max": 8}}), "declared_budgets.memory_max"),
-            (json!({"declared_budgets": {"disk_max": null}}), "declared_budgets.disk_max"),
-            (json!({"declared_budgets": {"extra": 1}}), "declared_budgets.extra"),
+            (
+                json!({"declared_budgets": {"cpu_seconds": null}}),
+                "declared_budgets.cpu_seconds",
+            ),
+            (
+                json!({"declared_budgets": {"cpu_seconds": 1.5}}),
+                "declared_budgets.cpu_seconds",
+            ),
+            (
+                json!({"declared_budgets": {"token_budget": "1"}}),
+                "declared_budgets.token_budget",
+            ),
+            (
+                json!({"declared_budgets": {"memory_max": 8}}),
+                "declared_budgets.memory_max",
+            ),
+            (
+                json!({"declared_budgets": {"disk_max": null}}),
+                "declared_budgets.disk_max",
+            ),
+            (
+                json!({"declared_budgets": {"extra": 1}}),
+                "declared_budgets.extra",
+            ),
         ] {
             for (kind, subject, body) in [
                 (
@@ -533,7 +777,11 @@ mod claim_tests {
                     "agent/test",
                     json!({"fields": {"body": {"kind": "agent", "member": fields.clone()}}}),
                 ),
-                ("mission.published", "mission/test", json!({"fields": {"body": fields}})),
+                (
+                    "mission.published",
+                    "mission/test",
+                    json!({"fields": {"body": fields}}),
+                ),
             ] {
                 let error = validate_claim(kind, subject, &body).unwrap_err();
                 assert_eq!(error.code, "invalid-declared-admission");
@@ -569,9 +817,12 @@ mod claim_tests {
             json!({"name": "declared-budgets", "children": [{"name": "extra", "arguments": [1]}]}),
             json!({"name": "declared-budgets", "children": [{"name": "cpu-seconds", "arguments": [1], "properties": {"extra": 1}}]}),
         ] {
-            let body = json!({"fields": {"body": {"kind": "agent", "desired": {"children": [child]}}}});
+            let body =
+                json!({"fields": {"body": {"kind": "agent", "desired": {"children": [child]}}}});
             assert_eq!(
-                validate_claim("intent.desired", "agent/test", &body).unwrap_err().code,
+                validate_claim("intent.desired", "agent/test", &body)
+                    .unwrap_err()
+                    .code,
                 "invalid-declared-admission"
             );
         }
@@ -586,8 +837,14 @@ mod claim_tests {
     #[test]
     fn old_payloads_are_not_newly_decoded_or_rejected() {
         for (kind, body) in [
-            ("intent.desired", json!({"fields": {"body": {"member": {"old_unknown": 1}}}})),
-            ("mission.published", json!({"fields": {"body": {"old_unknown": 1}}})),
+            (
+                "intent.desired",
+                json!({"fields": {"body": {"member": {"old_unknown": 1}}}}),
+            ),
+            (
+                "mission.published",
+                json!({"fields": {"body": {"old_unknown": 1}}}),
+            ),
             ("other", json!({"declared_budgets": null})),
         ] {
             validate_claim(kind, "subject/test", &body).unwrap();
@@ -607,13 +864,23 @@ mod deferred_claim_tests {
             r#"host "node" { agent "worker" { declared-budgets { cpu-seconds 0; }; }; }"#,
             r#"agent "${ST_MISSION_RUN}/worker" { declared-lane "future"; }"#,
         ] {
-            for mission in
-                [json!({"declarations_kdl": source}), json!({"steps": {"work": {"declarations_kdl": source}}})]
-            {
-                let error = validate_claim("mission.published", "mission/test", &json!({"fields": {"body": mission}}))
-                    .unwrap_err();
+            for mission in [
+                json!({"declarations_kdl": source}),
+                json!({"steps": {"work": {"declarations_kdl": source}}}),
+            ] {
+                let error = validate_claim(
+                    "mission.published",
+                    "mission/test",
+                    &json!({"fields": {"body": mission}}),
+                )
+                .unwrap_err();
                 assert_eq!(error.code, "invalid-declared-admission");
-                assert!(error.details["subject"].as_str().unwrap().starts_with("agent/"));
+                assert!(
+                    error.details["subject"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("agent/")
+                );
             }
         }
     }
@@ -636,7 +903,10 @@ mod consistency_tests {
     #[test]
     fn direct_claim_member_and_canonical_metadata_must_agree() {
         let raw = json!({"children": [{"name": "declared-priority", "arguments": ["normal"]}]});
-        for (member, desired) in [(json!({"declared_priority": "normal"}), json!({})), (json!({}), raw.clone())] {
+        for (member, desired) in [
+            (json!({"declared_priority": "normal"}), json!({})),
+            (json!({}), raw.clone()),
+        ] {
             let body = json!({"fields": {"body": {"kind": "agent", "member": member, "desired": desired}}});
             let error = validate_claim("intent.desired", "agent/test", &body).unwrap_err();
             assert_eq!(error.code, "invalid-declared-admission");
