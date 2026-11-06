@@ -43,9 +43,9 @@ mission "child" state="ready" { goal "Check child responsibility."
 mission "pool" state="ready" { goal "Keep raw responsibility."
   step "work" { available-to "agent/example/requester"; available-to "agent/example/free" } }
 mission "source" state="ready" { goal "Keep carried requesters."; step "work" { agentless } }
-mission "looping" state="ready" { goal "Do not silently accept unsupported history."
+mission "looping" state="ready" { goal "Review every round."
   loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } } }
-mission "nested-loop" state="ready" { goal "Reject nested loop history."
+mission "nested-loop" state="ready" { goal "Review nested loop history."
   step "outer" { agentless; mission "nested" { goal "Loop inline."
     loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } }
   } }
@@ -137,14 +137,119 @@ fn agent_review_run_missing_rows_and_unknown_owner_fail_closed() {
     assert_ne!(check(&store, &parent.subject, FREE), "ok");
 }
 
-#[test]
-fn agent_review_run_loop_definitions_fail_closed() {
+fn loop_fixture(mission: &str) -> (Store, MissionRunView, String, MissionRunView) {
     let (store, _, _) = fixture();
+    let run = store.create_mission_run(&request(mission)).unwrap();
+    let definition = pinned_generation_mission_tx(
+        &store.connection.write(),
+        generation_id_from_subject(&run.generation),
+    )
+    .unwrap()
+    .unwrap();
+    let specs = flatten_mission_step_specs(&definition);
+    let spec = specs
+        .iter()
+        .find_map(|step| step.loop_spec.as_deref())
+        .unwrap();
+    let parent = step(&run, &spec.path);
+    let subject = format!(
+        "loop-run/{}/{}",
+        generation_id_from_subject(&run.generation),
+        spec.path
+    );
+    let mut earlier = None;
+    for round in 1..=2 {
+        let mut request = request(&spec.round.id);
+        request.revision = Some(spec.round.revision.clone());
+        request.requester = Some(REQUESTER.into());
+        request.idempotency_key = format!("{mission}-round-{round}");
+        request
+            .inputs
+            .insert(crate::mission::LOOP_ROUND_INPUT.into(), round.to_string());
+        let child = store
+            .create_child_mission_run(&request, &run, &parent.subject, None)
+            .unwrap();
+        event(
+            &store,
+            &subject,
+            "loop.state",
+            PERSON,
+            json!({"fields":{"round":round,"status":"completed"}}),
+        );
+        event(
+            &store,
+            &subject,
+            "loop.round-result",
+            PERSON,
+            json!({"fields":{"round":round,"status":"completed","mission_run":child.subject}}),
+        );
+        store
+            .set_mission_run_state(&child.subject, "completed", "terminal", None)
+            .unwrap();
+        if round == 1 {
+            earlier = Some(child);
+        }
+    }
+    (store, run, subject, earlier.unwrap())
+}
+
+#[test]
+fn agent_review_run_all_loop_rounds_and_nested() {
     for mission in ["looping", "nested-loop"] {
-        let run = store.create_mission_run(&request(mission)).unwrap();
+        let (store, run, _, earlier) = loop_fixture(mission);
+        assert_eq!(check(&store, &run.subject, FREE), "ok");
+        assert_eq!(check(&store, &run.subject, REQUESTER), CONFLICT);
+        progress(&store, &earlier.steps[0].subject, FREE);
+        assert_eq!(check(&store, &run.subject, FREE), CONFLICT);
+    }
+}
+
+#[test]
+fn agent_review_run_loop_missing_or_malformed_history() {
+    for body in [
+        json!({"fields":{"round":"bad","status":"completed"}}),
+        json!({"fields":{"round":3,"status":"completed"}}),
+    ] {
+        let (store, run, subject, _) = loop_fixture("looping");
+        event(&store, &subject, "loop.state", PERSON, body);
+        assert_eq!(check(&store, &run.subject, FREE), UNKNOWN);
+    }
+    let (store, run, subject, _) = loop_fixture("looping");
+    event(
+        &store,
+        &subject,
+        "loop.round-result",
+        PERSON,
+        json!({"fields":{"round":1,"status":"completed","mission_run":"mission-run/missing"}}),
+    );
+    assert_eq!(check(&store, &run.subject, FREE), UNKNOWN);
+}
+
+#[test]
+fn agent_review_run_proposed_assignment() {
+    let (store, run, _) = fixture();
+    let connection = store.connection.write();
+    let scope = Scope {
+        run: BTreeSet::new(),
+        intent: None,
+    };
+    for (assignee, requester, code) in [
+        (FREE, PERSON, CONFLICT),
+        (CHILD, FREE, CONFLICT),
+        (CHILD, PERSON, "ok"),
+        ("agent/example/missing", PERSON, UNKNOWN),
+    ] {
+        let result = validate_run_reviewer_assignment(
+            &scope,
+            &connection,
+            &run.subject,
+            requester,
+            assignee,
+            FREE,
+        );
         assert_eq!(
-            check(&store, &run.subject, FREE),
-            "reviewer-history-unsupported"
+            result.map_or_else(|e| e.code.to_owned(), |_| "ok".into()),
+            code
         );
     }
 }
