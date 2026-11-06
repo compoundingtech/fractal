@@ -6,7 +6,7 @@ export interface MembershipToken { readonly scope: MembershipScope; readonly gen
 export interface MembershipFrontier { readonly epoch: string; readonly changed_index: number; readonly live_count: number }
 export interface MembershipComplete { readonly scope: MembershipScope; readonly frontier: MembershipFrontier; readonly snapshots: readonly Snapshot[]; readonly members: readonly OrderedMembership[] }
 export interface MembershipPage { readonly frontier: MembershipFrontier; readonly snapshot: Snapshot; readonly members: readonly OrderedMembership[]; readonly has_more: boolean; readonly next?: string }
-export type MembershipStatus = 'Unloaded' | 'Paging' | 'Ready' | 'Disconnected' | 'Refused' | 'Unsupported' | 'Exhausted'
+export type MembershipStatus = 'Unloaded' | 'Paging' | 'Ready' | 'Disconnected' | 'Refused' | 'Unsupported' | 'InvalidCursor' | 'FrontierInconsistent' | 'Exhausted'
 export type MembershipReadEffect = { readonly _tag: 'SubscribeAndRead'; readonly token: MembershipToken } | { readonly _tag: 'Read'; readonly token: MembershipToken; readonly cursor: string }
 export type MembershipEffect = MembershipReadEffect | { readonly _tag: 'PersistBase' }
 export type MembershipEvent =
@@ -17,6 +17,8 @@ export type MembershipEvent =
   | { readonly _tag: 'Expired'; readonly token: MembershipToken }
   | { readonly _tag: 'Refused'; readonly token: MembershipToken }
   | { readonly _tag: 'Unsupported'; readonly token: MembershipToken }
+  | { readonly _tag: 'InvalidCursor'; readonly token: MembershipToken }
+  | { readonly _tag: 'FrontierInconsistent'; readonly token: MembershipToken }
   | { readonly _tag: 'TransportLost'; readonly token: MembershipToken }
 const sameScope = (a: MembershipScope, b: MembershipScope): boolean => a.owner === b.owner && a.container === b.container && a.endpoint === b.endpoint && a.host === b.host && a.projection === b.projection
 const sameFrontier = (a: MembershipFrontier, b: MembershipFrontier): boolean => a.epoch === b.epoch && a.changed_index === b.changed_index && a.live_count === b.live_count
@@ -56,8 +58,7 @@ export class MembershipPaging {
     const { token } = event
     const current = this.#token
     if (!current || token.generation !== current.generation || token.attempt !== current.attempt || !sameScope(token.scope, current.scope)) return []
-    if (event._tag === 'Refused') return this.#stop('Refused')
-    if (event._tag === 'Unsupported') return this.#stop('Unsupported')
+    if (event._tag === 'Refused' || event._tag === 'Unsupported' || event._tag === 'InvalidCursor' || event._tag === 'FrontierInconsistent') return this.#stop(event._tag)
     if (event._tag === 'TransportLost') { this.#newest = undefined; return this.#stop('Disconnected') }
     if (event._tag === 'Expired') return this.#start(token)
     if (event._tag === 'Metadata') {
@@ -118,8 +119,8 @@ export const membershipFrame = (token: MembershipToken, frame: OrderedMembership
     ? { _tag: 'Expired', token } : membershipMetadata(token, frame.membership)
 export const membershipHttpFailure = (token: MembershipToken, status: number, code: string): MembershipEvent => {
   const restart = status === 409 && (code === 'membership-frontier-reset' || code === 'membership-collection-changed')
-    || status === 410 && code === 'page-cursor-expired'
-  return { _tag: status === 404 ? 'Unsupported' : restart ? 'Expired' : 'Refused', token }
+  const failure = code === 'unsupported-membership-paging-contract' ? 'Unsupported' : code === 'invalid-membership-cursor' ? 'InvalidCursor' : 'Refused'
+  return { _tag: status === 404 ? 'Unsupported' : status === 422 ? failure : status === 500 && code === 'membership-frontier-inconsistent' ? 'FrontierInconsistent' : restart ? 'Expired' : 'Refused', token }
 }
 export interface MembershipReadPort {
   /** Resolve only after the attempt's metadata subscription is installed; host owns cancellation. */

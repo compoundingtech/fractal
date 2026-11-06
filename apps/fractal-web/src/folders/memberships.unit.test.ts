@@ -108,8 +108,9 @@ it('adapts real page/frame shapes, subscribes before reading, and fails closed w
   expect(membershipMetadata(token, { container: scope.container, changed_index: 1, live_count: 1 })._tag).toBe('Refused')
   for (const missing of [{ ...value, membership: undefined }, { ...value, filters: {} }]) expect((await executeMembershipRead({ _tag: 'Read', token, cursor: 'cursor' }, { ...port, read: async () => ({ value: missing, snapshot }) }))._tag).toBe('Refused')
   const denied = new ClientError({ api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', code: 'forbidden', message: 'Denied', request_id: 'request/test', retryable: false, details: {} }, 403)
-  const expired = new ClientError({ ...denied.response, code: 'page-cursor-expired' }, 410)
-  for (const [error, tag] of [[denied, 'Refused'], [expired, 'Expired'], [new TypeError('Transport lost'), 'TransportLost']]) expect((await executeMembershipRead({ _tag: 'Read', token, cursor: 'cursor' }, { ...port, read: async () => { throw error } }))._tag).toBe(tag)
+  const legacyExpired = new ClientError({ ...denied.response, code: 'page-cursor-expired' }, 410)
+  const unavailable = new ClientError({ ...denied.response, code: 'not-found' }, 404)
+  for (const [error, tag] of [[denied, 'Refused'], [legacyExpired, 'Refused'], [unavailable, 'Unsupported'], [new TypeError('Transport lost'), 'TransportLost']]) expect((await executeMembershipRead({ _tag: 'Read', token, cursor: 'cursor' }, { ...port, read: async () => { throw error } }))._tag).toBe(tag)
   expect(membershipHttpFailure(token, 409, 'membership-frontier-reset')._tag).toBe('Expired'); expect(membershipHttpFailure(token, 403, 'membership-frontier-reset')._tag).toBe('Refused')
 })
 it('refuses equal-index page conflicts and permits an incomparable epoch after resubscription', () => {
@@ -125,18 +126,23 @@ it('refuses equal-index page conflicts and permits an incomparable epoch after r
   expect(state.complete?.members.map(row => row.member)).toEqual(['\ue000', '😀'])
   state.reduce({ _tag: 'Disconnect' }); expect(state.complete).toBeDefined(); expect(state.stale).toBe(true)
 })
-it('reports HTTP 404 as Unsupported for needs-newer-daemon, preserving stale data and token isolation', async () => {
-  const { state, token: old } = ready(); const token = refresh(state, 2)
-  expect(state.reduce(membershipHttpFailure(old, 404, 'not-found'))).toEqual([]); expect(state.status).toBe('Paging')
-  const unavailable = new ClientError({ api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', code: 'not-found', message: 'Unsupported endpoint', request_id: 'request/test', retryable: false, details: {} }, 404)
-  const event = await executeMembershipRead({ _tag: 'SubscribeAndRead', token }, { subscribe: async () => {}, read: async () => { throw unavailable } })
-  expect(event).toEqual({ _tag: 'Unsupported', token }); expect(state.reduce(event)).toEqual([])
-  expect(state.status).toBe('Unsupported'); expect(state.stale).toBe(true); expect(state.complete?.members[0]?.member).toBe('a')
-  expect(state.reduce({ _tag: 'Page', token, page: page() })).toEqual([]); expect(state.status).toBe('Unsupported')
-  refresh(state, 3); expect(state.status).toBe('Paging')
+it('keeps stale data on typed terminal failures without looping, isolated by token', () => {
+  for (const failure of [
+    { status: 404, code: 'not-found', tag: 'Unsupported' }, { status: 422, code: 'unsupported-membership-paging-contract', tag: 'Unsupported' },
+    { status: 422, code: 'invalid-membership-cursor', tag: 'InvalidCursor' }, { status: 500, code: 'membership-frontier-inconsistent', tag: 'FrontierInconsistent' },
+    { status: 422, code: 'other', tag: 'Refused' }, { status: 500, code: 'other', tag: 'Refused' },
+  ]) {
+    const { state, token: old } = ready(); const token = refresh(state, 2)
+    expect(state.reduce(membershipHttpFailure(old, failure.status, failure.code))).toEqual([]); expect(state.status).toBe('Paging')
+    const event = membershipHttpFailure(token, failure.status, failure.code)
+    expect(event).toEqual({ _tag: failure.tag, token }); expect(state.reduce(event)).toEqual([])
+    expect(state.status).toBe(failure.tag); expect(state.stale).toBe(true); expect(state.complete?.members[0]?.member).toBe('a')
+    expect(state.reduce({ _tag: 'Expired', token })).toEqual([]); expect(state.reduce({ _tag: 'Page', token, page: page() })).toEqual([])
+    refresh(state, 3); expect(state.status).toBe('Paging')
+  }
 })
-it('restarts the whole staged attempt for server 409 collection changes and 410 cursor expiry', () => {
-  for (const error of [{ status: 409, code: 'membership-collection-changed' }, { status: 410, code: 'page-cursor-expired' }]) {
+it('restarts the whole staged attempt for both collection-v1 HTTP 409 codes', () => {
+  for (const error of [{ status: 409, code: 'membership-collection-changed' }, { status: 409, code: 'membership-frontier-reset' }]) {
     const { state } = ready(); const old = refresh(state)
     state.reduce({ _tag: 'Page', token: old, page: page(2, 2, ['b'], 'cursor') })
     const token = tokenOf(state.reduce(membershipHttpFailure(old, error.status, error.code)))
