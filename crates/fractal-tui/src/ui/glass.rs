@@ -5158,6 +5158,7 @@ mod tests {
         let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
         ui.resource_sidebar.arrangements.push(serde_json::from_value(serde_json::json!({
             "id": format!("arrangement/{}/{}", ui.world.person, uuid::Uuid::now_v7()), "revision":"claim/test", "updated_at":"2026-10-11T00:00:00Z", "owner":ui.world.person, "deleted":false,
+            "resolved":{"parents":{first.clone():null,second.clone():null},"folders":{}},
             "body":{"version":1,"name":{"value":"Sidebar","revision":"claim/test"},"folders":{
                 first.clone():{"name":{"value":"First","revision":"claim/test"},"position":{"value":{"key":"a0","parent":null},"revision":"claim/test"},"tombstone":null},
                 second.clone():{"name":{"value":"Second","revision":"claim/test"},"position":{"value":{"key":"a1","parent":null},"revision":"claim/test"},"tombstone":null}
