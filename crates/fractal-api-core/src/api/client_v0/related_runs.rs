@@ -159,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_session_only_marks_its_own_person_holds() {
-        use crate::{PublishedViewsStore, WorkListStore};
+        use crate::WorkListStore;
         use crate::api::published_lists::tests_shared_client_v0_tests::{fold, publish};
         use tower::ServiceExt as _;
         let root = tempfile::tempdir().unwrap();
@@ -169,14 +169,15 @@ mission "example" state="ready" report-to="agent/example" {
  goal "Review."
  step "check" { assigned-to "person/reviewer" }
 }"#, "publish");
-        state.store.create_mission_run(&crate::model::MissionRunRequest {
+        let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
             mission:"example".into(), revision:None, workspace:root.path().display().to_string(),
             requester:Some("person/operator".into()), mode:None, inputs:BTreeMap::new(), idempotency_key:"run".into(),
         }).unwrap();
+        state.store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
         fold(&state.store);
         state.store.published_work_list().start();
         crate::api::published_lists::refresh_work_once(&state.store);
-        for (person, expected) in [("person/reviewer",true),("person/observer",false)] {
+        for (person, expected) in [("person/reviewer",true),("person/other",false)] {
             let app = Router::new().route("/related/{*id}", axum::routing::get(super::get))
                 .layer(Extension(ClientSession::local(Some(person)).unwrap())).with_state(state.clone());
             let response = app.oneshot(axum::http::Request::builder().uri("/related/agent/example")
