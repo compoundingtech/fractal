@@ -947,7 +947,7 @@ mod tests {
         for problem in ["missing", "cycle", "all-missing"] {
             let mut sidebar = golden_sidebar("reserved");
             let good = "mission/independent";
-            sidebar.seen.insert(good.into(), ResourceRow { id: good.into(), kind: "Mission".into(), title: "Independent".into(), open: good.into(), missing: false });
+            sidebar.seen.insert(good.into(), ResourceRow { id: good.into(), kind: "Missions".into(), title: "Independent".into(), open: good.into(), missing: false });
             let a = sidebar.arrangements.last_mut().unwrap();
             let bad = a.resolved.as_ref().unwrap().parents.keys().next().unwrap().clone();
             match problem {
