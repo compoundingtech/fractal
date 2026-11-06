@@ -83,6 +83,14 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Membership projection generation inventory (PR #5381)
+
+`fractal_store::store::ordered_membership` owns `lv-h3b5ec217e92b`.
+The upsert binds one fixed metadata key and one checked nonnegative `i64` generation;
+it replaces one local scalar, never replicated input or a growing result.
+The lexical inventory supports only transitional exceptions, not bounded-value exemptions.
+Keep this site registered while the producer owns the metadata representation and reclamation review.
+
 ### Carried-step review fixture inventory (PR #5343)
 
 The `fractal_store::references::step_review::tests` maintainer owns both
