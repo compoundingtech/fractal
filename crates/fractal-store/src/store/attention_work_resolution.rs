@@ -95,7 +95,7 @@ fn person_sql() -> String {
 
 /// Ask recipients come from the immutable ask. Authored person steps have a fenced
 /// generation:attempt:epoch episode; their accepted answer carries admission-validated
-/// person/delegation/assistant authority. Neither path reads today's assignment.
+/// person/explicit/assistant authority. Neither path reads today's assignment.
 /// Like standing_responses, only an on-time person answer can replace a deadline default.
 pub fn person_step_resolution_at(
     connection: &Connection, source_id: &str, person: &str, episode: &str,
@@ -131,7 +131,7 @@ mod tests {
 
     pub(super) fn indexed(connection: &Connection, sql: &str, index: &str) {
         let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-        let plan = statement.query_map(params!["step-run/test", "person/alice", "request"],
+        let plan = statement.query_map(params!["step-run/test", "person/ada", "request"],
             |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert!(plan.iter().any(|line| line.contains(index)), "{plan:?}");
         for line in &plan {
@@ -144,19 +144,19 @@ mod tests {
     fn gate_exact_recipient_episode_and_canonical_actor() {
         let connection = database();
         insert(&connection, "request", "review/test", "gate.requested", "agent/requester", 1,
-            json!({"owner":"step-run/test","reviewer":"person/alice"}));
-        insert(&connection, "wrong", "review/test", "gate.result", "person/bob", 2,
+            json!({"owner":"step-run/test","reviewer":"person/ada"}));
+        insert(&connection, "wrong", "review/test", "gate.result", "person/blair", 2,
             json!({"request":"request","verdict":"pass"}));
         insert(&connection, "winner", "review/test", "gate.result", "agent/delegate", 3,
-            json!({"request":"request","verdict":"pass","acted_for":"person/alice",
+            json!({"request":"request","verdict":"pass","acted_for":"person/ada",
                 "delegation":{"episode":"request"}}));
-        insert(&connection, "later", "review/test", "gate.result", "person/alice", 4,
+        insert(&connection, "later", "review/test", "gate.result", "person/ada", 4,
             json!({"request":"request","verdict":"fail"}));
-        let result = human_gate_resolution_at(&connection, "step-run/test", "person/alice", "request").unwrap().unwrap();
+        let result = human_gate_resolution_at(&connection, "step-run/test", "person/ada", "request").unwrap().unwrap();
         assert_eq!((result.claim_id.as_str(), result.resolved_by.as_str()), ("winner", "agent/delegate"));
-        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/bob", "request").unwrap().is_none());
-        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/alice", "stale").unwrap().is_none());
-        assert!(human_gate_resolution_at(&connection, "step-run/other", "person/alice", "request").unwrap().is_none());
+        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/blair", "request").unwrap().is_none());
+        assert!(human_gate_resolution_at(&connection, "step-run/test", "person/ada", "stale").unwrap().is_none());
+        assert!(human_gate_resolution_at(&connection, "step-run/other", "person/ada", "request").unwrap().is_none());
         indexed(&connection, &gate_sql(), "claims_human_gate_answer_request_index");
     }
 }
@@ -168,7 +168,7 @@ mod person_tests {
 
     fn ask(connection: &Connection, deadline: Option<u64>) {
         insert(connection, "request", "step-run/test", "work.person-asked", "agent/requester", 1,
-            json!({"person":"person/alice","deadline_unix_ms":deadline}));
+            json!({"person":"person/ada","deadline_unix_ms":deadline}));
     }
 
     fn answer(connection: &Connection, id: &str, actor: &str, at: u64, extra: Value) {
@@ -179,7 +179,7 @@ mod person_tests {
     }
 
     fn resolved(connection: &Connection) -> SourceResolution {
-        person_step_resolution_at(connection, "step-run/test", "person/alice", "request")
+        person_step_resolution_at(connection, "step-run/test", "person/ada", "request")
             .unwrap().unwrap()
     }
 
@@ -187,13 +187,13 @@ mod person_tests {
     fn ask_proof_binds_original_recipient_episode_and_delegated_actor() {
         let connection = database();
         ask(&connection, None);
-        answer(&connection, "stale", "person/alice", 2, json!({"episode":"older-request"}));
-        assert!(person_step_resolution_at(&connection, "step-run/test", "person/alice", "request").unwrap().is_none());
+        answer(&connection, "stale", "person/ada", 2, json!({"episode":"older-request"}));
+        assert!(person_step_resolution_at(&connection, "step-run/test", "person/ada", "request").unwrap().is_none());
         answer(&connection, "delegated", "agent/reviewer", 3,
-            json!({"acted_for":"person/alice","delegation":{"person":"person/alice","episode":"request"}}));
+            json!({"acted_for":"person/ada","delegation":{"person":"person/ada","episode":"request"}}));
         assert_eq!(resolved(&connection).resolved_by, "agent/reviewer");
-        assert!(person_step_resolution_at(&connection, "step-run/test", "person/bob", "request").unwrap().is_none());
-        assert!(person_step_resolution_at(&connection, "step-run/other", "person/alice", "request").unwrap().is_none());
+        assert!(person_step_resolution_at(&connection, "step-run/test", "person/blair", "request").unwrap().is_none());
+        assert!(person_step_resolution_at(&connection, "step-run/other", "person/ada", "request").unwrap().is_none());
         indexed(&connection, &person_sql(), "claims_subject_kind_index");
     }
 
@@ -202,10 +202,10 @@ mod person_tests {
         let connection = database();
         ask(&connection, Some(100));
         answer(&connection, "default", "daemon/runtime", 110, json!({"resolved_by":"deadline"}));
-        answer(&connection, "late", "person/alice", 100, json!({}));
+        answer(&connection, "late", "person/ada", 100, json!({}));
         assert_eq!(resolved(&connection).claim_id, "default");
         answer(&connection, "timely", "agent/reviewer", 99,
-            json!({"acted_for":"person/alice","delegation":{"person":"person/alice","episode":"request"}}));
+            json!({"acted_for":"person/ada","delegation":{"person":"person/ada","episode":"request"}}));
         assert_eq!(resolved(&connection).claim_id, "timely");
         assert_eq!(resolved(&connection).resolved_by, "agent/reviewer");
     }
@@ -215,30 +215,30 @@ mod person_tests {
         let connection = database();
         ask(&connection, None);
         answer(&connection, "default", "daemon/runtime", 10, json!({"resolved_by":"deadline"}));
-        answer(&connection, "late", "person/alice", 11, json!({}));
+        answer(&connection, "late", "person/ada", 11, json!({}));
         assert_eq!(resolved(&connection).claim_id, "default");
-        answer(&connection, "timely", "person/alice", 9, json!({}));
+        answer(&connection, "timely", "person/ada", 9, json!({}));
         assert_eq!(resolved(&connection).claim_id, "timely");
     }
 
     #[test]
     fn authored_episode_uses_admitted_person_metadata_not_current_owner() {
         for (actor, extra) in [
-            ("person/alice", json!({})),
-            ("agent/reviewer", json!({"acted_for":"person/alice",
-                "delegation":{"person":"person/alice","episode":"generation:1:2"}})),
+            ("person/ada", json!({})),
+            ("agent/reviewer", json!({"acted_for":"person/ada",
+                "delegation":{"person":"person/ada","episode":"generation:1:2"}})),
             ("assistant/chatgpt", json!({"sender_class":"external-assistant",
-                "assistant_owner":"person/alice","assistant_grant_id":"grant-accepted"})),
+                "assistant_owner":"person/ada","assistant_grant_id":"grant-accepted"})),
         ] {
             let connection = database();
             let mut fields = json!({"episode":"generation:1:2","attempt":1,"summary":"Finished"});
             fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             insert(&connection, "accepted", "step-run/test", "work.person-done", actor, 3, fields);
-            let winner = person_step_resolution_at(&connection, "step-run/test", "person/alice", "generation:1:2")
+            let winner = person_step_resolution_at(&connection, "step-run/test", "person/ada", "generation:1:2")
                 .unwrap().unwrap();
             assert_eq!(winner.resolved_by, actor);
-            assert!(person_step_resolution_at(&connection, "step-run/test", "person/bob", "generation:1:2").unwrap().is_none());
-            assert!(person_step_resolution_at(&connection, "step-run/test", "person/alice", "generation:1:3").unwrap().is_none());
+            assert!(person_step_resolution_at(&connection, "step-run/test", "person/blair", "generation:1:2").unwrap().is_none());
+            assert!(person_step_resolution_at(&connection, "step-run/test", "person/ada", "generation:1:3").unwrap().is_none());
         }
     }
 }
@@ -252,12 +252,12 @@ mod ended_ask_tests {
     fn owner_ended_cancellation_binds_ask_through_immutable_key() {
         let connection = database();
         insert(&connection, "request", "step-run/test", "work.person-asked", "agent/requester", 1,
-            json!({"person":"person/alice"}));
+            json!({"person":"person/ada"}));
         insert(&connection, "cancelled", "step-run/test", "work.person-cancelled", "daemon/runtime", 2,
             json!({"attempt":1,"status":"cancelled","summary":"owning run ended","key":"person-owner-ended:request"}));
-        let result = person_step_resolution_at(&connection, "step-run/test", "person/alice", "request")
+        let result = person_step_resolution_at(&connection, "step-run/test", "person/ada", "request")
             .unwrap().unwrap();
         assert_eq!(result.resolved_by, "daemon/runtime");
-        assert!(person_step_resolution_at(&connection, "step-run/test", "person/alice", "older").unwrap().is_none());
+        assert!(person_step_resolution_at(&connection, "step-run/test", "person/ada", "older").unwrap().is_none());
     }
 }
