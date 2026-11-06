@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "New triggers, no schema-version change: replica_envelopes, checkpoint_envelopes and retired_envelopes count every change but an append (envelope deletes and rewrites, inserts below the tail, every tombstone and retired-ledger change) in meta key replication_inventory_changes. Opening a store writes nothing new. A new file, <database>.replication-inventory, is written at a clean daemon stop (305 MB and 0.8 s for 4.5M identities) and removed by the next start's first snapshot."
+    "detail": "New triggers, no schema-version change: replica_envelopes, checkpoint_envelopes and retired_envelopes count every change but an append (envelope deletes and rewrites, inserts below the tail, every tombstone and retired-ledger change) in meta key replication_inventory_changes. Opening a store writes nothing new. A clean stop also writes a random token in meta key replication_inventory_saved, which the file carries; a store restored from a copy taken before that save holds another token, or none, and reads the store. A new file, <database>.replication-inventory, is written at a clean daemon stop (305 MB and 0.8 s for 4.5M identities) and removed by the next start's first snapshot."
   },
   "rules": {
     "status": "none",

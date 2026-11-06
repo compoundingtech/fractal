@@ -13,14 +13,20 @@
 //! database, so they count for every binary that writes it, an older one too. A snapshot keeps
 //! the count it was read at, and loses it when a change it does not take in (a trim's deleted
 //! payloads) lands under it. A stop saves only while the count is the snapshot's, and the next
-//! open reads the file only while the count is still the file's. The file also names the
-//! envelope at its last row, which a store restored from a copy would not hold. Reading
-//! consumes it, so a process that stops without saving leaves none behind.
+//! open reads the file only while the count is still the file's.
+//!
+//! Two more checks tie the file to this database. A save writes a random token into `meta`
+//! before the file, and the file carries it: a store restored from a copy taken before that
+//! save holds another token, or none, whatever its count. And the file names the envelope at
+//! its last row: envelope identities are unique, so finding that one at that rowid means no
+//! copy renumbered the rows below it (a VACUUM may, and fires no trigger). Reading consumes the
+//! file, so a process that stops without saving leaves none behind.
 use super::*;
 use std::io::{Read as _, Write as _};
 
 const CHANGES: &str = "replication_inventory_changes";
-const MAGIC: &[u8; 32] = b"fractal replication inventory 02";
+const SAVED: &str = "replication_inventory_saved";
+const MAGIC: &[u8; 32] = b"fractal replication inventory 03";
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     let count = format!(
@@ -74,6 +80,14 @@ fn anchor(connection: &Connection, rowid: i64) -> Result<Option<ReplicaEnvelopeI
         .optional()?)
 }
 
+/// The token of the last save, which only the file that save wrote also carries.
+fn saved_token(connection: &Connection) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached("SELECT value FROM meta WHERE key=?1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-ha6479e16f374 owner=smallclaims::store::saved_inventory TODO=trace-statement-and-value-representation */ [SAVED], |row| row.get(0))
+        .optional()?)
+}
+
 /// Where a store at `database` leaves its inventory.
 pub fn path(database: &Path) -> PathBuf {
     let mut name = database.as_os_str().to_owned();
@@ -89,6 +103,7 @@ struct Header {
     envelope_rows: u64,
     retired_authoritative: bool,
     anchor: Option<ReplicaEnvelopeId>,
+    token: String,
 }
 
 /// What a stop's save did, and when it saved nothing, why: the next start then reads the store.
@@ -122,6 +137,9 @@ impl Store {
                 None
             })
         };
+        let mut token = [0u8; 16];
+        getrandom::fill(&mut token).map_err(|error| anyhow::anyhow!("no randomness for the inventory token: {error}"))?;
+        let token = hex::encode(token);
         let (changed_before, header) = self.read_snapshot_unindexed(|| {
             let connection = self.readers.get();
             let header = Header {
@@ -131,6 +149,7 @@ impl Store {
                 envelope_rows: snapshot.envelope_rows as u64,
                 retired_authoritative: retired::authoritative(&connection)?,
                 anchor: anchor(&connection, snapshot.max_envelope_rowid)?,
+                token: token.clone(),
             };
             Ok((changed(&connection)?, header))
         })?;
@@ -140,6 +159,11 @@ impl Store {
         if snapshot.max_envelope_rowid > 0 && header.anchor.is_none() {
             return Ok(InventorySave::Skipped("the snapshot's last envelope is gone"));
         }
+        // The token commits before the file exists, so no file outlives the save that wrote it.
+        self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hcc1be495eace owner=smallclaims::store::saved_inventory TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [SAVED, token.as_str()],
+        )?;
         let partial = destination.with_extension("replication-inventory.partial");
         write(&partial, &header, &snapshot)?;
         std::fs::rename(&partial, &destination)?;
@@ -185,6 +209,7 @@ impl Store {
         };
         let describes = header.changes == changes_now
             && header.inventory_generation == inventory_generation::current(connection)?
+            && saved_token(connection)?.as_deref() == Some(header.token.as_str())
             && header.retired_authoritative == retired::authoritative(connection)?
             && header.max_envelope_rowid <= max_envelope_rowid(connection)?
             && (header.max_envelope_rowid == 0
@@ -276,6 +301,7 @@ fn write(destination: &Path, header: &Header, snapshot: &ReplicationSnapshot) ->
         }
         None => put_u64(&mut out, 0)?,
     }
+    put_text(&mut out, &header.token)?;
     put_u64(&mut out, inventory.writers.len() as u64)?;
     for writer in &inventory.writers {
         put_text(&mut out, writer)?;
@@ -376,6 +402,7 @@ fn read(
         0 => None,
         _ => Some(get_identity(&mut input)?),
     };
+    let token = get_text(&mut input)?;
     let mut inventory = CompactReplicationInventory::default();
     for _ in 0..get_count(&mut input)? {
         inventory.writers.push(get_text(&mut input)?);
@@ -433,6 +460,7 @@ fn read(
             envelope_rows,
             retired_authoritative,
             anchor,
+            token,
         },
         inventory,
         buckets,
