@@ -20,7 +20,7 @@ const project = (frame: readonly OptimisticAttention[], entry: PendingMutation<A
 export const optimisticAlertActions = (transport: AlertActionPort) => {
   const noticeTargets = new Map<string, AlertAnswered>()
   const receipts = new Map<string, Extract<AlertActionResult, { _tag: 'Sent' }> & { readonly supersedes?: string }>()
-  const reconcileControl = (control: Native.Attention['presentation_control'], mutation: { readonly key: string; readonly action: Answer }) => {
+  const reconcileControl = (control: Omit<Native.AttentionControl, 'id'> | undefined, mutation: { readonly key: string; readonly action: Answer }) => {
     const { alert, action } = mutation.action
     if (action.type !== 'attention.dismiss' && action.type !== 'attention.restore' && action.type !== 'attention.snooze') return 'pending'
     // An inverse's authoritative frame also proves its predecessor was applied.

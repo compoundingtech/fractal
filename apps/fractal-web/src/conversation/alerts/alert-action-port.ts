@@ -228,7 +228,7 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
   return {
     act, forget: (key) => { attempts.delete(key); prompts.forget?.(key) },
     readControl: async (alert) => {
-      if (alert.presentation_control === undefined || alert.attention_kind === undefined)
+      if (alert.presentation_control === undefined || alert.attention_kind === undefined || alert.episode === undefined)
         return Promise.reject(new TypeError('This alert lacks native control metadata.'))
       const response = await client.attentionControlsGet(alert.id, {
         source_id: alert.source_id, attention_kind: alert.attention_kind, episode: alert.episode,
