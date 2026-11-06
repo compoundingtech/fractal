@@ -25,12 +25,17 @@ test('rows keep served order, active before the finished fold, without client re
   assert.match(html, /Finished · <!-- -->1|Finished · 1/)
 })
 
-test('waiting on you replaces the ETA; a late ETA is marked; truncation is explicit', () => {
-  const html = render(loaded([run('hold', { waiting_on_you: true, status_chip: 'waiting-on-you', eta }), run('late', { late: true, eta }), run('late-no-eta', { late: true })], 140))
+test('line 2 leads with waiting on you or a worded late ETA, then one phrase; truncation is explicit', () => {
+  const wait = { step: 's', path: 'p', state: 'open', kind: 'ask', who: 'person/reviewer' }
+  const step = { step: 's', path: 'p', state: 'open', kind: 'step', title: 'Ship' }
+  const html = render(loaded([run('hold', { waiting_on_you: true, status_chip: 'waiting-on-you', eta, current_step: step, waits_on: [wait] }), run('late', { late: true, eta }), run('late-no-eta', { late: true })], 140))
   assert.equal(html.match(/data-waiting-on-you/g)?.length, 1)
   assert.equal(html.match(/data-late/g)?.length, 2)
   assert.equal(html.match(/data-mission-eta="/g)?.length, 1, 'the held run draws no ETA')
-  assert.match(html, /waiting on you/)
+  assert.match(html, /waiting on you<\/span><span aria-hidden="true">·<\/span><span[^>]*>waits on reviewer<\/span>/, 'the blocker replaces the step: one phrase')
+  assert.doesNotMatch(html, />Ship</)
+  assert.equal(html.match(/>late<\/span>/g)?.length, 2, 'lateness is worded, not only colored')
+  assert.match(html, />late<\/span> · <span data-mission-eta="~10–15 min left"/)
   assert.match(html, /Showing <!-- -->3<!-- --> of <!-- -->140<!-- --> runs|Showing 3 of 140 runs/)
 })
 
