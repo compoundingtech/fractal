@@ -40,6 +40,15 @@ test('the st validate daily review uses object references and matches the canoni
     assert.equal(encodeKdl({ agents: [editor, writer], missions: [mission], schedules: [schedule] }), expected);
 });
 
+test('principal and lane capacities match the parser-backed golden', () => {
+    const declarations = {
+        agents: [{ ...editor, principal: 'person/operator' }, writer],
+        missions: [{ ...mission, capacity: { cores: 2, memory: '4G' },
+            steps: [{ ...mission.steps[0], capacity: { memory: '8G' } }] }],
+    };
+    assert.equal(encodeKdl(declarations), fs.readFileSync(path.join(__dirname, 'fixtures/capacity-principal.kdl'), 'utf8'));
+});
+
 test('the runnable TypeScript example matches the Rust-validated golden fixture', () => {
     const { execFileSync } = require('node:child_process');
     const rendered = execFileSync(process.execPath, [path.join(__dirname, 'examples/render.cjs')], { encoding: 'utf8' });

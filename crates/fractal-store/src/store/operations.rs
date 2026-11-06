@@ -59,7 +59,7 @@ impl Store {
                 |row| row.get::<_, bool>(0),
             )?
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "not-found",
                 format!("mission `mission/{mission}` does not exist"),
             )
@@ -504,7 +504,7 @@ mod tests {
         let store = Store::open_memory("fixture").unwrap();
         for mission in ["mission/example/missing", "example/missing"] {
             let error = store.mission_overview(mission, 10).unwrap_err();
-            let error = error.downcast_ref::<St3Error>().unwrap();
+            let error = error.downcast_ref::<FractalError>().unwrap();
             assert_eq!(error.code, "not-found");
             assert_eq!(
                 error.message,

@@ -91,6 +91,24 @@ fn cgroup(pid: u32) -> String {
     fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap()
 }
 
+/// The cgroup of an exec once it has joined its scope `unit`. The spawn returns while `systemd-run`
+/// waits for the user manager to start the scope, still in its parent's cgroup, and it runs the
+/// task only once it has moved into the scope.
+fn joined_cgroup(pid: u32, unit: &str) -> String {
+    for _ in 0..1500 {
+        let group = cgroup(pid);
+        if group
+            .lines()
+            .filter_map(|line| line.strip_prefix("0::"))
+            .any(|path| path.split('/').any(|part| part == unit))
+        {
+            return group;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("exec {pid} never joined its scope {unit}: {}", cgroup(pid));
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     ready: UnixDatagram,
@@ -293,9 +311,8 @@ fn exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops() {
     let before = running_exec(fixture.path());
     assert_eq!(before.isolation_mode, "scope");
     assert!(before.scope_unit.as_ref().unwrap().ends_with(".scope"));
-    let group = cgroup(before.pid);
+    let group = joined_cgroup(before.pid, before.scope_unit.as_ref().unwrap());
     assert!(!group.contains(&fixture.unit));
-    assert!(group.contains(before.scope_unit.as_ref().unwrap()));
     let member = pidfd(before.pid);
 
     fixture.kill_parent(&parent);

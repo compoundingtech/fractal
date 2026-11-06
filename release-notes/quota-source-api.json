@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose an optional versioned external quota source through authenticated client-v0 reads, shared across concurrent clients.",
+  "replay": {"status": "none", "detail": "No replicated state changes."},
+  "schema": {"status": "changed", "detail": "Additive quota-source v1 HTTP contract and client read endpoint."},
+  "rules": {"status": "none", "detail": "No checkpoint changes."},
+  "compatibility": {"status": "changed", "detail": "Older daemons reject the optional quota_source configuration; omit it when reverting."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "none", "detail": "Source integration is opt-in via quota_source.url."},
+  "recovery": {"status": "none", "detail": "Remove quota_source configuration and revert."}
+}

@@ -32,10 +32,10 @@ jq -e '
 
 trace_file="$(mktemp)"
 trap 'rm -f "$trace_file"' EXIT
-st3 trace show --json --limit 500 >"$trace_file"
+fractal trace show --json --limit 500 >"$trace_file"
 
 while IFS= read -r subject; do
-  work_snapshot="$(st3 work show "$subject" --json)"
+  work_snapshot="$(fractal work show "$subject" --json)"
   jq -e '.value.state == "completed"' <<<"$work_snapshot" >/dev/null
 
   wake_prefix="st3-work:$subject@"
@@ -53,7 +53,7 @@ while IFS= read -r subject; do
   wake_sent_at="$(jq -sr --arg message "$wake_message" '
     .[] | select(.subject == $message and .kind == "message.sent") | .accepted_at_unix_ms
   ' "$trace_file")"
-  claim_at="$(st3 trace show "$subject" --json --limit 100 \
+  claim_at="$(fractal trace show "$subject" --json --limit 100 \
     | jq -sr '[.[] | select(.kind == "work.claimed")] | select(length == 1) | .[0].accepted_at_unix_ms')"
   test -n "$wake_sent_at"
   test -n "$claim_at"

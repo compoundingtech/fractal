@@ -1,0 +1,13 @@
+# Attachment schema loading
+
+`attachmentPort.ts` uses the read entry for capability and chunk decoding. Upload responses and message actions need `BlobUpload`, `ActionRequest` and `ActionResult`, which are not read contracts. `attachmentSchema.ts` exposes these codecs behind `loadAttachmentSchema`, using the same retryable `createLazyChunk` boundary as SDK mutations and PTY services. The upload loads it after the capability grant and checks cancellation again before sending bytes. Sending loads it before generated action validation; malformed actions still never reach the gateway.
+
+The production module graph also exposed full-schema imports in folder/pin validation and terminal input/resize. Their read codecs now use the read entry too. Arrangement edit validators load through `loadArrangementSchema`; terminal write results and geometry load through `loadTerminalSchema`. The folder editor acquires validation before refreshing its fence, pin edits recheck admission after loading, and terminal input acquires its codec before reading the fresh snapshot. No chunk acquisition retries a gateway mutation.
+
+## Manual production graph regression check
+
+There is no web eager-module graph guard to extend. Build production with the normal `vite.config.ts` and an output-only `generateBundle` attribution plugin. Record each output chunk's `modules` (including `renderedLength`), `imports` and `dynamicImports`, and each source module's `getModuleInfo(id).importedIds`. Do not change splitting options.
+
+Read `dist/web/index.html` and collect unique external module scripts, modulepreload links and stylesheet links. Follow static chunk imports to distinguish the complete eager closure from lazy chunks. Check positive rendered-length modules for `clients/typescript/fractal-client/Schema.generated.ts`. Trace static source importers back to `src/web/main.tsx`; dynamic imports must not be traversed as eager edges. `attachmentPort.ts` must have no static path to the full schema; its only full-schema path is through the dynamic `attachmentSchema.ts` import in `lazySdk.ts`.
+
+Compare the same locked dependencies and recipe on the #5230 base and this branch. Sum bytes and independent Node Brotli quality-11 compression of each HTML-declared eager asset, excluding HTML, inline scripts and lazy assets. The SDK read entry on #5230 still imports the full schema through `packages/fractal-sdk/src/effect/mod.ts`, `resourceDecode.ts` and `conversationBlocks.ts`; those SDK importers are independently owned. Stacking with the lazy SDK codec changes (#5273/#5277) is necessary, but the graph must also confirm that the other SDK read modules have migrated. Do not treat a new schema chunk name as proof it is lazy.

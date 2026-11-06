@@ -55,13 +55,13 @@ socket_b="$root/b/st3.sock"
 common_a=(--node replica-a --state-dir "$root/a/state" --socket "$socket_a" --fleet-id "$fleet" --shared-secret-file "$secret" --peer-listen "127.0.0.1:$port_a" --peer "replica-b=http://127.0.0.1:$port_b")
 common_b=(--node replica-b --state-dir "$root/b/state" --socket "$socket_b" --fleet-id "$fleet" --shared-secret-file "$secret" --peer-listen "127.0.0.1:$port_b" --peer "replica-a=http://127.0.0.1:$port_a")
 
-st3 up "${common_a[@]}" >"$root/a/daemon.log" 2>&1 &
+fractal up "${common_a[@]}" >"$root/a/daemon.log" 2>&1 &
 daemons+=("$!")
-st3 up "${common_b[@]}" >"$root/b/daemon.log" 2>&1 &
+fractal up "${common_b[@]}" >"$root/b/daemon.log" 2>&1 &
 daemons+=("$!")
-st3 replication-worker "${common_a[@]}" >"$root/a/worker.log" 2>&1 &
+fractal replication-worker "${common_a[@]}" >"$root/a/worker.log" 2>&1 &
 workers+=("$!")
-st3 replication-worker "${common_b[@]}" >"$root/b/worker.log" 2>&1 &
+fractal replication-worker "${common_b[@]}" >"$root/b/worker.log" 2>&1 &
 workers+=("$!")
 
 python3 - "$socket_a" "$socket_b" <<'PY'
@@ -77,25 +77,25 @@ raise SystemExit("the local APIs did not become ready")
 PY
 
 printf 'version 2\nresource "initial-a" { kind "custom.eval.initial-a" }\n' >"$root/initial-a.kdl"
-st3 --endpoint "$socket_a" publish "$root/initial-a.kdl" --as person/eval >/dev/null
+fractal --endpoint "$socket_a" publish "$root/initial-a.kdl" --as person/eval >/dev/null
 python3 ./await_convergence.py "$socket_a" "$socket_b" 10 >/dev/null
 printf 'INITIAL-CONVERGENCE\n' >result.txt
 
 kill -TERM "${workers[0]}"
 wait "${workers[0]}" 2>/dev/null || true
-st3 --endpoint "$socket_a" doctor >/dev/null
+fractal --endpoint "$socket_a" doctor >/dev/null
 printf 'MAIN-SURVIVED\n' >>result.txt
 
 printf 'version 2\nresource "partition-a" { kind "custom.eval.partition-a" }\n' >"$root/partition-a.kdl"
 printf 'version 2\nresource "partition-b" { kind "custom.eval.partition-b" }\n' >"$root/partition-b.kdl"
-st3 --endpoint "$socket_a" publish "$root/partition-a.kdl" --as person/eval >/dev/null
-st3 --endpoint "$socket_b" publish "$root/partition-b.kdl" --as person/eval >/dev/null
+fractal --endpoint "$socket_a" publish "$root/partition-a.kdl" --as person/eval >/dev/null
+fractal --endpoint "$socket_b" publish "$root/partition-b.kdl" --as person/eval >/dev/null
 
-st3 replication-worker "${common_a[@]}" >>"$root/a/worker.log" 2>&1 &
+fractal replication-worker "${common_a[@]}" >>"$root/a/worker.log" 2>&1 &
 workers[0]="$!"
 python3 ./await_convergence.py "$socket_a" "$socket_b" 15 >/dev/null
-st3 --endpoint "$socket_a" inspect resource/partition-b --json >/dev/null
-st3 --endpoint "$socket_b" inspect resource/partition-a --json >/dev/null
+fractal --endpoint "$socket_a" inspect resource/partition-b --json >/dev/null
+fractal --endpoint "$socket_b" inspect resource/partition-a --json >/dev/null
 printf 'PARTITION-HEALED\n' >>result.txt
 
 cleanup

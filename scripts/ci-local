@@ -296,6 +296,9 @@ run_stage() {
     compat_target=$(python3 -I -c 'import os; target=os.environ.get("CARGO_TARGET_DIR"); print(os.path.abspath(target) + "-fleet-compat" if target else os.path.abspath("target/fleet-compat"))')
     local CARGO_TARGET_DIR=$compat_target
     export CARGO_TARGET_DIR
+    # Its intermediates too: a build-dir shared with the tests' target would relink their binaries all the same.
+    local CARGO_BUILD_BUILD_DIR=$compat_target
+    export CARGO_BUILD_BUILD_DIR
   fi
   # Both streams into one pipe. PIPESTATUS[0] is the stage's own status.
   set +e

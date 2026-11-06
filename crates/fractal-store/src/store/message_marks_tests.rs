@@ -119,11 +119,20 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
     assert_eq!(projections(&claims), projections(&marks), "the twins start equal");
     let digest = |store: &Store| crate::store::projection_digest::tables(&store.readers.get()).unwrap();
     let unmarked = digest(&marks);
+    // A commit folds its selectors only within a time budget, so on a loaded host either twin can
+    // stop partway, claims having more rows to fold than marks. Stop both after one row of each
+    // pass, then let maintenance finish them as the daemon's worker does.
+    for store in [&claims, &marks] {
+        store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+    }
     for (subject, to, ends) in messages() {
         for kind in ends {
             claims.append_claim(&lifecycle(&subject, kind, &to)).unwrap();
             message_marks::record(&marks, &subject, kind, &to).unwrap();
         }
+    }
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
     }
     assert!(claims.readers.get().query_row("SELECT COUNT(*) FROM local_message_marks", [], |row| row.get::<_, i64>(0)).unwrap() == 0);
     assert!(marks.claims_for("message/marks-0-4", Some("message.closed")).unwrap().is_empty(), "marks wrote a claim");
@@ -131,6 +140,7 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
     // Marks are outside the projection digest every member computes alike.
     assert_eq!(digest(&marks), unmarked, "a mark changed the shared projection digest");
     let (by_claims, by_marks) = (projections(&claims), projections(&marks));
+    assert_eq!(by_claims["local_client_message_selectors_v1 unfolded"], Vec::<String>::new());
     for (table, rows) in &by_claims {
         assert_eq!(rows, &by_marks[table], "{table}");
     }

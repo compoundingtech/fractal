@@ -42,7 +42,7 @@ so every member shows the same answer and a later look at the run can explain it
 by itself afterwards.
 
 **Moving.** A run that has waited thirty minutes where another member now has room is flagged with a
-suggested move. A person, or an agent acting for one, moves it (`st missions move RUN --to HOST`):
+suggested move. A person, or an agent acting for one, moves it (`fractal missions move RUN --to HOST`):
 its seats write their handoffs, stop, and start on the new host, in a workspace that host prepares
 from the run's resources at the same revision. Automatic moves come later, once moves are proven by
 hand.
@@ -66,7 +66,7 @@ Each part lands on its own, additive first, so no member reads what it cannot:
 2. Placement, behind a per-host switch and advertised on `daemon.started` like `mission_capacity`: a
    member places a run on another only when every current member advertises it, and `placed_on` is
    added to the run record only for a placed run, so an unplaced run's record is unchanged.
-3. `st missions move`, by hand, once placements have run without surprise for a week.
+3. `fractal missions move`, by hand, once placements have run without surprise for a week.
 
 ## Not in this note
 

@@ -26,7 +26,7 @@ def main():
     args = parser.parse_args()
     app = args.app.resolve()
     electron = str(app / "electron/pixel")
-    with tempfile.TemporaryDirectory(prefix="stui-browser-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-browser-") as directory:
         root = Path(directory)
         document = root / "document.html"
         document.write_text("<html><body><h1>Copper browser probe</h1><p>Invented local content.</p></body></html>")
@@ -38,7 +38,7 @@ def main():
                 tab.env.pop(name, None)
         tab.env.update({
             # Select the app's kitty renderer. No kitty process, screen or remote control is used.
-            "TERM": "xterm-kitty", "STUI_PROBE_GRAPHICS": "1", "XDG_RUNTIME_DIR": str(root / "runtime"),
+            "TERM": "xterm-kitty", "FRACTAL_TUI_PROBE_GRAPHICS": "1", "XDG_RUNTIME_DIR": str(root / "runtime"),
             "XDG_DATA_HOME": str(root / "data"), "TERMINAL_BROWSER_DIST_ROOT": str(app),
             "TERMINAL_BROWSER_DISABLE_GPU": "1", "DISPLAY": "", "WAYLAND_DISPLAY": "",
             "DO_NOT_TRACK": "1", "TERMINAL_BROWSER_NO_TELEMETRY": "1",

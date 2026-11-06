@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
-use crate::model::{ClaimInput, St3Error};
+use crate::model::{ClaimInput, FractalError};
 use smallclaims::error::internal;
 use crate::store::Store;
 
@@ -67,7 +67,7 @@ pub fn check(
     store: &Store,
     rows: &[Value],
     objectives: &BTreeSet<String>,
-) -> Result<ObjectiveFaults, St3Error> {
+) -> Result<ObjectiveFaults, FractalError> {
     let mut check = ObjectiveFaults::default();
     let read: Vec<(&str, bool, &Value)> = rows
         .iter()

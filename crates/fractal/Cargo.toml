@@ -21,6 +21,7 @@ convergence-audit = []
 anyhow = "1"
 fractal-daemon = { path = "../fractal-daemon" }
 fractal-store = { path = "../fractal-store" }
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
 ciborium = "0.2"

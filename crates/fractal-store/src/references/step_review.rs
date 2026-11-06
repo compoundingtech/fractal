@@ -1,19 +1,23 @@
-use super::{Scope, St3Error, agent_review};
+use super::{Scope, FractalError, agent_review};
 use crate::model::StepRunView;
-use crate::store::{ReferenceGraph, identities, step_run_row_tx, step_timing_events};
+use crate::store::{
+    ReferenceGraph, identities, mission_run_header_tx, step_claim_expired,
+    step_owner_is_terminal_tx, step_run_row_tx, step_timing_events,
+};
 use rusqlite::Connection;
 use smallclaims::error::internal;
+use smallclaims::store::now_ms;
 use std::collections::BTreeSet;
 
-fn unresolved(subject: &str) -> St3Error {
-    St3Error::new("reviewer-owner-unresolved", subject)
+fn unresolved(subject: &str) -> FractalError {
+    FractalError::new("reviewer-owner-unresolved", subject)
 }
 
 /// The caller supplies a raw step/assignment/pool view and requester from the same
 /// caller-owned store snapshot. For reassignment, include the proposed assignee in that view.
-/// Includes local responsibility and every carried source step.
+/// Includes local responsibility, every carried source step and cross-run source requesters.
 /// Run hierarchy validation lives in fractal-missions' `store::missions::validate_run_reviewer`.
-/// Loops and the start/reassignment boundary still require the later run-policy slice.
+/// Concrete start/reassignment validation uses that module's `validate_run_reviewer_assignment`.
 #[doc(hidden)]
 pub fn validate_step_reviewer(
     scope: &Scope<'_>,
@@ -21,9 +25,9 @@ pub fn validate_step_reviewer(
     step: &StepRunView,
     requester: &str,
     reviewer: &str,
-) -> Result<BTreeSet<String>, St3Error> {
+) -> Result<BTreeSet<String>, FractalError> {
     let mut excluded = BTreeSet::new();
-    let mut include = |actor: &str| -> Result<(), St3Error> {
+    let mut include = |actor: &str| -> Result<(), FractalError> {
         if actor.contains("${") {
             return Err(unresolved(actor));
         }
@@ -50,7 +54,13 @@ pub fn validate_step_reviewer(
         Ok(())
     };
     include(requester)?;
-    collect_step(connection, step, &mut include, &mut BTreeSet::new())?;
+    collect_step(
+        connection,
+        step,
+        &mut include,
+        &mut BTreeSet::new(),
+        now_ms(),
+    )?;
     let reviewer = agent_review::resolve_reviewer(scope, connection, reviewer)?;
     agent_review::independent_reviewer(&reviewer, &excluded)?;
     Ok(excluded)
@@ -60,9 +70,10 @@ pub fn validate_step_reviewer(
 fn collect_step(
     connection: &Connection,
     step: &StepRunView,
-    include: &mut impl FnMut(&str) -> Result<(), St3Error>,
+    include: &mut impl FnMut(&str) -> Result<(), FractalError>,
     visiting: &mut BTreeSet<String>,
-) -> Result<(), St3Error> {
+    snapshot_unix_ms: u128,
+) -> Result<(), FractalError> {
     if !visiting.insert(step.subject.clone()) {
         return Err(unresolved(&step.subject));
     }
@@ -81,18 +92,30 @@ fn collect_step(
     {
         include(actor)?;
     }
-    if step.claimant.is_none() {
-        for actor in &step.available_to {
-            include(actor)?;
-        }
-    }
     // Read raw history: effective views and carried_claimants_tx intentionally drop
     // responsibility after lease expiry, terminal state, or a later claim.
     let events = step_timing_events(connection, &step.subject).map_err(internal)?;
+    let mut prior_claimant = false;
     for (_, body, _) in &events {
         let fields = body.get("fields").unwrap_or(body);
         if let Some(actor) = fields.get("claimant").and_then(serde_json::Value::as_str) {
             include(actor)?;
+            prior_claimant = true;
+        }
+    }
+    if !step.available_to.is_empty()
+        && (step.claimant.is_none() || step_claim_expired(step, snapshot_unix_ms))
+    {
+        // Terminalization clears the persisted lease too; retain the historical workers
+        // instead of treating a previously claimed pool as newly unclaimed.
+        if step_owner_is_terminal_tx(connection, &step.subject)? {
+            if !prior_claimant {
+                return Err(unresolved(&step.subject));
+            }
+        } else {
+            for actor in &step.available_to {
+                include(actor)?;
+            }
         }
     }
     // Any agent writing work on this step contributed; over-exclusion is safer.
@@ -127,7 +150,13 @@ fn collect_step(
         let source = step_run_row_tx(connection, source)
             .map_err(internal)?
             .ok_or_else(|| unresolved(source))?;
-        collect_step(connection, &source, include, visiting)?;
+        if source.run != step.run {
+            let owner =
+                mission_run_header_tx(connection, source.run.trim_start_matches("mission-run/"))
+                    .map_err(internal)?;
+            include(&owner.requester)?;
+        }
+        collect_step(connection, &source, include, visiting, snapshot_unix_ms)?;
     }
     visiting.remove(&step.subject);
     Ok(())

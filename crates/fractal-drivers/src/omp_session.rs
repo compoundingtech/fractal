@@ -953,8 +953,6 @@ pub fn run_native(
         &OMP_KIND,
         &environment,
         &RESUME_FENCE_ENV,
-        None,
-        false,
     )
 }
 

@@ -113,15 +113,12 @@ mod tests {
 
     fn launcher(directory: &Path, accepts: bool) -> PathBuf {
         fs::create_dir_all(directory).unwrap();
-        let path = directory.join("pty");
         let body = if accepts {
             "#!/bin/sh\necho 'Usage: pty run [--id <id>] -- <command>' >&2\nexit 1\n"
         } else {
             "#!/bin/sh\necho 'Invalid env format: \"X\". Use --env KEY=VALUE' >&2\nexit 1\n"
         };
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        crate::test_executable::fake_executable(directory, "pty", body)
     }
 
     fn joined(directories: &[&Path]) -> OsString {

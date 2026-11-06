@@ -1,5 +1,7 @@
 import { ClientError, type FractalClient } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
+import { Effect } from 'effect'
+import { loadTerminalSchema } from '../data/lazySdk.ts'
 
 /** One explicit resize attempt: confirmed geometry or a user-readable refusal. */
 export type TerminalResizeResult =
@@ -37,8 +39,9 @@ export const gatewayTerminalResize = (client: FractalClient): TerminalResizePort
             'This device is not granted terminal resize. The current terminal size is unchanged.',
         }
       }
+      const schema = await Effect.runPromise(loadTerminalSchema)
       const observed = await client.terminalScreen(terminalId)
-      const screen = Native.decodeUnknownSync(Native.TerminalScreen)(observed.value)
+      const screen = Native.decodeUnknownSync(schema.TerminalScreen)(observed.value)
       const snapshot = Native.decodeUnknownSync(Native.Snapshot)(observed.snapshot)
       if (screen.terminal_id !== terminalId || screen.runtime_incarnation !== incarnation) {
         return {
@@ -58,7 +61,7 @@ export const gatewayTerminalResize = (client: FractalClient): TerminalResizePort
         },
         parameters: { terminal_id: terminalId, columns, rows },
       })
-      const result = Native.decodeUnknownSync(Native.ActionResult)(response.value)
+      const result = Native.decodeUnknownSync(schema.ActionResult)(response.value)
       return result.status === 'rejected'
         ? {
             _tag: 'Refused',

@@ -4,6 +4,7 @@ evals/**/_git/objects/** binary
 crates/fractal-client/src/generated.rs linguist-generated=true
 crates/fractal-client/src/contract.rs linguist-generated=true
 crates/fractal-client/src/lib.rs linguist-generated=true
+crates/fractal-client/src/notice_descriptors.generated.rs linguist-generated=true
 clients/typescript/fractal-client/*.generated.ts linguist-generated=true
 clients/swift/FractalClient/Sources/FractalClient/*.generated.swift linguist-generated=true
 clients/swift/FractalClient/Sources/FractalClient/Models.swift linguist-generated=true

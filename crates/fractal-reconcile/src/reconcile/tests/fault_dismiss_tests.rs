@@ -3,7 +3,7 @@
 //! its source, and a later failure of the same source is a new fault. Only one live agent holds
 //! `handles-faults`, and a dismissal counts only from a person or the holder of its time.
 use super::*;
-use crate::model::{FaultDismissRequest, St3Error};
+use crate::model::{FaultDismissRequest, FractalError};
 
 const SOURCE: &str = r#"
 version 2
@@ -52,7 +52,7 @@ fn faults_of(store: &Store, run: &MissionRunView) -> Vec<AttentionItemView> {
         .collect()
 }
 
-fn dismiss(store: &Store, source: &str, actor: &str) -> Result<crate::model::FaultDismissal, St3Error> {
+fn dismiss(store: &Store, source: &str, actor: &str) -> Result<crate::model::FaultDismissal, FractalError> {
     store.dismiss_fault_as(&FaultDismissRequest {
         source: source.into(),
         episode: None,
@@ -156,7 +156,7 @@ fn a_later_failed_run_of_the_same_mission_is_a_new_fault() {
     assert_eq!(wrong_episode.code, "missing-fault");
 }
 
-fn try_apply(store: &Store, source: &str, idempotency_key: &str) -> Result<(), St3Error> {
+fn try_apply(store: &Store, source: &str, idempotency_key: &str) -> Result<(), FractalError> {
     let intent = parse_intent(source, "node").unwrap();
     let mission = store
         .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })

@@ -1,6 +1,6 @@
 # Mission Document Lift
 
-This st3-only eval proves the repository mission workflow.
+This fractal-only eval proves the repository mission workflow.
 
 The mission baseline requires the exact immutable source mission before any planner starts.
 

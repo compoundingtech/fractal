@@ -92,7 +92,7 @@ Duplicates after that bounded observation window are not covered.
 Delivery and reporting are separate results: a working channel reported stale fails the
 reporting gate even if the message arrives. `result.json` records both receipt timing and
 the delivery assessment. Every path, including the upgraded previous-release channel, must
-be `current`, and every `st3 driver` process of the seat must run the daemon's executable.
+be `current`, and every `fractal driver` process of the seat must run the daemon's executable.
 The failed-handoff case also requires a visible blockage in the agent, doctor and sender views. Per-case evidence keeps graph
 traces, native receipts, process snapshots, agent cards, replication status and
 daemon/worker logs. Paths are normalized before publishing; stores, configuration
@@ -131,7 +131,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s scripts/fractal-messaging-faults-eval -p 'test_*.py'
 ```
 
-Set `ST3_MFE_TEST_BINARY=/path/to/st3` to include the cleanup regression. It starts
+Set `ST3_MFE_TEST_BINARY=/path/to/fractal` to include the cleanup regression. It starts
 real isolated nodes and a native OMP provider/channel, then kills the controller or
 launcher and checks that all recorded PIDs and private directories disappear within
 five seconds. It also checks SIGTERM and explicit `--keep`. Cargo runs this proof

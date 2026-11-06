@@ -110,7 +110,7 @@ impl Context {
         let bytes = if let Some(cancelled) = cancelled {
             tokio::select! {
                 biased;
-                _ = cancelled => return Err(ApiError::bad(St3Error::new(
+                _ = cancelled => return Err(ApiError::bad(FractalError::new(
                     "read-deadline", "the request ended before its response body was collected",
                 ))),
                 result = collect => result?,

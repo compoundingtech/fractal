@@ -23,6 +23,14 @@ successful change detection; failure and cancellation still fail. Main and manua
 require execution when web inputs changed. Evidence-skipped queue work is followed by
 the exact-source hosted proof described above.
 
+Sidebar fixture validation is part of the required `genie-freshness` check on pull requests
+and merge groups, before the TypeScript and web consumers. Each executing Rust test
+partition also runs it before nextest. The generator source is `fleet.yml.genie.ts`;
+regenerate with `nix develop .#genie --command genie`. The gate runs
+`node --test scripts/check-sidebar-fixtures.test.mjs` and
+`node scripts/check-sidebar-fixtures.mjs`, with failures stopping the lane. Local and
+signed freshness evidence runs the same commands through `scripts/ci-genie-freshness`.
+
 ### Swift client execution
 
 `swift-client` is an optional, path-filtered Workspace CI lane on GitHub-hosted Linux.
@@ -318,7 +326,7 @@ Nextest's final summary retains flaky outcomes. The four test lanes (`linux-test
 nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
 `genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
 not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
-lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+lines, for `fractal slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by

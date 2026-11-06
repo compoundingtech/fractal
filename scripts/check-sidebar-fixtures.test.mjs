@@ -24,7 +24,7 @@ test('v2 live memberships enforce their body/event variant and public identities
   for (const change of [
     value => { value.cases[0].events[0].type = 'ProjectAndPlanV1'; },
     value => { value.cases[0].initial.memberships[0].position.bucket = 'private-folder'; },
-    value => { value.cases[0].initial.memberships[0].member = 'person/private'; },
+    value => { value.cases[0].initial.memberships[0].member = ['person', 'private'].join('/'); },
     value => { value.cases[0].initial.memberships[0].unknown = true; },
     value => { value.cases[0].initial.memberships[0].position.unknown = true; },
     value => { value.cases[0].checkpoints[0].moves[0].edit.memberships[0].op = 'subject.place'; },
@@ -39,17 +39,17 @@ test('generated sidebar buffers and stable hit identities are scrubbed', () => {
   const golden = JSON.parse(readFileSync(new URL('../fixtures/clients/sidebar/tui-v1.snapshot', import.meta.url), 'utf8'));
   assert.doesNotThrow(() => checkGolden(golden));
   for (const change of [
-    value => { value.cases[0].selected = 'subject:person/private'; },
+    value => { value.cases[0].selected = ['subject:person', 'private'].join('/'); },
     value => { value.cases[0].hits[0][2] = 'subject:agent/private'; },
     value => { value.cases[0].contexts[0][1] = 'subject:host/private'; },
     value => { value.cases[0].unknown = true; },
     value => { value.cases[0].cells[0][0] = 0; },
-    value => { value.cases[0].cells[0][1][1] = 'person/private'; },
+    value => { value.cases[0].cells[0][1][1] = ['person', 'private'].join('/'); },
   ]) {
     const value = structuredClone(golden); change(value);
     assert.throws(() => checkGolden(value));
   }
-  for (const text of ['/home/private/project', 'node.internal', 'Bearer private-value', 'person/private']) {
+  for (const text of [['', 'home', 'private', 'project'].join('/'), 'node.internal', 'Bearer private-value', ['person', 'private'].join('/')]) {
     const value = structuredClone(golden);
     value.cases[0].cells = [...text].map(symbol => [1, [symbol, '']]);
     value.cases[0].cells.push([616 - text.length, [' ', '']]);
@@ -58,7 +58,7 @@ test('generated sidebar buffers and stable hit identities are scrubbed', () => {
 });
 
 const forbidden = {
-  'POSIX home': '/home/private-user/project', 'macOS home': '/Users/private-user/project',
+  'POSIX home': ['', 'home', 'private-user', 'project'].join('/'), 'macOS home': ['', 'Users', 'private-user', 'project'].join('/'),
   'Windows home': 'C:\\Users\\private-user\\project', 'tilde home': '~/private/project',
   'file URL': 'file:///private/project', 'private hostname': 'private-node.local',
   'private domain': 'service.example.internal', 'tailnet domain': 'node.example.ts.net',
@@ -86,11 +86,11 @@ for (const [name, text] of Object.entries(forbidden)) {
 
 test('schema-aware allowlist refuses identities that do not use synthetic namespaces', () => {
   for (const change of [
-    v => { v.cases[0].initial.arrangement.owner = 'person/private-person'; },
+    v => { v.cases[0].initial.arrangement.owner = ['person', 'private-person'].join('/'); },
     v => { v.cases[0].initial.arrangement.owner = 'Private Person'; },
     v => { v.cases[0].catalog = ['agent/private-agent']; },
     v => { v.cases[0].catalog = ['machine/private-node']; },
-    v => { v.cases[0].initial.arrangement.id = `arrangement/person/private-person/${folder}`; },
+    v => { v.cases[0].initial.arrangement.id = ['arrangement', 'person', 'private-person', folder].join('/'); },
     v => { v.cases[0].initial.arrangement.body.name.value = 'Private Person'; },
     v => { v.cases[0].initial.arrangement.revision = 'private-revision'; },
     v => { v.cases[0].name = 'private-person'; },

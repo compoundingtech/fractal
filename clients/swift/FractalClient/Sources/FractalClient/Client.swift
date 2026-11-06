@@ -325,6 +325,7 @@ public actor FractalClient {
     public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> { try await get("v1/client/agent-workspaces/\(id)") }
     public func agentDeclarationGet(id: String, revision: String? = nil, showEnvValues: Bool = false) async throws -> Envelope<AgentDeclaration> { var query: [URLQueryItem] = [.init(name: "show_env_values", value: showEnvValues ? "true" : "false")]; if let revision { query.append(.init(name: "revision", value: revision)) }; return try await get("v1/client/agent-declarations/\(id)", query: query) }
     public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> { try await get("v1/client/status-history/\(id)") }
+    public func agentRelatedRunsGet(_ id: String) async throws -> Envelope<AgentRelatedRuns> { try await get("v1/client/agent-related-runs/\(Self.routedSessionID(id))") }
     public func harnessInventoryGet(id: String, options: HarnessInventoryQuery) async throws -> Envelope<HarnessInventory> { var query: [URLQueryItem] = [.init(name: "owner_host_id", value: options.ownerHostID), .init(name: "session_id", value: options.sessionID), .init(name: "native_session_id", value: options.nativeSessionID), .init(name: "runtime_incarnation", value: options.runtimeIncarnation), .init(name: "collection", value: options.collection)]; if let directory = options.directory { query.append(.init(name: "directory", value: directory)) }; if let prefix = options.prefix { query.append(.init(name: "prefix", value: prefix)) }; if let limit = options.limit { query.append(.init(name: "limit", value: String(limit))) }; if let cursor = options.cursor { query.append(.init(name: "cursor", value: cursor)) }; return try await get("v1/client/harness-inventory/\(id)", query: query) }
     public func runtimesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("runtimes", cursor: cursor, limit: limit, history: history) }
     public func runtimesGet(id: String) async throws -> Envelope<Resource> { try await resource("runtimes", id: id) }
@@ -541,9 +542,11 @@ public actor FractalClient {
         applyTraceContext(to: &request)
         let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
-        if status == 404 && path == "v1/client/schedules" {
+        let relatedRuns = path.hasPrefix("v1/client/agent-related-runs/")
+        if status == 404 && (relatedRuns || path == "v1/client/schedules") {
+            let operation = relatedRuns ? "agent-related-runs.get" : "schedules.list"
             throw ErrorEnvelope(apiVersion: "st3.client.v0", errorVersion: "st3.client.error.v0", requestID: "",
-                code: .unsupportedCapability, message: "This server does not support schedules.list; upgrade the server",
+                code: .unsupportedCapability, message: "This server does not support " + operation + "; upgrade the server",
                 retryable: false, retryAfterMS: nil, details: [:])
         }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }

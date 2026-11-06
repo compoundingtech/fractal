@@ -33,7 +33,7 @@ pub enum Tap {
     More,
 }
 
-/// A read stui wants; the live loop sends it and hands the answer back.
+/// A read the terminal UI wants; the live loop sends it and hands the answer back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Want {
     Get(String),
