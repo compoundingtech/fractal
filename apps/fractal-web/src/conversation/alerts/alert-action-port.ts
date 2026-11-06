@@ -1,14 +1,16 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
+import { Option } from 'effect'
 import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
 export type AlertActionResult =
-  | { readonly _tag: 'Sent' }
+  | { readonly _tag: 'Sent'; readonly controlRevision?: string | null; readonly undo?: () => Promise<AlertActionResult> }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
 /** The alert as the person read it: what an answer names and is fenced on. */
-export type AlertAnswered = Pick<Native.Attention, 'id' | 'revision' | 'source_id' | 'episode'>
+export type AlertAnswered = Pick<Native.Attention, 'id' | 'revision' | 'source_id' | 'episode'> &
+  Partial<Pick<Native.Attention, 'attention_kind' | 'presentation_control'>>
 
 /**
  * An answer to an alert, as the Fractal terminal UI and the phone send it:
@@ -31,6 +33,8 @@ export type AlertAction =
   | { readonly type: 'launch.revise'; readonly feedback: string }
   | { readonly type: 'prompt.respond'; readonly target_id: string; readonly episode: string; readonly answer: string }
   | { readonly type: 'message.read' }
+  | { readonly type: 'attention.dismiss' | 'attention.restore' }
+  | { readonly type: 'attention.snooze'; readonly until: string | null }
 
 export type AlertActionRequest = { readonly alert: AlertAnswered; readonly action: AlertAction; readonly key?: string }
 export interface AlertActionPort {
@@ -82,13 +86,13 @@ const shownVariant = (items: readonly unknown[], item: AttentionRead): VariantRe
  */
 export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
   const prompts = gatewayPromptAnswers(client)
-  const attempts = new Map<string, () => Promise<{ readonly value: unknown }>>()
+  const attempts = new Map<string, () => Promise<AlertActionResult>>()
   const outcome = (response: { readonly value: unknown }): AlertActionResult =>
     (typeof response.value === 'object' && response.value !== null && 'status' in response.value && response.value.status === 'rejected')
       ? refused('Fractal did not take this answer.') : { _tag: 'Sent' }
   const act: AlertActionPort['act'] = async ({ alert, action, key }) => {
     const remember = (send: () => Promise<{ readonly value: unknown }>) => {
-      if (key !== undefined) attempts.set(key, send)
+      if (key !== undefined) attempts.set(key, async () => outcome(await send()))
       return send()
     }
     try {
@@ -96,7 +100,35 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => {
         alert: { ...alert, target_id: action.target_id, episode: action.episode }, answer: action.answer, key,
       })
       const retry = key === undefined ? undefined : attempts.get(key)
-      if (retry !== undefined) return outcome(await retry())
+      if (retry !== undefined) return await retry()
+      if (action.type === 'attention.dismiss' || action.type === 'attention.restore' || action.type === 'attention.snooze') {
+        const control = alert.presentation_control
+        if (control === undefined || alert.attention_kind === undefined) return refused('This alert lacks native control metadata. Refresh before trying again.')
+        const observed = await client.capabilities()
+        if (!observed.value.capabilities.some((capability) => capability.id === action.type && capability.state === 'granted')) {
+          return refused('This device is not granted this native alert control.')
+        }
+        const id = key ?? `action/${crypto.randomUUID()}`
+        const parameters = {
+          target_id: alert.id, source_id: alert.source_id, attention_kind: alert.attention_kind,
+          episode: alert.episode, source_revision: control.source_revision,
+          expected_control_revision: Option.getOrNull(control.revision),
+        }
+        // Capture the complete wire request once; a retry never reads a newer control fence.
+        const request = { id, idempotency_key: id, fence: { snapshot_id: observed.snapshot.id, subject_revisions: {} }, parameters }
+        const send = action.type === 'attention.snooze'
+          ? (() => { const prepared = { ...request, parameters: { ...parameters, until: action.until } }
+            return () => client.attentionSnooze(prepared) })()
+          : action.type === 'attention.dismiss' ? () => client.attentionDismiss(request) : () => client.attentionRestore(request)
+        const deliver = async (): Promise<AlertActionResult> => {
+          const response = await send()
+          const result = outcome(response)
+          return result._tag === 'Sent' && response.value.control_revision !== undefined
+            ? { ...result, controlRevision: response.value.control_revision } : result
+        }
+        if (key !== undefined) attempts.set(key, deliver)
+        return await deliver()
+      }
       let current
       try {
         current = await client.attentionGet(alert.id)
