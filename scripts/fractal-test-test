@@ -2542,6 +2542,56 @@ finally:
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
 
+    def test_a_check_that_builds_keeps_cargos_intermediates_beside_its_target_whatever_build_dir_the_host_sets(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}} ${{CARGO_BUILD_BUILD_DIR:-none}}" >> {seen}']
+        host = {'CARGO_BUILD_BUILD_DIR': '/srv/build/cargo/{workspace-path-hash}'}
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=host)[0], 0)
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=dict(host, CARGO_TARGET_DIR='/elsewhere'))[0], 0)
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=dict(host, ST_EVIDENCE_TARGET='off'))[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=host)[0], 0)  # builds nothing: left as it is
+        target, tree = self.pool() / 'target-0', self.pool() / 'tree-0'
+        self.assertEqual(seen.read_text().splitlines(), [
+            f'{target} {target}', '/elsewhere /elsewhere', f'none {tree / "target"}', 'none /srv/build/cargo/{workspace-path-hash}'])
+
+    def test_a_host_build_dir_removed_after_the_build_leaves_the_dep_info_check_its_units(self):
+        # A real cargo build of a one-file crate whose cargo config, as a build host's did, puts intermediates in a build-dir of their
+        # own, which is then removed before the dep-info check runs (2026-11-06: units 0, linux-clippy refused).
+        cargo = shutil.which('cargo')
+        if not cargo:
+            self.skipTest('no cargo')
+        loader = importlib.machinery.SourceFileLoader('dep_info_check', str(ROOT / 'scripts/dep-info-check'))
+        spec = importlib.util.spec_from_loader('dep_info_check', loader)
+        dep_info = importlib.util.module_from_spec(spec)
+        loader.exec_module(dep_info)
+        scratch = Path(self.tmp.name) / 'build-dir'
+        host = scratch / 'host-build'
+        def units(name, pinned):
+            crate = scratch / name
+            (crate / 'src').mkdir(parents=True)
+            (crate / 'Cargo.toml').write_text(f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n[workspace]\n')
+            (crate / 'src/lib.rs').write_text('pub fn probe() -> u8 { 1 }\n')
+            (crate / '.cargo').mkdir()
+            (crate / '.cargo/config.toml').write_text(f'[build]\nbuild-dir = "{host}/{{workspace-path-hash}}"\n')
+            env = {key: value for key, value in os.environ.items() if not key.startswith('CARGO_') and key not in ('RUSTC_WRAPPER', 'RUSTFLAGS')}
+            env.update(CARGO_INCREMENTAL='0', CARGO_HOME=os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+            target = scratch / f'{name}-target'
+            if pinned:
+                st_test.build_beside(env, target, crate)
+            else:
+                env['CARGO_TARGET_DIR'] = str(target)
+            logs = scratch / f'{name}-logs'
+            logs.mkdir()
+            built = subprocess.run([cargo, 'check', '--offline', '--message-format=json'], cwd=crate, env=env, capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr[-800:])
+            (logs / 'clippy-probe.jsonl').write_text(built.stdout)
+            shutil.rmtree(host, ignore_errors=True)  # what removed the build host's build-dir before the check
+            return len(dep_info.dep_info_files(logs))
+        self.assertEqual(units('split', pinned=False), 0, 'a removed host build-dir leaves the check no dep-info')
+        self.assertEqual(units('pinned', pinned=True), 1, "the crate's dep-info is beside its target")
+
     def test_fleet_compat_target_is_kept_and_trimmed_under_the_tree_lock_with_the_workspace_target(self):
         self.commit('b.txt', 'two')
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):

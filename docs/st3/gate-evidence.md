@@ -1929,8 +1929,12 @@ PATHs differ would otherwise rebuild nearly the whole workspace in the same pool
 All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
 tree already held, `fractal-test` removes the least recently used trees and both their workspace and fleet-compat targets whose lock is free, oldest first, until the pool directory
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
-compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. Where cargo's
-`build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. A build host's
+cargo config may point `build-dir` elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`). Every check that builds runs with
+`CARGO_BUILD_BUILD_DIR` set to its own target, so the intermediates stay in the pool, under the tree's lock and the cap. That includes each
+unit's dep-info, which the keyed checks read after the build. The fleet-compat stage moves its build-dir with its own target. Left on the
+build disk, nothing held them for the run: one host's were removed between a run's clippy build and its dep-info check, so the check found no
+dep-info and linux-clippy was refused (2026-11-06).
 A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
 `/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
 a kept one). A host's `/tmp` can be a small tmpfs that swaps, and `nix develop -c` never removes the `nix-shell.*` directory it makes its
