@@ -187,6 +187,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    notice_authority::refresh_binding(tx)?;
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| {
         r.get::<_, bool>(0)
     })? {

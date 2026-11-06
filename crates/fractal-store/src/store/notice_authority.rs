@@ -58,6 +58,7 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
             } else { "1".into() };
             let name = format!("notice_authority_{table}_{action}");
             let sql = format!(
+                /* sqlite-large-value: allow-for-now lv-h6b344b76fae0 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
                 "CREATE TRIGGER {name} BEFORE {action} ON {table}
                  WHEN ({relevant}) AND ({changed}) BEGIN
                  INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
@@ -68,7 +69,7 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
                 [&name], |row| row.get(0),
             ).optional()?;
             if installed.as_deref() != Some(sql.as_str()) {
-                connection.execute_batch(&format!("DROP TRIGGER IF EXISTS {name}; {sql};"))?;
+                connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-ha3325e0e8f6d owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS {name}; {sql};"))?;
             }
         }
     }
@@ -83,13 +84,14 @@ pub(super) fn record_dependencies(tx: &Transaction<'_>, subject: &str, history: 
         return Ok(());
     }
     let mut insert = tx.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-h2d6ca7ff29ef owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
         "INSERT OR IGNORE INTO custom_dependencies VALUES(?1,?2,'[]','')",
     )?;
     for claim in history {
         let fields = &claim.body["fields"];
         for field in ["source_id", "creation_claim"] {
             if let Some(dependency) = fields.get(field).and_then(Value::as_str) {
-                insert.execute(params![subject, dependency])?;
+                insert.execute(/* sqlite-large-value: allow-for-now lv-hc61106882558 owner=fractal_store::store::notice_authority TODO=trace-statement-and-value-representation */ params![subject, dependency])?;
             }
         }
     }
@@ -122,6 +124,21 @@ fn runtime(connection: &Connection) -> Result<String, FractalError> {
         [] => Err(unavailable("missing notice-runtime designation")),
         _ => Err(unavailable("duplicate notice-runtime designations")),
     }
+}
+
+/// Compare the resolver's actual outcome, not a duplicated identity/lifecycle watch list.
+/// Identity heads and pending records can fence a holder without changing desired at all.
+pub(super) fn refresh_binding(tx: &Transaction<'_>) -> Result<()> {
+    let current = serde_json::to_string(&runtime(tx))?;
+    let previous: Option<String> = tx.query_row(
+        "SELECT value FROM meta WHERE key='notice_runtime_binding'", [], |row| row.get(0),
+    ).optional()?;
+    if previous.as_deref() != Some(current.as_str()) {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h80b0a7485e7e owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
+            WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9d1a487a758c owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('notice_runtime_binding',?1)", [&current])?;
+    }
+    Ok(())
 }
 
 pub(super) fn refuse_second_holder(

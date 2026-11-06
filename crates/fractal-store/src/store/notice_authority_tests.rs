@@ -18,7 +18,7 @@ fn setup() -> (Store, ClaimRecord) {
     for manifest in notice::manifests() {
         store.register_custom_kind(&RegistrationRequest { manifest: manifest.clone(), actor: "person/example".into() }).unwrap();
     }
-    let fixture: Value = serde_json::from_str(include_str!("../../../../docs/st3/client-v0/fixtures/notice-conformance.json")).unwrap();
+    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h99da4f16cb38 owner=fractal_store::store::notice_authority_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../docs/st3/client-v0/fixtures/notice-conformance.json")).unwrap();
     let source = store.append_claim(&input(SOURCE, "custom.attention.notice-created", "agent/example/producer", fixture["snapshot"]["input"].clone())).unwrap();
     (store, source)
 }
@@ -96,7 +96,7 @@ fn notice_second_designated_holder_is_refused_and_missing_binding_fails_closed()
     let empty = Store::open_memory("example").unwrap();
     assert!(runtime(&empty.readers.get()).is_err());
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute("DELETE FROM desired WHERE subject=?1", [RUNTIME])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4e5df88ef9e3 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [RUNTIME])?;
         custom::rebuild(tx)?;
         let row = custom::source(tx, SOURCE)?.unwrap();
         assert_ne!(row["state"], "ready");
@@ -182,9 +182,9 @@ fn notice_source_registration_and_document_removal_revalidate_links_like_rebuild
                 let reference: String = tx.query_row("SELECT json_extract(body,'$.fields.document') FROM claims WHERE id=?1",
                     [&registration], |r| r.get(0))?;
                 let (name, hash) = split_document_ref(&reference)?;
-                assert_eq!(tx.execute("DELETE FROM documents WHERE name=?1 AND hash=?2", params![name, hash])?, 1);
+                assert_eq!(tx.execute(/* sqlite-large-value: allow-for-now lv-h18dd79b21618 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM documents WHERE name=?1 AND hash=?2", params![name, hash])?, 1);
             } else {
-                assert_eq!(tx.execute("UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&registration])?, 1);
+                assert_eq!(tx.execute(/* sqlite-large-value: allow-for-now lv-h20a541ba3f90 owner=fractal_store::store::notice_authority_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&registration])?, 1);
             }
             custom::flush(tx)?;
             assert_links_fail_closed_like_rebuild(tx)
@@ -220,20 +220,20 @@ fn notice_owned_runtime_liveness_mutations_match_rebuild() {
     for mutation in ["terminal", "generation", "generation-removal"] {
         let store = linked_store();
         store.connection.batched(|tx| -> Result<()> {
-            tx.execute("INSERT INTO mission_runs VALUES('notice-owner','example/notice-owner','revision',
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hb0fb45559620 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES('notice-owner','example/notice-owner','revision',
                 'notice-generation','revision','notice-owner',NULL,'.','person/example','{}','run','running','normal','0','0')", [])?;
-            tx.execute("INSERT INTO run_generations VALUES('notice-generation','notice-owner','revision',
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h802ed557558f owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations VALUES('notice-generation','notice-owner','revision',
                 NULL,'running','person/example','Fixture','0','0')", [])?;
-            tx.execute("UPDATE desired SET owner_run='mission-run/notice-owner',
+            tx.execute(/* sqlite-large-value: allow-for-now lv-haa66dc1a89ad owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run='mission-run/notice-owner',
                 owner_generation='run-generation/notice-generation' WHERE subject=?1", [RUNTIME])?;
             custom::flush(tx)?;
             for subject in [SNAPSHOT, CONTROL] {
                 assert_eq!(custom::source(tx, subject)?.unwrap()["state"], "ready");
             }
             match mutation {
-                "terminal" => { tx.execute("UPDATE mission_runs SET status='completed' WHERE id='notice-owner'", [])?; }
-                "generation" => { tx.execute("UPDATE mission_runs SET current_generation_id='missing' WHERE id='notice-owner'", [])?; }
-                _ => { tx.execute("DELETE FROM run_generations WHERE id='notice-generation'", [])?; }
+                "terminal" => { tx.execute(/* sqlite-large-value: allow-for-now lv-he7c0b1746d3b owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE id='notice-owner'", [])?; }
+                "generation" => { tx.execute(/* sqlite-large-value: allow-for-now lv-ha6074026d9d9 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id='missing' WHERE id='notice-owner'", [])?; }
+                _ => { tx.execute(/* sqlite-large-value: allow-for-now lv-h3394ef4bbe97 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE id='notice-generation'", [])?; }
             }
             custom::flush(tx)?;
             assert_links_fail_closed_like_rebuild(tx)
@@ -247,19 +247,19 @@ fn notice_only_runtime_dependency_chain_queues_revalidation() {
         let store = linked_store();
         store.connection.batched(|tx| -> Result<()> {
             for name in ["owner", "ancestor", "unrelated"] {
-                tx.execute("INSERT INTO mission_runs VALUES(?1,?1,'revision',?1,'revision',?1,
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h63e65e38bdf8 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs VALUES(?1,?1,'revision',?1,'revision',?1,
                     NULL,'.','person/example','{}','run','running','normal','0','0')", [name])?;
-                tx.execute("INSERT INTO run_generations VALUES(?1,?1,'revision',NULL,'running',
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h99362c36c696 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations VALUES(?1,?1,'revision',NULL,'running',
                     'person/example','Fixture','0','0')", [name])?;
-                tx.execute("INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hd355c60374f5 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,
                     status,attempt,goals,created_at_unix_ms,updated_at_unix_ms)
                     VALUES('step-run/'||?1,?1,?1,'build','hash','working',1,'[]','0','0')", [name])?;
             }
-            tx.execute("UPDATE mission_runs SET parent_step_run='step-run/ancestor',
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h95a6ae5cb3b4 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET parent_step_run='step-run/ancestor',
                 root_run_id='ancestor' WHERE id='owner'", [])?;
-            tx.execute("UPDATE desired SET owner_run='mission-run/owner',
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h8610ddeb875c owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run='mission-run/owner',
                 owner_generation='run-generation/owner' WHERE subject=?1", [RUNTIME])?;
-            tx.execute("INSERT INTO desired(subject,kind,revision,claim_id,body)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he4d3e44fce0b owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body)
                 SELECT 'agent/example/unrelated',kind,revision,claim_id,'{}' FROM desired WHERE subject=?1", [RUNTIME])?;
             custom::flush(tx)?;
             assert_eq!(custom::source(tx, SNAPSHOT)?.unwrap()["state"], "ready");
@@ -271,28 +271,67 @@ fn notice_only_runtime_dependency_chain_queues_revalidation() {
             tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
             if mutation == "unrelated" {
                 for sql in [
+                    /* sqlite-large-value: allow-for-now lv-h1f35500980c5 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */
                     "UPDATE mission_runs SET status='completed' WHERE id='unrelated'",
+                    /* sqlite-large-value: allow-for-now lv-hfe8fa93ac1c9 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */
                     "UPDATE step_runs SET status='completed' WHERE subject='step-run/unrelated'",
+                    /* sqlite-large-value: allow-for-now lv-hd3906354fc71 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */
                     "UPDATE run_generations SET id='unrelated-next' WHERE id='unrelated'",
+                    /* sqlite-large-value: allow-for-now lv-hcda036dc4a29 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */
                     "UPDATE run_generations SET id='unrelated' WHERE id='unrelated-next'",
+                    /* sqlite-large-value: allow-for-now lv-hca8d43bc7c69 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */
                     "UPDATE desired SET body='{\"children\":[]}' WHERE subject='agent/example/unrelated'",
                 ] {
-                    tx.execute(sql, [])?;
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h21b3f50f7470 owner=fractal_store::store::notice_authority_tests TODO=trace-statement-and-value-representation */ sql, [])?;
                     assert_eq!(queued(tx)?, 0, "{sql}");
                 }
                 return Ok(());
             }
             tx.execute(match mutation {
-                "parent-step" => "UPDATE step_runs SET status='completed' WHERE subject='step-run/ancestor'",
-                "ancestor-run" => "UPDATE mission_runs SET status='completed' WHERE id='ancestor'",
-                _ => "DELETE FROM run_generations WHERE id='ancestor'",
+                "parent-step" => /* sqlite-large-value: allow-for-now lv-h9e46780a0a9b owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='completed' WHERE subject='step-run/ancestor'",
+                "ancestor-run" => /* sqlite-large-value: allow-for-now lv-hcc57e4fcd6e3 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='completed' WHERE id='ancestor'",
+                _ => /* sqlite-large-value: allow-for-now lv-ha65e1b1067de owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE id='ancestor'",
             }, [])?;
             assert!(queued(tx)? > 0);
             custom::flush(tx)?;
             assert_links_fail_closed_like_rebuild(tx)?;
             if mutation == "ancestor-generation" {
-                tx.execute("INSERT INTO run_generations VALUES('ancestor','ancestor','revision',NULL,
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h5f87cb47cc14 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations VALUES('ancestor','ancestor','revision',NULL,
                     'running','person/example','Fixture','0','0')", [])?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn notice_runtime_identity_fences_match_rebuild_without_declaration_changes() {
+    for fence in ["identity-head", "unknown", "invalid"] {
+        let store = linked_store();
+        store.connection.batched(|tx| -> Result<()> {
+            if fence == "identity-head" {
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hc25ca9a02029 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_heads VALUES(?1,'agent',?1,NULL,'conflict')
+                    ON CONFLICT(identity) DO UPDATE SET unavailable='conflict'", [RUNTIME])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hc47322f44af2 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO identity_names VALUES(?1,?1,NULL)", [RUNTIME])?;
+            } else {
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hea3a81fd2260 owner=fractal_store::store::notice_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,
+                    raw,state,subject_hint,kind_hint,updated_at_unix_ms)
+                    VALUES('record/notice-fence','example-peer',1,'pending',0,'{}',?1,?2,'agent.renamed','1')",
+                    params![fence,RUNTIME])?;
+            }
+            assert!(current_desired_row(tx, RUNTIME).is_err());
+            Ok(())
+        }).unwrap().unwrap();
+        // The commit finalizer must discover the fence even with no desired/liveness mutation.
+        store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h206fb305ff5c owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE identity_heads SET unavailable=NULL WHERE identity=?1", [RUNTIME])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h3a0326f24f3d owner=fractal_store::store::notice_authority_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE record_ref='record/notice-fence'", [])?;
+            Ok(())
+        }).unwrap().unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            for subject in [SNAPSHOT, CONTROL] {
+                assert_eq!(custom::source(tx, subject)?.unwrap()["state"], "ready");
             }
             Ok(())
         }).unwrap().unwrap();
