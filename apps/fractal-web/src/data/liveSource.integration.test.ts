@@ -137,6 +137,9 @@ class Gateway {
         session_actor: 'person/operator',
         transport: 'fabric-loopback',
       }
+    } else if (path.startsWith('/v1/client/agent-related-runs/')) {
+      value = { kind: 'agent-related-runs', agent_id: agent.id, as_of: 1, missions_cut: 1, work_cut: 1,
+        rows: [], total_rows: 0, truncated: false }
     } else if (path.startsWith('/v1/client/runtimes/')) {
       this.runtimeReads.push(decodeURIComponent(path.slice('/v1/client/runtimes/'.length)))
       this.terminalRequests.push('read')
@@ -434,6 +437,29 @@ const withGateway = <E,>(
     )
     yield* test(live, gateway)
   }).pipe(Effect.scoped)
+
+describe('related runs pushed source binding', () => {
+  it.live('retains agents, missions and attention and refreshes after each pushed window commit', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      const atom = live.source.subjectReads.relatedRuns.feed(agent.id)
+      const release = live.registry.mount(atom)
+      yield* Effect.addFinalizer(() => Effect.sync(release))
+      yield* settle
+      expect(live.registry.get(atom)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+      const reads = () => gateway.httpPaths.filter(path => path.startsWith('/v1/client/agent-related-runs/')).length
+      for (const collection of ['agents', 'missions', 'attention'] as const) {
+        const before = reads()
+        gateway.send({ kind: 'snapshot', id: gateway.subscription(collection).id, collection,
+          has_more: false, items: collection === 'agents' ? [agent] : [],
+          order: collection === 'agents' ? [agent.id] : [], snapshot })
+        yield* settle
+        expect(reads()).toBeGreaterThan(before)
+        expect(live.registry.get(atom)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+      }
+    }), { maxFollows: 4 }),
+  )
+})
 
 describe('session inventory independence', () => {
   it.live('reads selected threads before the roster and reconnects without listing sessions', () =>

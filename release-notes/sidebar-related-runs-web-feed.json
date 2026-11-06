@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refresh mounted sidebar mission reads from pushed updates",
+  "replay": {"status": "none", "detail": "No claim changes."},
+  "schema": {"status": "none", "detail": "Uses the generated agent-related-runs contract."},
+  "rules": {"status": "none", "detail": "No mission semantics change."},
+  "compatibility": {"status": "changed", "detail": "Mounted agent rows share demand-owned reads invalidated by roster, mission and attention commits. Reads retain the last good value on transient failures and report unsupported daemons explicitly. Deploy the daemon before callers."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Reverting changes no stored state."}
+}
