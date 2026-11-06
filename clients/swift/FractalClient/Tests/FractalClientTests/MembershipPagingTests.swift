@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 @testable import FractalClient
 
@@ -120,4 +123,42 @@ final class MembershipPagingTests: XCTestCase {
         XCTAssertEqual(join.complete?.count, 1)
         XCTAssertThrowsError(try join.append(page(), attempt: obsolete))
     }
+    func testSelectedRequestsRefuseMissingOrUngrantedCapability() async throws {
+        for host in ["missing.example.test", "ungranted.example.test"] {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MembershipCapabilityProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let client = FractalClient(fabricLoopbackURL: URL(string: "https://\(host)")!, session: session)
+            do {
+                _ = try await client.arrangementsMembershipsCollectionV1(personName: "ada", uuid: "id", person: "person/ada")
+                XCTFail("missing collection capability must refuse HTTP paging")
+            } catch { XCTAssertEqual(error as? MembershipPagingFailure, .refused) }
+            do {
+                _ = try await client.orderedMembershipsCollectionV1Stream(person: "person/ada", subject: container)
+                XCTFail("missing collection capability must refuse the subscribe")
+            } catch { XCTAssertEqual(error as? MembershipPagingFailure, .refused) }
+        }
+    }
+}
+
+private final class MembershipCapabilityProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        XCTAssertEqual(request.url?.path, "/v1/client/capabilities")
+        do {
+            var root = URL(fileURLWithPath: #filePath)
+            for _ in 0..<6 { root.deleteLastPathComponent() }
+            var body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/capabilities.json"))) as? [String: Any])
+            var value = try XCTUnwrap(body["value"] as? [String: Any])
+            value["capabilities"] = request.url?.host == "ungranted.example.test"
+                ? [["id": "ordered-memberships.paging.v1", "version": 1, "state": "ungranted"]] : []
+            body["value"] = value
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: try JSONSerialization.data(withJSONObject: body))
+            client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {}
 }

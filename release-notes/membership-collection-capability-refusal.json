@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refuse collection membership paging when the serving daemon lacks the complete capability",
+  "replay": {"status": "none", "detail": "No replay is required."},
+  "schema": {"status": "none", "detail": "No canonical schema changes."},
+  "rules": {"status": "none", "detail": "The selected API still requires existing read authorization."},
+  "compatibility": {"status": "none", "detail": "Explicit Rust, Swift and TypeScript collection-v1 entrypoints require ordered-memberships.paging.v1 version 1 granted before sending a page request or selected subscription. Legacy entrypoints are unchanged."},
+  "downtime": {"status": "none", "detail": "Normal client rollout only."},
+  "manual": {"status": "none", "detail": "Use Client::subscribe_ordered_memberships_collection_v1 with the Rust stream. Await the TypeScript selected subscription before requesting pages; its promise resolves only after the socket has sent the command."},
+  "recovery": {"status": "none", "detail": "Missing, ungranted or unsupported capability support is a protocol refusal, never a downgrade or an empty collection. Selected responses still require complete epoch metadata. Capability advertisement remains gated by acceptance."}
+}

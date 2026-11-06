@@ -1030,14 +1030,17 @@ test('collection paging refuses duplicate/count/epoch/scope/inexact metadata', (
 test('explicit membership methods send selectors without changing legacy requests', async () => {
     const fixture = require('../../../fixtures/clients/ordered-memberships-v2.json');
     const requests = [], sent = [];
+    const supported = { ...capabilityFixture, value: { ...capabilityFixture.value,
+        capabilities: [...capabilityFixture.value.capabilities, { id: 'ordered-memberships.paging.v1', version: 1, state: 'granted' }] } };
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
         requests.push(new URL(url));
-        return response(String(url).includes('/capabilities') ? capabilityFixture : { ...envelope(fixture.collection_v1.page), snapshot: fixture.collection_v1.frame.snapshot });
+        return response(String(url).includes('/capabilities') ? supported : { ...envelope(fixture.collection_v1.page), snapshot: fixture.collection_v1.frame.snapshot });
     } });
     const socket = { onopen: null, onmessage: null, onclose: null, onerror: null, send: value => sent.push(JSON.parse(value)), close() {} };
     const stream = await client.collectionStream({ onFrame() {}, socket: () => socket });
-    stream.subscribeOrderedMembershipsCollection('selected', 'person/ada', fixture.collection_v1.page.membership.container);
+    const subscribed = stream.subscribeOrderedMembershipsCollection('selected', 'person/ada', fixture.collection_v1.page.membership.container);
     socket.onopen();
+    await subscribed;
     assert.equal(sent[0].paging_contract, 'collection-v1');
     stream.subscribeOrderedMemberships('legacy', 'person/ada', fixture.collection_v1.page.membership.container);
     assert.equal(sent[1].paging_contract, undefined);
@@ -1046,6 +1049,24 @@ test('explicit membership methods send selectors without changing legacy request
     assert.equal(requests.at(-1).searchParams.get('paging_contract'), 'collection-v1');
     assert.equal(requests.at(-1).searchParams.get('person'), 'person/ada');
     stream.close();
+});
+
+test('collection-v1 refuses absent or partial capability before sending selected requests', async () => {
+    const capability = { id: 'ordered-memberships.paging.v1', version: 1, state: 'granted' };
+    for (const capabilities of [[], [{ ...capability, state: 'ungranted' }], [{ ...capability, version: 0 }]]) {
+        const sent = [], paths = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
+            paths.push(new URL(url).pathname);
+            return response({ ...capabilityFixture, value: { ...capabilityFixture.value, capabilities } });
+        } });
+        const socket = { onopen: null, onmessage: null, onclose: null, onerror: null, send: value => sent.push(value), close() {} };
+        const stream = await client.collectionStream({ onFrame() {}, socket: () => socket });
+        await assert.rejects(stream.subscribeOrderedMembershipsCollection('s', 'person/ada', 'arrangement/person/ada/id'), /unsupported-membership-paging-contract/);
+        await assert.rejects(client.arrangementsMembershipsCollection('ada', 'id', 'person/ada'), /unsupported-membership-paging-contract/);
+        assert.deepEqual(sent, []);
+        assert(paths.every(path => path === '/v1/client/capabilities'));
+        stream.close();
+    }
 });
 
 test('glass methods preserve structure, null creation base, and idempotency headers', async () => {

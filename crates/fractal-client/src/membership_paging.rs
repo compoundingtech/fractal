@@ -3,8 +3,15 @@ use crate::*;
 use std::collections::HashSet;
 
 impl Client {
+    async fn require_membership_paging(&self) -> Result<(), ClientError> {
+        if !self.capabilities_internal().await?.value.grants("ordered-memberships.paging.v1", 1) {
+            return Err(ClientError::Protocol("unsupported-membership-paging-contract: capability not granted".into()));
+        }
+        Ok(())
+    }
     /// Request authoritative collection metadata, refusing legacy or unknown contracts.
     pub async fn arrangements_memberships_collection_v1(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {
+        self.require_membership_paging().await?;
         let mut path = format!("/v1/client/arrangements/{}/{}/memberships?person={}&paging_contract=collection-v1", percent_encode(person_name), percent_encode(uuid), percent_encode(person));
         if let Some(cursor) = cursor { path.push_str(&format!("&cursor={}", percent_encode(cursor))); }
         if let Some(limit) = limit { path.push_str(&format!("&limit={limit}")); }
@@ -14,10 +21,11 @@ impl Client {
         Ok(response)
     }
 }
-impl CollectionStream {
+impl Client {
     /// Subscribe FIRST. Keep this joiner only for this connection and subscription generation.
-    pub async fn subscribe_ordered_memberships_collection_v1(&mut self, id: &str, person: &str, subject: &str, limit: usize) -> Result<MembershipJoin, ClientError> {
-        self.send(&serde_json::json!({"kind":"subscribe","id":id,"collection":"ordered-memberships","person":person,"subject":subject,"limit":limit,"paging_contract":"collection-v1"})).await?;
+    pub async fn subscribe_ordered_memberships_collection_v1(&self, stream: &mut CollectionStream, id: &str, person: &str, subject: &str, limit: usize) -> Result<MembershipJoin, ClientError> {
+        self.require_membership_paging().await?;
+        stream.send(&serde_json::json!({"kind":"subscribe","id":id,"collection":"ordered-memberships","person":person,"subject":subject,"limit":limit,"paging_contract":"collection-v1"})).await?;
         Ok(MembershipJoin::after_subscription(id, person, subject))
     }
 }

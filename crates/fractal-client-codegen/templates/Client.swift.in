@@ -45,6 +45,12 @@ public actor FractalClient {
 
     public func setCredential(_ credential: String?) { self.credential = credential }
     public func capabilities() async throws -> Envelope<Capabilities> { try await get("v1/client/capabilities") }
+    private func requireMembershipPaging() async throws {
+        let advertised = try await capabilities().value.capabilities
+        guard advertised.contains(where: { $0.id == "ordered-memberships.paging.v1" && $0.version >= 1 && $0.state == "granted" }) else {
+            throw MembershipPagingFailure.refused
+        }
+    }
     private func list(_ collection: String, cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> {
         var query: [URLQueryItem] = []
         if let cursor { query.append(.init(name: "cursor", value: cursor)) }
@@ -263,6 +269,7 @@ public actor FractalClient {
     }
     /// Returns only after subscribe has been sent; request pages after awaiting this method.
     public func orderedMembershipsCollectionV1Stream(person: String, subject: String, subscriptionID: String = "ordered-memberships", limit: Int = 100) async throws -> AsyncThrowingStream<OrderedMembershipCollectionFrame, Error> {
+        try await requireMembershipPaging()
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!)
@@ -289,6 +296,7 @@ public actor FractalClient {
         }
     }
     public func arrangementsMembershipsCollectionV1(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> {
+        try await requireMembershipPaging()
         var query: [URLQueryItem] = [.init(name: "person", value: person), .init(name: "paging_contract", value: "collection-v1")]
         if let cursor { query.append(.init(name: "cursor", value: cursor)) }
         if let limit { query.append(.init(name: "limit", value: String(limit))) }

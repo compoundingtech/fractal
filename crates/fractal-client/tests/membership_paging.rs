@@ -100,6 +100,20 @@ fn exact_frontiers_counts_and_restart_errors() {
     assert_eq!(response.value.membership.as_ref().unwrap().live_count, u64::MAX);
     let mut j = join(); let a = j.begin(); assert_eq!(j.page(a, response), Err(ErrorCode::MembershipFrontierInconsistent));
 }
+async fn serve_paging_capability(listener: &tokio::net::UnixListener, granted: Option<bool>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = [0; 4096]; let n = socket.read(&mut request).await.unwrap();
+    assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/client/capabilities "));
+    let mut body: Value = serde_json::from_str(include_str!("../../../docs/st3/client-v0/fixtures/capabilities.json")).unwrap();
+    if let Some(granted) = granted {
+        body["value"]["capabilities"].as_array_mut().unwrap().push(json!({
+            "id":"ordered-memberships.paging.v1","version":1,"state":if granted {"granted"} else {"ungranted"}
+        }));
+    }
+    let body = body.to_string();
+    socket.write_all(format!("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+}
 #[tokio::test]
 async fn typed_entrypoints_send_explicit_selectors() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -107,6 +121,7 @@ async fn typed_entrypoints_send_explicit_selectors() {
     let root = tempfile::tempdir().unwrap(); let path = root.path().join("client.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
     let server = tokio::spawn(async move {
+        serve_paging_capability(&listener, Some(true)).await;
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = vec![0; 4096]; let n = socket.read(&mut request).await.unwrap();
         let request = String::from_utf8_lossy(&request[..n]);
@@ -115,14 +130,26 @@ async fn typed_entrypoints_send_explicit_selectors() {
         socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         let (socket, _) = listener.accept().await.unwrap();
         let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        serve_paging_capability(&listener, Some(true)).await;
         let command: Value = serde_json::from_str(websocket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(command, json!({"kind":"subscribe","id":"scoped","collection":"ordered-memberships","person":"person/ada","subject":"container","limit":1,"paging_contract":"collection-v1"}));
     });
     let client = fractal_client::Client::unix(&path);
     client.arrangements_memberships_collection_v1("ada", "id", "person/ada", Some("membership-v1/next"), Some(1)).await.unwrap();
     let mut stream = client.collection_stream().await.unwrap();
-    stream.subscribe_ordered_memberships_collection_v1("scoped", "person/ada", "container", 1).await.unwrap();
+    client.subscribe_ordered_memberships_collection_v1(&mut stream, "scoped", "person/ada", "container", 1).await.unwrap();
     server.await.unwrap();
+}
+#[tokio::test]
+async fn typed_collection_pages_refuse_missing_or_ungranted_capability_before_reading_rows() {
+    for granted in [None, Some(false)] {
+        let root = tempfile::tempdir().unwrap(); let path = root.path().join("client.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move { serve_paging_capability(&listener, granted).await });
+        let error = fractal_client::Client::unix(&path).arrangements_memberships_collection_v1("ada", "id", "person/ada", None, None).await.unwrap_err();
+        assert!(matches!(error, fractal_client::ClientError::Protocol(message) if message.contains("unsupported-membership-paging-contract")));
+        server.await.unwrap();
+    }
 }
 #[test]
 fn reset_stream_discards_scope_but_keeps_stale_complete_view() {
