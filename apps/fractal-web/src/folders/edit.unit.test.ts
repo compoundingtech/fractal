@@ -586,6 +586,6 @@ it('keeps a failed stale-fence refresh explicit and refreshes again on user retr
   h.snapshotFailure(undefined)
   h.behavior(undefined)
   expect(await h.editor.retryEdit()).toEqual({ _tag: 'Success' })
-  expect(h.requests[1]?.fence.snapshot_id).toBe('snapshot/fresh/4')
+  expect(h.requests[1]?.fence.snapshot_id).toBe(`snapshot/fresh/${h.counters().snapshots}`)
   h.editor.close()
 })
