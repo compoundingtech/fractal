@@ -1274,12 +1274,12 @@ pub fn run(context: Context) -> Result<()> {
         // machines and devices (Fleet). They are read then, never on a timer.
         let showing_resources = ui.glasses.sidebar.shown;
         if showing_resources && extras.live {
-            for row in ui.resource_sidebar.rows() {
-                if let super::resource_sidebar::Row::Resource(row) = row
-                    && row.id.starts_with("agent/")
-                    && let Some(epoch) = related_reads.begin(&row.id)
+            let frame = ui.frame.borrow();
+            for (rect, id, _) in &frame.context_rows {
+                if rect.intersects(frame.glass_sidebar) && id.starts_with("agent/")
+                    && let Some(epoch) = related_reads.begin(id)
                 {
-                    let reader = client.clone(); let tx = fetched_tx.clone(); let agent = row.id;
+                    let reader = client.clone(); let tx = fetched_tx.clone(); let agent = id.clone();
                     extras.related_runs.entry(agent.clone()).or_insert(Load::Loading);
                     runtime.spawn(async move {
                         let outcome = reader.agent_related_runs_get(&agent).await.map(|reply| reply.value).map_err(|error| error.human());
