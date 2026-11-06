@@ -5,9 +5,8 @@
  * replace `state` when a push invalidates the read and keep the previous Loaded value while they refetch. Rows are the
  * decoded Native DTO, so nullable wire fields arrive as `Option`.
  *
- * Line 1: status chip, mission, then a fixed done/total cluster, so the mission keeps the row's free width.
- * Line 2: "waiting on you", or the served ETA after the word "late" in danger ink, then one phrase: who the run waits on,
- * else its current step. Only that phrase truncates.
+ * Line 1: status chip, mission, fixed done/total cluster. Line 2: "waiting on you", or the served ETA after the word
+ * "late" in danger ink, then one phrase, who the run waits on else its current step; only that phrase truncates.
  */
 import * as stylex from '@stylexjs/stylex'
 import { Option } from 'effect'
@@ -53,11 +52,8 @@ function RunRow({ run, now }: { readonly run: SidebarRelatedRun; readonly now: n
   const status = run.waiting_on_you
     ? <span data-waiting-on-you {...stylex.props(styles.metric, styles.attention)}>waiting on you</span>
     : run.late || eta !== undefined
-      ? <span data-late={run.late || undefined} {...stylex.props(styles.metric)}>
-        {run.late ? <span {...stylex.props(styles.late)}>late</span> : null}
-        {run.late && eta !== undefined ? ' · ' : null}
-        {eta === undefined ? null : <MissionEtaLabel eta={eta} now={now} />}
-      </span>
+      ? <span data-late={run.late || undefined} {...stylex.props(styles.metric)}>{run.late ? <span {...stylex.props(styles.late)}>late</span> : null}
+        {run.late && eta !== undefined ? ' · ' : null}{eta === undefined ? null : <MissionEtaLabel eta={eta} now={now} />}</span>
       : null
   return <>
     <span {...stylex.props(styles.line)}>
