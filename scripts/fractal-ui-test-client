@@ -241,7 +241,7 @@ def main() -> int:
     env["STUI_CLIENT_LABEL"] = arguments.label
     env.pop("ST_AGENT", None)
     if arguments.timing:
-        env["STUI_TIMING_LOG"] = arguments.timing
+        env["FRACTAL_TUI_TIMING_LOG"] = arguments.timing
     events.write("start", binary_label=arguments.label)
     command = [arguments.binary, "ui"]
     if arguments.space:
