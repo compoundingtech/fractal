@@ -739,6 +739,7 @@ async fn clients_inventory_follows_connect_disconnect_and_reconnect() {
         &session,
         &headers,
         client_now_ms(),
+        super::super::client_presence::StreamCategory::Collections,
     );
     let changed = fixture.frame().await;
     assert_eq!(changed["kind"], "changes");

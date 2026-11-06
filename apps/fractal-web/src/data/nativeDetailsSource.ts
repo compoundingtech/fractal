@@ -1,5 +1,5 @@
 import { ClientError, FractalClient, type ClientOptions } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import { Effect, Fiber, Schedule, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'

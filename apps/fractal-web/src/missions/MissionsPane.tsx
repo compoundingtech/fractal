@@ -1,5 +1,5 @@
 import { useAtomValue } from '@effect/atom-react'
-import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
+import { MissionEtaLabel, SystemNotice, formatMissionEta } from '@fractal/ui/assistant-ui/shell'
 import type * as Fractal from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime } from 'effect'
@@ -9,7 +9,7 @@ import * as Aria from 'react-aria-components'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
-import { hiddenByDefault, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
+import { hiddenByDefault, missionEta, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 
 // The Missions screen: every mission with its word and who must act, in the contract's order,
 // as the Fractal terminal UI's Missions tab lists them. A row opens to its steps. Fractal's own missions, ones never
@@ -64,6 +64,8 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
                   {shown.map(({ mission, presentation }) => {
                     const word = missionWord(presentation.word)
                     const expanded = open === mission.id
+                    // Served as of its publication cut, never counted down; a settled mission shows none.
+                    const eta = presentation.settled_at === null ? missionEta(mission) : null
                     return (
                       <li key={mission.id} {...stylex.props(styles.item)}>
                         <Aria.Button aria-expanded={expanded} onPress={() => setOpen(expanded ? undefined : mission.id)} {...stylex.props(styles.row)}>
@@ -73,6 +75,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
                           <span {...stylex.props(styles.meta)}>
                             {presentation.who.kind === 'nobody' ? '' : `${presentation.who.label} · `}
                             {presentation.progress.total > 0 ? `${presentation.progress.done}/${presentation.progress.total} · ` : ''}
+                            {formatMissionEta(eta) === null ? null : <><MissionEtaLabel eta={eta} now={now} />{' · '}</>}
                             {ago(DateTime.formatIso(mission.updated_at), now)}
                           </span>
                         </Aria.Button>

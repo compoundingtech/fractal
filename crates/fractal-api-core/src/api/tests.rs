@@ -14231,16 +14231,22 @@ fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_run
 
 #[test]
 fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
-    // The second check starts 600 ms in, well inside the total even on a loaded host, and
-    // ends past it.
-    let clock = DoctorClock::new(Duration::from_millis(1000), Duration::from_millis(100));
+    // Advance the actual shared budget's clock inside each check, without depending
+    // on whether the host schedules this test before a real-time deadline.
+    let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock_now = now.clone();
+    let clock = DoctorClock::with_clock_for_test(
+        Duration::from_millis(1000), Duration::from_millis(100),
+        Arc::new(move || *clock_now.lock().unwrap()),
+    );
     let ran = std::cell::Cell::new(0);
     for _ in 0..2 {
-        clock.checks("slow-check", || {
+        let slow = clock.checks("slow-check", || {
             ran.set(ran.get() + 1);
-            std::thread::sleep(Duration::from_millis(600));
+            *now.lock().unwrap() += Duration::from_millis(600);
             Ok(Vec::new())
         });
+        assert_eq!(slow[0].status, "timeout");
     }
     assert_eq!(ran.get(), 2);
     let skipped = clock.checks("late-check", || {

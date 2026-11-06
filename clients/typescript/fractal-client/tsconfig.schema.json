@@ -3,6 +3,7 @@
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,
     "target": "ES2024",
     "module": "esnext",

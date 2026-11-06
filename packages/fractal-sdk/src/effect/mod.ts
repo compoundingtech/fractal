@@ -39,8 +39,8 @@ import {
   decodeUnknownSync,
   Resource,
   Runtime,
-  TerminalScreen,
-} from '@fractal/client/schema'
+} from '@fractal/client/schema/read'
+import type { TerminalScreen } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
@@ -233,6 +233,8 @@ export interface ConversationChunk {
   readonly id?: string
   readonly replace: boolean
   readonly hasMore: boolean
+  readonly olderCursor?: string
+  readonly sessionId?: string
   readonly entries: readonly (ConversationEntry | UnrecognizedEntry)[]
   /** Raw page evidence before decoding/filtering; only explicit has_more=false proves emptiness. */
   readonly observation?: { readonly empty: boolean }
@@ -359,7 +361,6 @@ export interface FractalOptions {
 }
 
 
-const decodeScreen = decodeUnknownSync(TerminalScreen)
 const decodeRuntime = decodeUnknownSync(Runtime)
 const decodeCapabilities = decodeUnknownSync(CapabilitiesCodec)
 
@@ -388,6 +389,8 @@ export const decodeConversationChunk = (
   id: frame.id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
+  ...(frame.older_cursor === undefined ? {} : { olderCursor: frame.older_cursor }),
+  sessionId: frame.session_id,
   ...(frame.header !== null && typeof frame.header === 'object' && !Array.isArray(frame.header)
     ? { header: Object.fromEntries(Object.entries(frame.header)) } : {}),
   ...(frame.replace || frame.items.length > 0
@@ -407,12 +410,14 @@ const RETRY_DELAY = '1 second'
 
 /** How one kind of follow talks on the socket. */
 interface FollowProtocol<A> {
+  /** Interruptible setup before admission or socket registration, with shared failure reporting. */
+  readonly prepare?: Effect.Effect<void, FollowFailure>
   readonly subscribe: (args: {
     readonly stream: CollectionStream
     readonly id: string
   }) => Effect.Effect<void, FollowFailure>
   /** The decoded value a data frame carries, or `undefined` for a frame that changes nothing. */
-  readonly onData: (frame: CollectionFrame) => A | undefined
+  readonly onData: (frame: CollectionFrame) => A | DecodeFailure | undefined
   /** The socket dropped: forget anything the next snapshot replaces. */
   readonly reset: () => void
 }
@@ -687,6 +692,13 @@ const make = (options: FractalOptions) =>
               publishSync()
             }
           }))
+          if (protocol.prepare !== undefined) {
+            const ready = yield* protocol.prepare.pipe(Effect.match({
+              onSuccess: () => true,
+              onFailure: (error) => { fail(error); return false },
+            }))
+            if (!ready) return
+          }
           const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
           // Under `'advertised'`, no follow admits before the connect probe fixes the budget:
           // a subscribe cannot send before that probe opens the socket anyway.
@@ -825,7 +837,7 @@ const make = (options: FractalOptions) =>
                   options.onDiagnostics === undefined || spec._tag === 'Window'
                     ? undefined
                     : performance.now()
-                let value: A | undefined
+                let value: A | DecodeFailure | undefined
                 try {
                   value = protocol.onData(frame)
                 } finally {
@@ -834,6 +846,10 @@ const make = (options: FractalOptions) =>
                       _tag: 'Decode',
                       elapsedMs: performance.now() - started,
                     })
+                }
+                if (value instanceof DecodeFailure) {
+                  fail(value)
+                  return
                 }
                 if (value !== undefined) observe(value)
               },
@@ -991,7 +1007,16 @@ const make = (options: FractalOptions) =>
         spec,
         makeProtocol: () => {
           let initialRuntime = spec.initialRuntime
+          let decodeScreen: (value: unknown) => TerminalScreen
           return {
+            prepare: Effect.tryPromise({
+              try: async () => {
+                // Optional PTY and mutation validators must not load on read startup.
+                const { TerminalScreen } = await import('@fractal/client/schema')
+                decodeScreen = decodeUnknownSync(TerminalScreen)
+              },
+              catch: () => new DecodeFailure({ message: 'Fractal terminal screen codec could not load' }),
+            }),
             subscribe: ({ stream, id }) =>
               Effect.suspend(() => {
                 const observation = initialRuntime
@@ -1005,9 +1030,8 @@ const make = (options: FractalOptions) =>
               try {
                 return decodeScreen(frame.value)
               } catch {
-                // The schema failure quotes the frame, which carries screen text: log fixed text only.
-                console.warn('Fractal terminal screen did not decode')
-                return undefined
+                // Decoder errors quote screen text; expose only a fixed diagnostic.
+                return new DecodeFailure({ message: 'Fractal terminal screen did not decode' })
               }
             },
             reset: () => {},

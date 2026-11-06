@@ -1175,6 +1175,15 @@ class StTest(unittest.TestCase):
         self.assertEqual((calls, result), (3, 'failure: git fetch failed: ' + lock))  # three is the limit
         result, calls, _ = self.fetches_with_lock_errors(['fatal: unable to access the remote'])
         self.assertEqual((calls, result), (1, 'failure: git fetch failed: fatal: unable to access the remote'))
+        old_value = 'error: fetching ref refs/remotes/origin/main failed: incorrect old value provided'  # batched updates, 2026-11-05
+        result, calls, err = self.fetches_with_lock_errors([old_value, lock])
+        self.assertEqual((result, calls), (tip, 3))
+        self.assertIn('fetching again (3 of 3)', err)
+        result, calls, _ = self.fetches_with_lock_errors([old_value] * 3)
+        self.assertEqual((calls, result), (3, 'failure: git fetch failed: ' + old_value))
+        missing = 'error: fetching ref refs/remotes/origin/main failed: reference does not exist'
+        result, calls, _ = self.fetches_with_lock_errors([missing])
+        self.assertEqual((calls, result), (1, 'failure: git fetch failed: ' + missing))  # only the compare-and-swap race is tried again
 
     def test_a_runs_checks_carry_an_admission_run_of_the_accepted_form_a_new_one_per_run_replacing_the_callers(self):
         seen = Path(self.tmp.name) / 'admission-run'

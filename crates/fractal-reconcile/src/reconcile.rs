@@ -543,7 +543,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
         desired: &DesiredSubject,
         launch: &MemberSpec,
     ) -> Result<crate::launch_contract::Contract> {
-        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true)
+        crate::launch_contract::capture_effective(store, desired, &BTreeMap::new(), &launch.environment, true).map(|(contract, _)| contract)
     }
     /// Proof for the operation in this prepared launch: no operation-owned runtime
     /// remains and no producer can launch later. A returned error or absence alone
@@ -1406,6 +1406,8 @@ pub struct Reconciler<R = NativeRuntime> {
     file_subscriptions: std::sync::OnceLock<Arc<file_subscriptions::Pool>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
+    file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
+    launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1618,6 +1620,8 @@ impl Reconciler<NativeRuntime> {
             file_subscriptions: Default::default(),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
+            file_watch_revision: Default::default(),
+            launch_input_wake: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1819,6 +1823,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_subscriptions: Default::default(),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
             file_observations: Arc::new(Mutex::new(HashMap::new())),
+            file_watch_revision: Default::default(),
+            launch_input_wake: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -4030,6 +4036,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        for subject in desired.iter().filter(|subject| subject.kind == "agent"
+            && subject.member.as_ref().is_some_and(|member| member.host == self.host)) {
+            self.isolate(&format!("stage/launch-inputs/{}", subject.subject), &daemon, || self.watch_launch_inputs(subject));
+        }
         self.isolate("stage/missions", &daemon, || self.evaluate_mission_runs());
         self.release_unused_file_watchers();
 
@@ -18966,6 +18976,44 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
+        let item = format!("launch-inputs:{}", subject.subject);
+        if !self.incremental.needs(&item, now_ms()) {
+            for key in self.incremental.reads_of(&item).into_iter().filter(|key| key.starts_with("launch-input/")) {
+                self.file_watchers_used.lock().unwrap_or_else(PoisonError::into_inner).insert(key);
+            }
+            return Ok(());
+        }
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        });
+        let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
+        let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
+        let (result, reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::note_read(|| "launch-identity".into());
+            smallclaims::touched::note_read(|| "kind:intent.desired".into());
+            crate::contract::declared_ready_inputs(&self.store, subject, &|path| {
+                let key = format!("launch-input/{}", path.display());
+                smallclaims::touched::note_read(|| key.clone());
+                self.ensure_file_watch(&key, path).inspect_err(|error| if !error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) { *watch_error.borrow_mut() = Some(error.to_string()); })
+            })
+        });
+        self.incremental.evaluated(&item, reads, None);
+        if watch_error.borrow().is_some() || matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
+            self.incremental.touch("launch-identity");
+        }
+        watch_error.into_inner().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
+    }
+
     fn ensure_file_watch(&self, subject: &str, path: &Path) -> Result<()> {
         self.file_watchers_used
             .lock()
@@ -19011,6 +19059,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
+        let revision = self.file_watch_revision.clone();
         let watched_subject = subject.to_owned();
         if self.file_subscriptions.get().is_none() {
             let _ = self.file_subscriptions.set(file_subscriptions::Pool::new()?);
@@ -19031,6 +19080,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &watched_directory,
                     watched_referent.as_deref(),
                 ) {
+                    revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     if event.need_rescan() || matches!(event.kind, notify::EventKind::Remove(_)
                         | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))) {
                         changed_watch.store(true, std::sync::atomic::Ordering::Release);
@@ -21190,6 +21240,77 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 assert_eq!(runtime.stops.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_indeterminate_kill_is_not_certified_and_the_next_pass_kills_the_real_group() {
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+        let id = "runtime.cancelled-gate";
+        let generation = runtime.exec.spawn(
+            id,
+            &fractal_runtime::Launch::Shell(
+                "trap '' TERM; echo ready > ready; while :; do sleep 60; done".into(),
+            ),
+            root.path(),
+            &std::env::vars().collect(),
+        ).unwrap();
+        let record = root.path().join("exec").join(format!("{id}.json"));
+        let bytes = std::fs::read(&record).unwrap();
+        struct Cleanup(Arc<NativeRuntime>, PathBuf, Vec<u8>, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                // A failed assertion with unreadable evidence must still own its cleanup.
+                let _ = std::fs::write(&self.1, &self.2);
+                let _ = self.0.exec.kill_if("runtime.cancelled-gate", Some(&self.3));
+            }
+        }
+        let _cleanup = Cleanup(runtime.clone(), record.clone(), bytes.clone(), generation.generation_id.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            assert!(Instant::now() < deadline, "the TERM-resistant group did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let subject = "gate-operation/cancelled";
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let observation = runtime.observe_exec(id).unwrap().unwrap();
+        let stop = |observation: &RuntimeObservation| {
+            reconciler.reconcile_runtime_stop(
+                subject, id, false, Some(&generation.generation_id), 0, Some(observation),
+            )
+        };
+        assert!(!stop(&observation).unwrap()); // TERM is ignored; the deadline is now due.
+
+        // Model evidence becoming unreadable between the pass observation and the signal guard.
+        std::fs::write(&record, b"unreadable generation").unwrap();
+        assert!(stop(&observation).unwrap_err().to_string().contains("generation is indeterminate"));
+        assert!(store.observations_for(subject, "runtime.action.succeeded").unwrap().is_empty());
+        assert!(fractal_runtime::process_generation_alive(generation.pid, generation.start_token).unwrap());
+
+        std::fs::write(&record, bytes).unwrap();
+        let observation = runtime.observe_exec(id).unwrap().unwrap();
+        assert!(!stop(&observation).unwrap()); // Exactly one further attempt, with readable evidence.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exited = loop {
+            if let Some(fractal_runtime::ExecObservation::Exited(exited)) = runtime.exec.observe(id).unwrap() {
+                break exited;
+            }
+            assert!(Instant::now() < deadline, "the real SIGKILL did not end the group");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(exited.exit_signal, Some(libc::SIGKILL));
+        assert!(exited.group_exited);
+        // A genuinely ended group completes immediately and causes no further kill attempts.
+        for _ in 0..3 {
+            assert!(stop(&runtime.observe_exec(id).unwrap().unwrap()).unwrap());
+        }
+        let kills = store.observations_for(subject, "runtime.action.succeeded").unwrap();
+        assert_eq!(kills.len(), 1);
+        assert_eq!(kills[0].body["fields"]["action"], "kill");
     }
 
     #[test]
@@ -26803,6 +26924,41 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn launch_input_watchers_recover_missing_and_retargeted_interpreters() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for retarget in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let interpreter = root.path().join("interpreter");
+            let target = root.path().join("target");
+            let provider = root.path().join("provider");
+            std::fs::write(&provider, format!("#!{}\n", interpreter.display())).unwrap();
+            std::fs::write(&target, "interpreter bytes").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if retarget { std::os::unix::fs::symlink(&target, &interpreter).unwrap(); }
+            let notify = Arc::new(Notify::new());
+            let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+                Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+            let result = fractal_drivers::harness_admission::executable_identity_ready_observed(
+                &provider, &|_| unreachable!(), &|path| reconciler.ensure_file_watch(
+                    &format!("launch-input/{}", path.display()), path));
+            assert_eq!(result.is_ok(), retarget);
+            if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
+                &format!("launch-input/{}", target.display()))); }
+            reconciler.incremental.evaluated("probe", BTreeSet::from([format!("launch-input/{}", interpreter.display())]), None);
+            if retarget {
+                let replacement = root.path().join("replacement");
+                std::os::unix::fs::symlink(&provider, &replacement).unwrap();
+                std::fs::rename(replacement, &interpreter).unwrap();
+            } else {
+                std::fs::rename(&target, &interpreter).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+            assert!(reconciler.incremental.needs("probe", now_ms()));
+            fractal_drivers::harness_admission::identity_measurements_settled();
+        }
     }
 
     #[tokio::test]

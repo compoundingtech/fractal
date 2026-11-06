@@ -7,7 +7,7 @@ import type { Key } from 'react-aria-components'
 import { MilestoneAgentRow, openAgentRowMenu } from './MilestoneAgentRow'
 import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, type SidebarTreeItem, type SidebarTreeRowState } from './SidebarTree'
 import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
-import { geometryNumbers, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { geometryNumbers, geometryVars as g, sidebarRowSize, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
@@ -36,7 +36,7 @@ const parent: Row = {
 interface AgentItem extends SidebarTreeItem<AgentItem> { readonly kind: 'agent'; readonly row: Row; readonly children: readonly AgentItem[] }
 interface FolderItem extends SidebarTreeItem<Item> { readonly kind: 'folder'; readonly children: readonly AgentItem[] }
 type Item = AgentItem | FolderItem
-const toItem = (row: Row, depth: number): AgentItem => ({ kind: 'agent', id: row.ref, depth, textValue: row.title, row, disclosurePlacement: 'trailing', children: row.children.map(next => toItem(next, depth + 1)) })
+const toItem = (row: Row, depth: number): AgentItem => ({ kind: 'agent', id: row.ref, depth, textValue: row.title, row, rowHeight: { compact: sidebarRowSize }, disclosurePlacement: 'trailing', children: row.children.map(next => toItem(next, depth + 1)) })
 const treeItems: readonly AgentItem[] = [toItem(parent, 0), toItem(stateRows[2]!, 0)]
 const touchDisclosure = (state: SidebarTreeRowState) => state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined
 
@@ -70,14 +70,14 @@ const noSessionChild: Row = { ...subagent, ref: 'agent/example-no-session', titl
 const displayOnlyChild = parent.children[0]!
 const actionAgent = (depth: number): AgentItem => {
   const root = toItem({ ...parent, children: [...parent.children, noSessionChild] }, depth)
-  return { ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true } : child) }
+  return { ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true, rowHeight: { compact: sidebarRowSize, touch: sidebarRowSize } } : child) }
 }
 /** A parent whose only subagent is display-only: arrow keys expand it but never move focus into the child. */
 const displayOnlyParentRow: Row = { ...parent, ref: 'agent/example-display-parent', title: 'Summarise reported subagents', needsMe: false,
   children: [{ ...displayOnlyChild, ref: 'agent/example-display-review', parentRef: 'agent/example-display-parent', title: 'Reported review summary' }] }
 const displayOnlyParent = (depth: number): AgentItem => {
   const root = toItem(displayOnlyParentRow, depth)
-  return { ...root, children: root.children.map(child => ({ ...child, isDisabled: true })) }
+  return { ...root, children: root.children.map(child => ({ ...child, isDisabled: true, rowHeight: { compact: sidebarRowSize, touch: sidebarRowSize } })) }
 }
 /** Desktop: a refused folder carries an inline retry, and nests a parent agent inside RAC's nested Collection. */
 const retryFolder: FolderItem = { kind: 'folder', id: 'folder/example-retry', depth: 0, textValue: 'Reviews', children: [displayOnlyParent(1)] }
@@ -207,7 +207,8 @@ export const TwoLineAndNesting: Story = {
     const rows = await waitFor(() => { const found = [...tree.querySelectorAll<HTMLElement>('[data-milestone-row]')].filter(row => row.closest('[inert]') === null); expect(found).toHaveLength(4); return found })
     const [root, review, checks, leaf] = rows
     for (const row of rows) {
-      await expect(Math.abs(row.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
+      await expect(row.getBoundingClientRect().height).toBe(sidebarRowSize)
+      await expect(row.closest('[role="row"]')!.getBoundingClientRect().height).toBe(sidebarRowSize)
       // Line 1 (glyph, title, time, signal) sits wholly above line 2.
       const title = row.querySelector('[data-row-column="title"]')!.getBoundingClientRect()
       const line2 = row.querySelector('[data-row-column="line2"]')!.getBoundingClientRect()
@@ -450,6 +451,9 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
   // Labels keep the fine-pointer x: a 16px gutter at every depth, and one depth step between parent and child.
   const folderRow = await waitFor(() => canvas.getByRole('row', { name: phoneFolder.textValue }))
   await waitFor(() => expect(canvas.getByRole('row', { name: parent.title })).toBeVisible())
+  const exactChildRow = canvas.getByRole('row', { name: displayOnlyChild.title })
+  await expect(exactChildRow.querySelector('[data-milestone-row]')!.getBoundingClientRect().height).toBe(sidebarRowSize)
+  await expect(exactChildRow.getBoundingClientRect().height).toBe(sidebarRowSize)
   const step = offset(childTitles[1]!) - offset(parent.title)
   await expect(Math.abs(offset(parent.title) - step - 16)).toBeLessThanOrEqual(0.5)
   await expect(Math.abs(folderRow.querySelector('[data-folder-label]')!.getBoundingClientRect().left - folderRow.getBoundingClientRect().left - 16)).toBeLessThanOrEqual(0.5)

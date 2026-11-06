@@ -84,7 +84,9 @@ const ConversationThreadPane = ({
   // The same last-observed rule as the roster: a stale feed or a connection that is not live.
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const projectTranscript = React.useMemo(createConversationTranscript, [])
-  const state = projectTranscript(feed, { agentName, showSystemEvents })
+  // A stable callback keeps the cached projection; the source reports progress and failure through `page.older`.
+  const onLoadEarlier = React.useMemo(() => source.loadOlder === undefined ? undefined : () => { void source.loadOlder?.(agentRef) }, [source, agentRef])
+  const state = projectTranscript(feed, { agentName, showSystemEvents, onLoadEarlier })
   const observed = state._tag === 'Observed'
   const hasTurns = observed && state.turns.length > 0
   const boundary = React.useRef<HTMLDivElement>(null)

@@ -13,6 +13,12 @@ use crate::model::{
 #[allow(dead_code)]
 pub(crate) mod agent_review;
 
+// Prepared for concrete start/reassignment validation; no public gate kind dispatches here.
+#[allow(dead_code)]
+mod step_review;
+#[doc(hidden)]
+pub use step_review::validate_step_reviewer;
+
 /// What the graph holds, as far as the reference checks need it.
 pub trait Graph {
     /// Whether `subject` has a current declaration.

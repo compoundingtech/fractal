@@ -6,6 +6,33 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testDeviceCommandTypedArgumentsAndResourceRoundTrip() throws {
+        let request = DeviceCommandRequest(device: "device/phone",
+            command: .navigate(.conversation(target: "agent/example/worker", sessionID: "session/example")), ttlMS: 30000)
+        let data = try JSONEncoder().encode(request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["kind"] as? String, "phone.navigate")
+        XCTAssertEqual(object["device"] as? String, "device/phone")
+        let args = try XCTUnwrap(object["args"] as? [String: Any])
+        XCTAssertEqual(args["screen"] as? String, "Conversation")
+        let params = try XCTUnwrap(args["params"] as? [String: String])
+        XCTAssertEqual(params, ["target": "agent/example/worker", "sessionId": "session/example"])
+        XCTAssertEqual(try JSONDecoder().decode(DeviceCommandRequest.self, from: data).command, request.command)
+        let resourceData = Data(#"{"id":"device-command/example","kind":"device-command","revision":"revision/one","updated_at":"2026-10-30T12:00:00.000Z","command_kind":"phone.inspect","args":{},"device_id":"device/phone","session_actor":"person/ada/session/phone","issued_by":"person/ada","issued_at":"2026-10-30T12:00:00.000Z","expires_at":"2026-10-30T12:00:30.000Z","state":"pending"}"#.utf8)
+        guard case .deviceCommand(let command) = try JSONDecoder().decode(Resource.self, from: resourceData) else {
+            return XCTFail("Expected a typed device-command resource")
+        }
+        XCTAssertEqual(command.command, .inspect)
+        XCTAssertEqual(command.state, .pending)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: resourceData) as? NSDictionary)
+        let report = DeviceResult(commandID: command.id, outcome: .completed, result: .object(["foreground": .bool(true)]))
+        let reportData = try JSONEncoder().encode(report)
+        XCTAssertEqual(try JSONDecoder().decode(DeviceResult.self, from: reportData).outcome, .completed)
+        XCTAssertThrowsError(try JSONDecoder().decode(PhoneNavigateArgs.self,
+            from: Data(#"{"screen":"Terminal","params":{"target":"agent/example/worker"}}"#.utf8)))
+    }
+
     func testRevisionedAgentsCommandAndGoldenFrames() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

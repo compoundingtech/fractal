@@ -1,4 +1,4 @@
-import { TimelineBlock } from '@fractal/client/schema'
+import { TimelineBlock } from '@fractal/client/schema/read'
 import { Schema } from 'effect'
 
 export const isRecordValue = (value: unknown): value is Readonly<Record<string, unknown>> =>

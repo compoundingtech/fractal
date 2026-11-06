@@ -23,6 +23,19 @@ successful change detection; failure and cancellation still fail. Main and manua
 require execution when web inputs changed. Evidence-skipped queue work is followed by
 the exact-source hosted proof described above.
 
+### Swift client execution
+
+`swift-client` is an optional, path-filtered Workspace CI lane on GitHub-hosted Linux.
+It compiles and tests `clients/swift/FractalClient` with the digest-pinned official
+Swift 6.0.3 image because the repository's Nix Swift package is 5.10.1, below the
+package's Swift tools 6.0 requirement. `scripts/ci-swift-client` mounts the checkout
+read-only, including shared fixtures, and places compiler output and caches in tmpfs.
+The lane uses the ordinary Workspace CI events and ready-PR admission.
+Changes to Swift clients, Swift templates, codegen sources, shared client fixtures,
+or the lane definition select execution; manual dispatch always selects it.
+It does not register a required context or sign/consume reusable evidence:
+its result is hosted execution proof only, not a replacement for a merge gate.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks

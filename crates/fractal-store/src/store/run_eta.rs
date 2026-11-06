@@ -2,16 +2,48 @@
 use super::*;
 
 pub const SAMPLE_LIMIT: usize = 64;
+pub(super) const CANDIDATES_SQL: &str = "WITH recent AS MATERIALIZED (
+    SELECT run_id FROM local_run_eta_terminal WHERE definition_hash=?1
+    ORDER BY ended DESC,run_id DESC LIMIT ?3)
+    SELECT s.subject,s.run_id,s.attempt FROM recent c JOIN mission_runs r ON r.id=c.run_id
+    JOIN step_runs s ON s.run_id=r.id AND s.generation_id=r.current_generation_id
+    WHERE s.definition_hash=?1 AND s.step_path=?2 AND r.status='completed' AND s.status='completed'
+    AND (?4 OR r.id IN(SELECT run_id FROM local_run_eta_pending))";
+pub(super) const INVALIDATE_MISSIONS_SQL: &str =
+    /* sqlite-large-value: allow-for-now lv-hab33c59006bf owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */
+    "INSERT INTO local_run_eta_mission_changes
+    SELECT DISTINCT r.mission_id,(SELECT COALESCE(MAX(changed_index),0)+1 FROM local_run_eta_mission_changes)
+    FROM step_runs s INDEXED BY step_runs_eta_remaining JOIN mission_runs r ON r.id=s.run_id
+    WHERE s.definition_hash=?1 AND s.step_path=?2
+    AND s.status NOT IN('completed','failed','cancelled','skipped')
+    AND r.phase<>'terminal' AND s.generation_id=r.current_generation_id
+    ON CONFLICT(mission_id) DO UPDATE SET changed_index=excluded.changed_index";
+
+fn window(tx: &Transaction<'_>, hash: &str, path: &str) -> rusqlite::Result<Vec<(String, i64)>> {
+    tx.prepare_cached("SELECT subject,duration FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 ORDER BY subject")?
+        .query_map(params![hash,path], |row| Ok((row.get(0)?,row.get(1)?)))?.collect()
+}
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h2ab181ca837b owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ "
+CREATE TABLE IF NOT EXISTS local_run_eta_mission_changes (mission_id TEXT PRIMARY KEY,changed_index INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_run_eta_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_run_eta_terminal_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS run_eta_terminal_pending AFTER INSERT ON local_run_eta_pending BEGIN
+ INSERT OR IGNORE INTO local_run_eta_terminal_pending VALUES(NEW.run_id); END;
+CREATE INDEX IF NOT EXISTS local_run_eta_mission_changed ON local_run_eta_mission_changes(changed_index);
+CREATE INDEX IF NOT EXISTS step_runs_eta_remaining ON step_runs(definition_hash,step_path,run_id,generation_id) WHERE status NOT IN('completed','failed','cancelled','skipped');
+-- Prevent the v3 parent from replacing v4 triggers when reopening a fresh v4 store.
+INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');
+")?;
     if tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3')",
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_triggers_v4')",
         [],
         |row| row.get(0),
     )? {
         return flush(tx);
     }
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd848d67f227a owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h657e935e7890 owner=fractal_store::store::run_eta TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_run_eta_samples (
  subject TEXT PRIMARY KEY, run_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
  step_path TEXT NOT NULL, ended INTEGER NOT NULL, duration INTEGER NOT NULL
@@ -20,11 +52,17 @@ CREATE INDEX IF NOT EXISTS local_run_eta_key ON local_run_eta_samples(definition
 CREATE INDEX IF NOT EXISTS local_run_eta_run ON local_run_eta_samples(run_id);
 CREATE TABLE IF NOT EXISTS local_run_eta_pending (run_id TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_run_eta_dirty (definition_hash TEXT,step_path TEXT,PRIMARY KEY(definition_hash,step_path)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_run_eta_terminal (
+ definition_hash TEXT NOT NULL, ended INTEGER NOT NULL, run_id TEXT NOT NULL,
+ PRIMARY KEY(definition_hash,run_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS local_run_eta_terminal_order ON local_run_eta_terminal(definition_hash,ended DESC,run_id DESC);
+CREATE INDEX IF NOT EXISTS local_run_eta_terminal_run ON local_run_eta_terminal(run_id);
 DROP TRIGGER IF EXISTS run_eta_run_insert; DROP TRIGGER IF EXISTS run_eta_run_update; DROP TRIGGER IF EXISTS run_eta_run_delete; DROP TRIGGER IF EXISTS run_eta_step_insert; DROP TRIGGER IF EXISTS run_eta_step_update; DROP TRIGGER IF EXISTS run_eta_step_delete; DROP TRIGGER IF EXISTS run_eta_claim_insert; DROP TRIGGER IF EXISTS run_eta_claim_update; DROP TRIGGER IF EXISTS run_eta_claim_delete;
 CREATE TRIGGER run_eta_run_insert AFTER INSERT ON mission_runs WHEN NEW.phase='terminal' BEGIN
  INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;
 CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN
- INSERT OR IGNORE INTO local_run_eta_dirty SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
+ INSERT OR IGNORE INTO local_run_eta_dirty SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id AND OLD.phase='terminal';
  INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;
 CREATE TRIGGER run_eta_run_delete BEFORE DELETE ON mission_runs WHEN OLD.phase='terminal' BEGIN
  INSERT OR IGNORE INTO local_run_eta_dirty SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
@@ -49,9 +87,13 @@ CREATE TRIGGER IF NOT EXISTS run_eta_claim_delete AFTER DELETE ON claims BEGIN
  INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal' AND id IN (SELECT OLD.subject UNION SELECT substr(OLD.subject,13) UNION
  SELECT run_id FROM step_runs WHERE subject=OLD.subject OR subject=json_extract(OLD.body,'$.fields.origin_step')
  OR subject IN (SELECT json_extract(body,'$.fields.origin_step') FROM claims WHERE subject=OLD.subject AND kind='work.person-asked')); END;
-INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs
- WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v3');
-INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v3','1');
+INSERT OR IGNORE INTO local_run_eta_dirty SELECT definition_hash,step_path FROM step_runs
+ WHERE run_id IN(SELECT id FROM mission_runs WHERE phase='terminal')
+ AND NOT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v4');
+INSERT OR IGNORE INTO local_run_eta_pending SELECT id FROM mission_runs WHERE phase='terminal'
+ AND NOT EXISTS(SELECT 1 FROM meta WHERE key='run_eta_samples_v4');
+INSERT OR IGNORE INTO meta VALUES('run_eta_samples_v4','1');
+INSERT OR IGNORE INTO meta VALUES('run_eta_triggers_v4','1');
 "#)?;
     flush(tx)
 }
@@ -66,6 +108,20 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    // The v3 writer drains pending, but cannot clear this trigger-maintained metadata backlog.
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h6303ef3fa163 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_run_eta_pending SELECT run_id FROM local_run_eta_terminal_pending", [])?;
+    let pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_run_eta_pending) OR EXISTS(SELECT 1 FROM local_run_eta_dirty)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
+    let rebuild: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_run_eta_terminal WHERE run_id IN(SELECT run_id FROM local_run_eta_pending))
+         OR EXISTS(SELECT 1 FROM local_run_eta_samples WHERE run_id IN(SELECT run_id FROM local_run_eta_pending))
+         OR EXISTS(SELECT 1 FROM local_run_eta_dirty)", [], |row| row.get(0))?;
     let keys = tx
         .prepare_cached(
             "SELECT definition_hash,step_path FROM local_run_eta_samples
@@ -75,17 +131,31 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         UNION SELECT definition_hash,step_path FROM local_run_eta_dirty",
         )?
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let (hash, path): (String,String) = (row.get(0)?,row.get(1)?);
+            let previous = window(tx, &hash, &path)?;
+            Ok((hash,path,previous))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (hash, path) in &keys {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h777dc35a3cdd owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2", params![hash,path])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hfb7e99bd99ec owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_terminal WHERE run_id IN(SELECT run_id FROM local_run_eta_pending)", [])?;
+    // Metadata is backfilled once; subsequent writes touch only queued terminal runs.
+    tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-hbaab5269301b owner=fractal_store::store::run_eta TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_run_eta_terminal
+        SELECT DISTINCT s.definition_hash,COALESCE((SELECT CAST(claims.accepted_at_unix_ms AS INTEGER)
+        FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.subject='mission-run/'||r.id
+        AND claims.kind='mission-run.state' AND json_extract(claims.body,'$.fields.phase')='terminal'
+        ORDER BY {CANONICAL_ORDER} LIMIT 1),0),r.id
+        FROM local_run_eta_pending p CROSS JOIN mission_runs r ON r.id=p.run_id
+        CROSS JOIN step_runs s ON s.run_id=r.id AND s.generation_id=r.current_generation_id WHERE r.phase='terminal'"), [])?;
+    if rebuild {
+        for (hash, path, _) in &keys {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h777dc35a3cdd owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2", params![hash,path])?;
+        }
     }
-    for (hash, path) in keys {
-        // Bound: only the newest 64 terminal runs per hash, including unusable runs.
-        // Work is bounded by those runs' own claims, never by older step histories.
-        let mut candidates = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h822f33d4bbe8 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ &candidates_sql())?;
-        let mut rows = candidates.query(params![hash, path, SAMPLE_LIMIT])?;
+    for (hash, path, previous) in keys {
+        // Rebuilds load at most 64 terminal runs per hash times those runs' own claims,
+        // including unusable candidates. Normal transitions fold only the queued new runs.
+        // The candidate index bounds selection before any step claim body is loaded.
+        let mut candidates = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0e7c4a7b63d7 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ CANDIDATES_SQL)?;
+        let mut rows = candidates.query(params![hash, path, SAMPLE_LIMIT, rebuild])?;
         while let Some(row) = rows.next()? {
             let (subject, run, attempt): (String, String, u32) =
                 (row.get(0)?, row.get(1)?, row.get(2)?);
@@ -135,33 +205,18 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
                     i64::try_from(duration)?
                 ],
             )?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h6f55c65253e5 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 AND subject NOT IN (
-                SELECT subject FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 ORDER BY ended DESC,subject DESC LIMIT ?3)",
-                params![hash,path,SAMPLE_LIMIT])?;
+        }
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h5433629a009d owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_samples WHERE definition_hash=?1 AND step_path=?2 AND run_id NOT IN(
+            SELECT run_id FROM local_run_eta_terminal WHERE definition_hash=?1 ORDER BY ended DESC,run_id DESC LIMIT ?3)",
+            params![hash,path,SAMPLE_LIMIT])?;
+        if window(tx, &hash, &path)? != previous {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hb66868f35424 owner=fractal_store::store::run_eta TODO=trace-statement-and-value-representation */ INVALIDATE_MISSIONS_SQL, params![hash,path])?;
         }
     }
     tx.execute(/* sqlite-large-value: allow-for-now lv-h57ee6fe04659 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_pending", [])?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7dd9271f11ac owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_dirty", [])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7c290b785c03 owner=fractal_store::store::run_eta TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_run_eta_terminal_pending", [])?;
     Ok(())
-}
-
-/// The selected attempts of `?2` in the newest `?3` terminal runs of definition `?1`. It reads the
-/// definition's own runs through `step_runs_definition_index`: reading every terminal run per
-/// definition made a first open on a long history take minutes (#5239).
-pub(super) fn candidates_sql() -> String {
-    format!("WITH recent AS MATERIALIZED (
-            SELECT r.id,r.current_generation_id,r.status,
-            (SELECT CAST(claims.accepted_at_unix_ms AS INTEGER) FROM claims JOIN batches ON batches.id=claims.batch_id
-             WHERE claims.subject='mission-run/'||r.id AND claims.kind='mission-run.state'
-             AND json_extract(claims.body,'$.fields.phase')='terminal' ORDER BY {CANONICAL_ORDER} LIMIT 1) AS ended
-            FROM (SELECT DISTINCT run_id,generation_id FROM step_runs INDEXED BY step_runs_definition_index
-                  WHERE definition_hash=?1) h
-            CROSS JOIN mission_runs r ON r.id=h.run_id AND r.current_generation_id=h.generation_id
-            WHERE r.phase='terminal'
-            ORDER BY ended DESC,r.id DESC LIMIT ?3)
-            SELECT s.subject,s.run_id,s.attempt FROM recent r JOIN step_runs s ON s.run_id=r.id
-            AND s.generation_id=r.current_generation_id WHERE s.definition_hash=?1 AND s.step_path=?2
-            AND r.status='completed' AND s.status='completed'")
 }
 
 /// The person asks a step made itself or that name it as their origin, each through its own index;

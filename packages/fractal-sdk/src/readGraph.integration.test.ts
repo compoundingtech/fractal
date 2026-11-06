@@ -20,9 +20,25 @@ it('isolates SDK optional services while bounding the shared client dependency',
     if (visited.has(path)) continue
     visited.add(path)
     expect(relative(packageRoot, path)).not.toMatch(/^src\/effect\/(?:pty|mutations?)(?:[./-]|$)/i)
-    // Type imports, re-exports and literal dynamic imports count too.
-    const imports = ts.preProcessFile(readFileSync(path, 'utf8'), true, true).importedFiles
-    for (const { fileName } of imports) {
+    // Only eager value edges belong to the static graph: terminal demand loads its codec later.
+    const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+    const imports = source.statements.flatMap((statement) => {
+      if (ts.isImportDeclaration(statement)) {
+        const clause = statement.importClause
+        if (clause?.isTypeOnly) return []
+        if (clause?.name === undefined && clause?.namedBindings !== undefined &&
+          ts.isNamedImports(clause.namedBindings) && clause.namedBindings.elements.length > 0 &&
+          clause.namedBindings.elements.every((element) => element.isTypeOnly)) return []
+      } else if (ts.isExportDeclaration(statement)) {
+        if (statement.isTypeOnly) return []
+        if (statement.exportClause !== undefined && ts.isNamedExports(statement.exportClause) &&
+          statement.exportClause.elements.length > 0 &&
+          statement.exportClause.elements.every((element) => element.isTypeOnly)) return []
+      } else return []
+      return statement.moduleSpecifier !== undefined && ts.isStringLiteral(statement.moduleSpecifier)
+        ? [statement.moduleSpecifier.text] : []
+    })
+    for (const fileName of imports) {
       if (fileName.startsWith('.')) pending.push(resolve(dirname(path), fileName))
       else {
         const dependency = packages.find(
@@ -38,13 +54,15 @@ it('isolates SDK optional services while bounding the shared client dependency',
     }
   }
   expect(visited.size).toBeGreaterThan(1)
-  // The generated client is deliberately NOT read-only: its one FractalClient class includes
-  // collection reads and mutation methods. Splitting that shared generator is a separate change.
-  // These are the only client source modules admitted by this SDK boundary (including type edges).
+  // The transport client still includes read and mutation methods; generated schema modules
+  // partition shared read codecs from optional validators without splitting that client class.
+  // Only read validators and shared helpers may be constructed by the eager SDK graph.
   const clientRoot = resolve(repoRoot, 'clients/typescript/fractal-client')
+  expect(visited.has(resolve(clientRoot, 'Schema.generated.ts'))).toBe(false)
   expect([...visited].filter((path) => path.startsWith(`${clientRoot}/`))
     .map((path) => relative(clientRoot, path)).sort()).toEqual([
-      'Client.generated.ts', 'Models.generated.ts', 'Schema.generated.ts',
+      'Client.generated.ts', 'Models.generated.ts', 'ReadSchema.generated.ts',
+      'SchemaSupport.generated.ts',
       'errors.ts', 'index.ts', 'subagent-drivers.ts',
     ])
 })

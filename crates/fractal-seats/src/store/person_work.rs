@@ -240,8 +240,82 @@ pub mod tests {
             assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().assigned_to.as_deref(), Some("person/avery"), "{fence}");
         }
     }
+    #[test]
+    fn refresh_person_ask_identity_and_answers_survive_seal_and_restart() {
+        for answer_at in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("asks.sqlite3");
+            let (memory, _, _) = fixture();
+            let node = memory.origin.clone();
+            drop(memory);
+            let (store, origin, mut input) = fixture_with_store(Store::open(&path, &node).unwrap());
+            store.set_ask_deadlines(true);
+            input.request = Some(gateway_decision());
+            input.deadline_ms = Some(600_000);
+            let ask = store.ask_person(&input).unwrap();
+            let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+            let context = store.work_for_reconcile(&input.actor).unwrap();
+            assert_eq!(context.iter().find(|step| step.subject == origin.subject).unwrap()
+                .blocked_reason.as_deref(), Some(ask.subject.as_str()));
+            let item = store.attention_items(Some(&input.person)).unwrap().into_iter()
+                .find(|item| item.subject == ask.subject).unwrap();
+            assert_eq!(item.request, input.request);
+            let answer = PersonStepResponse {
+                delegation: None, subject: ask.subject.clone(), actor: input.person.clone(),
+                summary: String::new(), evidence: vec![], episode: Some(item.episode.clone()),
+                idempotency_key: "refresh-answer".into(),
+                answer: Some(crate::person_request::AnswerInput {
+                    id: Some("land".into()), text: None,
+                }),
+            };
+            store.append_claim(&ClaimInput {
+                subject: input.actor.clone(), kind: "runtime.observed".into(), actor: None,
+                fields: serde_json::from_value(json!({"status":"running",
+                    "incarnation_id":input.incarnation})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let seal = fractal_store::store::refresh_intake::Seal {
+                operation: "refresh-ask".into(), incumbent: input.incarnation.clone().unwrap(),
+                desired_token: current_desired_row(&store.readers.get(), &input.actor)
+                    .unwrap().unwrap().claim_id,
+                activity_epoch: store.refresh_activity_epoch(&input.actor).unwrap(),
+            };
+            if answer_at == 0 { store.finish_person_step(&answer, false).unwrap(); }
+            assert!(store.prepare_refresh_intake(&input.actor, &seal).unwrap());
+            assert!(store.seal_refresh_intake(&input.actor, &seal).unwrap());
+            if answer_at == 1 { store.finish_person_step(&answer, false).unwrap(); }
+            drop(store);
+            let store = Store::open(&path, &node).unwrap();
+            let retained = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+            assert_eq!(retained.id, original.id);
+            assert_eq!(retained.body, original.body, "display, origin, deadline and answer IDs unchanged");
+            assert!(store.unseal_refresh_intake(&input.actor, &seal.operation).unwrap());
+            if answer_at == 2 {
+                let restored = store.attention_items(Some(&input.person)).unwrap().into_iter()
+                    .find(|item| item.subject == ask.subject).unwrap();
+                assert_eq!(restored.episode, item.episode);
+                assert_eq!(restored.request, item.request);
+                store.finish_person_step(&answer, false).unwrap();
+            }
+            // Retrying the same answer after restart neither reposts nor creates a new attempt.
+            store.finish_person_step(&answer, false).unwrap();
+            let resumed = store.work_for_reconcile(&input.actor).unwrap().into_iter()
+                .find(|step| step.subject == origin.subject).unwrap();
+            assert_eq!(resumed.attempt, origin.attempt);
+            assert_eq!(resumed.person_answers.len(), 1);
+            assert_eq!(resumed.person_answers[0].ask, ask.subject);
+            assert_eq!(resumed.person_answers[0].answer.as_ref().unwrap()["id"], "land");
+            drop(store);
+            let store = Store::open(&path, &node).unwrap();
+            assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().person_answers.len(), 1);
+        }
+    }
+
     pub fn fixture() -> (Store, StepRunView, PersonAskRequest) {
-        let store = Store::open_memory("alder").unwrap();
+        fixture_with_store(Store::open_memory("alder").unwrap())
+    }
+
+    fn fixture_with_store(store: Store) -> (Store, StepRunView, PersonAskRequest) {
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
 agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }

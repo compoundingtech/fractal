@@ -1,6 +1,6 @@
 // Controlled presentation/model only.
 import * as stylex from '@stylexjs/stylex'
-import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars, radiusVars, spaceVars, geometryVars, motionVars, elevationVars } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars, radiusVars, spaceVars, geometryVars, sidebarRowSize, motionVars, elevationVars } from './composition-tokens.stylex'
 
 const surfaceVarsTheme = stylex.createTheme(surfaceVars, {
   canvas: '#0a0a0a',
@@ -96,7 +96,7 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
   gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px',
-  sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
+  sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',

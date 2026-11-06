@@ -4,7 +4,7 @@
  * forecast are what st served, never derived here. `read` is the client's read outcome, not served
  * data, so stories take it as an argument rather than a scenario variant.
  */
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import type { ObjectivesState } from '@fractal/scenarios'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'

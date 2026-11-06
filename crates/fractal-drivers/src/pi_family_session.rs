@@ -28,7 +28,7 @@ use crate::provider_session::{
     PROVIDER_POLL, ProviderOutcome, STOP, describe_exit, install_signal_handler,
     run_provider_observed_with_env_removals,
 };
-use crate::{harness_state, hooks, message, status};
+use crate::{harness_state, hooks, status};
 
 /// pi's startup network work, which a supervised seat should not be doing.
 ///
@@ -77,36 +77,6 @@ pub(crate) struct HarnessKind {
 /// What the wrapper hands the provider process: the channel environment plus the launch argv with
 /// the channel extension spliced in.
 type PreparedLaunch = (Vec<(String, String)>, Vec<String>);
-
-/// Run one interactive pi-family provider and maintain its presence until it exits.
-pub(crate) fn run_for_with_environment(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    provider_argv: Vec<String>,
-    kind: &HarnessKind,
-    additional_env: &[(String, String)],
-    removed_env: &[&str],
-    required_incarnation: Option<String>,
-    legacy_presence: bool,
-) -> Result<()> {
-    let label = kind.label;
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, &identity, &crate::run::detect_host())?
-            .with_context(|| format!("{label} driver agent '{identity}' is not declared"))?;
-    run_for_paths(
-        catalog_root,
-        &agent_dir,
-        identity,
-        runtime_id,
-        provider_argv,
-        kind,
-        additional_env,
-        removed_env,
-        required_incarnation,
-        legacy_presence,
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_for_paths(

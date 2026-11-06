@@ -17,6 +17,7 @@ export { AgentRowActions, type AgentRowActionsProps } from './sidebar/DeferredRo
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { PinsSection, type PinsSectionProps } from './sidebar/PinsSection.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
+export { MissionEtaLabel, formatMissionEta, type MissionEta } from './MissionEta.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, SidebarMissionContext, SidebarMissionInfo, SidebarMissionProgress, SidebarMissionStep, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export { ShowMenu, ShowMenuItem } from './sidebar/SidebarShowMenu.tsx'

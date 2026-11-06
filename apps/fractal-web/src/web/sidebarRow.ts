@@ -73,6 +73,8 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
   return {
     _tag: 'Mission', id, slug: missionSlug(id),
     progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
+    eta: run === undefined || ['completed', 'failed', 'cancelled'].includes(run.status) || Option.isSome(run.completed_at)
+      ? undefined : Option.getOrUndefined(run.eta),
     step: question !== undefined ? { _tag: 'Waiting', question: question.detail.trim() || question.title } :
       work === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: work.title || work.path },
     queued: [...queued.values()],
