@@ -4557,42 +4557,34 @@ pub fn client_attention_resources_fenced_at(
     person: Option<&str>,
     at_unix_ms: u128,
 ) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
-    let (mut current, mut valid_until) = crate::performance::task("attention_collection/snapshot", || {
+    let (current, mut valid_until) = crate::performance::task("attention_collection/snapshot", || {
         store.attention_collection_snapshot(person, at_unix_ms)
     })?;
-    let connection = store.readers.get();
-    let mut failure = None;
-    current.retain(|item| {
-        if failure.is_some() { return true; }
-        let read = || -> anyhow::Result<_> {
-            let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
-            let source = client_attention_control_source(item)?;
-            crate::store::attention_controls::current(&connection, &item.person, &id, &source)
-        };
-        match read() {
-            Ok(controls) => {
-                if !controls.dismissed
-                    && let Some(until) = controls.snoozed_until_unix_ms.map(|until| until as u128)
-                    && until > at_unix_ms
-                {
-                    valid_until = Some(valid_until.map_or(until, |due| due.min(until)));
-                }
-                !controls.dismissed && controls.snoozed_until_unix_ms.is_none_or(|until| until as u128 <= at_unix_ms)
-            }
-            Err(error) => { failure = Some(error); true }
-        }
-    });
-    if let Some(error) = failure { return Err(error); }
-    Ok((client_attention_resources_from_items(store, current)?, valid_until))
+    let resources = client_attention_resources_from_items(store, current, at_unix_ms, &mut valid_until)?;
+    Ok((resources, valid_until))
 }
 
 fn client_attention_resources_from_items(
     store: &Store,
     current: Vec<crate::model::AttentionItemView>,
+    at_unix_ms: u128,
+    valid_until: &mut Option<u128>,
 ) -> anyhow::Result<Vec<Value>> {
     let mut resources = Vec::new();
+    let connection = store.readers.get();
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
+        let source = client_attention_control_source(&item)?;
+        let controls = crate::store::attention_controls::current(&connection, &item.person, &id, &source)?;
+        if !controls.dismissed
+            && let Some(until) = controls.snoozed_until_unix_ms.map(|until| until as u128)
+            && until > at_unix_ms
+        {
+            *valid_until = Some(valid_until.map_or(until, |due| due.min(until)));
+        }
+        if controls.dismissed || controls.snoozed_until_unix_ms.is_some_and(|until| until as u128 > at_unix_ms) {
+            continue;
+        }
         let alert = item.is_alert();
         let conversations = item.conversations();
         let mut resource = json!({
@@ -4605,6 +4597,10 @@ fn client_attention_resources_from_items(
             "targets": item.targets, "actions": client_attention_actions(&item.kind, item.review_mode.as_deref()),
             "operational": {"layer": "current", "actionable": true, "reasons": []},
             "alert": alert,
+            "presentation_control": {
+                "source_revision": source, "revision": controls.revision, "dismissed": controls.dismissed,
+                "snoozed_until": controls.snoozed_until_unix_ms.map(|until| client_timestamp(until as u128)),
+            },
         });
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);

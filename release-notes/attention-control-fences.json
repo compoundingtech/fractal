@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Serve typed source and control-register fences on native attention rows",
+  "replay": { "status": "none", "detail": "No additional claim replay changes." },
+  "schema": { "status": "none", "detail": "No additional database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordinated upgrade required." },
+  "compatibility": { "status": "changed", "detail": "Open attention rows include additive presentation_control metadata: semantic source revision, nullable register revision, dismissed state and nullable UTC snooze deadline. Rust, TypeScript and Swift client models accept the field; older daemon rows remain valid. Filtering and metadata read the same registers before building each visible row." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No action required. This change advertises no new mutation route." },
+  "recovery": { "status": "none", "detail": "The additive serving field leaves source work and stored controls unchanged." }
+}

@@ -684,6 +684,15 @@ mod tests {
         let id = original[0]["id"].as_str().unwrap();
         let items = store.attention_snapshot(Some("person/example"), now).unwrap();
         let source = client_attention_control_source(&items[0]).unwrap();
+        let typed: fractal_client::Attention = serde_json::from_value(original[0].clone()).unwrap();
+        let control = typed.presentation_control.unwrap();
+        assert_eq!(control.source_revision, source);
+        assert_eq!(control.revision, None);
+        assert!(!control.dismissed);
+        assert_eq!(control.snoozed_until, None);
+        let mut legacy = original[0].clone();
+        legacy.as_object_mut().unwrap().remove("presentation_control");
+        assert!(serde_json::from_value::<fractal_client::Attention>(legacy).unwrap().presentation_control.is_none());
         let mut changed = items[0].clone();
         changed.detail.push_str(" Updated");
         assert_ne!(client_attention_control_source(&changed).unwrap(), source);
@@ -718,6 +727,11 @@ mod tests {
         write(Change::Restore, "restore");
         refresh_attention_list(&store).unwrap();
         assert_eq!(store.published_attention_list().unwrap().rows.len(), 1);
+        let restored = store.published_attention_list().unwrap();
+        let control = &restored.rows[0]["presentation_control"];
+        assert_eq!(control["source_revision"], source);
+        assert!(control["revision"].is_string());
+        assert_eq!(control["snoozed_until"], Value::Null);
     }
 
     #[test]

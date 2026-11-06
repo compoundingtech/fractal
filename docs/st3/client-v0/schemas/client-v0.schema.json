@@ -908,6 +908,17 @@
         "operational": { "$ref": "#/$defs/Operational" }
       }
     },
+    "AttentionPresentationControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_revision", "revision", "dismissed", "snoozed_until"],
+      "properties": {
+        "source_revision": { "$ref": "#/$defs/Revision", "description": "Fingerprint of native source semantics, excluding delivery and presentation." },
+        "revision": { "type": ["string", "null"], "description": "Canonical control-register revision; null before the first control." },
+        "dismissed": { "type": "boolean" },
+        "snoozed_until": { "type": ["string", "null"], "format": "date-time", "description": "Server UTC snooze deadline; null explicitly clears snooze." }
+      }
+    },
     "Attention": {
       "allOf": [
         { "$ref": "#/$defs/ResourceHeader" },
@@ -931,6 +942,7 @@
             "source_kind": {"type": "string"},
             "episode": {"type": "string"},
             "action_parameters": {"type": "object"},
+            "presentation_control": { "$ref": "#/$defs/AttentionPresentationControl", "description": "Person-owned presentation state and its source/control fences; absent on older daemons." },
             "request": { "$ref": "#/$defs/StructuredRequest", "description": "A person-step ask's structured request; absent on a free-text ask." },
             "update": { "$ref": "#/$defs/PersonUpdate", "description": "Information the person asked for. It asks nothing: reading it (work.done with answer id read) clears it." },
             "source_id": { "$ref": "#/$defs/Id" },
