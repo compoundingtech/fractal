@@ -25,7 +25,7 @@ public struct MembershipPagingJoin {
     public init(person: String, container: String) { self.person = person; self.container = container }
     /// Call only after subscribing; retain the token with every HTTP request in this attempt.
     public mutating func beginAttempt() -> UUID {
-        let token = UUID(); attempt = token; staged = nil; rows = []; members = []
+        let token = UUID(); attempt = token; staged = nil; rows = []; members = []; isStale = true
         return token
     }
     private mutating func invalidate() { attempt = nil; staged = nil; rows = []; members = []; isStale = true }
@@ -44,6 +44,7 @@ public struct MembershipPagingJoin {
     private func frontier(_ snapshot: Snapshot, _ state: OrderedMembershipState) throws -> Frontier {
         guard state.container == container else { throw MembershipPagingFailure.restart }
         guard let epoch = state.epoch else { throw MembershipPagingFailure.refused }
+        guard state.changedIndex <= snapshot.storeIndex else { throw MembershipPagingFailure.inconsistent }
         return Frontier(host: snapshot.hostID, projection: snapshot.projectionVersion, epoch: epoch, index: state.changedIndex, count: state.liveCount)
     }
     private func compare(_ lhs: Frontier, _ rhs: Frontier) throws {
@@ -55,17 +56,16 @@ public struct MembershipPagingJoin {
             try Self.validate(frame)
             guard let snapshot = frame.snapshot, let state = frame.membership else { throw MembershipPagingFailure.refused }
             let incoming = try frontier(snapshot, state)
+            if let stream, !incoming.sameScope(stream) { self.stream = incoming; throw MembershipPagingFailure.restart }
             if let stream { try compare(incoming, stream); if incoming.index < stream.index { return } }
             stream = incoming
-            if let published {
+            if let staged {
+                try compare(incoming, staged)
+                if incoming.index > staged.index { throw MembershipPagingFailure.restart }
+            } else if let published {
                 try compare(incoming, published)
-                if incoming.index < published.index { return }
-                if incoming.index > published.index {
-                    isStale = true
-                    if staged == nil { throw MembershipPagingFailure.restart }
-                }
+                if incoming.index > published.index { throw MembershipPagingFailure.restart }
             }
-            if let staged { try compare(incoming, staged); if incoming.index > staged.index { throw MembershipPagingFailure.restart } }
         } catch { invalidate(); throw error }
     }
     /// A 409 abandons the attempt, never retries its cursor. All other errors remain errors.
@@ -85,7 +85,11 @@ public struct MembershipPagingJoin {
             let incoming = try frontier(response.snapshot, state)
             guard page.filters["person"] == person else { throw MembershipPagingFailure.restart }
             if let staged { try compare(incoming, staged); guard incoming.index == staged.index else { throw MembershipPagingFailure.restart } }
-            if let stream { try compare(incoming, stream); guard incoming.index >= stream.index else { throw MembershipPagingFailure.restart } }
+            if let stream {
+                if !incoming.sameScope(stream) { self.stream = nil; throw MembershipPagingFailure.restart }
+                try compare(incoming, stream)
+                guard incoming.index >= stream.index else { throw MembershipPagingFailure.restart }
+            }
             staged = incoming
             for row in page.items {
                 guard row.container == container, members.insert(row.member).inserted else { throw MembershipPagingFailure.inconsistent }

@@ -19,6 +19,7 @@ final class MembershipPagingTests: XCTestCase {
     private func page(_ index: UInt64 = 10, count: UInt64 = 1, duplicate: Bool = false, more: Bool = false) throws -> Envelope<OrderedMembershipPage> {
         let f = try fixture()
         var envelope = try XCTUnwrap(f["envelope"] as? [String: Any])
+        var snapshot = try XCTUnwrap(envelope["snapshot"] as? [String: Any]); snapshot["store_index"] = max(1842, index); envelope["snapshot"] = snapshot
         var value = try XCTUnwrap(f["page"] as? [String: Any])
         value["paging_contract"] = "collection-v1"; value["membership"] = metadata(index, count: count)
         value["page"] = ["limit": 100, "has_more": more, "next_cursor": "next"]
@@ -28,6 +29,7 @@ final class MembershipPagingTests: XCTestCase {
     }
     private func frame(_ index: UInt64, count: UInt64 = 1, epoch: String? = "opaque-epoch/1", host: String? = nil, contract: String? = "collection-v1") throws -> OrderedMembershipCollectionFrame {
         var value = try XCTUnwrap(try fixture()["snapshot_frame"] as? [String: Any])
+        var snapshot = try XCTUnwrap(value["snapshot"] as? [String: Any]); snapshot["store_index"] = max(1842, index); value["snapshot"] = snapshot
         value["paging_contract"] = contract; value["membership"] = metadata(index, count: count, epoch: epoch)
         if let host { var snapshot = try XCTUnwrap(value["snapshot"] as? [String: Any]); snapshot["host_id"] = host; value["snapshot"] = snapshot }
         return try decode(value, as: OrderedMembershipCollectionFrame.self)
@@ -102,5 +104,18 @@ final class MembershipPagingTests: XCTestCase {
         let emptyToken = join.beginAttempt()
         value["items"] = []; value["membership"] = metadata(11, count: 0); envelope["value"] = value
         XCTAssertEqual(try join.append(decode(envelope, as: Envelope<OrderedMembershipPage>.self), attempt: emptyToken)?.count, 0)
+    }
+    func testScopeRestartCanFinishWithoutAnotherFrame() throws {
+        var join = MembershipPagingJoin(person: "person/ada", container: container)
+        try join.observe(frame(10, epoch: "old"))
+        let obsolete = join.beginAttempt()
+        XCTAssertThrowsError(try join.append(page(), attempt: obsolete))
+        let fresh = join.beginAttempt()
+        XCTAssertEqual(try join.append(page(), attempt: fresh)?.count, 1)
+        let token = join.beginAttempt()
+        XCTAssertNil(try join.append(page(11, count: 2, more: true), attempt: token))
+        try join.observe(frame(11, count: 2))
+        XCTAssertEqual(join.complete?.count, 1)
+        XCTAssertThrowsError(try join.append(page(), attempt: obsolete))
     }
 }
