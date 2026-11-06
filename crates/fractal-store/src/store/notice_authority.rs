@@ -14,7 +14,7 @@ pub(super) fn record_dependencies(tx: &Transaction<'_>, subject: &str, history: 
         "INSERT OR IGNORE INTO custom_dependencies VALUES(?1,?2,'[]','')",
     )?;
     for claim in history {
-        let fields = custom::fields(claim);
+        let fields = &claim.body["fields"];
         for field in ["source_id", "creation_claim"] {
             if let Some(dependency) = fields.get(field).and_then(Value::as_str) {
                 insert.execute(params![subject, dependency])?;
