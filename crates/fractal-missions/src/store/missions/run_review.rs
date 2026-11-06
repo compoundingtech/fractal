@@ -8,6 +8,8 @@ use fractal_store::store::{
 
 /// Caller-owned snapshot of every generation, descendant and starting parent step, not siblings.
 /// Includes strict loop-round history; public parsers still reject agent-review.
+/// Loops with keep/discard branches or nested loops sharing a loop path currently fail closed
+/// with `reviewer-owner-unresolved` until a later slice.
 #[doc(hidden)]
 pub fn validate_run_reviewer(
     scope: &Scope<'_>,
@@ -167,6 +169,8 @@ fn validate_loop_history(
 }
 
 /// Validate an existing run plus the concrete requester and proposed assignment, without writing.
+/// Loops with keep/discard branches or nested loops sharing a loop path currently fail closed
+/// with `reviewer-owner-unresolved` until a later slice.
 #[doc(hidden)]
 pub fn validate_run_reviewer_assignment(
     scope: &Scope<'_>,
