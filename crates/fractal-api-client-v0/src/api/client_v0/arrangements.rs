@@ -1058,27 +1058,27 @@ mod tests {
             format!("{}&cursor={token}", path.replace("limit=1", "limit=2")),
             format!("{}&cursor={token}", path.replace("&paging_contract=collection-v1", ""))] {
             let (status, body) = membership_json(&state, &uri, "person/ada").await;
-            assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (422, Some(membership_paging::INVALID)));
+            assert_eq!((status.as_u16(), body["code"].as_str()), (422, Some(membership_paging::INVALID)));
         }
         for uri in [path.replace("collection-v1", "unknown"), "/v1/client/agents?paging_contract=collection-v1".into()] {
             let (status, body) = membership_json(&state, &uri, "person/ada").await;
-            assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (422, Some(membership_paging::UNSUPPORTED)));
+            assert_eq!((status.as_u16(), body["code"].as_str()), (422, Some(membership_paging::UNSUPPORTED)));
         }
         let mut inconsistent = membership_paging::Cursor::decode(token, "person/ada", SUBJECT, 1).unwrap();
         inconsistent.live_count += 1;
         let (_, body) = membership_json(&state, &format!("{path}&cursor={}", inconsistent.encode().unwrap()), "person/ada").await;
-        assert_eq!(body["error"]["code"], membership_paging::INCONSISTENT);
+        assert_eq!(body["code"], membership_paging::INCONSISTENT);
         let (status, _) = membership_json(&state, &format!("{path}&cursor={token}"), "person/other").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         edit_memberships(&state, &session, &membership_request(&state, "reorder", json!([
             {"op":"place","member":"resource/b","bucket":null,"key":"a2"}
         ]))).await.unwrap();
         let (status, body) = membership_json(&state, &format!("{path}&cursor={token}"), "person/ada").await;
-        assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (409, Some(membership_paging::CHANGED)));
+        assert_eq!((status.as_u16(), body["code"].as_str()), (409, Some(membership_paging::CHANGED)));
         let (_, fresh) = membership_json(&state, path, "person/ada").await;
         state.store.rebuild_claim_projections().unwrap();
         let (status, body) = membership_json(&state, &format!("{path}&cursor={}", fresh["value"]["page"]["next_cursor"].as_str().unwrap()), "person/ada").await;
-        assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (409, Some(membership_paging::RESET)));
+        assert_eq!((status.as_u16(), body["code"].as_str()), (409, Some(membership_paging::RESET)));
     }
 
     #[tokio::test]
