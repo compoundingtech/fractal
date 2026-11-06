@@ -445,6 +445,8 @@ pub fn signal_visible_change(state: &AppState) {
 
 #[cfg(test)]
 mod storage_contention_response_tests;
+#[cfg(test)]
+mod replication_wake_tests;
 
 #[derive(Debug)]
 pub struct ApiError {

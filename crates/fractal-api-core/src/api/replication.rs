@@ -364,24 +364,24 @@ pub async fn replication_receive(
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
+        // One read answers both whether every new claim is quiet and which kind names the wake;
+        // only a change that projected can wake the reconciler, so no other receive asks it.
+        let (any_new, waking_kind) = if changed && projected {
+            store
+                .claims_since_waking_kind(before_index)
+                .map_err(|error| FractalError::new("internal", error.to_string()))?
+        } else {
+            (false, None)
+        };
         let quiet_only = projection_was_healthy
             && projected
             && repairs == 0
             && admission.unknown == 0
             && admission.invalid == 0
-            && store
-                .claims_since_only_quiet_notifications(before_index)
-                .map_err(|error| FractalError::new("internal", error.to_string()))?;
+            && any_new
+            && waking_kind.is_none();
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         let reconcile_changed = changed && !quiet_only && projected;
-        // The wake is counted under the kind it brought; a repair that brought no claim names none.
-        let waking_kind = if reconcile_changed {
-            store
-                .waking_kind_since(before_index)
-                .map_err(|error| FractalError::new("internal", error.to_string()))?
-        } else {
-            None
-        };
         Ok((
             ReplicationReceiveResponse {
                 receipt,
