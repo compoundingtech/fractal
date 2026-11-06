@@ -6609,11 +6609,13 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to the refresh's own length.
+/// A read waiting for a fresh roster, or a claim this node commits, cuts it short to the
+/// refresh's own length.
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so
-/// that a very cheap fold cannot turn fresh reads into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster, or a claim this node commits, can cut
+/// the refresher's pause to, so that a very cheap fold cannot turn fresh reads or a burst of
+/// local writes into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
@@ -6632,11 +6634,21 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        // The writer's callback only wakes this task; whether the commit holds a claim this
+        // node wrote is read here, off the writer.
+        let commits = Arc::new(tokio::sync::Notify::new());
+        let _observer = {
+            let commits = Arc::clone(&commits);
+            store.observe_commits(move |_| commits.notify_one())
+        };
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
+        let mut look = AgentRosterLook::default();
         loop {
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the fold below or an earlier one.
+            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -6647,15 +6659,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            // Pause as long as the refresh took, so refreshing stays under about half a core
-            // however often readers ask, and at least the minimum pause unless a reader waits
-            // for a fresh roster: that read then waits for one fold, not the rest of the pause.
-            let pause = started.elapsed().max(AGENT_ROSTER_FRESH_PAUSE);
-            tokio::time::sleep(pause).await;
-            tokio::select! {
-                () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
-                () = store.fresh_agent_roster_wanted() => {}
-            }
+            agent_roster_pause(&store, &commits, &mut look, started.elapsed(), folded_through).await;
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
             if store.agent_roster_refresh_failed() {
@@ -6664,6 +6668,105 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// Why the refresher's pause between two refreshes ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentRosterPauseEnd {
+    Full,
+    FreshRead,
+    LocalClaim,
+}
+
+/// The most claims one look for a claim this node wrote reads. A longer run, as through a
+/// replication catch-up, is read a run of this many at a time, each on its own blocking task,
+/// so no read grows with the catch-up and none of it is skipped. There is no index by origin.
+const AGENT_ROSTER_LOCAL_SCAN: u64 = 10_000;
+
+/// The refresher's one look for a claim this node wrote, kept from one pause to the next: a
+/// pause that ends while a look is queued or running leaves it here, and the next pause waits
+/// on it rather than start another, so a congested blocking pool never holds more than one.
+#[derive(Default)]
+struct AgentRosterLook {
+    running: Option<tokio::task::JoinHandle<anyhow::Result<(u64, bool, bool)>>>,
+    /// How many looks have started, for tests.
+    started: u64,
+}
+
+/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
+/// however often readers ask or this node writes, and at least the minimum pause; then the rest
+/// of the full pause, unless a reader waits for a fresh roster or this node commits a claim after
+/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
+/// one more fold at the minimum pause, never a missed one). Either then waits for one fold, not
+/// the rest of the pause: a person waiting to see their own write is not left waiting up to a
+/// second for the next timed fold. Commits that hold only claims other nodes wrote keep the full
+/// pause, so a busy replication stream does not fold the roster any more often.
+async fn agent_roster_pause(
+    store: &Arc<Store>,
+    commits: &tokio::sync::Notify,
+    look: &mut AgentRosterLook,
+    folded: Duration,
+    through: u64,
+) -> AgentRosterPauseEnd {
+    agent_roster_pause_scanning(store, commits, look, folded, through, AGENT_ROSTER_LOCAL_SCAN).await
+}
+
+/// [`agent_roster_pause`], reading at most `scan` claims per look. `commits` is woken by every
+/// commit; a wake starts one look on the blocking pool, and at most one runs at a time, in this
+/// pause or carried over from an earlier one. The timer and fresh reads are still served while it
+/// runs, so a busy pool or a slow read never holds the pause past its end. Wakes during a look
+/// leave their permit for the next one.
+async fn agent_roster_pause_scanning(
+    store: &Arc<Store>,
+    commits: &tokio::sync::Notify,
+    look: &mut AgentRosterLook,
+    folded: Duration,
+    mut through: u64,
+    scan: u64,
+) -> AgentRosterPauseEnd {
+    let start = |look: &mut AgentRosterLook, through: u64| {
+        let reader = Arc::clone(store);
+        look.started += 1;
+        look.running = Some(tokio::task::spawn_blocking(move || {
+            let index = reader.index()?;
+            let upto = index.min(through.saturating_add(scan));
+            if upto <= through {
+                return anyhow::Ok((through, false, false));
+            }
+            Ok((upto, reader.first_local_commit_after(through, upto)?.is_some(), upto < index))
+        }));
+    };
+    let pause = folded.max(AGENT_ROSTER_FRESH_PAUSE);
+    tokio::time::sleep(pause).await;
+    let rest = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause));
+    tokio::pin!(rest);
+    loop {
+        tokio::select! {
+            () = &mut rest => return AgentRosterPauseEnd::Full,
+            () = store.fresh_agent_roster_wanted() => return AgentRosterPauseEnd::FreshRead,
+            // A commit during the refresh or the minimum pause left its wake: it is read here.
+            () = commits.notified(), if look.running.is_none() => start(look, through),
+            read = async { look.running.as_mut().expect("polled only while looking").await },
+                if look.running.is_some() => {
+                look.running = None;
+                match read {
+                    // A look carried over from an earlier pause may end at or before `through`:
+                    // what it found, the refresh since has folded.
+                    Ok(Ok((upto, true, _))) if upto > through => return AgentRosterPauseEnd::LocalClaim,
+                    Ok(Ok((upto, _, more))) if upto > through => {
+                        through = upto;
+                        // The rest of a long run is read at once, with no commit to wait for.
+                        if more {
+                            start(look, through);
+                        }
+                    }
+                    Ok(Ok(_)) => {}
+                    // The full pause still ends this one; a failed read costs only the shortcut.
+                    Ok(Err(_)) | Err(_) => {}
+                }
+            }
+        }
+    }
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
