@@ -3100,10 +3100,14 @@ mod tests {
         let source = r#"mission "collision" state="ready" {
           goal "Keep nested histories separate."
           step "left" { mission "left-inner" { goal "Left.";
-            loop "repeat" { max-rounds 2; round { goal "Left round."; }; }
+            loop "repeat" { max-rounds 2; round { goal "Left round.";
+              completion { when "all-steps-exhausted"; };
+            }; }
           }; }
           step "right" { mission "right-inner" { goal "Right.";
-            loop "repeat" { max-rounds 2; round { goal "Right round."; }; }
+            loop "repeat" { max-rounds 2; round { goal "Right round.";
+              completion { when "all-steps-exhausted"; };
+            }; }
           }; }
         }"#;
         let missions = super::parse_missions(&source.parse().unwrap(), "node").unwrap();
@@ -3130,7 +3134,9 @@ mod tests {
     #[test]
     fn top_level_loop_retains_local_path_and_legacy_publication_hashes() {
         let source = r#"mission "top" state="ready" { goal "Top.";
-          loop "repeat" { max-rounds 2; round { goal "Round."; }; }
+          loop "repeat" { max-rounds 2; round { goal "Round.";
+            completion { when "all-steps-exhausted"; };
+          }; }
         }"#;
         let missions = super::parse_missions(&source.parse().unwrap(), "node").unwrap();
         let mission = &missions["top"];
