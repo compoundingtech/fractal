@@ -112,6 +112,158 @@ fn lifecycle(store: &Store, member: &str) -> (bool, String) {
 fn sync(source: &Store, target: &Store) {
     receive_and_project(target, &source.origin, &exchange_from(source, &ReplicationInventory::default()));
 }
+
+#[test]
+fn checked_membership_pages_isolate_local_and_imported_claims() {
+    let source = Store::open_memory("page-import-source").unwrap();
+    let target = Store::open_memory("page-import-target").unwrap();
+    create(&source);
+    for member in [SEAT_A, SEAT_B, SEAT_C] {
+        declare(&source, member, "true", member);
+    }
+    edit(&source, json!([
+        place(SEAT_A, None, "a0"), place(SEAT_B, None, "a1"), place(SEAT_C, None, "a2")
+    ]));
+    sync(&source, &target);
+    let first = target.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    let mut index = first.store_index;
+    for round in 0..3 {
+        let mut other = arrangement_input(json!([{"op":"create","name":"Other"}]));
+        other.subject = format!("arrangement/person/ada/019a0000-0000-7000-8000-00000000020{round}");
+        other.fields.insert("version".into(), json!(2));
+        target.edit_arrangement(&other, &BTreeMap::new()).unwrap();
+        declare(&target, "agent/ada/unreferenced-local", &format!("echo local-{round}"), &format!("local-{round}"));
+        declare(&source, "agent/ada/unreferenced-import", &format!("echo import-{round}"), &format!("import-{round}"));
+        sync(&source, &target); // Return is a committed replication/projection barrier.
+        let page = target.ordered_membership_page_checked(
+            CONTAINER, Some(("", "a0", SEAT_A)), 2, |_, generation, state| {
+                assert_eq!(generation, first.generation);
+                assert_eq!(state, first.state);
+                Ok::<(), ()>(())
+            },
+        ).unwrap().unwrap();
+        assert!(page.store_index > index);
+        index = page.store_index;
+        assert_eq!(page.items.iter().map(|row| row["member"].as_str().unwrap()).collect::<Vec<_>>(),
+            vec![SEAT_B, SEAT_C]);
+    }
+    // The imported edit is outside the one-row first page and preserves the live count.
+    edit(&source, json!([place(SEAT_C, None, "a3")]));
+    sync(&source, &target);
+    let rejected = target.ordered_membership_page_checked(
+        CONTAINER, Some(("", "a0", SEAT_A)), 2, |_, generation, state| {
+            assert_eq!(generation, first.generation);
+            assert_eq!(state.live_count, first.state.live_count);
+            assert!(state.changed_index > first.state.changed_index);
+            Err::<(), _>(state)
+        },
+    ).unwrap().unwrap_err();
+    let current = target.ordered_membership_page(CONTAINER, None, 3).unwrap();
+    assert_eq!(rejected, current.state);
+    assert_eq!(current.items[2]["position"]["key"], "a3");
+}
+
+#[test]
+fn checked_membership_pages_reject_each_relevant_lifecycle_change() {
+    for change in ["place", "remove", "reorder", "effective-bucket", "retirement"] {
+        let store = Store::open_memory(&format!("page-change-{change}")).unwrap();
+        create(&store);
+        for member in [SEAT_A, SEAT_B, SEAT_C] {
+            declare(&store, member, "true", member);
+        }
+        folder_edit(&store, json!([
+            {"op":"folder.create","id":FOLDER_A,"name":"A","parent":null,"key":"a0"}
+        ]));
+        edit(&store, json!([place(SEAT_A, None, "a0"), place(SEAT_B, Some(FOLDER_A), "a1")]));
+        if change == "reorder" {
+            edit(&store, json!([place(SEAT_C, Some(FOLDER_A), "a2")]));
+        }
+        let first = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+        assert_eq!(first.items[0]["member"], SEAT_A);
+        let retained = head(&store, SEAT_B);
+        // Each synchronous edit returns only after its projection commit. All changes
+        // affect the unseen tail, not the held one-row window.
+        match change {
+            "place" => { edit(&store, json!([place(SEAT_C, None, "a2")])); }
+            "remove" => { edit(&store, json!([{"op":"remove","member":SEAT_B}])); }
+            "reorder" => { edit(&store, json!([place(SEAT_B, Some(FOLDER_A), "a3")])); }
+            "effective-bucket" => {
+                folder_edit(&store, json!([{"op":"folder.delete","id":FOLDER_A}]));
+            }
+            "retirement" => { desired_retirement_fixture(&store, SEAT_B, "page-retire"); }
+            _ => unreachable!(),
+        }
+        let rejected = store.ordered_membership_page_checked(
+            CONTAINER, Some(("", "a0", SEAT_A)), 2, |_, generation, state| {
+                assert_eq!(generation, first.generation);
+                assert!(state.changed_index > first.state.changed_index, "{change}");
+                Err::<(), _>(state)
+            },
+        ).unwrap().unwrap_err();
+        let current = store.ordered_membership_page(CONTAINER, None, 3).unwrap();
+        assert_eq!(rejected, current.state);
+        assert_eq!(current.items.len() as u64, current.state.live_count);
+        assert_eq!(current.items[0], first.items[0], "{change}");
+        match change {
+            "place" => assert_eq!(current.state.live_count, 3),
+            "remove" | "retirement" => assert_eq!(current.state.live_count, 1),
+            "reorder" => {
+                assert_eq!(current.state.live_count, first.state.live_count);
+                assert_eq!(current.items[1]["member"], SEAT_C);
+                assert_eq!(current.items[2]["member"], SEAT_B);
+                assert_eq!(current.items[2]["position"]["key"], "a3");
+            }
+            "effective-bucket" => {
+                assert_eq!(current.state.live_count, first.state.live_count);
+                assert_eq!(current.items[1]["position"]["bucket"], Value::Null);
+                assert_eq!(head(&store, SEAT_B), retained);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn checked_membership_keysets_cross_root_and_folder_ties() {
+    let store = Store::open_memory("page-bucket-ties").unwrap();
+    create(&store);
+    let fourth = "agent/ada/seat-d";
+    for member in [SEAT_A, SEAT_B, SEAT_C, fourth] {
+        declare(&store, member, "true", member);
+    }
+    folder_edit(&store, json!([
+        {"op":"folder.create","id":FOLDER_A,"name":"A","parent":null,"key":"a0"}
+    ]));
+    edit(&store, json!([
+        place(fourth, Some(FOLDER_A), "a0"), place(SEAT_B, None, "a0"),
+        place(SEAT_C, Some(FOLDER_A), "a0"), place(SEAT_A, None, "a0")
+    ]));
+    let first = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    let expected = [(SEAT_A, ""), (SEAT_B, ""), (SEAT_C, FOLDER_A), (fourth, FOLDER_A)];
+    let mut staged = vec![first.items[0].clone()];
+    assert_eq!(staged[0]["member"], SEAT_A);
+    for (member, bucket) in expected {
+        let next = store.ordered_membership_page_checked(
+            CONTAINER, Some((bucket, "a0", member)), 1, |_, generation, state| {
+                assert_eq!(generation, first.generation);
+                assert_eq!(state, first.state);
+                Ok::<(), ()>(())
+            },
+        ).unwrap().unwrap();
+        assert_eq!(next.state.live_count, 4);
+        if member == fourth {
+            assert!(next.items.is_empty());
+        } else {
+            assert_eq!(next.items.len(), 1);
+            staged.extend(next.items);
+        }
+    }
+    assert_eq!(staged.iter().map(|row| row["member"].as_str().unwrap()).collect::<Vec<_>>(),
+        vec![SEAT_A, SEAT_B, SEAT_C, fourth]);
+    assert_eq!(staged.len() as u64, first.state.live_count);
+    assert_eq!(staged, rows(&store));
+}
+
 #[test]
 fn membership_page_frontier_ignores_unreferenced_writes() {
     let store = Store::open_memory("membership-page-scope").unwrap();

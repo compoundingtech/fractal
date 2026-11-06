@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add store acceptance cases for checked membership pages across replication, lifecycle edits and root/folder keyset ties",
+  "replay": {"status": "none", "detail": "Tests use committed local edits and the existing replication/projector fixture; production replay behavior is unchanged."},
+  "schema": {"status": "none", "detail": "No schema or generated client changes."},
+  "rules": {"status": "none", "detail": "Cases assert unchanged collection state after other-arrangement, unreferenced-resource and irrelevant imported writes; relevant imports, placement, removal, count-preserving reorder, effective-bucket changes and retirement advance the selected frontier."},
+  "compatibility": {"status": "none", "detail": "Tests exercise the existing checked atomic page API and terminal metadata across root/folder tuple ties. They do not establish HTTP error mapping, host-switch handling, restored-database boot epochs or client publication behavior. No capability is advertised."},
+  "downtime": {"status": "none", "detail": "Test-only change."},
+  "manual": {"status": "none", "detail": "No manual steps. These added tests have not been run as part of this change."},
+  "recovery": {"status": "none", "detail": "Existing generation rollback, unchanged-index repair/rebuild and reopen coverage is retained without duplication."}
+}
