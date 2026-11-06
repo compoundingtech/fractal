@@ -34706,6 +34706,153 @@ version 2
     }
 
     #[test]
+    fn nested_loops_keep_round_results_and_feedback_separate() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "left-result" { kind "custom.test.loop-result"; }
+resource "right-result" { kind "custom.test.loop-result"; }
+mission "collision" state="ready" {
+  goal "Keep nested histories separate."
+  completion { when "all-steps-exhausted"; }
+  step "left" { mission "left-inner" { goal "Left."; completion { when "all-steps-exhausted"; };
+    loop "repeat" { max-rounds 2; until { gate "left-ready" { field "state" "resource/left-result" is "ready"; }; }
+      round { completion { when "all-steps-exhausted"; }; step "work" { agentless; goal "Left round."; }; }
+    }
+  }; }
+  step "right" { mission "right-inner" { goal "Right."; completion { when "all-steps-exhausted"; };
+    loop "repeat" { max-rounds 2; until { gate "right-ready" { field "state" "resource/right-result" is "ready"; }; }
+      round { completion { when "all-steps-exhausted"; }; step "work" { agentless; goal "Right round."; }; }
+    }
+  }; }
+}"#,
+            "nested-loop-collision",
+        );
+        let mut request = MissionRunRequest {
+            mission: "collision".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "nested-loop-collision-run".into(),
+        };
+        let run = store.create_mission_run(&request).unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..24 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let generation = run.generation.strip_prefix("run-generation/").unwrap();
+        let mut feedbacks = Vec::new();
+        for (path, own_gate, other_gate) in [
+            ("left/left-inner/repeat", "left-ready", "right-ready"),
+            ("right/right-inner/repeat", "right-ready", "left-ready"),
+        ] {
+            let subject = format!("loop-run/{generation}/{path}");
+            let results = store
+                .claims_for(&subject, Some("loop.round-result"))
+                .unwrap();
+            let first = results
+                .iter()
+                .find(|claim| claim.body.pointer("/fields/round") == Some(&Value::from(1)))
+                .expect("each nested loop records its own first-round result");
+            let [child, second] = [1, 2].map(|round| {
+                store
+                    .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
+                        "loop-round:step-run/{generation}/{path}:{round}"
+                    )))
+                    .unwrap()
+                    .unwrap()
+            });
+            assert_eq!(
+                first
+                    .body
+                    .pointer("/fields/mission_run")
+                    .and_then(Value::as_str),
+                Some(child.subject.as_str())
+            );
+            let feedback = &second.inputs[LOOP_FEEDBACK_INPUT].value;
+            let (name, hash) = feedback.rsplit_once('@').unwrap();
+            let document = store.get_document(name, hash).unwrap().unwrap();
+            let body = String::from_utf8(document).unwrap();
+            assert!(body.contains(own_gate), "{body}");
+            assert!(!body.contains(other_gate), "{body}");
+            assert_eq!(
+                name,
+                format!("doc/loop-feedback/{generation}/{path}/1/outcome")
+            );
+            feedbacks.push(feedback.clone());
+        }
+        assert_ne!(feedbacks[0], feedbacks[1]);
+        let old_subject = format!("loop-run/{generation}/repeat");
+        assert!(
+            store
+                .claims_for(&old_subject, Some("loop.round-result"))
+                .unwrap()
+                .is_empty()
+        );
+        let id = "x".repeat(150);
+        let leaf = "y".repeat(62);
+        let source = format!(
+            r#"version 2
+mission "long" state="ready" {{ goal "Long.";
+  step "{id}" {{ mission "a" {{ goal "A.";
+    step "{id}" {{ mission "b" {{ goal "B.";
+      step "{leaf}" {{ mission "c" {{ goal "C.";
+        loop "repeat" {{ max-rounds 1; round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}
+      }}; }}; }}; }}; }}; }}
+}}"#
+        );
+        apply_source(&store, &source, "long-loop");
+        request.mission = "long".into();
+        request.idempotency_key = "long-loop-run".into();
+        let long = store.create_mission_run(&request).unwrap();
+        for _ in 0..16 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let generation = long.generation.strip_prefix("run-generation/").unwrap();
+        // The unchanged legacy writer admits both the name and its boundary name@hash reference.
+        let name =
+            format!("doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/1/outcome");
+        let hash = store.latest_document_hash(&name).unwrap().unwrap();
+        assert!(format!("{name}@{hash}").len() < 512);
+        let subject = format!("loop-run/{generation}/{id}/a/{id}/b/{leaf}/c/repeat");
+        assert!(
+            !store
+                .claims_for(&subject, Some("loop.round-result"))
+                .unwrap()
+                .is_empty()
+        );
+        // Every retry fits, including the full u32 attempt width beyond max-rounds.
+        let name = format!(
+            "doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/{}/outcome",
+            u32::MAX
+        );
+        let document = store
+            .put_document(&name, b"{}", &None, "max-attempt-outcome")
+            .unwrap();
+        let reference = format!("{}@{}", document.name, document.hash);
+        assert_eq!(reference.len(), 512);
+        reconciler
+            .record_once(
+                &subject,
+                "loop.state",
+                BTreeMap::from([
+                    ("status".into(), Value::String("failed".into())),
+                    ("round".into(), Value::from(u32::MAX)),
+                    ("feedback".into(), Value::String(reference)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn a_first_class_loop_runs_bounded_child_missions_until_its_gate_passes() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let source = r#"
@@ -34789,6 +34936,10 @@ mission "loop" state="ready" {
         assert_eq!(completed.loops[0].status, "completed");
         assert_eq!(completed.loops[0].round, 2);
         assert_eq!(completed.loops[0].results.len(), 2);
+        let reference = completed.loops[0].results[0].feedback.as_ref().unwrap();
+        let (name, _) = reference.rsplit_once('@').unwrap();
+        let generation = run.generation.strip_prefix("run-generation/").unwrap();
+        assert_eq!(name, format!("doc/loop-feedback/{generation}/improve/1"));
     }
 
     #[test]
