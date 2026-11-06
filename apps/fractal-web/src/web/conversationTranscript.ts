@@ -3,6 +3,7 @@ import type {
   TranscriptAvailability,
   TranscriptEmptyState,
   TranscriptHistory,
+  TranscriptOlderRequest,
   TranscriptTurn,
 } from '@fractal/ui/assistant-ui'
 import { workLogTurnFromItems, type WorkKind } from '@fractal/ui/assistant-ui/work-log'
@@ -223,7 +224,7 @@ const diagnosticCode = /^[a-z][a-z0-9-]{0,39}$/
 
 export const mapConversationFeed = (
   feed: Feed<ConversationPage>,
-  options: { readonly agentName?: string; readonly showSystemEvents?: boolean },
+  options: { readonly agentName?: string; readonly showSystemEvents?: boolean; readonly onLoadEarlier?: () => void },
 ): ConversationTranscriptState => {
   switch (feed._tag) {
     case 'Waiting':
@@ -235,17 +236,23 @@ export const mapConversationFeed = (
       return { _tag: 'Unavailable', classification, code, availability: { _tag: 'Unavailable', ...unavailableCopy[classification] } }
     }
     case 'Observed': {
-      const hasOlder = feed.value.hasOlder
+      const { hasOlder, older } = feed.value
       const turns = transcriptTurnsForItems(feed.value.items, { agentName: options.agentName, firstTurnComplete: !hasOlder, showSystemEvents: options.showSystemEvents })
       // Native page provenance decides emptiness: a non-empty page whose rows are all omitted
       // (or that arrived with none) is filtered, not an empty conversation.
       const filteredEmpty = feed.value.observation?.empty === false
         && (feed.value.items.length === 0 || (!options.showSystemEvents && feed.value.items.every(isOmittedItem)))
+      // `hasOlder` alone places the boundary; a failed request's detail is diagnostic and never rendered.
+      const request: TranscriptOlderRequest | undefined = older === undefined ? undefined : older._tag === 'Loading' ? { _tag: 'Loading' } : { _tag: 'Failed' }
       return {
         _tag: 'Observed',
         turns,
         items: turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]),
-        history: hasOlder ? { _tag: 'HasOlder' } : { _tag: 'Complete' },
+        history: hasOlder ? {
+          _tag: 'HasOlder',
+          ...(options.onLoadEarlier === undefined ? {} : { onLoadEarlier: options.onLoadEarlier }),
+          ...(request === undefined ? {} : { older: request }),
+        } : { _tag: 'Complete' },
         filteredEmpty,
         emptyState: filteredEmpty ? { title: 'This page contains no displayable conversation entries.' } : undefined,
         isRunning: turns.some(turn => turn.work.running),
@@ -261,12 +268,14 @@ export const createConversationTranscript = (): typeof mapConversationFeed => {
   let previousFeed: Feed<ConversationPage> | undefined
   let previousName: string | undefined
   let previousSystemEvents: boolean | undefined
+  let previousLoadEarlier: (() => void) | undefined
   let previousState: ConversationTranscriptState | undefined
   return (feed, options) => {
-    if (previousState !== undefined && previousName === options.agentName && previousSystemEvents === options.showSystemEvents && (
+    if (previousState !== undefined && previousName === options.agentName && previousSystemEvents === options.showSystemEvents && previousLoadEarlier === options.onLoadEarlier && (
       previousFeed === feed
       || (feed._tag === 'Observed' && previousFeed?._tag === 'Observed'
         && feed.value.hasOlder === previousFeed.value.hasOlder
+        && feed.value.older?._tag === previousFeed.value.older?._tag
         && feed.value.observation?.empty === previousFeed.value.observation?.empty
         && sameConversationItems(feed.value.items, previousFeed.value.items))
       || (feed._tag === 'Waiting' && previousFeed?._tag === 'Waiting')
@@ -279,6 +288,7 @@ export const createConversationTranscript = (): typeof mapConversationFeed => {
     previousFeed = feed
     previousName = options.agentName
     previousSystemEvents = options.showSystemEvents
+    previousLoadEarlier = options.onLoadEarlier
     previousState = mapConversationFeed(feed, options)
     return previousState
   }
