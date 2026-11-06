@@ -4508,6 +4508,7 @@
           "properties": {
             "kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128},
             "collection": {"const": "ordered-memberships"},
+            "paging_contract": {"const": "collection-v1"},
             "person": {"$ref": "#/$defs/ArrangementPerson"}, "subject": {"$ref": "#/$defs/ArrangementId"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200}
           }
