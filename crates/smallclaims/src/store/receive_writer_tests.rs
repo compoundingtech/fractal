@@ -663,6 +663,12 @@ fn an_old_sealing_frontier_recovers_skipped_batches_once_after_reopen() {
     let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
     store.bind_fleet(FLEET).unwrap();
     let observer = node("elm");
+    // Exchanges do not run the recovery search; the daemon's deferred pass does.
+    let exported = store
+        .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
+        .unwrap();
+    assert!(exported.envelopes.is_empty());
+    store.seal_local_batches().unwrap();
     let exported = store
         .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
         .unwrap();
@@ -724,19 +730,76 @@ fn startup_admission_seals_new_batches_without_a_snapshot_or_recovery_search() {
     assert!(store.replication_snapshot.lock().unwrap().is_none());
     assert!(*store.sealing_recovery.try_lock().unwrap());
 
-    // The first export after serving builds both.
+    // The first export after serving builds the snapshot, still without the search: the
+    // daemon runs it after the reconnect window.
     store.replication_snapshot().unwrap();
     assert!(store.replication_snapshot.lock().unwrap().is_some());
+    assert!(*store.sealing_recovery.try_lock().unwrap());
+    store.seal_local_batches().unwrap();
     assert!(!*store.sealing_recovery.try_lock().unwrap());
 }
 
-/// After a downgrade an older binary can leave a batch behind the sealing frontier with no
-/// envelope. Startup admission seals only the batches after the frontier, so the first snapshot
-/// after serving seals the skipped one, after a newer batch. The envelope takes its writer,
-/// sequence and previous hash from the batch header written with the batch, so sealing later
-/// changes none of them: the writer's chain stays whole and a peer admits both batches.
+/// The recovery search walks every batch, fourteen seconds on a busy host's store, and once
+/// each exchange's snapshot ran it first: export and receive both waited for it in the minute
+/// after a restart. An exchange now seals after the frontier and builds its snapshot while the
+/// search is still running.
 #[test]
-fn a_batch_skipped_behind_the_frontier_is_sealed_by_the_first_snapshot_after_admission() {
+fn exchanges_do_not_wait_for_the_sealing_recovery_search() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        for index in 0..2_000 {
+            recovery_note(&store, &format!("note/history-{index}"));
+        }
+        store.seal_local_batches().unwrap();
+    }
+    let store = Arc::new(Store::open(&path, "cedar", Arc::new(Plain)).unwrap());
+    store.bind_fleet(FLEET).unwrap();
+    let written = recovery_note(&store, "note/written-after-the-restart");
+    // As if the search had started and were still walking the batches.
+    let searching = store.sealing_recovery.blocking_lock();
+    assert!(*searching);
+    let exporting = store.clone();
+    let (done, exported) = mpsc::sync_channel(1);
+    let exporter = std::thread::spawn(move || {
+        let observer = node("elm");
+        let inventory = observer.replication_inventory().unwrap();
+        done.send(
+            exporting
+                .export_replication_exchange(FLEET, &inventory)
+                .map(|exchange| exchange.envelopes.len())
+                .map_err(|error| error.to_string()),
+        )
+        .unwrap();
+    });
+    let exported = exported.recv_timeout(Duration::from_secs(20));
+    drop(searching);
+    exporter.join().unwrap();
+    let exported = exported.expect("the export waited for the recovery search").unwrap();
+    assert!(exported > 0);
+    let sealed: i64 = store
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*) FROM replica_envelopes
+             WHERE batch_id=(SELECT batch_id FROM claims WHERE id=?1)",
+            [&written.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sealed, 1, "the export sealed the batch written after the frontier");
+    assert!(*store.sealing_recovery.try_lock().unwrap(), "the search is still due");
+}
+
+/// After a downgrade an older binary can leave a batch behind the sealing frontier with no
+/// envelope. Startup admission and exchanges seal only the batches after the frontier, so the
+/// deferred recovery search seals the skipped one, after a newer batch. The envelope takes its
+/// writer, sequence and previous hash from the batch header written with the batch, so sealing
+/// later changes none of them: the writer's chain stays whole and a peer admits both batches.
+#[test]
+fn a_batch_skipped_behind_the_frontier_is_sealed_by_the_recovery_search_after_admission() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cedar.sqlite3");
     let skipped = {
@@ -794,10 +857,15 @@ fn a_batch_skipped_behind_the_frontier_is_sealed_by_the_first_snapshot_after_adm
 
     assert_eq!(store.validate_replication_backlog().unwrap().valid, 3);
     assert!(envelope(&newer).is_some(), "admission sealed the batch after the frontier");
-    assert!(envelope(&skipped).is_none(), "the skipped batch waits for the first snapshot");
+    assert!(envelope(&skipped).is_none(), "the skipped batch waits for the recovery search");
     let admitted = peer_verdicts();
     assert_eq!(admitted.len(), 3);
 
+    // An exchange's snapshot does not search; the daemon's deferred pass does, and the next
+    // snapshot offers what it sealed.
+    store.replication_snapshot().unwrap();
+    assert!(envelope(&skipped).is_none(), "an exchange does not search behind the frontier");
+    store.seal_local_batches().unwrap();
     store.replication_snapshot().unwrap();
     let (writer, skipped_sequence) = envelope(&skipped).unwrap();
     let (newer_writer, newer_sequence) = envelope(&newer).unwrap();

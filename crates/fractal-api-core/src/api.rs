@@ -6591,11 +6591,9 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
 /// request path. Until it is made, the collection says so instead of making a read wait for it.
-/// A newly started report returns its operation audit for the delayed startup repair to consume;
-/// later doctor calls and diagnostic refreshes always audit the current store themselves.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// The report reads the last operation audit; the daemon makes its first audit only after the
+/// reconnect window. Return whether this call started the report.
+pub fn start_operation_report(state: &AppState) -> bool {
     client_v0::start_operation_report(state)
 }
 
@@ -8771,7 +8769,8 @@ pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
 }
 
 /// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
-/// every operation, about 14 s on a 56 GB store. The daemon audits at startup and then every
+/// every operation, about 14 s on a 56 GB store. The daemon audits
+/// [`crate::store::STARTUP_MAINTENANCE_DELAY`] after it starts and then every
 /// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
 pub(crate) fn operation_projection_check(
     audit: Option<crate::store::OperationAuditRecord>,
@@ -8785,7 +8784,8 @@ pub(crate) fn operation_projection_check(
     };
     let Some(audit) = audit else {
         return check("warn", format!(
-            "no operation audit has finished since the daemon started; it audits at startup and then every {} min",
+            "no operation audit has finished since the daemon started; it audits {} min after it starts and then every {} min",
+            crate::store::STARTUP_MAINTENANCE_DELAY.as_secs() / 60,
             period.as_secs() / 60
         ));
     };

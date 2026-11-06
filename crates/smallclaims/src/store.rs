@@ -840,7 +840,9 @@ pub struct Store {
     pub readers: ReadPool,
     pub committed_index: Arc<AtomicU64>,
     pub seeded_batch_rowid: AtomicI64,
-    /// Check older writers' skipped batches once per open, before the first sealing pass.
+    /// Check older writers' skipped batches once per open. Exchanges do not wait for it: the
+    /// daemon runs it after the reconnect window, and checkpoints, backups and proofs before
+    /// they read.
     sealing_recovery: tokio::sync::Mutex<bool>,
     pub replica_generation: AtomicU64,
     pub replication_snapshot: Mutex<Option<Arc<ReplicationSnapshot>>>,
@@ -1250,8 +1252,9 @@ impl Store {
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
-        // Preserve the sealing cursor here. With keys loaded, the first sealing pass searches
-        // for retained claims older writers skipped and rewinds only if recovery is necessary.
+        // Preserve the sealing cursor here. With keys loaded, the first full sealing pass
+        // (`seal_local_batches`) searches for retained claims older writers skipped and rewinds
+        // only if recovery is necessary.
         let max_rowid = max_batch_rowid(&connection)?;
         let stored_cursor: i64 = connection
             .query_row(
@@ -7039,8 +7042,12 @@ impl Store {
         Ok(self.replication_snapshot()?.inventory.public())
     }
 
-    /// The replication snapshot with every local batch sealed into a signed envelope first. The
-    /// exchange paths use it; they must offer peers everything this node wrote.
+    /// The replication snapshot with every local batch after the sealing frontier sealed into a
+    /// signed envelope first. The exchange paths use it; they must offer peers everything this
+    /// node wrote since. A batch an older binary left behind the frontier is offered once the
+    /// once-per-open recovery search seals it: that search walks every batch, fourteen seconds
+    /// on a busy host's store, and no exchange waits for it. The daemon runs it after the
+    /// reconnect window.
     pub fn replication_snapshot(&self) -> Result<Arc<ReplicationSnapshot>> {
         // A write that lands between sealing and reading would be counted by the projection
         // digests but not by the inventory, and a peer comparing graphs at equal inventories
@@ -7049,7 +7056,7 @@ impl Store {
         let mut snapshot;
         let mut attempts = 0;
         loop {
-            self.seal_local_batches()?;
+            self.seal_local_batches_after_frontier()?;
             snapshot = self.sealed_replication_snapshot()?;
             attempts += 1;
             if !snapshot.unsealed || attempts == 8 {
@@ -7062,7 +7069,8 @@ impl Store {
         Ok(snapshot)
     }
 
-    /// Seal this node's batches that have no envelope yet, and sign them. Only this takes the
+    /// Seal this node's batches that have no envelope yet, and sign them, first searching once
+    /// per open for batches older writers skipped behind the frontier. Only this takes the
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
         self.recover_sealing_frontier()?;
@@ -7070,8 +7078,8 @@ impl Store {
     }
 
     /// Seal the batches written after the sealing frontier, without the once-per-process search
-    /// for batches skipped behind it. That search walks every batch; whoever seals for a
-    /// snapshot runs it, and lowering the frontier then seals what it found.
+    /// for batches skipped behind it. That search walks every batch; `seal_local_batches` runs
+    /// it, and lowering the frontier then seals what it found.
     fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
@@ -8138,7 +8146,8 @@ impl Store {
     ) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
-        // envelope, and the daemon runs this before it serves. The first export builds it.
+        // envelope, and the daemon runs this before it serves. The first export builds it, and
+        // neither waits for the recovery search.
         self.seal_local_batches_after_frontier()?;
         self.judge_claims_slice(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
