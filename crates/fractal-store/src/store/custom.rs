@@ -170,7 +170,7 @@ pub fn open(tx: &Transaction<'_>) -> Result<()> {
         )
         .optional()?
         .as_deref()
-        != Some("1")
+        != Some("2")
     {
         rebuild(tx)
     } else {
@@ -181,7 +181,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hcc772813cbfc owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "DELETE FROM custom_registrations; DELETE FROM custom_sources; DELETE FROM custom_dependencies; DELETE FROM local_custom_dirty; INSERT INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%';")?;
     flush(tx)?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-ha3a90c10519b owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','1')",
+        /* sqlite-large-value: allow-for-now lv-ha275af346170 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','2')",
         [],
     )?;
     Ok(())
@@ -558,7 +558,7 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
         if fractal_schema::notice::is_reserved_subject(subject) {
             let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});
-            tx.execute("INSERT OR REPLACE INTO custom_sources VALUES(?1,'','','','unavailable',?2,NULL,NULL,0,'0')",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h50b120964acf owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO custom_sources VALUES(?1,'','','','unavailable',?2,NULL,NULL,0,'0')",
                 params![subject, canonical_json_text(&body)?])?;
             return Ok(());
         }
@@ -869,7 +869,7 @@ impl Store {
                 "SELECT subject,body FROM custom_sources WHERE subject>?3 ORDER BY subject"
             }
         };
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hef0985e2aacf owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ query)?;
         let rows = statement.query_map(params![kind, version, after.unwrap_or("")], |row| {
             let subject: String = row.get(0)?;
             if fractal_schema::notice::is_reserved_subject(&subject) {
@@ -896,7 +896,7 @@ impl Store {
         } else {
             "SELECT subject,body,requested_at FROM custom_sources WHERE active=1 AND ?1 IS NULL ORDER BY subject"
         };
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h45d8564d30b6 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ query)?;
         let rows = statement.query_map([person], |row| {
             let subject: String = row.get(0)?;
             if fractal_schema::notice::is_reserved_subject(&subject) {
