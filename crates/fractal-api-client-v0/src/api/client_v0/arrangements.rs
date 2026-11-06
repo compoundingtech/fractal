@@ -138,7 +138,8 @@ pub(crate) async fn memberships(
     Extension(session): Extension<ClientSession>,
     AxumPath((name, uuid)): AxumPath<(String, String)>,
     Query(query): Query<ClientListQuery>,
-) -> Result<(Extension<ClientSnapshot>, Json<ClientResourcePage>), ApiError> {
+    Query(contract): Query<membership_paging::Query>,
+) -> Result<(Extension<ClientSnapshot>, Json<membership_paging::Page>), ApiError> {
     let owner = person(&session, query.person.as_deref(), false)?;
     let subject = format!("arrangement/person/{name}/{uuid}");
     if fractal_schema::arrangements::owner(&subject).map_err(|error| validation(error.message))? != owner {
@@ -152,6 +153,12 @@ pub(crate) async fn memberships(
     let limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
         return Err(validation("membership page limit must be 1 through 200"));
+    }
+    if membership_paging::selected(contract.paging_contract.as_deref(), true)? {
+        return collection_memberships(state, owner, subject, query, limit).await;
+    }
+    if query.cursor.as_deref().is_some_and(|cursor| cursor.starts_with("membership-v1/")) {
+        return Err(membership_paging::error(membership_paging::INVALID));
     }
     let cursor = query.cursor.as_deref().map(|encoded| {
         if encoded.len() > 16_384 {
@@ -213,6 +220,52 @@ pub(crate) async fn memberships(
         page: ClientPageInfo { limit, has_more, next_cursor, cursor_expires_at: has_more.then(|| client_timestamp(expires)), omitted_items: None },
         sync: client_sync_notice(&state),
         replicated: None,
+    }.into())))
+}
+
+async fn collection_memberships(state: AppState, owner: String, subject: String, query: ClientListQuery, limit: usize)
+    -> Result<(Extension<ClientSnapshot>, Json<membership_paging::Page>), ApiError> {
+    use membership_paging::{After, Cursor, Metadata, CONTRACT, INCONSISTENT, epoch, error};
+    let cursor = query.cursor.as_deref().map(|token| Cursor::decode(token, &owner, &subject, limit)).transpose()?;
+    let reader = state.clone();
+    let container = subject.clone();
+    let (snapshot, mut page, epoch) = blocking_store(move || {
+        reader.store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&reader, index);
+            let mut current_epoch = String::new();
+            let after = cursor.as_ref().map(|cursor| (cursor.after.bucket.as_str(), cursor.after.key.as_str(), cursor.after.member.as_str()));
+            let page = reader.store.ordered_membership_page_checked(&container, after, limit + 1, |_, generation, state| {
+                current_epoch = epoch(generation);
+                if state.changed_index > index { return Err(error(INCONSISTENT)); }
+                cursor.as_ref().map_or(Ok(()), |cursor| cursor.check_frontier(&snapshot, &current_epoch, state))
+            })?;
+            Ok(page.map(|page| (snapshot, page, current_epoch)))
+        })
+    }).await??;
+    let mut has_more = page.items.len() > limit;
+    page.items.truncate(limit);
+    let end = window_end(&page.items, 0, page.items.len())?;
+    has_more |= end < page.items.len();
+    page.items.truncate(end);
+    let next_cursor = if has_more {
+        let last = page.items.last().ok_or_else(|| error(INCONSISTENT))?;
+        Some(Cursor::new(&snapshot, epoch.clone(), owner.clone(), subject.clone(), limit, page.state, After {
+            bucket: last["position"]["bucket"].as_str().unwrap_or("").into(),
+            key: last["position"]["key"].as_str().ok_or_else(|| error(INCONSISTENT))?.into(),
+            member: last["member"].as_str().ok_or_else(|| error(INCONSISTENT))?.into(),
+        }).encode()?)
+    } else { None };
+    let membership = Metadata { container: subject.clone(), epoch,
+        changed_index: page.state.changed_index, live_count: page.state.live_count };
+    let value = ClientResourcePage {
+        kind: "page".into(), collection: "ordered-memberships".into(),
+        filters: BTreeMap::from([("subject".into(), subject), ("person".into(), owner)]),
+        items: page.items,
+        page: ClientPageInfo { limit, has_more, next_cursor, cursor_expires_at: None, omitted_items: None },
+        sync: client_sync_notice(&state), replicated: None,
+    };
+    Ok((Extension(snapshot), Json(membership_paging::Page {
+        value, paging_contract: Some(CONTRACT), membership: Some(membership),
     })))
 }
 
@@ -941,6 +994,91 @@ mod tests {
             "membership-resource-fixture",
         ).unwrap();
         state.store.apply_internal(&declaration, &format!("declare-{member}")).unwrap();
+    }
+
+    async fn membership_json(state: &AppState, uri: &str, person: &str) -> (StatusCode, Value) {
+        let response = crate::api::router(state.clone()).oneshot(Request::builder().uri(uri)
+            .header(LOCAL_PERSON_HEADER, person).body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        (status, serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn collection_http_pages_finish_after_unrelated_commits_with_terminal_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-http-progress");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        let (status, empty) = membership_json(&state, path, "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["value"]["membership"]["live_count"], 0);
+        assert_eq!(empty["value"]["page"]["has_more"], false);
+        for member in ["resource/a", "resource/b", "resource/c"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "collection-rows", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/c","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let (_, first) = membership_json(&state, path, "person/ada").await;
+        assert_eq!(first["value"]["paging_contract"], "collection-v1");
+        assert!(first["value"]["page"].get("cursor_expires_at").is_none());
+        let metadata = first["value"]["membership"].clone();
+        assert_eq!(metadata["live_count"], 3);
+        let mut seen = vec![first["value"]["items"][0]["member"].clone()];
+        let mut cursor = first["value"]["page"]["next_cursor"].as_str().unwrap().to_owned();
+        for member in ["resource/unrelated-one", "resource/unrelated-two"] {
+            declare_resource_member(&state, member); // Commit barrier before each continuation.
+            let (status, next) = membership_json(&state, &format!("{path}&cursor={cursor}"), "person/ada").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(next["value"]["membership"], metadata);
+            assert!(next["snapshot"]["store_index"].as_u64().unwrap() > first["snapshot"]["store_index"].as_u64().unwrap());
+            seen.push(next["value"]["items"][0]["member"].clone());
+            cursor = next["value"]["page"]["next_cursor"].as_str().unwrap_or("").into();
+        }
+        assert_eq!(seen, vec![json!("resource/a"), json!("resource/b"), json!("resource/c")]);
+        assert!(cursor.is_empty(), "the terminal page must finish without a restart");
+    }
+
+    #[tokio::test]
+    async fn collection_http_errors_distinguish_invalid_changed_reset_and_inconsistent() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-http-errors");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "error-rows", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a1"}
+        ]))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        let (_, first) = membership_json(&state, path, "person/ada").await;
+        let token = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        for uri in [format!("{path}&cursor=membership/abc"), format!("{path}&cursor=!"),
+            format!("{}&cursor={token}", path.replace("limit=1", "limit=2")),
+            format!("{}&cursor={token}", path.replace("&paging_contract=collection-v1", ""))] {
+            let (status, body) = membership_json(&state, &uri, "person/ada").await;
+            assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (422, Some(membership_paging::INVALID)));
+        }
+        for uri in [path.replace("collection-v1", "unknown"), "/v1/client/agents?paging_contract=collection-v1".into()] {
+            let (status, body) = membership_json(&state, &uri, "person/ada").await;
+            assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (422, Some(membership_paging::UNSUPPORTED)));
+        }
+        let mut inconsistent = membership_paging::Cursor::decode(token, "person/ada", SUBJECT, 1).unwrap();
+        inconsistent.live_count += 1;
+        let (_, body) = membership_json(&state, &format!("{path}&cursor={}", inconsistent.encode().unwrap()), "person/ada").await;
+        assert_eq!(body["error"]["code"], membership_paging::INCONSISTENT);
+        let (status, _) = membership_json(&state, &format!("{path}&cursor={token}"), "person/other").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        edit_memberships(&state, &session, &membership_request(&state, "reorder", json!([
+            {"op":"place","member":"resource/b","bucket":null,"key":"a2"}
+        ]))).await.unwrap();
+        let (status, body) = membership_json(&state, &format!("{path}&cursor={token}"), "person/ada").await;
+        assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (409, Some(membership_paging::CHANGED)));
+        let (_, fresh) = membership_json(&state, path, "person/ada").await;
+        state.store.rebuild_claim_projections().unwrap();
+        let (status, body) = membership_json(&state, &format!("{path}&cursor={}", fresh["value"]["page"]["next_cursor"].as_str().unwrap()), "person/ada").await;
+        assert_eq!((status.as_u16(), body["error"]["code"].as_str()), (409, Some(membership_paging::RESET)));
     }
 
     #[tokio::test]

@@ -1296,8 +1296,16 @@ async fn response_envelope_unbounded(
         roster: request_route == "/v1/client/agents",
     };
     request.extensions_mut().insert(envelope_context.clone());
+    let paging_error = client_request.then(|| {
+        Query::<client_v0::membership_paging::Query>::try_from_uri(request.uri()).ok()
+            .and_then(|Query(query)| client_v0::membership_paging::selected(
+                query.paging_contract.as_deref(),
+                request_route == "/v1/client/arrangements/{person_name}/{uuid}/memberships",
+            ).err())
+    }).flatten();
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
+        (None, Ok(_)) if paging_error.is_some() => paging_error.expect("selected paging error").into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
         // handler on a blocking thread so a busy projection or replication pass cannot
         // occupy an async worker needed to accept another call. Read workers are admitted

@@ -470,15 +470,24 @@ fn state_at(connection: &Connection, container: &str) -> Result<schema::State> {
     )?)
 }
 
-pub fn items_at(connection: &Connection, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
+fn validate_page(connection: &Connection, container: &str, limit: usize) -> Result<()> {
     anyhow::ensure!(limit <= 1001, "ordered membership pages are bounded to 1000 entries plus one lookahead");
     let created: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM arrangements WHERE subject=?1 AND created=1)", [container], |row| row.get(0))?;
     if !created { return Err(anyhow::Error::new(St3Error::new("not-found", "ordered membership container is unknown"))); }
     if arrangements::version(connection, container)? != 2 {
         return Err(anyhow::Error::new(St3Error::new("invalid-arrangement-operations", "ordered membership reads require version 2; version-1 placements are not an empty membership collection")));
     }
+    Ok(())
+}
+
+pub fn items_at(connection: &Connection, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
+    validate_page(connection, container, limit)?;
     anyhow::ensure!(state_at(connection, container)?.changed_index <= through,
         "ordered membership snapshot frontier is stale");
+    query_items(connection, container, after, limit)
+}
+
+fn query_items(connection: &Connection, container: &str, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
     let read_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
         let member: String = row.get(2)?;
         let bucket: String = row.get(0)?;
@@ -507,12 +516,21 @@ impl Store {
     /// Metadata and keyset rows share a short transaction, including when nested in an API read.
     /// No transaction or result is retained for a subsequent request.
     pub fn ordered_membership_page(&self, container: &str, after: Option<(&str,&str,&str)>, limit: usize) -> Result<MembershipPage> {
+        self.ordered_membership_page_checked(container, after, limit, |_, _, _| Ok::<(), std::convert::Infallible>(()))
+            .map(|page| page.unwrap_or_else(|never| match never {}))
+    }
+    /// Validate a continuation's frontier before querying rows, in the same read cut.
+    pub fn ordered_membership_page_checked<E>(&self, container: &str, after: Option<(&str,&str,&str)>, limit: usize,
+        validate: impl FnOnce(u64, u64, schema::State) -> std::result::Result<(), E>,
+    ) -> Result<std::result::Result<MembershipPage, E>> {
         self.read_snapshot(|store_index| {
             let connection = self.readers.get();
+            validate_page(&connection, container, limit)?;
             let generation = generation_at(&connection)?;
             let state = state_at(&connection, container)?;
-            let items = items_at(&connection, container, store_index, after, limit)?;
-            Ok(MembershipPage { store_index, generation, state, items })
+            if let Err(error) = validate(store_index, generation, state) { return Ok(Err(error)); }
+            let items = query_items(&connection, container, after, limit)?;
+            Ok(Ok(MembershipPage { store_index, generation, state, items }))
         })
     }
     pub fn ordered_memberships(&self, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {

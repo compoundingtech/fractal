@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Serve opt-in collection-scoped ordered-membership HTTP pages with authoritative metadata",
+  "replay": {"status": "none", "detail": "No claim replay or projection rebuild is required."},
+  "schema": {"status": "none", "detail": "Page metadata wraps existing local membership state without changing its strict schema."},
+  "rules": {"status": "none", "detail": "Existing authorization runs before cursor checks; collection cursors grant no access."},
+  "compatibility": {"status": "none", "detail": "Requests selecting paging_contract=collection-v1 use a distinct no-TTL cursor and receive collection metadata on every page. Legacy requests retain their prior shape and semantics. Unsupported selectors and mixed cursor contracts are refused. No capability is advertised before stream, typed-client and acceptance integration."},
+  "downtime": {"status": "none", "detail": "Normal daemon rollout only."},
+  "manual": {"status": "none", "detail": "No manual steps are required."},
+  "recovery": {"status": "none", "detail": "Relevant changes or incomparable epochs require a new attempt. Unrelated commits preserve a continuation. Every page releases its transaction before returning; abandoned cursors retain no server resources."}
+}

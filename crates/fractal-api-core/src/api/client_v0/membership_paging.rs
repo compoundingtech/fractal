@@ -14,6 +14,36 @@ pub const INCONSISTENT: &str = "membership-frontier-inconsistent";
 const PREFIX: &str = "membership-v1/";
 const MAX_TOKEN_BYTES: usize = 16_384;
 
+#[derive(Default, Deserialize)]
+pub struct Query {
+    pub paging_contract: Option<String>,
+}
+
+/// API-only metadata wrapper; the schema's strict local State remains unchanged.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Metadata {
+    pub container: String,
+    pub epoch: String,
+    pub changed_index: u64,
+    pub live_count: u64,
+}
+
+#[derive(Serialize)]
+pub struct Page {
+    #[serde(flatten)]
+    pub value: crate::model::ClientResourcePage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paging_contract: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership: Option<Metadata>,
+}
+
+impl From<crate::model::ClientResourcePage> for Page {
+    fn from(value: crate::model::ClientResourcePage) -> Self {
+        Self { value, paging_contract: None, membership: None }
+    }
+}
+
 pub fn error(code: &'static str) -> ApiError {
     ApiError {
         status: match code {
@@ -66,6 +96,12 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    pub fn new(snapshot: &ClientSnapshot, epoch: String, person: String, subject: String,
+        limit: usize, state: State, after: After,
+    ) -> Self {
+        Self { version: 1, host_id: snapshot.host_id.clone(), projection_version: snapshot.projection_version.clone(),
+            epoch, person, subject, limit, changed_index: state.changed_index, live_count: state.live_count, after }
+    }
     fn validate(&self) -> Result<(), ApiError> {
         if self.version != 1 || !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&self.limit)
             || self.host_id.is_empty() || self.projection_version.is_empty() || self.epoch.is_empty()
