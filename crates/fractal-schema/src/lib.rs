@@ -733,6 +733,14 @@ impl Registry {
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
+        if kind == "attention.control" {
+            let until = &fields["until_unix_ms"];
+            if (!until.is_null() && until.as_i64().is_none_or(|value| value < 0))
+                || (fields["operation"] != "snooze" && !until.is_null())
+            {
+                return Err(error("invalid-attention-control", "only snooze accepts a nonnegative Unix-millisecond deadline"));
+            }
+        }
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
         }
@@ -1473,6 +1481,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
 
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
+        (
+            "attention.control",
+            &["person"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
         (
             "person.delegation-set",
             &["person"],
@@ -3112,6 +3129,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("commands", required_array()),
         ],
         "agent.account" => &[("account", required_reference_to(&["account"]))],
+        "attention.control" => &[
+            ("attention_id", required_reference_to(&["attention"])),
+            ("source_revision", required_string()),
+            ("operation", required_enum(&["dismiss", "restore", "snooze"])),
+            ("until_unix_ms", FieldSpec { required: true, nullable: true, ..integer() }),
+        ],
         "attention.requested" => &[
             ("reviewer", required_reference_to(&["person"])),
             ("title", required_string()),
@@ -4866,6 +4889,26 @@ mod tests {
                 "old claim `{claim}` survived"
             );
         }
+    }
+
+    #[test]
+    fn attention_controls_require_the_person_and_valid_deadlines() {
+        use serde_json::json;
+        let mut fields = BTreeMap::from([
+            ("attention_id".into(), json!("attention/example")),
+            ("source_revision".into(), json!("source/one")),
+            ("operation".into(), json!("dismiss")),
+            ("until_unix_ms".into(), Value::Null),
+        ]);
+        let registry = registry();
+        assert!(registry.validate_public_claim("person/example", "attention.control", &fields, Some("person/example")).is_ok());
+        assert_eq!(registry.validate_public_claim("person/example", "attention.control", &fields, Some("person/other")).unwrap_err().code, "claim-write-forbidden");
+        fields.insert("until_unix_ms".into(), json!(1000));
+        assert!(registry.validate_claim("person/example", "attention.control", &fields).is_err());
+        fields.insert("operation".into(), json!("snooze"));
+        assert!(registry.validate_claim("person/example", "attention.control", &fields).is_ok());
+        fields.insert("until_unix_ms".into(), json!(-1));
+        assert!(registry.validate_claim("person/example", "attention.control", &fields).is_err());
     }
 
     #[test]

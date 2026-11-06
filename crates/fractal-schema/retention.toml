@@ -44,6 +44,7 @@
 "agent.renamed" = { class = "durable" }
 "agent.retired" = { class = "durable" }
 "arrangement.edited" = { class = "durable" }
+"attention.control" = { class = "durable" }
 "attention.requested" = { class = "durable" }
 "attention.resolved" = { class = "durable" }
 "checkpoint.excused" = { class = "durable" }

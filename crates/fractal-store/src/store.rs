@@ -15,6 +15,7 @@ macro_rules! message_desired_recipient_match {
 
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
+pub mod attention_controls;
 pub mod delivery;
 pub mod deploy;
 pub mod evidence;
@@ -1051,6 +1052,9 @@ CREATE INDEX IF NOT EXISTS claims_person_ask_owner_index ON claims(json_extract(
 WHERE kind='work.person-asked';
 CREATE INDEX IF NOT EXISTS claims_person_ask_origin_step_index ON claims(json_extract(body, '$.fields.origin_step'))
 WHERE kind='work.person-asked';
+CREATE INDEX IF NOT EXISTS claims_attention_control_index
+ON claims(subject, json_extract(body, '$.fields.attention_id'), json_extract(body, '$.fields.operation'))
+WHERE kind='attention.control';
 
 CREATE TABLE IF NOT EXISTS mission_run_requests (
     operation_id TEXT PRIMARY KEY,
