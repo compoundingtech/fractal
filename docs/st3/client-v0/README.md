@@ -3226,3 +3226,30 @@ If the standby restarts while the primary is down, the standby cannot take over 
 
 Hosted validation must run `cargo run -p fractal-client-codegen -- --check`. Generated
 files remain generated; do not hand-edit clients for open JSON observation detail.
+
+## External quota source v1
+
+The daemon accepts optional `[quota_source]` configuration with `url` (an absolute
+HTTP(S) snapshot URL without embedded credentials) and `refresh_seconds` (default
+30, range 1–3600). Only the operator selects the URL; client request parameters
+never override it. Redirects are refused. Sources need no change signal.
+
+`GET /v1/client/quota` requires `read.projections` and uses the normal client-v0
+envelope. Its value is `{state:"disabled"}`, `{state:"unavailable",refresh_seconds,reason}`,
+or `{state:"available",refresh_seconds,snapshot}`. Requests share one in-flight
+fetch and its success or failure for a refresh window; there is no daemon poller.
+Errors never return an old snapshot as available. HTTP reads have a five-second
+deadline and a 1 MiB body limit.
+Unavailable reasons distinguish `transport` from `invalid_snapshot`.
+
+The source returns the following JSON snapshot (unknown additive fields allowed):
+Its machine-readable contract is [quota-source-v1.schema.json](schemas/quota-source-v1.schema.json).
+`{"schema_version":1,"generated_at":"2026-01-01T00:00:00Z","freshness_horizon_seconds":60,"accounts":[{"id":"team","provider":"example","label":"Team","observed_at":"2026-01-01T00:00:00Z","governing_window_id":"week","windows":[{"id":"week","label":"Weekly","used_percent":72,"resets_at":null}]}]}`.
+Timestamps are RFC3339. Account IDs and per-account window IDs are nonempty and
+unique. Producer array ordering is presentation ordering. Governing IDs must name
+a published window or be null (unknown); consumers never infer governing policy
+from the largest percentage. Percentages are nonnegative, may exceed 100, and
+null means unknown, not zero. Null reset means unknown. Freshness expires after
+the positive horizon, both for snapshot generation and each account observation;
+consumers must label expired readings stale. Unsupported versions are unavailable.
+
