@@ -1655,4 +1655,181 @@ mod tests {
         assert_eq!(state.store.index().unwrap(), index);
         assert!(state.store.claims_for(SUBJECT, Some("ordered-membership.edited")).unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn collection_tuple_ties_and_abandoned_cursors_release_each_page_read() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-tuple-boundaries");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let folder = "019a0000-0000-7000-8000-000000000010";
+        edit(&state, &session, &request(&state, "tie-folder", json!([
+            {"op":"folder.create","id":folder,"name":"Folder","parent":null,"key":"a0"}
+        ]))).await.unwrap();
+        for member in ["resource/a", "resource/b", "resource/c", "resource/d"] {
+            declare_resource_member(&state, member);
+        }
+        edit_memberships(&state, &session, &membership_request(&state, "ties", json!([
+            {"op":"place","member":"resource/d","bucket":folder,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/c","bucket":folder,"key":"a0"},
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        let checkpoint = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
+        let mut cursor = None::<String>;
+        let mut metadata = None;
+        let mut abandoned = Vec::new();
+        for (index, member) in ["resource/a", "resource/b", "resource/c", "resource/d"].into_iter().enumerate() {
+            let uri = cursor.as_ref().map_or_else(|| path.to_owned(), |cursor| format!("{path}&cursor={cursor}"));
+            let (status, page) = membership_json(&state, &uri, "person/ada").await;
+            assert_eq!(status, StatusCode::OK);
+            let value = &page["value"];
+            assert_eq!(value["items"][0]["member"], member);
+            assert_eq!(value["items"][0]["position"]["bucket"], if index < 2 { Value::Null } else { json!(folder) });
+            assert_eq!(value["membership"]["live_count"], 4);
+            if let Some(expected) = &metadata { assert_eq!(&value["membership"], expected); }
+            else { metadata = Some(value["membership"].clone()); }
+            assert_eq!(value["page"]["has_more"], index < 3);
+            cursor = value["page"]["next_cursor"].as_str().map(str::to_owned);
+            if let Some(token) = &cursor { abandoned.push(token.clone()); }
+            // Keep earlier tokens alive, then commit beyond this page's snapshot.
+            // A retained read would prevent complete WAL backfill/recycling.
+            declare_resource_member(&state, &format!("resource/unrelated-{index}"));
+            let report = state.store.checkpoint_idle_wal_report(&checkpoint).unwrap();
+            assert!(report.frames > 0);
+            assert_eq!(report.frames, report.backfilled);
+            assert!(report.recycled, "page {index} retained a read transaction");
+        }
+        assert_eq!(abandoned.len(), 3);
+        let (status, replay) = membership_json(&state, &format!("{path}&cursor={}", abandoned[0]), "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["value"]["items"][0]["member"], "resource/b");
+    }
+
+    #[tokio::test]
+    async fn collection_http_scope_reset_and_legacy_cursor_shapes_stay_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-scope-boundaries");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "scope-rows", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1";
+        let selected = format!("{path}&paging_contract=collection-v1");
+        let (_, first) = membership_json(&state, &selected, "person/ada").await;
+        let token = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        for field in ["host", "projection", "epoch"] {
+            let mut cursor = membership_paging::Cursor::decode(token, "person/ada", SUBJECT, 1).unwrap();
+            match field {
+                "host" => cursor.host_id = "host/other".into(),
+                "projection" => cursor.projection_version = "other".into(),
+                _ => cursor.epoch = "other".into(),
+            }
+            let (status, body) = membership_json(&state, &format!("{selected}&cursor={}", cursor.encode().unwrap()), "person/ada").await;
+            assert_eq!((status.as_u16(), body["code"].as_str()), (409, Some(membership_paging::RESET)));
+            assert!(body.get("membership").is_none());
+        }
+        let (_, legacy) = membership_json(&state, path, "person/ada").await;
+        assert!(legacy["value"].get("membership").is_none());
+        assert!(legacy["value"].get("paging_contract").is_none());
+        assert!(legacy["value"]["page"]["cursor_expires_at"].is_string());
+        let token = legacy["value"]["page"]["next_cursor"].as_str().unwrap();
+        assert!(token.starts_with("membership/"));
+        let (status, terminal) = membership_json(&state, &format!("{path}&cursor={token}"), "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(terminal["value"]["items"][0]["member"], "resource/b");
+        assert_eq!(terminal["value"]["page"]["has_more"], false);
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.strip_prefix("membership/").unwrap()).unwrap();
+        let mut expired: MembershipCursor = serde_json::from_slice(&bytes).unwrap();
+        expired.expires = client_now_ms().saturating_sub(CLIENT_PAGE_TTL_MS + 1);
+        let token = format!("membership/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expired).unwrap()));
+        let (status, _) = membership_json(&state, &format!("{path}&cursor={token}"), "person/ada").await;
+        assert_eq!(status, StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn collection_http_rechecks_revoked_credentials_before_cursor_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-revoked-authorization");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b"] { declare_resource_member(&state, member); }
+        edit_memberships(&state, &session, &membership_request(&state, "authorized-rows", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a0"}
+        ]))).await.unwrap();
+        let append = |kind: &str, fields: Value| state.store.append_claim(&ClaimInput {
+            subject:"custom/client/pairing-membership-boundary".into(), kind:kind.into(),
+            actor:Some("person/ada".into()), fields:serde_json::from_value(fields).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        append("custom.client.pairing-completed", json!({
+            "session_actor":"client/device-membership-test","person_id":"person/ada",
+            "credential_hash":credential_digest("membership-test-credential"),"expires_at_unix_ms":u64::MAX,
+            "scopes":["read.projections","read.arrangements"]
+        }));
+        let get = |uri: String, credential: &str| {
+            let request = Request::builder().uri(uri).header("authorization", format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            let app = crate::api::router(state.clone());
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+                (status, body)
+            }
+        };
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=1&paging_contract=collection-v1";
+        let (status, first) = get(path.into(), "membership-test-credential").await;
+        assert_eq!(status, StatusCode::OK);
+        let continuation = format!("{path}&cursor={}", first["value"]["page"]["next_cursor"].as_str().unwrap());
+        append("custom.client.pairing-revoked", json!({"reason":"revoked between pages"}));
+        for (uri, credential) in [(continuation, "membership-test-credential"), (format!("{path}&cursor=!"), "unknown-credential")] {
+            let (status, body) = get(uri, credential).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body["code"], "forbidden");
+            assert!(body.get("value").is_none());
+            assert!(body.get("membership").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_maximal_rows_fit_http_budget_and_packer_keeps_whole_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "collection-byte-boundary");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        let key = format!("a0{}", "1".repeat(fractal_schema::arrangements::MAX_KEY_BYTES - 2));
+        let members: Vec<_> = (0..201).map(|index| format!("resource/{}-{index:03}", "a".repeat(499))).collect();
+        let mut operations = Vec::new();
+        for member in &members {
+            assert_eq!(member.len(), 512);
+            declare_resource_member(&state, member);
+            operations.push(json!({"op":"place","member":member,"bucket":null,"key":key}));
+        }
+        edit_memberships(&state, &session, &membership_request(&state, "maximal-rows", json!(operations))).await.unwrap();
+        let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001/memberships?person=person%2Fada&limit=200&paging_contract=collection-v1";
+        let (status, first) = membership_json(&state, path, "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["value"]["items"].as_array().unwrap().len(), 200);
+        assert_eq!(first["value"]["membership"]["live_count"], 201);
+        let cursor = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        let (status, last) = membership_json(&state, &format!("{path}&cursor={cursor}"), "person/ada").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last["value"]["membership"], first["value"]["membership"]);
+        assert_eq!(last["value"]["items"][0]["member"], members[200]);
+        assert_eq!(last["value"]["page"]["has_more"], false);
+        // Current legal row and limit caps cannot fill the byte budget. Exercise the
+        // production packer's truncation boundary separately, without invalid store rows.
+        let mut large = first["value"]["items"][0].clone();
+        large["padding"] = json!("x".repeat((CLIENT_MAX_RESPONSE_BYTES - 128_000) / 2));
+        let items = vec![large.clone(), large];
+        assert_eq!(window_end(&items, 0, items.len()).unwrap(), 1);
+        assert_eq!(window_end(&items, 1, items.len()).unwrap(), 2);
+        assert_eq!(first["value"]["membership"]["live_count"], 201);
+    }
 }
