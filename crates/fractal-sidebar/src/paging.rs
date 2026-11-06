@@ -73,7 +73,7 @@ impl Paging {
                 if let Some(held) = held {
                     if held.epoch == frontier.epoch && held.changed_index == frontier.changed_index && held.live_count != frontier.live_count { return self.stop(Status::Refused); }
                     if held.epoch == frontier.epoch && frontier.changed_index < held.changed_index { return Vec::new(); }
-                    if held == &frontier { return Vec::new(); }
+                    if held == &frontier { self.newest = Some(frontier); return Vec::new(); }
                 }
                 let restart = self.status == Status::Ready || self.staged.frontier.as_ref().is_some_and(|held| held != &frontier);
                 if self.status == Status::Ready { self.attempts = 0; }
@@ -125,6 +125,18 @@ mod tests {
     fn ready() -> (Paging, Token) {
         let mut state = Paging::new(None); let token = refresh(&mut state);
         assert_eq!(state.reduce(Event::Page(token.clone(), page(1, 1, &["a"], None))), vec![Effect::PersistBase]); (state, token)
+    }
+    #[test]
+    fn matching_refresh_metadata_guards_against_regressed_index_and_count() {
+        for (index, count, status) in [(4, 1, Status::Paging), (5, 0, Status::Refused)] {
+            let mut state = Paging::new(None); let token = refresh(&mut state);
+            assert_eq!(state.reduce(Event::Page(token, page(5, 1, &["a"], None))), vec![Effect::PersistBase]);
+            let base = state.complete().unwrap().clone(); let token = refresh(&mut state);
+            assert!(state.reduce(Event::Metadata(token.clone(), frontier(5, 1))).is_empty());
+            let effects = state.reduce(Event::Page(token, page(index, count, if count == 0 { &[] } else { &["b"] }, None)));
+            if status == Status::Paging { assert!(matches!(effects.as_slice(), [Effect::SubscribeAndRead(_)])); } else { assert!(effects.is_empty()); }
+            assert_eq!(state.status, status); assert_eq!(state.complete(), Some(&base));
+        }
     }
     #[test]
     fn every_partition_publishes_only_complete_pages_despite_unrelated_writes() {
