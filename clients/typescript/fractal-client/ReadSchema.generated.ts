@@ -1456,6 +1456,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "request": optionalKey(StructuredRequest),
   "requested_at": Timestamp,
   "requester_id": optionalKey(Id),
+  /** The actor of the accepted claim that resolved this item. Absent when no attributed resolution is retained; never inferred from the recipient. */
+  "resolved_by": optionalKey(Id),
   "review_mode": optionalKey(Schema.Literals(["approve","feedback"])),
   "revision": Revision,
   "source_id": Id,
@@ -1473,6 +1475,26 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "Attention" }))()
 export type Attention = typeof Attention.Type
 export type AttentionEncoded = typeof Attention.Encoded
+
+export const AttentionControl = /*#__PURE__*/ (() => Schema.Struct({
+  "dismissed": Schema.Boolean,
+  "id": Id,
+  "revision": Schema.OptionFromNullOr(Schema.String),
+  /** RFC3339 UTC deadline, including an expired deadline until explicitly cleared. */
+  "snoozed_until": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "RFC3339 UTC deadline, including an expired deadline until explicitly cleared." }),
+  "source_revision": Schema.String
+}).annotate({ identifier: "AttentionControl" }))()
+export type AttentionControl = typeof AttentionControl.Type
+export type AttentionControlEncoded = typeof AttentionControl.Encoded
+
+export const AttentionResolution = /*#__PURE__*/ (() => Schema.Struct({
+  "claim_id": Id,
+  "person_id": Id,
+  "resolved_at": Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })),
+  "resolved_by": Id
+}).annotate({ identifier: "AttentionResolution" }))()
+export type AttentionResolution = typeof AttentionResolution.Type
+export type AttentionResolutionEncoded = typeof AttentionResolution.Encoded
 
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */

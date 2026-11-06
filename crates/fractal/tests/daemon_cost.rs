@@ -843,10 +843,13 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/hosts/{*id}", "/v1/client/hosts/local/repositories"),
     get("GET /v1/client/devices", "/v1/client/devices"),
     get("GET /v1/client/attention", "/v1/client/attention"),
+    get("GET /v1/client/attention-controls/{*id}", "/v1/client/attention-controls/{attention}?{attention_control_query}"),
     get(
         "GET /v1/client/attention/{*id}",
         "/v1/client/attention/{attention}",
     ),
+    get("GET /v1/client/attention-resolutions/{*id}",
+        "/v1/client/attention-resolutions/attention/2d60431cc9620c5849f42211adc6a198?source_id=agent%2Fresolution-probe&attention_kind=harness-prompt&episode=claim%2Fresolution-probe"),
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
     get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
@@ -3439,6 +3442,15 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
             first.unwrap_or_else(|| format!("bench-missing-{name}")),
         );
     }
+    let attention = person.get::<Value>(&format!("/v1/client/attention/{}", items["attention"]))
+        .await.unwrap();
+    let attention = attention.get("value").unwrap_or(&attention);
+    let locator = ["source_id", "attention_kind", "episode"].into_iter()
+        .map(|key| format!("{key}={}", urlencoding::encode(attention[key].as_str().unwrap())))
+        .chain(std::iter::once(format!("source_revision={}", urlencoding::encode(
+            attention["presentation_control"]["source_revision"].as_str().unwrap(),
+        )))).collect::<Vec<_>>().join("&");
+    items.insert("attention_control_query", locator);
     items.insert("document", "doc/bench/host/report-0".into());
     let hash = client
         .get::<Value>("/v1/documents?name=doc/bench/host/probe")
