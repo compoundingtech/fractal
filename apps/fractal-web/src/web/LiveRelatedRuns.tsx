@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { useAtomValue } from '@effect/atom-react'
 import type * as Native from '@fractal/client/schema/read'
-import { SidebarRelatedRuns, type SidebarRelatedRunsState } from '@fractal/ui/assistant-ui/shell'
+import { SidebarRelatedRuns, type SidebarRelatedRunsState } from '@fractal/ui/assistant-ui/related-runs'
 import { useDataSource } from '../data/react.tsx'
 import type { Feed } from '../data/source.ts'
 import { useOpen } from '../shell/context.tsx'
