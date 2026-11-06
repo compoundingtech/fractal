@@ -1231,3 +1231,18 @@ test('human error sentences match the shared Rust cases without mutating wire en
         }
     }
 });
+
+test('internal notice descriptors do not register public server or client support', () => {
+    const schema = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
+    const operations = require('../../../docs/st3/client-v0/schemas/operations.json');
+    assert.deepEqual(schema['x-st-internal-resources'], { NoticeSnapshot: { collection: 'notices' } });
+    assert.ok(!schema.$defs.Resource.oneOf.some(branch => branch.$ref === '#/$defs/NoticeSnapshot'));
+    const internalOnly = manifest => assert.doesNotMatch(JSON.stringify(manifest), /NoticeSnapshot|notice\.(?:seen|dismiss|snooze)|\"notices\"/);
+    internalOnly(operations);
+    const copy = structuredClone(operations);
+    copy.actions['notice.seen'] = {};
+    assert.throws(() => internalOnly(copy), assert.AssertionError);
+    delete copy.actions['notice.seen'];
+    internalOnly(copy);
+    assert.ok(!Object.getOwnPropertyNames(FractalClient.prototype).some(name => /notice/i.test(name)));
+});

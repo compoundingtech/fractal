@@ -7,9 +7,9 @@ pub trait SubjectNotesStore {
     fn current_subject_note_incarnation(&self, target: &str) -> Result<Option<String>>;
     fn subject_note_agents(&self, target: &str) -> Result<BTreeSet<String>>;
     fn subject_note_readable(&self, note: &SubjectNote, reader: &str) -> Result<bool>;
-    fn subject_note(&self, id: &str, reader: &str) -> Result<Option<SubjectNote>, St3Error>;
-    fn list_subject_notes(&self, target: Option<&str>, author: Option<&str>, reader: &str) -> Result<Vec<SubjectNote>, St3Error>;
-    fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error>;
+    fn subject_note(&self, id: &str, reader: &str) -> Result<Option<SubjectNote>, FractalError>;
+    fn list_subject_notes(&self, target: Option<&str>, author: Option<&str>, reader: &str) -> Result<Vec<SubjectNote>, FractalError>;
+    fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, FractalError>;
 }
 
 fn timestamp(milliseconds: u128) -> Result<String> {
@@ -115,7 +115,7 @@ impl SubjectNotesStore for Store {
             || (reader.starts_with("agent/") && self.subject_note_agents(&note.target)?.contains(reader)))
     }
 
-    fn subject_note(&self, id: &str, reader: &str) -> Result<Option<SubjectNote>, St3Error> {
+    fn subject_note(&self, id: &str, reader: &str) -> Result<Option<SubjectNote>, FractalError> {
         validate_actor(reader)?;
         self.read_snapshot(|_| {
             let note = current(self, id, now_ms())?;
@@ -126,7 +126,7 @@ impl SubjectNotesStore for Store {
         }).map_err(internal)
     }
 
-    fn list_subject_notes(&self, target: Option<&str>, author: Option<&str>, reader: &str) -> Result<Vec<SubjectNote>, St3Error> {
+    fn list_subject_notes(&self, target: Option<&str>, author: Option<&str>, reader: &str) -> Result<Vec<SubjectNote>, FractalError> {
         validate_actor(reader)?;
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -151,19 +151,19 @@ impl SubjectNotesStore for Store {
     }
 
     fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>,
-        expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error> {
+        expires_at: Option<&str>) -> Result<Option<SubjectNote>, FractalError> {
         let session_parent = if target.starts_with("session/") {
             let (parent, incarnation) = fractal_schema::subject_notes::session_parts(target)
-                .map_err(|error| St3Error::new(error.code, error.message))?;
+                .map_err(|error| FractalError::new(error.code, error.message))?;
             if text.is_some() && self.current_subject_note_incarnation(parent).map_err(internal)?.as_deref() != Some(&incarnation) {
-                return Err(St3Error::new("note-target-access", "session target has no matching current running incarnation"));
+                return Err(FractalError::new("note-target-access", "session target has no matching current running incarnation"));
             }
             Some(parent)
         } else { None };
         if actor.starts_with("agent/") && actor != target && session_parent != Some(actor)
             && (!(target.starts_with("mission-run/") || target.starts_with("step-run/"))
                 || !self.subject_note_agents(target).map_err(internal)?.contains(actor)) {
-            return Err(St3Error::new("note-target-access", "agents may note only themselves, their sessions or assigned mission/step runs"));
+            return Err(FractalError::new("note-target-access", "agents may note only themselves, their sessions or assigned mission/step runs"));
         }
         let mut fields = BTreeMap::from([
             ("target".into(), json!(target)), ("text".into(), json!(text)), ("audience".into(), json!("agent"))]);

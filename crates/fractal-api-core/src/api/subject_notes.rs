@@ -6,7 +6,7 @@ fn reader(session: &client_v0::ClientSession, write: bool) -> Result<&str, ApiEr
     client_v0::require_scope(session, if write { "control.notes" } else { "read.projections" })?;
     let actor = session.authority_actor.as_str();
     if !actor.starts_with("person/") && !actor.starts_with("agent/") {
-        return Err(ApiError::bad(St3Error::new("note-forbidden", "notes require an identified person or agent")));
+        return Err(ApiError::bad(FractalError::new("note-forbidden", "notes require an identified person or agent")));
     }
     Ok(actor)
 }
@@ -26,11 +26,11 @@ pub(super) async fn read(
 ) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
     let actor = reader(&session, false)?.to_owned();
     if query.target.is_some() && query.author.is_some() {
-        return Err(ApiError::bad(St3Error::new("invalid-subject-note", "select target or author, not both")));
+        return Err(ApiError::bad(FractalError::new("invalid-subject-note", "select target or author, not both")));
     }
     if query.recipient.as_deref().is_some_and(|recipient| !recipient.starts_with("agent/")
         || (actor.starts_with("agent/") && actor != recipient)) {
-        return Err(ApiError::bad(St3Error::new("note-forbidden", "agents may refresh only their own digest")));
+        return Err(ApiError::bad(FractalError::new("note-forbidden", "agents may refresh only their own digest")));
     }
     let (snapshot, notes) = blocking_store(move || state.store.read_snapshot(|index| {
         let notes = if let Some(recipient) = query.recipient {
@@ -61,15 +61,15 @@ pub(super) async fn create(
     let (id, note) = blocking_action(move || {
         let existence_target = if input.target.starts_with("session/") {
             fractal_schema::subject_notes::session_parts(&input.target)
-                .map_err(|error| St3Error::new(error.code, error.message))?.0
+                .map_err(|error| FractalError::new(error.code, error.message))?.0
         } else { &input.target };
-        if state.store.latest_claim(existence_target, None).map_err(|error| St3Error::new("internal", error.to_string()))?.is_none() {
-            return Err(St3Error::new("note-target-access", "note target is absent"));
+        if state.store.latest_claim(existence_target, None).map_err(|error| FractalError::new("internal", error.to_string()))?.is_none() {
+            return Err(FractalError::new("note-target-access", "note target is absent"));
         }
         let note = state.store.set_subject_note(&id, &actor, &input.target, Some(&input.text),
             input.expires_at.as_deref())?;
-        for agent in state.store.subject_note_agents(&input.target).map_err(|error| St3Error::new("internal", error.to_string()))? {
-            crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
+        for agent in state.store.subject_note_agents(&input.target).map_err(|error| FractalError::new("internal", error.to_string()))? {
+            crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         signal_changed(&state);
         Ok((id, note))
@@ -85,33 +85,33 @@ pub(super) async fn update(
 ) -> Result<Json<Value>, ApiError> {
     let actor = reader(&session, true)?.to_owned();
     fractal_schema::subject_notes::validate_actor(&id, fractal_schema::subject_notes::KIND, Some(&actor))
-        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
-    let fields = input.as_object().ok_or_else(|| ApiError::bad(St3Error::new("invalid-subject-note", "expected an update object")))?;
+        .map_err(|error| ApiError::bad(FractalError::new(error.code, error.message)))?;
+    let fields = input.as_object().ok_or_else(|| ApiError::bad(FractalError::new("invalid-subject-note", "expected an update object")))?;
     if fields.keys().any(|field| !matches!(field.as_str(), "text" | "expires_at")) {
-        return Err(ApiError::bad(St3Error::new("invalid-subject-note", "update accepts text and expires_at only")));
+        return Err(ApiError::bad(FractalError::new("invalid-subject-note", "update accepts text and expires_at only")));
     }
     if fields.get("text").is_some_and(|text| !text.is_null() && !text.is_string()) {
-        return Err(ApiError::bad(St3Error::new("invalid-subject-note", "text must be a string or null")));
+        return Err(ApiError::bad(FractalError::new("invalid-subject-note", "text must be a string or null")));
     }
     for field in ["expires_at"] {
         if fields.get(field).is_some_and(|value| !value.is_string() && !value.is_null()) {
-            return Err(ApiError::bad(St3Error::new("invalid-subject-note", format!("invalid {field}"))));
+            return Err(ApiError::bad(FractalError::new("invalid-subject-note", format!("invalid {field}"))));
         }
     }
     let (id, note) = blocking_action(move || {
         // Authorship was checked before this lookup. Retain write access to expired and
         // archived revisions without making them current on a read surface.
         let previous = state.store.latest_claim(&id, Some(fractal_schema::subject_notes::KIND))
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
-            .ok_or_else(|| St3Error::new("subject-note-not-found", "note is absent"))?;
-        let old = previous.body.get("fields").ok_or_else(|| St3Error::new("internal", "note revision has no fields"))?;
-        let target = old.get("target").and_then(Value::as_str).ok_or_else(|| St3Error::new("internal", "note revision has no target"))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+            .ok_or_else(|| FractalError::new("subject-note-not-found", "note is absent"))?;
+        let old = previous.body.get("fields").ok_or_else(|| FractalError::new("internal", "note revision has no fields"))?;
+        let target = old.get("target").and_then(Value::as_str).ok_or_else(|| FractalError::new("internal", "note revision has no target"))?;
         let fields = input.as_object().expect("validated update object");
         let expiry = fields.get("expires_at").map_or_else(|| old.get("expires_at").and_then(Value::as_str), Value::as_str);
         let text = fields.get("text").map_or_else(|| old.get("text").and_then(Value::as_str), Value::as_str);
         let note = state.store.set_subject_note(&id, &actor, target, text, expiry)?;
-        for agent in state.store.subject_note_agents(target).map_err(|error| St3Error::new("internal", error.to_string()))? {
-            crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
+        for agent in state.store.subject_note_agents(target).map_err(|error| FractalError::new("internal", error.to_string()))? {
+            crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         signal_changed(&state);
         Ok((id, note))

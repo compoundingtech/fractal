@@ -16,7 +16,7 @@ pub fn deliver_tx(
     repository_id: &Value,
     failures: &[Value],
     baseline: bool,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut messages = Vec::new();
     // Each recipient establishes its own baseline, including when the first listing is
     // empty. Registering later cannot turn another recipient's baseline into a history flood.

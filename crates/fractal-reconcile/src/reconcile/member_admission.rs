@@ -6,7 +6,7 @@
 //! is placed. An operator, a person or an agent with a reason, can let the member go on without
 //! peers it cannot reach, for its current daemon start only.
 use super::*;
-use crate::model::{ClaimRecord, St3Error};
+use crate::model::{ClaimRecord, FractalError};
 use serde_json::json;
 use tokio::time::Instant;
 
@@ -68,8 +68,8 @@ pub fn override_input(
     reason: &str,
     configured: &[String],
     idempotency_key: String,
-) -> Result<ClaimInput, St3Error> {
-    let invalid = |message: String| St3Error::new("invalid-admission-override", message);
+) -> Result<ClaimInput, FractalError> {
+    let invalid = |message: String| FractalError::new("invalid-admission-override", message);
     if !(actor.starts_with("person/") || actor.starts_with("agent/")) {
         return Err(invalid("an override is applied by a person or an agent".into()));
     }
@@ -77,7 +77,7 @@ pub fn override_input(
         return Err(invalid("an override needs a reason".into()));
     }
     let known = schedule_admission_peers(store, host, configured)
-        .map_err(|error| St3Error::new("internal", format!("{error:#}")))?;
+        .map_err(|error| FractalError::new("internal", format!("{error:#}")))?;
     let peers = peers.into_iter().collect::<BTreeSet<_>>();
     if peers.is_empty() {
         return Err(invalid("an override names the peers it releases".into()));
@@ -86,7 +86,7 @@ pub fn override_input(
         return Err(invalid(format!("`{unknown}` is not a peer of host/{host}")));
     }
     let start = current_start(store, host)
-        .map_err(|error| St3Error::new("internal", format!("{error:#}")))?
+        .map_err(|error| FractalError::new("internal", format!("{error:#}")))?
         .ok_or_else(|| invalid(format!("host/{host} has recorded no daemon start")))?;
     Ok(ClaimInput {
         subject: format!("host/{host}"),

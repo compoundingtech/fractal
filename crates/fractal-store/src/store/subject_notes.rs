@@ -176,9 +176,9 @@ fn project(tx: &Transaction<'_>, note: &str, id: &str) -> Result<()> {
 
 /// A pinned membership is necessary, not proof of undiscovered legacy peers. Operators must
 /// fence legacy replication before enabling notes; reject every observed unfenced writer too.
-pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St3Error> {
-    fn refused(message: impl Into<String>) -> St3Error {
-        St3Error::new("subject-note-feature-barrier", message)
+pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), FractalError> {
+    fn refused(message: impl Into<String>) -> FractalError {
+        FractalError::new("subject-note-feature-barrier", message)
     }
     // A newly staged local admission/removal is not in the signed membership fold yet.
     // Do not publish against yesterday's members while the replication writer seals it.
