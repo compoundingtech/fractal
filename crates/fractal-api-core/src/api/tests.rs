@@ -6958,6 +6958,73 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     }
 }
 
+/// #4500: a seat whose declaration is a stop while its process still runs says it is stopping,
+/// and once the stop is deferred, what holds it.
+#[test]
+fn a_stop_declared_seat_that_still_runs_is_stopping_and_says_what_holds_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let seat = "agent/example-held/worker";
+    let declare = parse_intent(
+        "version 2\nagent \"example-held/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&declare, "held-card-declaration").unwrap();
+    let observe = |status: &str, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: seat.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!(status)),
+                ("runtime_id".into(), json!("held-runtime")),
+                ("incarnation_id".into(), json!("held-incarnation")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    observe("running", "held-running");
+    let card = |store: &Store| {
+        client_agent_resources_uncached(store, true, store.index().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|card| card["id"] == seat)
+            .unwrap()
+    };
+    assert_eq!(card(&store)["stopping"], Value::Null, "a declared seat is not stopping");
+
+    let stop = parse_intent("version 2\nstop \"agent/example-held/worker\"\n", store.origin()).unwrap();
+    store.apply_internal(&stop, "held-card-stop").unwrap();
+    assert_eq!(card(&store)["stopping"], json!({"held": null}));
+
+    let token = store.selected_desired_token(seat).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: seat.into(),
+        kind: "harness.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("warning")),
+            ("status".into(), json!("waiting")),
+            ("code".into(), json!("stop-deferred")),
+            ("reason".into(), json!("the seat holds a message nobody has read")),
+            ("observed_since_ms".into(), json!(1)),
+            ("incarnation_id".into(), json!("held-incarnation")),
+        ]),
+        evidence: vec![token],
+        expected_subject: None,
+        idempotency_key: Some("held-diagnostic".into()),
+    }).unwrap();
+    assert_eq!(
+        card(&store)["stopping"],
+        json!({"held": "the seat holds a message nobody has read"})
+    );
+
+    observe("stopped", "held-stopped");
+    assert_eq!(card(&store)["stopping"], Value::Null, "a stopped seat is no longer stopping");
+}
+
 #[test]
 fn client_work_projection_includes_agentless_mission_steps() {
     let root = tempfile::tempdir().unwrap();

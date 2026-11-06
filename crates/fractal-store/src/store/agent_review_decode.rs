@@ -1,6 +1,6 @@
-use super::agent_review_answer::{RequestBinding, ReviewRequest};
+use super::agent_review_answer::{AnswerCandidate, RequestBinding, ReviewRequest};
 use crate::model::evidence_contract::{EvidenceContract, EvidenceSpec, EvidenceType};
-use crate::model::{ClaimRecord, FractalError};
+use crate::model::{ClaimInput, ClaimRecord, FractalError};
 use serde_json::Value;
 
 fn invalid() -> FractalError {
@@ -173,6 +173,52 @@ pub(crate) fn stored_request(record: &ClaimRecord) -> Result<StoredReview<'_>, F
     })
 }
 
+/// Typed envelope fields originate in ClaimInput, never parallel caller arguments.
+pub(crate) fn incoming_answer(input: &ClaimInput) -> Result<AnswerCandidate<'_>, FractalError> {
+    let fields = &input.fields;
+    let allowed = [
+        "request",
+        "operation",
+        "reviewer",
+        "mission_revision",
+        "step_definition",
+        "attempt",
+        "decision",
+        "verdict",
+        "reason",
+        "evidence",
+    ];
+    let request = text(fields.get("request"))?;
+    let binding = binding(|key| fields.get(key), request)?;
+    if input.kind != "gate.result"
+        || binding.operation != input.subject
+        || fields.keys().any(|key| !allowed.contains(&key.as_str()))
+        || !input.evidence.iter().any(|id| id == request)
+    {
+        return Err(invalid());
+    }
+    let actor = input
+        .actor
+        .as_deref()
+        .filter(|actor| !actor.trim().is_empty())
+        .ok_or_else(invalid)?;
+    Ok(AnswerCandidate {
+        binding,
+        actor: Some(actor),
+        reviewer: text(fields.get("reviewer"))?,
+        decision: text(fields.get("decision"))?,
+        verdict: text(fields.get("verdict"))?,
+        reason: fields
+            .get("reason")
+            .map(|v| v.as_str().ok_or_else(invalid))
+            .transpose()?,
+        evidence: fields
+            .get("evidence")
+            .and_then(Value::as_object)
+            .ok_or_else(invalid)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +315,105 @@ mod tests {
             let mut bad = record.clone();
             bad.body["_operation"] = value;
             assert!(stored_request(&bad).is_err());
+        }
+    }
+    fn answer(record: &ClaimRecord) -> ClaimInput {
+        serde_json::from_value(json!({"subject":record.subject,"kind":"gate.result","actor":"agent/example/reviewer",
+            "fields":{"request":record.id,"operation":record.subject,"reviewer":"agent/example/reviewer",
+                "mission_revision":"revision","step_definition":"definition","attempt":2,
+                "decision":"approved","verdict":"pass","evidence":{"report":"ok"}},"evidence":[record.id]})).unwrap()
+    }
+    #[test]
+    fn agent_decode_answer_reuses_the_stored_request_predicate() {
+        use super::super::agent_review_answer::{Rejection, ReviewPolicy, validate};
+        let record = fixture();
+        let decoded = stored_request(&record).unwrap();
+        let excluded = Default::default();
+        let policy = ReviewPolicy {
+            resolved_reviewer: decoded.reviewer,
+            resolved_responsible_agents: &excluded,
+        };
+        for decision in ["approved", "rejected"] {
+            let mut input = answer(&record);
+            input.fields.insert("decision".into(), json!(decision));
+            input.fields.insert(
+                "verdict".into(),
+                json!(if decision == "approved" {
+                    "pass"
+                } else {
+                    "fail"
+                }),
+            );
+            input.fields.insert("reason".into(), json!("reviewed"));
+            validate(
+                &decoded.request(),
+                &policy,
+                &incoming_answer(&input).unwrap(),
+            )
+            .unwrap();
+            input.fields.insert("attempt".into(), json!(3));
+            assert!(matches!(
+                validate(
+                    &decoded.request(),
+                    &policy,
+                    &incoming_answer(&input).unwrap()
+                ),
+                Err(Rejection::Binding)
+            ));
+        }
+    }
+    #[test]
+    fn agent_decode_answer_required_fields_fail_closed() {
+        let input = answer(&fixture());
+        for field in input.fields.keys() {
+            let mut missing = input.clone();
+            missing.fields.remove(field);
+            assert!(incoming_answer(&missing).is_err(), "{field}");
+            for malformed in [Value::Null, json!([]), json!(" ")] {
+                let mut bad = input.clone();
+                bad.fields.insert(field.clone(), malformed);
+                assert!(incoming_answer(&bad).is_err(), "{field}");
+            }
+        }
+        for (field, value) in [
+            ("reason", json!(3)),
+            ("acted_for", json!("person/operator")),
+            ("delegation", json!({"episode":"request"})),
+            ("attempt", json!(-1)),
+            ("attempt", json!(u64::MAX)),
+            ("attempt", json!(1.5)),
+        ] {
+            let mut bad = input.clone();
+            bad.fields.insert(field.into(), value);
+            assert!(incoming_answer(&bad).is_err(), "{field}");
+        }
+    }
+    #[test]
+    fn agent_decode_answer_envelope_is_not_a_binding_override() {
+        let input = answer(&fixture());
+        for which in 0..7 {
+            let mut bad = input.clone();
+            match which {
+                0 => bad.kind = "gate.requested".into(),
+                1 => bad.subject = "gate-operation/other".into(),
+                2 => bad.actor = None,
+                3 => bad.actor = Some(" ".into()),
+                4 => bad.evidence.clear(),
+                5 => bad.evidence = vec!["wrong-request".into()],
+                _ => {
+                    bad.fields.insert("request".into(), json!("stale"));
+                }
+            }
+            assert!(incoming_answer(&bad).is_err());
+        }
+        for (field, value) in [
+            ("actor", json!(3)),
+            ("fields", json!([])),
+            ("evidence", json!([3])),
+        ] {
+            let mut raw = serde_json::to_value(&input).unwrap();
+            raw[field] = value;
+            assert!(serde_json::from_value::<ClaimInput>(raw).is_err());
         }
     }
 }
