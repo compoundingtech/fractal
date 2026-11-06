@@ -10,6 +10,7 @@ pub mod device;
 pub mod fabric;
 pub mod follow;
 mod generated;
+pub mod membership_paging;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;

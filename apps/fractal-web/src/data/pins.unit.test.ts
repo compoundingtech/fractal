@@ -33,6 +33,7 @@ const setup = (absent = false, version = 2, createCode?: 'arrangement-exists' | 
   } })
   const stream: CollectionStream = {
     subscribeArrangements: (...args) => { subscribed.push(args) }, subscribeOrderedMemberships: (...args) => { subscribed.push(args) },
+    subscribeOrderedMembershipsCollection: async () => {},
     subscribe: () => {}, subscribeAgent: async () => {}, subscribeAgentsPublication: async () => {}, subscribeGlasses: () => {}, subscribeTerminal: () => {}, subscribeConversation: () => {}, unsubscribe: () => {}, close: () => {},
   }
   client.collectionStream = async (options) => { frame = options.onFrame; end = options.onEnd; return stream }

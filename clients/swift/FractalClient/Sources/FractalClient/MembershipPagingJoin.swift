@@ -5,7 +5,7 @@ public enum MembershipPagingFailure: Error, Equatable {
     case server(String)
 }
 
-/// One instance per subscribed connection and selected person/container. Serialize access.
+/// One instance per subscribed connection and selected person and container. Serialize access.
 /// Keep `complete` visible while `isStale`; window deltas never reconstruct a full collection.
 public struct MembershipPagingJoin {
     private struct Frontier: Equatable {

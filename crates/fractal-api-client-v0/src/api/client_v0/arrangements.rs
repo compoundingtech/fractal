@@ -1110,7 +1110,8 @@ mod tests {
     async fn collection_paging_sustained_unrelated_writes_release() {
         use futures_util::SinkExt as _;
         use tokio_tungstenite::tungstenite::Message;
-        use fractal_client::{CollectionEvent, Envelope, MembershipJoin, MembershipProgress, OrderedMembershipPage};
+        use fractal_client::{CollectionEvent, Envelope, OrderedMembershipPage};
+        use fractal_client::membership_paging::{MembershipJoin, MembershipProgress};
         use std::time::{Duration, Instant};
         assert!(!cfg!(debug_assertions), "run this acceptance with cargo test --release");
         let root = tempfile::tempdir().unwrap();
