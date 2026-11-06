@@ -11120,7 +11120,6 @@ pub fn append_claim_tx_with_assistant_answer(
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
-    fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
     fractal_schema::slo_breaches::validate_claim(subject, kind, body, origin, actor)
         .map_err(anyhow::Error::msg)?;
