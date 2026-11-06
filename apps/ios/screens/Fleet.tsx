@@ -302,10 +302,10 @@ export function PairScreen() {
         <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="person-root fingerprint (sha256:…)" value={fingerprint} onChangeText={value => { setFingerprint(value); setUnpinned(false); }} />
         {unpinned ? <Note tone="warning">{UNPINNED_WARNING}</Note> : null}
         <Button label="Pair this device" disabled={busy || scanning} onPress={submit} />
-        <Button label={unpinned ? 'require fingerprint again' : 'pair without a trusted fingerprint…'} disabled={busy} onPress={() => {
+        {!pairDraft?.scanned ? <Button label={unpinned ? 'require fingerprint again' : 'pair without a trusted fingerprint…'} disabled={busy} onPress={() => {
           if (unpinned) { setUnpinned(false); return; }
           Alert.alert('Pair without identity verification?', UNPINNED_WARNING, [{ text: 'Cancel', style: 'cancel' }, { text: 'Use unpinned pairing', style: 'destructive', onPress: () => { setFingerprint(''); setUnpinned(true); } }]);
-        }} />
+        }} /> : null}
         {pairDraft ? <Button label="cancel re-pairing" disabled={busy} onPress={actions.cancelPairDraft} /> : null}
       </> : null}
     </ScrollView>

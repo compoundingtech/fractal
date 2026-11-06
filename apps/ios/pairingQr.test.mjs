@@ -45,3 +45,11 @@ test('rejects malformed JSON, non-objects and oversized input', () => {
     assert.deepEqual(parsePairingQr(raw, now), { ok: false, reason: 'malformed' });
   }
 });
+
+test('rejects surrounding whitespace and trailing line terminators', () => {
+  const raw = JSON.stringify(payload);
+  for (const whitespace of [' ', '\n', '\r', '\r\n', '\t', '\u2028', '\u2029']) {
+    assert.deepEqual(parsePairingQr(raw + whitespace, now), { ok: false, reason: 'malformed' });
+    assert.deepEqual(parsePairingQr(whitespace + raw, now), { ok: false, reason: 'malformed' });
+  }
+});

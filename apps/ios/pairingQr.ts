@@ -6,7 +6,7 @@ export type PairingQrResult =
 
 /** Decode only: scanning never pairs, changes a draft, or trusts a root fingerprint. */
 export const parsePairingQr = (raw: string, now = Date.now()): PairingQrResult => {
-  if (raw.length > 4096) return { ok: false, reason: 'malformed' };
+  if (raw.length > 4096 || raw !== raw.trim()) return { ok: false, reason: 'malformed' };
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return { ok: false, reason: 'malformed' }; }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, reason: 'malformed' };
