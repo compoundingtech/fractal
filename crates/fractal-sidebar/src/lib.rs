@@ -3,6 +3,7 @@
 
 pub mod keys;
 pub mod model;
+pub mod paging;
 pub mod plan;
 pub mod projection;
 #[cfg(feature = "ratatui")]
