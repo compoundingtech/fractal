@@ -130,7 +130,8 @@ mod tests {
         jsonschema::validator_for(&schema).unwrap().validate(&body).unwrap();
         let (url, _, task) = source(body.clone()).await;
         let value = Source::default().read(&url, 30).await;
-        assert_eq!(serde_json::to_value(value).unwrap()["snapshot"]["accounts"][0]["history"], history);
+        let QuotaSource::Available { snapshot, .. } = value else { panic!("valid history must be available") };
+        assert_eq!(snapshot.accounts[0].history, serde_json::from_value::<Vec<fractal_client::quota::QuotaHistory>>(history.clone()).unwrap());
         task.abort();
         for invalid in 0..4 {
             let mut body = body.clone();
