@@ -2559,9 +2559,11 @@ finally:
     def test_a_host_build_dir_removed_after_the_build_leaves_the_dep_info_check_its_units(self):
         # A real cargo build of a one-file crate whose cargo config, as a build host's did, puts intermediates in a build-dir of their
         # own, which is then removed before the dep-info check runs (2026-11-06: units 0, linux-clippy refused).
+        # Where the checks run cargo, it is there; ci-script-tests' own shell may have only rustup's proxy with no toolchain behind
+        # it (a hosted runner's isolated HOME), and then nothing here can build.
         cargo = shutil.which('cargo')
-        if not cargo:
-            self.skipTest('no cargo')
+        if not cargo or subprocess.run([cargo, '-V'], capture_output=True).returncode != 0:
+            self.skipTest('no usable cargo in this shell')
         loader = importlib.machinery.SourceFileLoader('dep_info_check', str(ROOT / 'scripts/dep-info-check'))
         spec = importlib.util.spec_from_loader('dep_info_check', loader)
         dep_info = importlib.util.module_from_spec(spec)
