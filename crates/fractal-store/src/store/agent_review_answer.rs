@@ -258,9 +258,7 @@ mod tests {
         let source = "version 2\nagent \"example/reviewer\" { command \"true\"; }";
         let intent = crate::parse_intent(source, "example").unwrap();
         let expected = [(REVIEWER.into(), vec![])].into();
-        store
-            .apply(&intent, &expected, "declare-reviewer")
-            .unwrap();
+        store.apply(&intent, &expected, "declare-reviewer").unwrap();
         let alias = "agent/example/alias";
         let rename = RenameRequest {
             from: REVIEWER.into(),
