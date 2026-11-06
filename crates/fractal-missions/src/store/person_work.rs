@@ -989,7 +989,14 @@ impl PersonWorkStore for Store {
             if !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
                 return Err(St3Error::new("missing-ask-owner", "the requester must have an existing agent declaration; declare the agent before asking"));
             }
-            let key = serde_json::to_string(&(&input.actor, name, &input.idempotency_key)).map_err(internal)?;
+            let key = if input.new_run.is_some() {
+                // Preserve the identity of named asks written before independent ownership.
+                let desired = current_desired_row(tx, &input.actor).map_err(internal)?.unwrap();
+                let declaration = desired.owner_run.is_some().then_some(&desired.claim_id);
+                serde_json::to_string(&(&input.actor, name, &desired.owner_run, &desired.owner_generation, declaration, &input.idempotency_key))
+            } else {
+                serde_json::to_string(&(&input.actor, name, &input.idempotency_key))
+            }.map_err(internal)?;
             let hash = hex::encode(Sha256::digest(key.as_bytes()));
             let generation = format!("ask-{}", &hash[..32]);
             let subject = format!("step-run/{generation}/ask");

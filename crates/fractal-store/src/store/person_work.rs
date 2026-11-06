@@ -555,20 +555,21 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     let requester = ask.actor.as_deref().unwrap_or_default();
     // Independent asks belong to the agent, not its current work or runtime turn.
     // This also preserves asks written before owner-run fencing was removed.
-    if view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null() {
-        return Ok(matches!(view.status.as_str(), "pending" | "ready")
-            && requester_declared(connection, requester)?);
-    }
+    let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
     // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
     // waits for nobody, so it stays until the person reads it, even after its poster stops.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
-        || !run_live(connection, &view.run, Some(&view.generation), false)?
+        || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)
     {
         return Ok(false);
     }
-    let requester_live = unfenced || declaration_live(connection, requester)?;
-    let retiring = !requester_live && super::rollouts::retiring_ask_live(connection, ask)?;
+    let requester_live = unfenced || if independent {
+        requester_declared(connection, requester)?
+    } else {
+        declaration_live(connection, requester)?
+    };
+    let retiring = !independent && !requester_live && super::rollouts::retiring_ask_live(connection, ask)?;
     if !requester_live && !retiring {
         return Ok(false);
     }
@@ -591,6 +592,9 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         {
             return Ok(false);
         }
+    }
+    if independent {
+        return Ok(true);
     }
     // A top-level seat's ask outlives its restarts and harness changes: only stopping or retiring
     // the seat (above) or cancelling the ask ends it, so a person never loses it to a restart. A

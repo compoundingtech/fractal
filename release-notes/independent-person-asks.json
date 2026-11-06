@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No graph replay is required. Existing independent asks also stop depending on owner-run liveness."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},
-  "compatibility": {"status": "changed", "detail": "Independent asks consume no agent work capacity and retain their identity across requester re-declarations. Older daemons still require --new-run and may cancel managed requesters' asks when their owning work ends. Step-bound refusals now name the step, claim state and corrective action."},
+  "compatibility": {"status": "changed", "detail": "Independent asks consume no agent work capacity. Unnamed asks retain their identity across requester re-declarations; named asks preserve their pre-upgrade identity tuple. Stopping or retiring a requester permanently fences its old asks, including after re-declaration. Older daemons still require --new-run and may cancel managed requesters' asks when their owning work ends. Step-bound refusals now name the step, claim state and corrective action."},
   "downtime": {"status": "none", "detail": "No startup work."},
   "manual": {"status": "none", "detail": "No manual step."},
   "recovery": {"status": "none", "detail": "Withdrawal, answers and configured deadline defaults retain their existing commands and behavior."}

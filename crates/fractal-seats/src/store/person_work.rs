@@ -788,6 +788,50 @@ mission "person-work" state="ready" {{
     }
 
     #[test]
+    fn independent_ask_does_not_revive_after_stop_then_redeclare() {
+        let (store, _, mut input) = fixture();
+        input.step = None;
+        let ask = store.ask_person(&input).unwrap();
+        let stop = crate::graph::parse_internal_intent("version 2\nstop \"agent/alder.asker\"", "alder").unwrap();
+        store.apply_internal(&stop, "stop-before-reconcile").unwrap();
+        let redeclare = crate::graph::parse_internal_intent(
+            "version 2\nagent \"alder.asker\" { workspace \"/tmp\"; command \"true\"; restart always; }", "alder").unwrap();
+        store.apply_internal(&redeclare, "redeclare-before-reconcile").unwrap();
+        assert!(!store.attention_items(Some(&input.person)).unwrap().iter()
+            .any(|item| item.subject == ask.subject));
+        store.reconcile_person_asks().unwrap();
+        assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+    }
+
+    #[test]
+    fn named_ask_retries_the_pre_upgrade_subject() {
+        let (store, _, mut input) = fixture();
+        input.step = None;
+        input.new_run = Some("release-question".into());
+        let key = serde_json::to_string(&(&input.actor, "release-question",
+            None::<String>, None::<String>, None::<String>, &input.idempotency_key)).unwrap();
+        let hash = hex::encode(Sha256::digest(key.as_bytes()));
+        let subject = format!("step-run/ask-{}/ask", &hash[..32]);
+        store.connection.batched(|tx| -> Result<()> {
+            let run = format!("mission-run/person-ask/{}", &hash[..32]);
+            let mission_id = format!("person-ask/{}", &hash[..32]);
+            let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}", input.title, input.person, input.reason);
+            let mission = crate::graph::parse_internal_intent(&kdl, "alder").unwrap()
+                .missions.remove(&mission_id).unwrap();
+            let claim = append_claim_tx(tx, "alder", &subject, "work.person-asked", Some(&input.actor),
+                &json!({"fields": {"run": run, "generation": format!("run-generation/ask-{}", &hash[..32]),
+                    "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
+                    "attempt": 1, "status": "ready", "mission_spec": mission, "owner_run": null,
+                    "owner_generation": null, "requester_declaration": null}}), &[], None)?;
+            project(tx, &claim).unwrap();
+            Ok(())
+        }).unwrap().unwrap();
+        assert_eq!(store.ask_person(&input).unwrap().subject, subject);
+        assert_eq!(store.attention_items(Some(&input.person)).unwrap().iter()
+            .filter(|item| item.subject.starts_with("step-run/ask-")).count(), 1);
+    }
+
+    #[test]
     fn answered_ask_is_not_cancelled_when_origin_is_reclaimed() {
         let (store, origin, input) = fixture();
         let ask = store.ask_person(&input).unwrap();
