@@ -73,6 +73,7 @@ import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
 import { gatewayNativeDetails } from './nativeDetailsSource.ts'
 import { gatewayObjectives } from './objectivesSource.ts'
+import { relatedRunsFeed } from './relatedRuns.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -194,9 +195,19 @@ export const liveSource = ({
     baseUrl,
     fetchImpl: fetch,
   })
+  const relatedRunsEpoch = Atom.keepAlive(Atom.make(0))
+  const invalidateRelatedRuns = () => registry.set(relatedRunsEpoch, registry.get(relatedRunsEpoch) + 1)
   const subjectReads = gatewaySubjectReads({
     options: { baseUrl, fetchImpl: fetch },
     resource: subjectReaderFromAtom({ feed: resources.byId, registry }),
+    relatedRuns: subjectReaderFromAtom({
+      registry,
+      feed: relatedRunsFeed({
+        options: { baseUrl, fetchImpl: fetch }, discovery: client, registry,
+        epoch: relatedRunsEpoch, refusal: readRefusal,
+        retain: (get) => { get(agents); get(missions); get(attention) },
+      }),
+    }),
     discovery: client,
     registry,
   })
@@ -210,6 +221,8 @@ export const liveSource = ({
       onDiagnostics: (event) => {
         switch (event._tag) {
           case 'Connection':
+            if (event.state._tag === 'Reconnecting' || event.state._tag === 'Live')
+              invalidateRelatedRuns()
             if (event.state._tag === 'Live' && !online) {
               // A successful transport attempt overrides a false browser offline hint.
               online = true
@@ -726,7 +739,10 @@ export const liveSource = ({
       rosterEvidence.set(retained, evidence)
       return retained
     },
-    onCommit: (value) => recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster),
+    onCommit: (value) => {
+      recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster)
+      invalidateRelatedRuns()
+    },
     observedFreshness: (value) => rosterEvidence.get(value)?.decodeStale ? 'stale' : 'live',
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
@@ -742,6 +758,7 @@ export const liveSource = ({
   const agents = agentsRetained.atom
   const missionsRetained = retain<readonly Mission[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'missions', limit: 100 }),
+    onCommit: invalidateRelatedRuns,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
         Stream.map((event) =>
@@ -757,6 +774,7 @@ export const liveSource = ({
   const missions = missionsRetained.atom
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
+    onCommit: invalidateRelatedRuns,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
         Stream.map((event) =>

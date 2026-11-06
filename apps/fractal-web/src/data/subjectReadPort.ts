@@ -15,6 +15,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import type { Feed } from './source.ts'
 import { observed, unavailable, waiting } from './source.ts'
 import { redactPublicationDefinition, type MissionDeclarationValue } from '../declarations/model.ts'
+import { relatedRunsFeed } from './relatedRuns.ts'
 
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
@@ -25,9 +26,9 @@ export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
 
 /**
  * Exact generated decoded DTOs, never envelopes or encoded wire. Feed subscriptions own
- * acquisition/release; last-good values revalidate immediately on remount. Getter refresh is
- * demand-mounted at 15 seconds until the SDK supplies shared authoritative per-ref streams:
- * opening another bounded collection follow would overwrite the SDK's existing follow key.
+ * acquisition/release; last-good values revalidate immediately on remount. Legacy getters
+ * refresh every 15 seconds while mounted; related runs instead invalidate on pushed commits.
+ * Opening another bounded collection follow would overwrite the SDK's existing follow key.
  * Registry callbacks validate Schema.toType(generatedCodec), not the wire decoder again.
  */
 export interface SubjectReader<T> {
@@ -305,11 +306,13 @@ export const gatewaySubjectReads = ({
   resource = unsupportedSubjectReader('Resource details are not supported by this connection'),
   discovery = new FractalClient(options),
   registry = AtomRegistry.make(),
+  relatedRuns,
 }: {
   readonly options: ClientOptions
   readonly resource?: SubjectReader<Native.ResourceObservation>
   readonly discovery?: FractalClient
   readonly registry?: AtomRegistry.AtomRegistry
+  readonly relatedRuns?: SubjectReader<Native.AgentRelatedRuns>
 }): SubjectReads => {
   const fromGetter = <T>({
     decode,
@@ -358,6 +361,7 @@ export const gatewaySubjectReads = ({
   const decodeMissionDeclaration = Native.decodeUnknownSync(Schema.Union([Native.MissionDeclaration, Native.PublicationDefinition]))
   return {
     resource,
+    relatedRuns: relatedRuns ?? subjectReaderFromAtom({ feed: relatedRunsFeed({ options, discovery, registry }), registry }),
     launch: fromGetter({
       decode: Native.decodeUnknownSync(Native.Launch),
       getter: ({ client, ref }) => client.launchesGet(ref),
@@ -507,6 +511,7 @@ export const gatewaySubjectReads = ({
 /** Native subject families available through the same read, stream, and atom contract. */
 export interface SubjectReads {
   readonly resource: SubjectReader<Native.ResourceObservation>
+  readonly relatedRuns: SubjectReader<Native.AgentRelatedRuns>
   readonly launch: SubjectReader<Native.Launch>
   readonly launchVariant: SubjectReader<Native.LaunchVariant>
   readonly launchDecision: SubjectReader<Native.LaunchDecision>
@@ -607,6 +612,7 @@ export const fixtureSubjectReads = ({
   }
   return {
     resource: reader({ table: fixtures.resource, pinned: overrides.resource }),
+    relatedRuns: reader({ table: fixtures.relatedRuns, pinned: overrides.relatedRuns }),
     launch: reader({ table: fixtures.launch, pinned: overrides.launch }),
     mission: reader({ table: fixtures.mission, pinned: overrides.mission }),
     work: reader({ table: fixtures.work, pinned: overrides.work }),

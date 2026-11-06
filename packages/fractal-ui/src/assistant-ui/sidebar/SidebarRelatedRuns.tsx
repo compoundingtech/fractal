@@ -2,22 +2,24 @@
  * Mission runs related to one agent, drawn exactly as `GET /v1/client/agent-related-runs/{agent}` serves them. The server
  * owns the status chip, done/total, ETA, `waiting_on_you`, `late`, urgency order and `folded`; this list keeps the served
  * order, draws active rows first and finished rows (retained 24 h) behind a native fold, and never joins or polls. Hosts
- * replace `state` when a push invalidates the read and keep the previous Loaded value while they refetch.
+ * replace `state` when a push invalidates the read and keep the previous Loaded value while they refetch. Rows are the
+ * decoded Native DTO, so nullable wire fields arrive as `Option`.
  *
  * Line 1: status chip, mission, done/total bar, then "waiting on you" or the served ETA (danger ink when late).
  * Line 2: the current step and who it waits on.
  */
 import * as stylex from '@stylexjs/stylex'
+import { Option } from 'effect'
 import { GridList, GridListItem, type Key } from 'react-aria-components'
 import { MissionEtaLabel } from '../MissionEta'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import type { AgentRelatedRun, AgentRelatedRuns, RelatedRunWait } from '../../../../../clients/typescript/fractal-client/Models.generated.ts'
+import type * as Native from '../../../../../clients/typescript/fractal-client/ReadSchema.generated.ts'
 
-export type SidebarRelatedRun = AgentRelatedRun
+export type SidebarRelatedRun = Native.AgentRelatedRun
 export type SidebarRelatedRunsState =
   | { readonly _tag: 'Loading' }
   | { readonly _tag: 'Failed'; readonly message: string }
-  | { readonly _tag: 'Loaded'; readonly value: AgentRelatedRuns }
+  | { readonly _tag: 'Loaded'; readonly value: Native.AgentRelatedRuns }
 export interface SidebarRelatedRunsProps {
   readonly state: SidebarRelatedRunsState
   /** Accessible name of the section. */
@@ -28,18 +30,18 @@ export interface SidebarRelatedRunsProps {
   readonly now?: number
 }
 
-type Chip = AgentRelatedRun['status_chip']
+type Chip = SidebarRelatedRun['status_chip']
 const chipLabel: Record<Chip, string> = { running: 'Running', waiting: 'Waiting', 'waiting-on-you': 'Needs you', stalled: 'Stalled', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
 /** Last segment of a canonical ref: `mission/sidebar-polish` reads `sidebar-polish`. */
 const refName = (ref: string) => ref.slice(ref.lastIndexOf('/') + 1)
-const waitName = (wait: RelatedRunWait) => wait.who === undefined ? wait.kind : refName(wait.who)
-const stepName = (wait: RelatedRunWait) => wait.title ?? wait.step
+const waitName = (wait: Native.RelatedRunWait) => wait.who === undefined ? wait.kind : refName(wait.who)
+const stepName = (wait: Native.RelatedRunWait) => wait.title ?? wait.step
 
 /** Plain-text row summary, the row's typeahead text. */
 export const relatedRunText = (run: SidebarRelatedRun): string => [
   chipLabel[run.status_chip], refName(run.mission_id), `${run.progress.done} of ${run.progress.total} steps`,
   run.waiting_on_you ? 'waiting on you' : run.late ? 'late' : undefined,
-  run.current_step === null ? undefined : stepName(run.current_step),
+  Option.getOrUndefined(Option.map(run.current_step, stepName)),
   run.waits_on.length === 0 ? undefined : `waits on ${run.waits_on.map(waitName).join(', ')}`,
 ].filter(part => part !== undefined).join(', ')
 
@@ -54,12 +56,13 @@ function RunRow({ run, now }: { readonly run: SidebarRelatedRun; readonly now: n
       <span {...stylex.props(styles.metric)}>{done}/{total}</span>
       {run.waiting_on_you
         ? <span data-waiting-on-you {...stylex.props(styles.metric, styles.attention)}>waiting on you</span>
-        : run.eta !== null
-          ? <span data-late={run.late || undefined} {...stylex.props(styles.metric, run.late && styles.late)}><MissionEtaLabel eta={run.eta} now={now} /></span>
-          : run.late ? <span data-late {...stylex.props(styles.metric, styles.late)}>late</span> : null}
+        : Option.match(run.eta, {
+          onSome: eta => <span data-late={run.late || undefined} {...stylex.props(styles.metric, run.late && styles.late)}><MissionEtaLabel eta={eta} now={now} /></span>,
+          onNone: () => run.late ? <span data-late {...stylex.props(styles.metric, styles.late)}>late</span> : null,
+        })}
     </span>
     <span {...stylex.props(styles.line, styles.detail)}>
-      <span {...stylex.props(styles.ellipsis)}>{run.current_step === null ? run.status : stepName(run.current_step)}</span>
+      <span {...stylex.props(styles.ellipsis)}>{Option.match(run.current_step, { onSome: stepName, onNone: () => run.status })}</span>
       {waits === '' ? null : <><span aria-hidden="true">·</span><span {...stylex.props(styles.ellipsis)}>waits on {waits}</span></>}
     </span>
   </>
@@ -83,7 +86,7 @@ export function SidebarRelatedRuns({ state, label = 'Related missions', onOpenRu
   return <section aria-label={label} aria-busy={state._tag === 'Loading' || undefined} {...stylex.props(styles.root)}>{body}</section>
 }
 
-function Loaded({ value, label, onOpenRun, now }: { readonly value: AgentRelatedRuns; readonly label: string; readonly onOpenRun: SidebarRelatedRunsProps['onOpenRun']; readonly now: number | undefined }) {
+function Loaded({ value, label, onOpenRun, now }: { readonly value: Native.AgentRelatedRuns; readonly label: string; readonly onOpenRun: SidebarRelatedRunsProps['onOpenRun']; readonly now: number | undefined }) {
   // Server order is kept: filtering partitions without reordering.
   const active = value.rows.filter(run => !run.folded)
   const finished = value.rows.filter(run => run.folded)
