@@ -903,6 +903,35 @@ impl Ui {
 }
 
 #[cfg(test)]
+pub(super) fn golden_sidebar(state: &str) -> Sidebar {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../fixtures/clients/sidebar/behavior-v1.json"
+    )).unwrap();
+    let case = &fixtures["cases"][1];
+    let mut legacy: fractal_client::Arrangement =
+        serde_json::from_value(case["initial"]["arrangement"].clone()).unwrap();
+    legacy.header.id = "arrangement/person/test/00000000-0000-7000-8000-000000000002".into();
+    let mut reserved = legacy.clone();
+    reserved.header.id = format!("arrangement/person/test/{}", fractal_client::SIDEBAR_ARRANGEMENT_UUID);
+    reserved.v1_mut().name.value = "Folder".into();
+    let mut sidebar = Sidebar { writable: true, focused: state != "unfocused", ..Sidebar::default() };
+    for (index, id) in case["catalog"].as_array().unwrap().iter().enumerate() {
+        let id = id.as_str().unwrap();
+        sidebar.seen.insert(id.into(), ResourceRow {
+            id: id.into(), kind: "Agents".into(), title: format!("Synthetic Resource {index}"),
+            open: id.into(), missing: false,
+        });
+    }
+    if state == "legacy" { reserved.deleted = true; }
+    if state == "retired" { legacy.deleted = true; reserved.deleted = true; sidebar.reserved_retired = true; }
+    sidebar.arrangements = vec![legacy, reserved];
+    if state == "fold" { sidebar.toggle(0); }
+    if state == "search" { sidebar.filter = "test".into(); sidebar.filtering = true; }
+    if state == "scroll" { sidebar.selected = sidebar.rows().len().saturating_sub(1); }
+    sidebar
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
