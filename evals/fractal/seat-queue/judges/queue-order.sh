@@ -13,7 +13,7 @@ dump_history "$history"
 
 for key in alpha/draft alpha/publish bravo/work charlie/work; do
   subject="$(jq -er --arg key "$key" '.steps[$key]' controller-state.json)"
-  st3 work show "$subject" --json | jq -e '.value.state == "completed"' >/dev/null
+  fractal work show "$subject" --json | jq -e '.value.state == "completed"' >/dev/null
 done
 
 # Rebuild the seat's queue and each step's state from graph history at every
