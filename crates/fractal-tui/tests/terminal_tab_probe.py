@@ -75,7 +75,7 @@ class Tab:
         self.master, self.slave = pty.openpty()
         self.resize(40, 120)
         self.env = {**os.environ, "TERM": "xterm-256color", "PTY_ROOT": str(self.registry),
-                    "STUI_PROBE_ROOT": str(self.root), "STUI_PROBE_SOCKET": str(self.root / "tab.sock"),
+                    "FRACTAL_TUI_PROBE_ROOT": str(self.root), "FRACTAL_TUI_PROBE_SOCKET": str(self.root / "tab.sock"),
                     "XDG_CONFIG_HOME": str(self.root / "config"),
                     "XDG_CACHE_HOME": str(self.root / "cache"),
                     "XDG_STATE_HOME": str(self.root / "state"), "HOME": str(self.root)}
@@ -442,7 +442,7 @@ def matrix(tab):
 def agent_guards(worker):
     with tempfile.TemporaryDirectory(prefix="stui-guard-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
-        tab.env["STUI_PROBE_AGENT"] = "1"
+        tab.env["FRACTAL_TUI_PROBE_AGENT"] = "1"
         try:
             tab.start()
             tab.emit(RESET)
@@ -462,7 +462,7 @@ def controls_and_images(worker):
     import base64
     with tempfile.TemporaryDirectory(prefix="stui-controls-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
-        tab.env["STUI_PROBE_GRAPHICS"] = "1"
+        tab.env["FRACTAL_TUI_PROBE_GRAPHICS"] = "1"
         rows = []
         try:
             tab.start()
