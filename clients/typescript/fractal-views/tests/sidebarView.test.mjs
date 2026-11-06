@@ -5,26 +5,10 @@ import { build, nodeKey, canPlace, planMove, rollup } from '@fractal/views/sideb
 import { build as publicBuild } from '@fractal/views';
 import { project } from '../../../../apps/fractal-web/src/folders/core.mts';
 import * as Schema from '@fractal/client/schema';
+import { checkEnvelope, checkFixtures } from '../../../../scripts/check-sidebar-fixtures.mjs';
 
 const fixtures = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/sidebar/behavior-v1.json', import.meta.url), 'utf8'));
-const behaviorSchema = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/sidebar/behavior.schema.json', import.meta.url), 'utf8'));
-function checkEnvelope(value, schema = behaviorSchema) {
-  if (schema.$ref) return checkEnvelope(value, behaviorSchema.$defs[schema.$ref.split('/').at(-1)]);
-  if (schema.oneOf) return assert.equal(schema.oneOf.filter(branch => { try { checkEnvelope(value, branch); return true; } catch { return false; } }).length, 1);
-  if (schema.const !== undefined) assert.deepEqual(value, schema.const);
-  if (schema.enum) assert.ok(schema.enum.includes(value));
-  if (schema.type) assert.ok([schema.type].flat().includes(value === null ? 'null' : Array.isArray(value) ? 'array' : Number.isInteger(value) ? 'integer' : typeof value));
-  if (schema.minLength !== undefined) assert.ok([...value].length >= schema.minLength);
-  if (schema.minimum !== undefined) assert.ok(value >= schema.minimum);
-  if (Array.isArray(value)) {
-    assert.ok(value.length >= (schema.minItems ?? 0) && value.length <= (schema.maxItems ?? Infinity));
-    for (const item of value) checkEnvelope(item, schema.items);
-  } else if (value !== null && typeof value === 'object') {
-    for (const key of schema.required ?? []) assert.ok(Object.hasOwn(value, key), key);
-    for (const [key, item] of Object.entries(value)) { const child = schema.properties?.[key] ?? schema.additionalProperties; assert.ok(child && typeof child === 'object', key); checkEnvelope(item, child); }
-  }
-}
-checkEnvelope(fixtures);
+checkFixtures();
 test('behavior schema rejects unknown fields, versions, cardinalities and invalid scalar bounds', () => {
   for (const mutate of [v => { v.cases[0].unknown = true; }, v => { v.schemaVersion = 2; }, v => { v.cases[0].events.push(v.cases[0].events[0]); }, v => { v.cases[0].checkpoints.push(v.cases[0].checkpoints[0]); }, v => { v.cases[0].name = ''; }, v => { Object.values(v.cases[1].checkpoints[0].rollup)[0].needsYou = -1; }]) { const invalid = structuredClone(fixtures); mutate(invalid); assert.throws(() => checkEnvelope(invalid)); }
 });
