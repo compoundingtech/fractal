@@ -151,8 +151,17 @@ empties on its own. The lane outlives it until the seat stops for good (above).
 
 ## The host guard
 
-The kernel OOM-kills inside a lane on purpose. A host guard that counts every `oom_kill` in the user
-slice would read that as a fault, so it counts only the kills outside lanes:
+The kernel OOM-kills inside a lane on purpose. `scripts/fractal-test` names such a kill, which
+otherwise leaves only a bare exit: before a check that builds, it reads the `oom_kill` count in
+`memory.events` of each memory limit the check runs under (its own cap, else the seat's lane it runs
+in, and builds.slice, where the host's sccache server compiles), and a check that fails while one grew
+says `killed by the lane's memory limit (SLICE): N OOM kills at memory.max X while it ran`. Only the
+innermost limit that counted kills is named, since a kill counts in every cgroup above it too. A
+limit is shared with what else runs under it (builds.slice with every run's compiles, a lane with the
+run's other checks and the seat's harness), so a kill it names may be theirs.
+
+A host guard that counts every `oom_kill` in the user slice would read a lane's kills as a fault, so
+it counts only the kills outside lanes:
 
 ```
 oom_kill(user.slice/user-UID.slice/memory.events)
@@ -324,9 +333,18 @@ does so only while that seat would fit once every step's raise and burst on the 
 back, beside the burst reserve; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
 waiting burst's reason starts `burst lane`. While held, admission counts the seat at the raised
 lane. Released, its cores come back at once and its memory once the lane holds less than it
-will allow, as a step's lowering does. Bursts live in the daemon's memory: after a daemon restart
-the slice is still raised and counts, as any raise does, and the holder's next renewal holds it
-again.
+will allow, as a step's lowering does. Bursts live in the daemon's memory, and a slice outlives a
+daemon restart. Before it judges any room, a new daemon reads each laned seat's slice once: one raised
+above the seat's own (a burst's, or a step's the daemon has not judged yet) counts as held at once
+(in other lanes' room and the burst reserve, so no start or other burst gets that room) and stays
+raised for one burst lease (90 s) after the daemon started. The holder renews at a third of the lease
+the daemon names and says it holds the burst; a daemon with no record of it restores the grant when it
+is such a found raise (or the daemon has not read the slices yet) and the slice still holds the burst
+lane. A burst that lapsed while the daemon ran is asked anew. A raise no holder renews
+within that lease goes back to what the seat's steps hold. Once granted, a holder answered anything but
+`granted` (a renewal that reached a daemon that could not restore it, or a lease that lapsed) prints
+`lost` and why, gives the burst back and exits non-zero, rather than letting its run go on in a lane
+it no longer holds.
 
 A burst is tied to the command, not to a step, so a seat in `work wait` holds only its base and
 its steps. A seat without a lane, or a host with lanes off, holds no burst: the holder answers
@@ -346,7 +364,8 @@ so the newer copy holds the same burst or reads the answer to the same ask. A ru
 `--queue-limit` for each ask (a burst given back and asked again starts a new one), prints
 each reason, and records `burst` (the size held, or none and why) and `burst_wait_s` in the run's
 `runs.jsonl` line, which `scripts/fractal-test-report` shows as its own line beside the tree and
-slot waits. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
+slot waits. A burst its holder says was lost while the run held it fails the run with a `lane-burst
+LOST` row that says why: from then on its checks ran in the seat's own lane. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
 as it is. Its compiles still go to the host's sccache server in `builds.slice` (above): the burst
 bounds the rest of the run.
 

@@ -78,33 +78,33 @@ pub fn glasses_at(
 pub fn prepare(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
-) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
+) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if !input.subject.starts_with("glass/") {
         return Ok(None);
     }
     let person =
-        fractal_schema::glasses::owner(&input.subject).map_err(|e| St3Error::new(e.code, e.message))?;
+        fractal_schema::glasses::owner(&input.subject).map_err(|e| FractalError::new(e.code, e.message))?;
     glass_heads::flush(transaction).map_err(internal)?;
     let head = glass_heads::head(transaction, &input.subject).map_err(internal)?;
     if head.as_ref().is_some_and(|head| head.deleted) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "glass-deleted",
             "a deleted glass ID cannot be reused",
         ));
     }
     let head = head.as_ref().and_then(|head| head.claim_id.as_deref());
     if input.kind == "glass.deleted" && head.is_none() {
-        return Err(St3Error::new("not-found", "the glass does not exist"));
+        return Err(FractalError::new("not-found", "the glass does not exist"));
     }
     if input.kind == "glass.upserted" && head.is_none() {
         if !input.fields.get("base_revision").is_none_or(Value::is_null) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-glass-base",
                 "creation requires a null base_revision",
             ));
         }
         if glass_heads::live_count(transaction, person).map_err(internal)? >= MAX_GLASSES {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "glass-limit",
                 "at most 100 glasses may be live",
             ));

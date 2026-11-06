@@ -294,7 +294,7 @@ fn prepare_member(
         workspace.display()
     );
     let (writes, warnings) = match render {
-        Some(render) => prepare_render(store, render, workspace).with_context(|| {
+        Some(render) => prepare_render(store, render, workspace, &|_| Ok(())).with_context(|| {
             format!(
                 "prepare render for {} in {}",
                 subject.subject,

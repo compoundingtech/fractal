@@ -9,7 +9,7 @@ use crate::declaration_syntax::*;
 use crate::model::{
     BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopAttentionSpec, LoopExhaustionSpec,
     LoopSpec, LoopStopSpec, MetricSource, MetricSpec, MissionInputKind, MissionInputSpec,
-    MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, St3Error, StepSpec,
+    MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, FractalError, StepSpec,
     UsedMissionSpec, WorkSelector,
 };
 
@@ -18,14 +18,14 @@ pub const LOOP_FEEDBACK_INPUT: &str = "__st3_loop_feedback";
 pub const LOOP_ITEM_INPUT: &str = "__st3_loop_item";
 pub const CANDIDATE_INDEX_INPUT: &str = "__st3_candidate_index";
 
-pub fn validate_mission_id(value: &str) -> Result<(), St3Error> {
+pub fn validate_mission_id(value: &str) -> Result<(), FractalError> {
     validate_id(value, "mission")
 }
 
 pub fn parse_missions(
     document: &KdlDocument,
     default_host: &str,
-) -> Result<BTreeMap<String, MissionSpec>, St3Error> {
+) -> Result<BTreeMap<String, MissionSpec>, FractalError> {
     let mut missions = BTreeMap::new();
     let mut top_level = Vec::new();
     for node in document.nodes() {
@@ -196,12 +196,12 @@ pub fn parent_step_index(mission: &MissionSpec) -> std::collections::HashMap<&st
 fn insert_mission(
     missions: &mut BTreeMap<String, MissionSpec>,
     mission: MissionSpec,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if missions
         .insert(mission.id.clone(), mission.clone())
         .is_some()
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-mission",
             format!("mission `{}` repeats", mission.id),
         ));
@@ -214,7 +214,7 @@ fn parse_mission(
     default_host: &str,
     top_level: bool,
     default_completion: bool,
-) -> Result<MissionSpec, St3Error> {
+) -> Result<MissionSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(
         node,
@@ -234,7 +234,7 @@ fn parse_mission(
     validate_id(&id, "mission")?;
     let authored_state = property_string(node, "state")?;
     if top_level && authored_state.is_none() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-mission-state",
             format!("mission `{id}` needs an explicit state"),
         ));
@@ -247,7 +247,7 @@ fn parse_mission(
         .map(|value| parse_duration(&value))
         .transpose()?;
     if timeout_ms == Some(0) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-timeout",
             format!("mission `{id}` timeout must be greater than zero"),
         ));
@@ -259,7 +259,7 @@ fn parse_mission(
         None | Some("restart-active") => RevisionCutover::RestartActive,
         Some("when-idle") => RevisionCutover::WhenIdle,
         Some(value) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-revision-cutover",
                 format!("mission `{id}` has invalid revision cutover `{value}`"),
             ));
@@ -267,7 +267,7 @@ fn parse_mission(
     };
     let children = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-mission", format!("mission `{id}` has no steps")))?;
+        .ok_or_else(|| FractalError::new("empty-mission", format!("mission `{id}` has no steps")))?;
     unique_named_child(children, "provenance")?;
     let mut inputs = BTreeMap::new();
     for input_node in children
@@ -277,7 +277,7 @@ fn parse_mission(
     {
         let input = parse_mission_input(input_node)?;
         if inputs.insert(input.name.clone(), input.clone()).is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-mission-input",
                 format!("mission `{id}` repeats input `{}`", input.name),
             ));
@@ -311,7 +311,7 @@ fn parse_mission(
         match child.name().value() {
             "system" => {
                 if system {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-mission-field",
                         format!("mission `{id}` repeats `system`"),
                     ));
@@ -325,7 +325,7 @@ fn parse_mission(
                 crate::provenance::parse_block(child)?;
             }
             "provenance" => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mission-provenance",
                     "provenance belongs on a top-level named mission",
                 ));
@@ -337,14 +337,14 @@ fn parse_mission(
                 // The publication makes each URI a desired subject; a nested or loop body is
                 // never published on its own, so its resources would name nothing.
                 if !top_level {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "nested-mission-resource",
                         format!("mission `{id}` is nested; name resources on the top-level mission"),
                     ));
                 }
                 let reference = parse_declared_resource_reference(child)?;
                 if !resource_names.insert(reference.name.clone()) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-resource-name",
                         format!("mission `{id}` repeats resource `{}`", reference.name),
                     ));
@@ -353,7 +353,7 @@ fn parse_mission(
             }
             "concurrent-runs" => {
                 if concurrent_runs_seen {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-mission-field",
                         format!("mission `{id}` repeats `concurrent-runs`"),
                     ));
@@ -363,7 +363,7 @@ fn parse_mission(
             }
             "assigned-to" => {
                 if assigned_to.is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-mission-field",
                         format!("mission `{id}` repeats `assigned-to`"),
                     ));
@@ -373,7 +373,7 @@ fn parse_mission(
             "available-to" => {
                 let agent = normalize_assignee(&first_string(child)?, default_host);
                 if available_to.contains(&agent) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-work-agent",
                         format!("mission `{id}` repeats available agent `{agent}`"),
                     ));
@@ -383,7 +383,7 @@ fn parse_mission(
             "baseline" => {
                 let baseline = parse_baseline(child)?;
                 if !baseline_names.insert(baseline.name.clone()) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-baseline",
                         format!("mission `{id}` repeats baseline `{}`", baseline.name),
                     ));
@@ -395,7 +395,7 @@ fn parse_mission(
                 produces_seen = true;
             }
             "produces" => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "duplicate-mission-field",
                     format!("mission `{id}` repeats `produces`"),
                 ));
@@ -404,7 +404,7 @@ fn parse_mission(
                 let gate = crate::gate_parse::parse_gate(child, default_host)?;
                 require_approve_mode_outside_step(&gate)?;
                 if !gate_names.insert(crate::gate_parse::gate_name(&gate).to_owned()) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-gate",
                         format!(
                             "mission `{id}` repeats gate `{}`",
@@ -417,7 +417,7 @@ fn parse_mission(
             "step" => {
                 let step = parse_step(child, "", default_host, false, &input_names)?;
                 if steps.insert(step.id.clone(), step.clone()).is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-step",
                         format!("mission `{id}` repeats step `{}`", step.id),
                     ));
@@ -427,7 +427,7 @@ fn parse_mission(
             "queue" => {
                 for step in parse_queue(child, default_host, &input_names)? {
                     if steps.insert(step.id.clone(), step.clone()).is_some() {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "duplicate-step",
                             format!("mission `{id}` repeats step `{}`", step.id),
                         ));
@@ -438,7 +438,7 @@ fn parse_mission(
             "loop" => {
                 let step = parse_loop_group(child, &id, default_host, &inputs, timeout_ms)?;
                 if steps.insert(step.id.clone(), step.clone()).is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-step",
                         format!("mission `{id}` repeats graph node `{}`", step.id),
                     ));
@@ -447,7 +447,7 @@ fn parse_mission(
             }
             "completion" => {
                 if completion.is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-mission-field",
                         format!("mission `{id}` repeats `completion`"),
                     ));
@@ -456,27 +456,27 @@ fn parse_mission(
             }
             "finally" => {
                 if finally_seen {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-mission-field",
                         format!("mission `{id}` repeats `finally`"),
                     ));
                 }
                 ensure_bare(child)?;
                 let body = child.children().ok_or_else(|| {
-                    St3Error::new(
+                    FractalError::new(
                         "empty-finally",
                         format!("mission `{id}` has an empty finally block"),
                     )
                 })?;
                 if body.nodes().is_empty() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "empty-finally",
                         format!("mission `{id}` has an empty finally block"),
                     ));
                 }
                 for final_node in body.nodes() {
                     if final_node.name().value() != "step" {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "invalid-finally-child",
                             format!(
                                 "mission `{id}` finally cannot contain `{}`",
@@ -486,7 +486,7 @@ fn parse_mission(
                     }
                     let step = parse_step(final_node, "", default_host, true, &input_names)?;
                     if steps.insert(step.id.clone(), step.clone()).is_some() {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "duplicate-step",
                             format!("mission `{id}` repeats step `{}`", step.id),
                         ));
@@ -496,14 +496,14 @@ fn parse_mission(
                 finally_seen = true;
             }
             "account" => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "account-inside-mission",
                     format!("mission `{id}` cannot own an account"),
                 ));
             }
             "capacity" => {
                 if capacity.is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-mission-field",
                         format!("mission `{id}` repeats `capacity`"),
                     ));
@@ -521,7 +521,7 @@ fn parse_mission(
                 declarations.push(child);
             }
             other => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mission-child",
                     format!("mission `{id}` cannot contain `{other}`"),
                 ));
@@ -545,7 +545,7 @@ fn parse_mission(
             if let DependencySpec::Step { step, .. } = dependency
                 && steps[step].finally
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "completion-depends-on-final-step",
                     format!("completion in mission `{id}` cannot depend on final step `{step}`"),
                 ));
@@ -601,13 +601,13 @@ fn parse_loop_group(
     default_host: &str,
     inputs: &BTreeMap<String, MissionInputSpec>,
     parent_timeout_ms: Option<u64>,
-) -> Result<StepSpec, St3Error> {
+) -> Result<StepSpec, FractalError> {
     reject_type(node)?;
     if ["for-each", "field", "max-parallel"]
         .into_iter()
         .any(|name| node.get(name).is_some())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "removed-loop-shape",
             "loop for-each and parallel collection modes were removed; compose explicit mission steps around a sequential loop",
         ));
@@ -620,7 +620,7 @@ fn parse_loop_group(
         .map(|value| parse_duration(&value))
         .transpose()?;
     if timeout_ms == Some(0) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-timeout",
             format!("loop `{id}` timeout must be greater than zero"),
         ));
@@ -628,11 +628,11 @@ fn parse_loop_group(
     let for_each = None;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-loop", format!("loop `{id}` is empty")))?;
+        .ok_or_else(|| FractalError::new("empty-loop", format!("loop `{id}` is empty")))?;
     let rounds = child_integer(body, "max-rounds")?
-        .ok_or_else(|| St3Error::new("missing-loop-rounds", "loop needs `max-rounds`"))?;
+        .ok_or_else(|| FractalError::new("missing-loop-rounds", "loop needs `max-rounds`"))?;
     if !(1..=100).contains(&rounds) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-rounds",
             "loop max-rounds must be between 1 and 100",
         ));
@@ -655,7 +655,7 @@ fn parse_loop_group(
     {
         let metric = parse_metric(child, default_host)?;
         if !metric_names.insert(metric.name.clone()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-loop-metric",
                 format!("loop `{id}` repeats metric `{}`", metric.name),
             ));
@@ -682,21 +682,21 @@ fn parse_loop_group(
                 .iter()
                 .any(|candidate| crate::gate_parse::gate_name(candidate) == gate)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unknown-metric-gate",
                 format!("metric `{}` names unknown gate `{gate}`", metric.name),
             ));
         }
     }
     if unique_named_child(body, "candidates")?.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "removed-loop-shape",
             "loop best-of-N candidates were removed; model candidates as explicit mission steps and gate the selected result",
         ));
     }
     let candidates = None;
     let round_node = unique_named_child(body, "round")?.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-loop-round",
             format!("loop `{id}` needs one round block"),
         )
@@ -710,7 +710,7 @@ fn parse_loop_group(
         child_timeout_ms,
     )?;
     if round.completion.is_none() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-round-completion",
             format!("loop `{id}` round needs an explicit completion"),
         ));
@@ -720,14 +720,14 @@ fn parse_loop_group(
             ensure_only_properties(child, &["metric"])?;
             ensure_no_children(child)?;
             property_string(child, "metric")?.ok_or_else(|| {
-                St3Error::new("missing-keep-metric", "keep-if needs a metric property")
+                FractalError::new("missing-keep-metric", "keep-if needs a metric property")
             })
         })
         .transpose()?;
     if let Some(metric) = &keep_metric
         && !metric_names.contains(metric)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unknown-keep-metric",
             format!("loop `{id}` keep-if names unknown metric `{metric}`"),
         ));
@@ -752,19 +752,19 @@ fn parse_loop_group(
     )?;
     if candidates.is_some() {
         if keep_metric.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "conflicting-candidate-keep-policy",
                 format!("loop `{id}` candidates use their selector instead of keep-if"),
             ));
         }
         if on_keep.is_some() != on_discard.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "incomplete-candidate-projection",
                 format!("loop `{id}` candidates need both on-keep and on-discard"),
             ));
         }
     } else if keep_metric.is_some() != (on_keep.is_some() && on_discard.is_some()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "incomplete-keep-policy",
             format!("loop `{id}` keep-if, on-keep, and on-discard must appear together"),
         ));
@@ -788,7 +788,7 @@ fn parse_loop_group(
                 | "on-discard"
                 | "on-exhausted"
         ) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-loop-field",
                 format!("loop `{id}` cannot contain `{}`", child.name().value()),
             ));
@@ -856,7 +856,7 @@ fn parse_embedded_mission(
     default_host: &str,
     inputs: &BTreeMap<String, MissionInputSpec>,
     timeout_ms: Option<u64>,
-) -> Result<MissionSpec, St3Error> {
+) -> Result<MissionSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     let mut body = KdlDocument::new();
@@ -892,7 +892,7 @@ fn parse_embedded_mission(
         .push(kdl::KdlEntry::new("Execute one bounded graph iteration."));
     body.nodes_mut().push(goal);
     let children = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "empty-embedded-mission",
             format!("`{}` has no body", node.name().value()),
         )
@@ -917,7 +917,7 @@ fn parse_loop_branch(
     default_host: &str,
     inputs: &BTreeMap<String, MissionInputSpec>,
     timeout_ms: Option<u64>,
-) -> Result<Option<Box<MissionSpec>>, St3Error> {
+) -> Result<Option<Box<MissionSpec>>, FractalError> {
     unique_named_child(body, name)?
         .map(|node| {
             let mission = parse_embedded_mission(
@@ -928,7 +928,7 @@ fn parse_loop_branch(
                 timeout_ms,
             )?;
             if mission.completion.is_none() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "missing-branch-completion",
                     format!("loop `{loop_id}` {name} needs an explicit completion"),
                 ));
@@ -938,9 +938,9 @@ fn parse_loop_branch(
         .transpose()
 }
 
-fn require_approve_mode_outside_step(gate: &GateSpec) -> Result<(), St3Error> {
+fn require_approve_mode_outside_step(gate: &GateSpec) -> Result<(), FractalError> {
     if matches!(gate, GateSpec::Human { mode, .. } if mode.as_deref() == Some("feedback")) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "feedback-gate-needs-step",
             "a feedback gate must be a step gate so the worker can rerun the step",
         ));
@@ -948,20 +948,20 @@ fn require_approve_mode_outside_step(gate: &GateSpec) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn parse_until(node: &KdlNode, default_host: &str) -> Result<Vec<GateSpec>, St3Error> {
+fn parse_until(node: &KdlNode, default_host: &str) -> Result<Vec<GateSpec>, FractalError> {
     ensure_bare(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-loop-until", "until is empty"))?;
+        .ok_or_else(|| FractalError::new("empty-loop-until", "until is empty"))?;
     if body.nodes().is_empty() {
-        return Err(St3Error::new("empty-loop-until", "until is empty"));
+        return Err(FractalError::new("empty-loop-until", "until is empty"));
     }
     let mut names = BTreeSet::new();
     body.nodes()
         .iter()
         .map(|child| {
             if child.name().value() != "gate" {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-loop-until",
                     "until accepts only gate blocks",
                 ));
@@ -969,42 +969,42 @@ fn parse_until(node: &KdlNode, default_host: &str) -> Result<Vec<GateSpec>, St3E
             let gate = crate::gate_parse::parse_gate(child, default_host)?;
             require_approve_mode_outside_step(&gate)?;
             if !names.insert(crate::gate_parse::gate_name(&gate).to_owned()) {
-                return Err(St3Error::new("duplicate-gate", "an until gate repeats"));
+                return Err(FractalError::new("duplicate-gate", "an until gate repeats"));
             }
             Ok(gate)
         })
         .collect()
 }
 
-fn parse_metric(node: &KdlNode, default_host: &str) -> Result<MetricSpec, St3Error> {
+fn parse_metric(node: &KdlNode, default_host: &str) -> Result<MetricSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["direction", "min-improvement"])?;
     let name = first_string(node)?;
     validate_id(&name, "metric")?;
     let direction = property_string(node, "direction")?.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-metric-direction",
             format!("metric `{name}` needs direction"),
         )
     })?;
     if !matches!(direction.as_str(), "higher" | "lower") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-metric-direction",
             "metric direction must be higher or lower",
         ));
     }
     let min_improvement = property_number(node, "min-improvement")?.unwrap_or(0.0);
     if !min_improvement.is_finite() || min_improvement < 0.0 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-metric-improvement",
             "metric min-improvement must be a finite non-negative number",
         ));
     }
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-metric", format!("metric `{name}` is empty")))?;
+        .ok_or_else(|| FractalError::new("empty-metric", format!("metric `{name}` is empty")))?;
     if body.nodes().len() != 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-metric-source",
             format!("metric `{name}` needs exactly one source"),
         ));
@@ -1017,7 +1017,7 @@ fn parse_metric(node: &KdlNode, default_host: &str) -> Result<MetricSpec, St3Err
         "field" => {
             let values = positional_strings(source)?;
             if values.len() != 2 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-metric-field",
                     "a metric field needs a path and a resource subject",
                 ));
@@ -1030,18 +1030,18 @@ fn parse_metric(node: &KdlNode, default_host: &str) -> Result<MetricSpec, St3Err
         "exec" => {
             let command = first_string(source)?;
             let source_body = source.children().ok_or_else(|| {
-                St3Error::new("missing-metric-exec-body", "a metric exec needs a body")
+                FractalError::new("missing-metric-exec-body", "a metric exec needs a body")
             })?;
             MetricSource::Exec {
                 command,
                 host: placement_host_for_mission(
                     child_string(source_body, "host")?.ok_or_else(|| {
-                        St3Error::new("missing-metric-host", "a metric exec needs host")
+                        FractalError::new("missing-metric-host", "a metric exec needs host")
                     })?,
                     default_host,
                 ),
                 workspace: child_string(source_body, "workspace")?.ok_or_else(|| {
-                    St3Error::new("missing-metric-workspace", "a metric exec needs workspace")
+                    FractalError::new("missing-metric-workspace", "a metric exec needs workspace")
                 })?,
                 environment: parse_string_map(source_body, "env")?,
                 time_limit_ms: child_string(source_body, "time-limit")?
@@ -1051,7 +1051,7 @@ fn parse_metric(node: &KdlNode, default_host: &str) -> Result<MetricSpec, St3Err
             }
         }
         other => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-metric-source",
                 format!("metric `{name}` cannot use `{other}`"),
             ));
@@ -1065,49 +1065,49 @@ fn parse_metric(node: &KdlNode, default_host: &str) -> Result<MetricSpec, St3Err
     })
 }
 
-fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopStopSpec, St3Error> {
+fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopStopSpec, FractalError> {
     ensure_bare(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-loop-stop", "stop is empty"))?;
+        .ok_or_else(|| FractalError::new("empty-loop-stop", "stop is empty"))?;
     let mut stop = LoopStopSpec::default();
     for child in body.nodes() {
         match child.name().value() {
             "plateau" => {
                 ensure_only_properties(child, &["metric", "rounds"])?;
                 let metric = property_string(child, "metric")?.ok_or_else(|| {
-                    St3Error::new("missing-plateau-metric", "plateau needs metric")
+                    FractalError::new("missing-plateau-metric", "plateau needs metric")
                 })?;
                 if !metrics.contains(&metric) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "unknown-plateau-metric",
                         format!("plateau names unknown metric `{metric}`"),
                     ));
                 }
                 let rounds = property_integer(child, "rounds")?.ok_or_else(|| {
-                    St3Error::new("missing-plateau-rounds", "plateau needs rounds")
+                    FractalError::new("missing-plateau-rounds", "plateau needs rounds")
                 })?;
                 if !(1..=100).contains(&rounds) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-plateau-rounds",
                         "plateau rounds must be between 1 and 100",
                     ));
                 }
                 if stop.plateau_metric.replace(metric).is_some() {
-                    return Err(St3Error::new("duplicate-plateau", "plateau repeats"));
+                    return Err(FractalError::new("duplicate-plateau", "plateau repeats"));
                 }
                 stop.plateau_rounds = Some(rounds as u32);
             }
             "repeated-failure" => {
                 let value = child_integer_value(child)?;
                 if !(2..=100).contains(&value) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-repeated-failure",
                         "repeated-failure must be between 2 and 100",
                     ));
                 }
                 if stop.repeated_failure.replace(value as u32).is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-repeated-failure",
                         "repeated-failure repeats",
                     ));
@@ -1116,32 +1116,32 @@ fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopSto
             "no-progress" => {
                 let value = child_integer_value(child)?;
                 if !(2..=100).contains(&value) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-no-progress",
                         "no-progress must be between 2 and 100",
                     ));
                 }
                 if stop.no_progress.replace(value as u32).is_some() {
-                    return Err(St3Error::new("duplicate-no-progress", "no-progress repeats"));
+                    return Err(FractalError::new("duplicate-no-progress", "no-progress repeats"));
                 }
             }
             "token-budget" => {
                 let value = child_integer_value(child)?;
                 if value <= 0 {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-loop-token-budget",
                         "a loop token budget must be positive",
                     ));
                 }
                 if stop.token_budget.replace(value as u64).is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-loop-token-budget",
                         "token-budget repeats",
                     ));
                 }
             }
             other => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-loop-stop",
                     format!("stop cannot contain `{other}`"),
                 ));
@@ -1154,13 +1154,13 @@ fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopSto
 fn parse_loop_exhaustion(
     node: &KdlNode,
     default_host: &str,
-) -> Result<(LoopExhaustionSpec, Option<LoopAttentionSpec>), St3Error> {
+) -> Result<(LoopExhaustionSpec, Option<LoopAttentionSpec>), FractalError> {
     ensure_bare(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-loop-exhaustion", "on-exhausted is empty"))?;
+        .ok_or_else(|| FractalError::new("empty-loop-exhaustion", "on-exhausted is empty"))?;
     if body.nodes().is_empty() || body.nodes().len() > 2 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-exhaustion",
             "on-exhausted needs fail, succeed, or one human gate",
         ));
@@ -1181,14 +1181,14 @@ fn parse_loop_exhaustion(
                 LoopExhaustionSpec::Human { gate }
             }
             _ => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-loop-exhaustion-gate",
                     "on-exhausted accepts only a human gate",
                 ));
             }
         },
         _ => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-loop-exhaustion",
                 "on-exhausted needs fail, succeed, or one human gate",
             ));
@@ -1196,7 +1196,7 @@ fn parse_loop_exhaustion(
     };
     let attention = body.nodes().get(1).map(parse_loop_attention).transpose()?;
     if attention.is_some() && !matches!(outcome, LoopExhaustionSpec::Fail) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-exhaustion-attention",
             "only a failed loop exhaustion can request attention",
         ));
@@ -1204,9 +1204,9 @@ fn parse_loop_exhaustion(
     Ok((outcome, attention))
 }
 
-fn parse_loop_attention(node: &KdlNode) -> Result<LoopAttentionSpec, St3Error> {
+fn parse_loop_attention(node: &KdlNode) -> Result<LoopAttentionSpec, FractalError> {
     if node.name().value() != "attention" {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-exhaustion",
             "the second on-exhausted entry must be attention",
         ));
@@ -1215,20 +1215,20 @@ fn parse_loop_attention(node: &KdlNode) -> Result<LoopAttentionSpec, St3Error> {
     ensure_only_properties(node, &[])?;
     let title = first_string(node)?;
     if title.trim().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-attention-title",
             "loop exhaustion attention needs a title",
         ));
     }
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-loop-attention-body",
             "loop exhaustion attention needs reviewer and severity",
         )
     })?;
     for child in body.nodes() {
         if !matches!(child.name().value(), "reviewer" | "severity") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-loop-attention-field",
                 format!(
                     "loop exhaustion attention cannot contain `{}`",
@@ -1239,14 +1239,14 @@ fn parse_loop_attention(node: &KdlNode) -> Result<LoopAttentionSpec, St3Error> {
     }
     let reviewer = unique_named_child(body, "reviewer")?
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-loop-attention-reviewer",
                 "loop exhaustion attention needs a reviewer",
             )
         })
         .and_then(plain_string)?;
     if !reviewer.starts_with("person/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-attention-reviewer",
             "loop exhaustion attention needs a full person subject",
         ));
@@ -1256,7 +1256,7 @@ fn parse_loop_attention(node: &KdlNode) -> Result<LoopAttentionSpec, St3Error> {
         .transpose()?
         .unwrap_or_else(|| "error".into());
     if !matches!(severity.as_str(), "warning" | "error") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-loop-attention-severity",
             "loop exhaustion attention severity must be warning or error",
         ));
@@ -1271,14 +1271,14 @@ fn parse_loop_attention(node: &KdlNode) -> Result<LoopAttentionSpec, St3Error> {
 fn unique_named_child<'a>(
     body: &'a KdlDocument,
     name: &str,
-) -> Result<Option<&'a KdlNode>, St3Error> {
+) -> Result<Option<&'a KdlNode>, FractalError> {
     let found = body
         .nodes()
         .iter()
         .filter(|node| node.name().value() == name)
         .collect::<Vec<_>>();
     if found.len() > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-field",
             format!("`{name}` repeats"),
         ));
@@ -1292,7 +1292,7 @@ fn parse_step(
     default_host: &str,
     finally: bool,
     input_names: &BTreeSet<String>,
-) -> Result<StepSpec, St3Error> {
+) -> Result<StepSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["timeout", "revisions", "revision-reviewer"])?;
     let id = first_string(node)?;
@@ -1347,7 +1347,7 @@ fn parse_step(
             ) && !is_mission_declaration(name)
                 && !names.insert(name.to_owned())
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "duplicate-step-field",
                     format!("step `{path}` repeats `{name}`"),
                 ));
@@ -1370,7 +1370,7 @@ fn parse_step(
                 "baseline" => {
                     let baseline = parse_baseline(child)?;
                     if !baseline_names.insert(baseline.name.clone()) {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "duplicate-baseline",
                             format!("step `{path}` repeats baseline `{}`", baseline.name),
                         ));
@@ -1383,7 +1383,7 @@ fn parse_step(
                 "available-to" => {
                     let agent = normalize_assignee(&first_string(child)?, default_host);
                     if available_to.contains(&agent) {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "duplicate-work-agent",
                             format!("step `{path}` repeats available agent `{agent}`"),
                         ));
@@ -1397,13 +1397,13 @@ fn parse_step(
                 "depends-on" => dependencies.extend(parse_dependencies(child, default_host)?),
                 "document" => documents.push(parse_step_document(child)?),
                 "account" => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "account-inside-mission",
                         format!("step `{path}` cannot own an account"),
                     ));
                 }
                 "lane" => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "lane-inside-step",
                         format!("step `{path}` cannot declare a lane; declare it on the mission"),
                     ));
@@ -1426,13 +1426,13 @@ fn parse_step(
                 "gate" => {
                     let gate = crate::gate_parse::parse_gate(child, default_host)?;
                     if matches!(gate, GateSpec::Deadline { .. }) {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "invalid-mission-deadline",
                             format!("step `{path}` must use its timeout property"),
                         ));
                     }
                     if !gate_names.insert(crate::gate_parse::gate_name(&gate).to_owned()) {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "duplicate-gate",
                             format!(
                                 "step `{path}` repeats gate `{}`",
@@ -1451,7 +1451,7 @@ fn parse_step(
                     retry = parse_retry(child)?;
                 }
                 "loop" => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "loop-is-graph-node",
                         format!(
                             "step `{path}` cannot contain `loop`; declare a named loop beside the step"
@@ -1459,7 +1459,7 @@ fn parse_step(
                     ));
                 }
                 other => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "unknown-step-field",
                         format!("step `{path}` cannot contain `{other}`"),
                     ));
@@ -1470,7 +1470,7 @@ fn parse_step(
     validate_goal_count(&format!("step `{path}`"), &goals, false)?;
     if after_run.is_some() {
         if assigned_to.is_some() || !available_to.is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "conflicting-work-selector",
                 format!("step `{path}` waits with `after-run`, so it cannot select an agent"),
             ));
@@ -1482,7 +1482,7 @@ fn parse_step(
             .iter()
             .any(|gate| matches!(gate, GateSpec::Human { mode, .. } if mode.as_deref() == Some("feedback")))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "feedback-gate-needs-worker",
             format!("step `{path}` needs a worker for a feedback gate"),
         ));
@@ -1494,7 +1494,7 @@ fn parse_step(
         agentless,
     )?;
     if capacity.is_some() && matches!(work_selector, Some(WorkSelector::Agentless)) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-capacity",
             format!("step `{path}` is agentless, so it has no seat whose lane its capacity could raise"),
         ));
@@ -1541,12 +1541,12 @@ fn parse_queue(
     node: &KdlNode,
     default_host: &str,
     input_names: &BTreeSet<String>,
-) -> Result<Vec<StepSpec>, St3Error> {
+) -> Result<Vec<StepSpec>, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     let values = positional_strings(node)?;
     if values.len() != 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-queue-id",
             "a queue needs exactly one ID",
         ));
@@ -1555,7 +1555,7 @@ fn parse_queue(
     validate_id(&id, "queue")?;
     let children = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-queue", format!("queue `{id}` has no steps")))?;
+        .ok_or_else(|| FractalError::new("empty-queue", format!("queue `{id}` has no steps")))?;
     let mut assigned_to = None;
     let mut available_to = Vec::new();
     let mut agentless = false;
@@ -1564,7 +1564,7 @@ fn parse_queue(
         match child.name().value() {
             "assigned-to" => {
                 if assigned_to.is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-queue-field",
                         format!("queue `{id}` repeats `assigned-to`"),
                     ));
@@ -1574,7 +1574,7 @@ fn parse_queue(
             "available-to" => {
                 let agent = normalize_assignee(&first_string(child)?, default_host);
                 if available_to.contains(&agent) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-work-agent",
                         format!("queue `{id}` repeats available agent `{agent}`"),
                     ));
@@ -1587,7 +1587,7 @@ fn parse_queue(
             }
             "step" => steps.push(parse_step(child, "", default_host, false, input_names)?),
             other => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-queue-child",
                     format!("queue `{id}` cannot contain `{other}`"),
                 ));
@@ -1595,7 +1595,7 @@ fn parse_queue(
         }
     }
     if steps.is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-queue",
             format!("queue `{id}` needs at least one step"),
         ));
@@ -1623,7 +1623,7 @@ fn parse_queue(
                         state,
                     } if target == prior => {
                         if state != "completed" {
-                            return Err(St3Error::new(
+                            return Err(FractalError::new(
                                 "conflicting-queue-dependency",
                                 format!(
                                     "queue `{id}` step `{}` requires predecessor `{prior}` to be `{state}`",
@@ -1659,12 +1659,12 @@ fn build_work_selector(
     assigned_to: Option<String>,
     mut available_to: Vec<String>,
     agentless: bool,
-) -> Result<Option<WorkSelector>, St3Error> {
+) -> Result<Option<WorkSelector>, FractalError> {
     let selected = usize::from(assigned_to.is_some())
         + usize::from(!available_to.is_empty())
         + usize::from(agentless);
     if selected > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "conflicting-work-selector",
             format!("{context} must use only one of `assigned-to`, `available-to`, or `agentless`"),
         ));
@@ -1683,13 +1683,13 @@ fn build_work_selector(
     })
 }
 
-fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, St3Error> {
+fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["kind"])?;
     ensure_no_children(node)?;
     let name = first_string(node)?;
     if name.contains('/') {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-input",
             format!("mission input `{name}` cannot contain `/`"),
         ));
@@ -1699,13 +1699,13 @@ fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, St3Error> {
         Some("text") => MissionInputKind::Text,
         Some("resource") => MissionInputKind::Resource,
         Some(value) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-mission-input-kind",
                 format!("mission input `{name}` has invalid kind `{value}`"),
             ));
         }
         None => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-mission-input-kind",
                 format!("mission input `{name}` needs `kind`"),
             ));
@@ -1714,12 +1714,12 @@ fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, St3Error> {
     Ok(MissionInputSpec { name, kind })
 }
 
-fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, St3Error> {
+fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["max"])?;
     ensure_no_children(node)?;
     if node.entries().iter().any(|entry| entry.name().is_none()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-concurrent-runs",
             "`concurrent-runs` does not accept positional values",
         ));
@@ -1728,7 +1728,7 @@ fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, St3Error> {
         return Ok(None);
     };
     let Some(value) = entry.as_integer() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-concurrent-runs",
             "`concurrent-runs max` must be a positive integer",
         ));
@@ -1737,7 +1737,7 @@ fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, St3Error> {
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-concurrent-runs",
                 "`concurrent-runs max` must be a positive integer",
             )
@@ -1745,11 +1745,11 @@ fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, St3Error> {
     Ok(Some(value))
 }
 
-fn parse_completion(node: &KdlNode, default_host: &str) -> Result<CompletionSpec, St3Error> {
+fn parse_completion(node: &KdlNode, default_host: &str) -> Result<CompletionSpec, FractalError> {
     ensure_bare(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-completion", "completion is empty"))?;
+        .ok_or_else(|| FractalError::new("empty-completion", "completion is empty"))?;
     let mut when = None;
     let mut dependencies = None;
     for child in body.nodes() {
@@ -1759,13 +1759,13 @@ fn parse_completion(node: &KdlNode, default_host: &str) -> Result<CompletionSpec
                 dependencies = Some(parse_dependencies(child, default_host)?)
             }
             "when" | "depends-on" => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "duplicate-completion-field",
                     format!("completion repeats `{}`", child.name().value()),
                 ));
             }
             other => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-completion-field",
                     format!("completion cannot contain `{other}`"),
                 ));
@@ -1776,39 +1776,39 @@ fn parse_completion(node: &KdlNode, default_host: &str) -> Result<CompletionSpec
         (Some(value), None) if value == "all-steps-exhausted" => {
             Ok(CompletionSpec::AllStepsExhausted)
         }
-        (Some(value), None) => Err(St3Error::new(
+        (Some(value), None) => Err(FractalError::new(
             "invalid-completion-condition",
             format!("completion condition `{value}` is not registered"),
         )),
         (None, Some(dependencies)) if !dependencies.is_empty() => {
             Ok(CompletionSpec::Dependencies { dependencies })
         }
-        (Some(_), Some(_)) => Err(St3Error::new(
+        (Some(_), Some(_)) => Err(FractalError::new(
             "conflicting-completion-condition",
             "completion cannot contain both `when` and `depends-on`",
         )),
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "empty-completion",
             "completion needs `when` or `depends-on`",
         )),
     }
 }
 
-fn parse_revision_protection(node: &KdlNode) -> Result<bool, St3Error> {
+fn parse_revision_protection(node: &KdlNode) -> Result<bool, FractalError> {
     match property_string(node, "revisions")?.as_deref() {
         None => Ok(false),
         Some("human-only") => Ok(true),
-        Some(value) => Err(St3Error::new(
+        Some(value) => Err(FractalError::new(
             "invalid-revision-protection",
             format!("`revisions` cannot be `{value}`"),
         )),
     }
 }
 
-fn parse_revision_reviewer(node: &KdlNode, human_only: bool) -> Result<Option<String>, St3Error> {
+fn parse_revision_reviewer(node: &KdlNode, human_only: bool) -> Result<Option<String>, FractalError> {
     let reviewer = property_string(node, "revision-reviewer")?;
     if reviewer.is_some() && !human_only {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "revision-reviewer-without-protection",
             "`revision-reviewer` requires revisions=\"human-only\"",
         ));
@@ -1817,7 +1817,7 @@ fn parse_revision_reviewer(node: &KdlNode, human_only: bool) -> Result<Option<St
         .as_deref()
         .is_some_and(|value| !value.starts_with("person/"))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-revision-reviewer",
             "a revision reviewer must be a full person subject",
         ));
@@ -1828,7 +1828,7 @@ fn parse_revision_reviewer(node: &KdlNode, human_only: bool) -> Result<Option<St
 fn direct_agent_owners(
     document: &KdlDocument,
     default_host: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut owners = document
         .nodes()
         .iter()
@@ -1859,13 +1859,13 @@ fn declarations_document(nodes: Vec<KdlNode>) -> Option<String> {
 pub fn with_mission_capacity(
     source: &str,
     capacity: Option<fractal_runtime::Capacity>,
-) -> Result<std::borrow::Cow<'_, str>, St3Error> {
+) -> Result<std::borrow::Cow<'_, str>, FractalError> {
     let Some(capacity) = capacity else {
         return Ok(std::borrow::Cow::Borrowed(source));
     };
     let mut document = source
         .parse::<KdlDocument>()
-        .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
+        .map_err(|error| FractalError::new("invalid-kdl", error.to_string()))?;
     let mut changed = false;
     for node in document.nodes_mut() {
         if node.name().value() != "agent" {
@@ -1899,10 +1899,10 @@ pub fn with_mission_capacity(
     Ok(std::borrow::Cow::Owned(document.to_string()))
 }
 
-fn agent_owner(node: &KdlNode, _default_host: &str) -> Result<String, St3Error> {
+fn agent_owner(node: &KdlNode, _default_host: &str) -> Result<String, FractalError> {
     let name = first_string(node)?;
     let children = node.children().ok_or_else(|| {
-        St3Error::new("missing-agent-body", format!("agent `{name}` has no body"))
+        FractalError::new("missing-agent-body", format!("agent `{name}` has no body"))
     })?;
     let identity = children
         .nodes()
@@ -1914,9 +1914,9 @@ fn agent_owner(node: &KdlNode, _default_host: &str) -> Result<String, St3Error> 
     Ok(format!("agent/${{ST_MISSION_RUN}}/{identity}"))
 }
 
-fn validate_goal_count(context: &str, goals: &[String], required: bool) -> Result<(), St3Error> {
+fn validate_goal_count(context: &str, goals: &[String], required: bool) -> Result<(), FractalError> {
     if (required && goals.is_empty()) || goals.len() > 3 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-goal-count",
             format!(
                 "{context} needs {} through 3 goals",
@@ -1933,7 +1933,7 @@ fn take_agent_constraints(
     node: &KdlNode,
     default_host: &str,
     agent_constraints: &mut BTreeMap<String, Vec<String>>,
-) -> Result<KdlNode, St3Error> {
+) -> Result<KdlNode, FractalError> {
     let mut node = node.clone();
     if node.name().value() != "agent" {
         return Ok(node);
@@ -1942,7 +1942,7 @@ fn take_agent_constraints(
         return Ok(node);
     };
     if children.nodes().iter().any(|child| child.name().value() == "accountable") {
-        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+        return Err(FractalError::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
     }
     let (constraint_nodes, other_nodes): (Vec<_>, Vec<_>) = children
         .nodes()
@@ -1965,16 +1965,16 @@ fn push_constraint(
     constraints: &mut Vec<String>,
     node: &KdlNode,
     context: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let constraint = plain_string(node)?;
     if constraint.is_empty() || constraint.len() > 1_000 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-constraint",
             format!("a constraint in {context} must contain 1 through 1,000 bytes"),
         ));
     }
     if constraints.contains(&constraint) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-constraint",
             format!("{context} repeats constraint `{constraint}`"),
         ));
@@ -1983,24 +1983,24 @@ fn push_constraint(
     Ok(())
 }
 
-fn parse_baseline(node: &KdlNode) -> Result<BaselineSpec, St3Error> {
+fn parse_baseline(node: &KdlNode) -> Result<BaselineSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     let name = first_string(node)?;
     if name.is_empty() || name.len() > 160 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-baseline-name",
             "a baseline name must contain 1 through 160 bytes",
         ));
     }
     let body = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-baseline-body",
             format!("baseline `{name}` has no predicates"),
         )
     })?;
     if body.nodes().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-baseline",
             format!("baseline `{name}` has no predicates"),
         ));
@@ -2020,7 +2020,7 @@ fn parse_baseline(node: &KdlNode) -> Result<BaselineSpec, St3Error> {
                 | GateSpec::Llm { .. }
                 | GateSpec::Human { .. }
         ) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-baseline-gate",
                 "a baseline accepts only graph predicates",
             ));
@@ -2030,19 +2030,19 @@ fn parse_baseline(node: &KdlNode) -> Result<BaselineSpec, St3Error> {
     Ok(BaselineSpec { name, gates })
 }
 
-fn parse_step_document(node: &KdlNode) -> Result<String, St3Error> {
+fn parse_step_document(node: &KdlNode) -> Result<String, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     let values = positional_strings(node)?;
     if values.len() != 1 || node.children().is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-step-document",
             "document needs exactly one immutable document reference",
         ));
     }
     let reference = &values[0];
     let Some((name, revision)) = reference.rsplit_once('@') else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unpinned-step-document",
             "document needs an exact doc/NAME@HASH reference",
         ));
@@ -2054,7 +2054,7 @@ fn parse_step_document(node: &KdlNode) -> Result<String, St3Error> {
         || revision.len() != 64
         || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-step-document",
             format!("invalid immutable document reference `{reference}`"),
         ));
@@ -2062,7 +2062,7 @@ fn parse_step_document(node: &KdlNode) -> Result<String, St3Error> {
     Ok(format!("{name}@{}", revision.to_ascii_lowercase()))
 }
 
-fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), St3Error> {
+fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), FractalError> {
     let old = std::mem::take(&mut mission.steps);
     let mut rewritten = BTreeMap::new();
     for (id, mut step) in old {
@@ -2118,7 +2118,7 @@ fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), St3Error> {
 fn parse_dependencies(
     node: &KdlNode,
     _default_host: &str,
-) -> Result<Vec<DependencySpec>, St3Error> {
+) -> Result<Vec<DependencySpec>, FractalError> {
     reject_type(node)?;
     let mut output = positional_strings(node)?
         .into_iter()
@@ -2132,14 +2132,14 @@ fn parse_dependencies(
             if child.name().value() == "step" {
                 let values = positional_strings(child)?;
                 if values.is_empty() || values.len() > 2 {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-step-dependency",
                         "a step dependency needs an ID and an optional state",
                     ));
                 }
                 let state = values.get(1).cloned().unwrap_or_else(|| "completed".into());
                 if !matches!(state.as_str(), "completed" | "failed" | "terminal") {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-step-dependency-state",
                         format!("step dependency state `{state}` is not registered"),
                     ));
@@ -2160,7 +2160,7 @@ fn parse_dependencies(
                         | GateSpec::Llm { .. }
                         | GateSpec::Human { .. }
                 ) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-dependency-predicate",
                         "depends-on accepts only graph predicates and step states",
                     ));
@@ -2170,7 +2170,7 @@ fn parse_dependencies(
         }
     }
     if output.is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "empty-depends-on",
             "depends-on cannot be empty",
         ));
@@ -2178,10 +2178,10 @@ fn parse_dependencies(
     Ok(output)
 }
 
-fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
+fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, FractalError> {
     ensure_bare(node)?;
     let children = node.children().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "empty-produces",
             "produces must contain at least one graph shape",
         )
@@ -2192,14 +2192,14 @@ fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
         reject_type(product)?;
         let kind = product.name().value();
         if !matches!(kind, "resource" | "message" | "agent" | "exec" | "pty") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-product-kind",
                 format!("produces cannot match `{kind}`"),
             ));
         }
         let subject = normalize_subject(&first_string(product)?, kind);
         if !subjects.insert(subject.clone()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-product",
                 format!("produces repeats `{subject}`"),
             ));
@@ -2212,7 +2212,7 @@ fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
                     || field.entries().len() != 1
                     || field.entries()[0].name().is_some()
                 {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-product-field",
                         format!(
                             "product field `{}` must contain one scalar value",
@@ -2223,7 +2223,7 @@ fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
                 let name = field.name().value().to_owned();
                 let value = json_value(field.entries()[0].value())?;
                 if fields.insert(name.clone(), value).is_some() {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "duplicate-product-field",
                         format!("product `{subject}` repeats field `{name}`"),
                     ));
@@ -2232,7 +2232,7 @@ fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
         }
         if kind == "resource" {
             let resource_kind = fields.get("kind").and_then(Value::as_str).ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-resource-kind",
                     format!("resource product `{subject}` needs a registered kind"),
                 )
@@ -2244,19 +2244,19 @@ fn parse_products(node: &KdlNode) -> Result<Vec<ProductSpec>, St3Error> {
                 .collect::<BTreeMap<_, _>>();
             fractal_schema::registry()
                 .validate_resource_facts(resource_kind, &facts)
-                .map_err(|error| St3Error::new(error.code, error.message))?;
+                .map_err(|error| FractalError::new(error.code, error.message))?;
         }
         output.push(ProductSpec { subject, fields });
     }
     Ok(output)
 }
 
-fn parse_produced_mission(node: &KdlNode) -> Result<String, St3Error> {
+fn parse_produced_mission(node: &KdlNode) -> Result<String, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     let values = positional_strings(node)?;
     if values.len() != 1 || node.children().is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-produces-mission",
             "produces-mission needs exactly one mission ID",
         ));
@@ -2269,11 +2269,11 @@ fn parse_produced_mission(node: &KdlNode) -> Result<String, St3Error> {
     Ok(id)
 }
 
-fn parse_used_mission(node: &KdlNode) -> Result<UsedMissionSpec, St3Error> {
+fn parse_used_mission(node: &KdlNode) -> Result<UsedMissionSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["output-of"])?;
     if node.children().is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-uses-mission",
             "uses-mission cannot contain a block",
         ));
@@ -2288,14 +2288,14 @@ fn parse_used_mission(node: &KdlNode) -> Result<UsedMissionSpec, St3Error> {
         ([reference], None) => {
             let reference = reference.strip_prefix("mission/").unwrap_or(reference);
             let (mission, revision) = reference.rsplit_once('@').ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "unpinned-mission-reference",
                     "uses-mission needs an exact MISSION@REVISION reference",
                 )
             })?;
             validate_id(mission, "mission")?;
             if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mission-revision",
                     "a used mission revision must be a 64-character hexadecimal hash",
                 ));
@@ -2305,17 +2305,17 @@ fn parse_used_mission(node: &KdlNode) -> Result<UsedMissionSpec, St3Error> {
                 revision: revision.to_ascii_lowercase(),
             })
         }
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "invalid-uses-mission",
             "uses-mission needs one exact mission reference or one output-of property",
         )),
     }
 }
 
-fn parse_after_run(node: &KdlNode) -> Result<String, St3Error> {
+fn parse_after_run(node: &KdlNode) -> Result<String, FractalError> {
     let run = plain_string(node)?;
     if run.strip_prefix("mission-run/").unwrap_or(&run).is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-after-run",
             "after-run needs a mission run",
         ));
@@ -2329,9 +2329,9 @@ pub const AFTER_RUN_STEP: &str = "after-run";
 /// Returns the mission that a run started with `--after RUN` follows. It adds an agentless
 /// `after-run` step that waits for RUN, and every root step of the normal phase depends on it.
 /// Existing steps keep their definition hashes, so revision compatibility is unchanged.
-pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionSpec, St3Error> {
+pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionSpec, FractalError> {
     if mission.steps.contains_key(AFTER_RUN_STEP) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "after-run-step-exists",
             format!(
                 "mission `{}` already has a root step named `{AFTER_RUN_STEP}`",
@@ -2385,7 +2385,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
 
 /// Returns the mission that one run follows: its revision, with the `after-run` step when the run
 /// was started after another run.
-pub fn run_mission(mission: MissionSpec, after: Option<&str>) -> Result<MissionSpec, St3Error> {
+pub fn run_mission(mission: MissionSpec, after: Option<&str>) -> Result<MissionSpec, FractalError> {
     match after {
         Some(after) => mission_after_run(mission, after),
         None => Ok(mission),
@@ -2400,14 +2400,14 @@ pub fn after_run_subject(run: &str) -> String {
     )
 }
 
-fn parse_retry(node: &KdlNode) -> Result<RetrySpec, St3Error> {
+fn parse_retry(node: &KdlNode) -> Result<RetrySpec, FractalError> {
     ensure_bare(node)?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("empty-retry", "retry is empty"))?;
+        .ok_or_else(|| FractalError::new("empty-retry", "retry is empty"))?;
     let attempts = child_integer(body, "attempts")?.unwrap_or(1);
     if !(1..=100).contains(&attempts) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-retry-attempts",
             "retry attempts must be between 1 and 100",
         ));
@@ -2425,7 +2425,7 @@ fn parse_retry(node: &KdlNode) -> Result<RetrySpec, St3Error> {
 fn validate_dependencies(
     mission: &str,
     steps: &BTreeMap<String, StepSpec>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for step in steps.values() {
         validate_dependency_targets(
             mission,
@@ -2437,7 +2437,7 @@ fn validate_dependencies(
             if let DependencySpec::Step { step: target, .. } = dependency
                 && steps[target].finally != step.finally
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "cross-phase-dependency",
                     format!(
                         "step `{}` in mission `{mission}` cannot depend on step `{target}` from another phase",
@@ -2447,7 +2447,7 @@ fn validate_dependencies(
             }
         }
         if step.produces_mission.is_some() && step.uses_mission.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "conflicting-mission-step",
                 format!(
                     "step `{}` in mission `{mission}` cannot produce and use a mission",
@@ -2457,7 +2457,7 @@ fn validate_dependencies(
         }
         if let Some(UsedMissionSpec::StepOutput { step: target }) = &step.uses_mission {
             let Some(producer) = steps.get(target) else {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unknown-mission-output",
                     format!(
                         "step `{}` in mission `{mission}` uses unknown step output `{target}`",
@@ -2466,7 +2466,7 @@ fn validate_dependencies(
                 ));
             };
             if producer.produces_mission.is_none() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "not-a-mission-output",
                     format!(
                         "step `{}` in mission `{mission}` does not produce a mission",
@@ -2478,7 +2478,7 @@ fn validate_dependencies(
                 matches!(dependency, DependencySpec::Step { step, state } if step == target && state == "completed")
             });
             if !waits_for_output {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "missing-mission-output-dependency",
                     format!(
                         "step `{}` must depend on completed step `{target}` before it uses that mission output",
@@ -2493,12 +2493,12 @@ fn validate_dependencies(
         steps: &BTreeMap<String, StepSpec>,
         visiting: &mut BTreeSet<String>,
         visited: &mut BTreeSet<String>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         if visited.contains(id) {
             return Ok(());
         }
         if !visiting.insert(id.to_owned()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "dependency-cycle",
                 format!("the mission has a dependency cycle through step `{id}`"),
             ));
@@ -2525,12 +2525,12 @@ fn validate_dependency_targets(
     context: &str,
     dependencies: &[DependencySpec],
     steps: &BTreeMap<String, StepSpec>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for dependency in dependencies {
         if let DependencySpec::Step { step: target, .. } = dependency
             && !steps.contains_key(target)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unknown-step-dependency",
                 format!("{context} in mission `{mission}` depends on unknown step `{target}`"),
             ));
@@ -2539,7 +2539,7 @@ fn validate_dependency_targets(
     Ok(())
 }
 
-pub fn interpolate(source: &str, variables: &BTreeMap<String, String>) -> Result<String, St3Error> {
+pub fn interpolate(source: &str, variables: &BTreeMap<String, String>) -> Result<String, FractalError> {
     let mut output = String::with_capacity(source.len());
     let mut rest = source;
     while let Some(start) = rest.find("${") {
@@ -2552,7 +2552,7 @@ pub fn interpolate(source: &str, variables: &BTreeMap<String, String>) -> Result
         output.push_str(&rest[..start]);
         let tail = &rest[start + 2..];
         let Some(end) = tail.find('}') else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-variable",
                 "a variable reference has no closing brace",
             ));
@@ -2569,7 +2569,7 @@ pub fn interpolate(source: &str, variables: &BTreeMap<String, String>) -> Result
                     .flatten()
             })
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "unavailable-variable",
                     format!("variable `{name}` is not available in this phase"),
                 )
@@ -2584,11 +2584,11 @@ pub fn interpolate(source: &str, variables: &BTreeMap<String, String>) -> Result
 pub fn interpolate_kdl(
     source: &str,
     variables: &BTreeMap<String, String>,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     fn interpolate_document(
         document: &mut KdlDocument,
         variables: &BTreeMap<String, String>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         for node in document.nodes_mut() {
             for entry in node.entries_mut() {
                 let Some(value) = entry.value().as_string() else {
@@ -2606,13 +2606,13 @@ pub fn interpolate_kdl(
 
     let mut document = source
         .parse::<KdlDocument>()
-        .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
+        .map_err(|error| FractalError::new("invalid-kdl", error.to_string()))?;
     interpolate_document(&mut document, variables)?;
     document.autoformat();
     Ok(document.to_string())
 }
 
-fn validate_variables(value: &Value, input_names: &BTreeSet<String>) -> Result<(), St3Error> {
+fn validate_variables(value: &Value, input_names: &BTreeSet<String>) -> Result<(), FractalError> {
     match value {
         Value::String(value) => {
             let mut rest = value.as_str();
@@ -2623,7 +2623,7 @@ fn validate_variables(value: &Value, input_names: &BTreeSet<String>) -> Result<(
                     continue;
                 }
                 let Some(end) = tail.find('}') else {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-variable",
                         "a variable reference has no closing brace",
                     ));
@@ -2653,8 +2653,8 @@ fn validate_variables(value: &Value, input_names: &BTreeSet<String>) -> Result<(
     Ok(())
 }
 
-fn unknown_variable(name: &str) -> St3Error {
-    St3Error::new(
+fn unknown_variable(name: &str) -> FractalError {
+    FractalError::new(
         "unknown-variable",
         format!("variable `{name}` is not registered; write `$${{{name}}}` for the literal text"),
     )
@@ -2664,12 +2664,12 @@ fn registered_variable(name: &str) -> bool {
     VARIABLES.contains(&name) || name.starts_with("loop.item.")
 }
 
-fn parse_mission_state(value: &str) -> Result<MissionState, St3Error> {
+fn parse_mission_state(value: &str) -> Result<MissionState, FractalError> {
     match value {
         "draft" => Ok(MissionState::Draft),
         "ready" => Ok(MissionState::Ready),
         "retired" => Ok(MissionState::Retired),
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "invalid-mission-state",
             format!("mission state `{value}` is not registered"),
         )),
@@ -2698,7 +2698,7 @@ fn normalize_assignee(value: &str, default_host: &str) -> String {
     }
 }
 
-fn validate_id(value: &str, kind: &str) -> Result<(), St3Error> {
+fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
     let invalid_path = kind != "mission" && value.contains('/');
     if value.is_empty()
         || value.len() > 160
@@ -2708,7 +2708,7 @@ fn validate_id(value: &str, kind: &str) -> Result<(), St3Error> {
         || value.contains("//")
         || value.chars().any(char::is_whitespace)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-id",
             format!("{kind} ID `{value}` is invalid"),
         ));
@@ -2723,14 +2723,14 @@ fn validate_id(value: &str, kind: &str) -> Result<(), St3Error> {
 fn parse_run_report(
     node: &KdlNode,
     id: &str,
-) -> Result<(Option<String>, Option<u64>, bool, bool), St3Error> {
+) -> Result<(Option<String>, Option<u64>, bool, bool), FractalError> {
     let report_to = property_string(node, "report-to")?;
     let stalled_after = property_string(node, "stalled-after")?;
     let report_stalls = match node.get("report-stalls") {
         None => true,
         Some(KdlValue::Bool(value)) => *value,
         Some(_) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-property",
                 "property `report-stalls` must be true or false",
             ));
@@ -2740,7 +2740,7 @@ fn parse_run_report(
         None => false,
         Some(KdlValue::Bool(value)) => *value,
         Some(_) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-property",
                 "property `report-completed` must be true or false",
             ));
@@ -2748,7 +2748,7 @@ fn parse_run_report(
     };
     let Some(report_to) = report_to else {
         if stalled_after.is_some() || report_completed || node.get("report-stalls").is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "report-without-recipient",
                 format!("mission `{id}` sets a run report option but no `report-to` agent"),
             ));
@@ -2761,7 +2761,7 @@ fn parse_run_report(
         Some(value) => parse_duration(&value)?,
     };
     if stalled_after_ms == 0 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-stalled-after",
             format!("mission `{id}` stalled-after must be greater than zero"),
         ));
@@ -2778,7 +2778,7 @@ fn parse_run_report(
 pub const DEFAULT_STALLED_AFTER_MS: u64 = 30 * 60_000;
 
 /// A run report goes to an agent. A person is reached through their own agent.
-pub fn validate_report_to(report_to: &str) -> Result<(), St3Error> {
+pub fn validate_report_to(report_to: &str) -> Result<(), FractalError> {
     let path = report_to.strip_prefix("agent/").unwrap_or_default();
     if path.is_empty()
         || path.starts_with('/')
@@ -2786,7 +2786,7 @@ pub fn validate_report_to(report_to: &str) -> Result<(), St3Error> {
         || path.contains("//")
         || path.chars().any(char::is_whitespace)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-report-to",
             format!("`report-to` names an agent such as `agent/ops/watcher`, not `{report_to}`"),
         ));
@@ -2794,7 +2794,7 @@ pub fn validate_report_to(report_to: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn parse_duration(value: &str) -> Result<u64, St3Error> {
+fn parse_duration(value: &str) -> Result<u64, FractalError> {
     let units = [
         ("ms", 1_u64),
         ("s", 1_000),
@@ -2805,39 +2805,39 @@ fn parse_duration(value: &str) -> Result<u64, St3Error> {
     for (suffix, multiplier) in units {
         if let Some(number) = value.strip_suffix(suffix) {
             let number = number.parse::<u64>().map_err(|_| {
-                St3Error::new("invalid-duration", format!("duration `{value}` is invalid"))
+                FractalError::new("invalid-duration", format!("duration `{value}` is invalid"))
             })?;
             return number
                 .checked_mul(multiplier)
-                .ok_or_else(|| St3Error::new("invalid-duration", "the duration is too large"));
+                .ok_or_else(|| FractalError::new("invalid-duration", "the duration is too large"));
         }
     }
-    Err(St3Error::new(
+    Err(FractalError::new(
         "invalid-duration",
         format!("duration `{value}` needs ms, s, m, h, or d"),
     ))
 }
 
 /// The same mission definition in the `retired` state, with the revision that state gives it.
-pub fn retired_mission(mut mission: MissionSpec) -> Result<MissionSpec, St3Error> {
+pub fn retired_mission(mut mission: MissionSpec) -> Result<MissionSpec, FractalError> {
     mission.state = MissionState::Retired;
     mission.revision = String::new();
     mission.revision = hash(&mission)?;
     Ok(mission)
 }
 
-fn hash(value: &impl Serialize) -> Result<String, St3Error> {
+fn hash(value: &impl Serialize) -> Result<String, FractalError> {
     let bytes = serde_json::to_vec(value).map_err(internal)?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-fn internal(error: impl std::fmt::Display) -> St3Error {
-    St3Error::new("internal", error.to_string())
+fn internal(error: impl std::fmt::Display) -> FractalError {
+    FractalError::new("internal", error.to_string())
 }
 
-fn reject_type(node: &KdlNode) -> Result<(), St3Error> {
+fn reject_type(node: &KdlNode) -> Result<(), FractalError> {
     if node.ty().is_some() {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "typed-node",
             "typed KDL nodes are not supported",
         ))
@@ -2846,11 +2846,11 @@ fn reject_type(node: &KdlNode) -> Result<(), St3Error> {
     }
 }
 
-fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
+fn ensure_bare(node: &KdlNode) -> Result<(), FractalError> {
     if node.ty().is_none() && node.entries().is_empty() {
         Ok(())
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-node",
             format!(
                 "`{}` must not have values or properties",
@@ -2860,9 +2860,9 @@ fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
     }
 }
 
-fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
+fn ensure_no_children(node: &KdlNode) -> Result<(), FractalError> {
     if node.children().is_some() {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-node",
             format!("`{}` must not have children", node.name().value()),
         ))
@@ -2871,12 +2871,12 @@ fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
     }
 }
 
-fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St3Error> {
+fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), FractalError> {
     for entry in node.entries() {
         if let Some(name) = entry.name()
             && !allowed.contains(&name.value())
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unknown-property",
                 format!(
                     "`{}` has unknown property `{}`",
@@ -2889,10 +2889,10 @@ fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St3Err
     Ok(())
 }
 
-fn first_string(node: &KdlNode) -> Result<String, St3Error> {
+fn first_string(node: &KdlNode) -> Result<String, FractalError> {
     let values = positional_strings(node)?;
     if values.len() != 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-value-count",
             format!("`{}` needs one string", node.name().value()),
         ));
@@ -2900,11 +2900,11 @@ fn first_string(node: &KdlNode) -> Result<String, St3Error> {
     Ok(values[0].clone())
 }
 
-fn plain_string(node: &KdlNode) -> Result<String, St3Error> {
+fn plain_string(node: &KdlNode) -> Result<String, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     if node.children().is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-node",
             format!("`{}` cannot contain a block", node.name().value()),
         ));
@@ -2912,13 +2912,13 @@ fn plain_string(node: &KdlNode) -> Result<String, St3Error> {
     first_string(node)
 }
 
-fn positional_strings(node: &KdlNode) -> Result<Vec<String>, St3Error> {
+fn positional_strings(node: &KdlNode) -> Result<Vec<String>, FractalError> {
     node.entries()
         .iter()
         .filter(|entry| entry.name().is_none())
         .map(|entry| match entry.value() {
             KdlValue::String(value) => Ok(value.clone()),
-            _ => Err(St3Error::new(
+            _ => Err(FractalError::new(
                 "invalid-value",
                 format!("`{}` needs string values", node.name().value()),
             )),
@@ -2926,59 +2926,59 @@ fn positional_strings(node: &KdlNode) -> Result<Vec<String>, St3Error> {
         .collect()
 }
 
-fn property_string(node: &KdlNode, name: &str) -> Result<Option<String>, St3Error> {
+fn property_string(node: &KdlNode, name: &str) -> Result<Option<String>, FractalError> {
     match node.get(name) {
         None => Ok(None),
         Some(KdlValue::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(St3Error::new(
+        Some(_) => Err(FractalError::new(
             "invalid-property",
             format!("property `{name}` must be a string"),
         )),
     }
 }
 
-fn property_integer(node: &KdlNode, name: &str) -> Result<Option<i64>, St3Error> {
+fn property_integer(node: &KdlNode, name: &str) -> Result<Option<i64>, FractalError> {
     match node.get(name) {
         None => Ok(None),
         Some(KdlValue::Integer(value)) => i64::try_from(*value).map(Some).map_err(|_| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-property",
                 format!("property `{name}` is too large"),
             )
         }),
-        Some(_) => Err(St3Error::new(
+        Some(_) => Err(FractalError::new(
             "invalid-property",
             format!("property `{name}` must be an integer"),
         )),
     }
 }
 
-fn property_number(node: &KdlNode, name: &str) -> Result<Option<f64>, St3Error> {
+fn property_number(node: &KdlNode, name: &str) -> Result<Option<f64>, FractalError> {
     match node.get(name) {
         None => Ok(None),
         Some(KdlValue::Float(value)) => Ok(Some(*value)),
         Some(KdlValue::Integer(value)) => Ok(Some(*value as f64)),
-        Some(_) => Err(St3Error::new(
+        Some(_) => Err(FractalError::new(
             "invalid-property",
             format!("property `{name}` must be a number"),
         )),
     }
 }
 
-fn child_integer_value(node: &KdlNode) -> Result<i64, St3Error> {
+fn child_integer_value(node: &KdlNode) -> Result<i64, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &[])?;
     ensure_no_children(node)?;
     if node.entries().len() != 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-field",
             format!("`{}` needs one integer", node.name().value()),
         ));
     }
     match node.entries()[0].value() {
         KdlValue::Integer(value) => i64::try_from(*value)
-            .map_err(|_| St3Error::new("invalid-field", "an integer is too large")),
-        _ => Err(St3Error::new(
+            .map_err(|_| FractalError::new("invalid-field", "an integer is too large")),
+        _ => Err(FractalError::new(
             "invalid-field",
             format!("`{}` needs one integer", node.name().value()),
         )),
@@ -2996,7 +2996,7 @@ fn placement_host_for_mission(host: String, default_host: &str) -> String {
 fn parse_string_map(
     document: &KdlDocument,
     name: &str,
-) -> Result<BTreeMap<String, String>, St3Error> {
+) -> Result<BTreeMap<String, String>, FractalError> {
     let Some(node) = unique_named_child(document, name)? else {
         return Ok(BTreeMap::new());
     };
@@ -3009,7 +3009,7 @@ fn parse_string_map(
         let key = child.name().value().to_owned();
         let value = first_string(child)?;
         if output.insert(key.clone(), value).is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-map-key",
                 format!("map key `{key}` repeats"),
             ));
@@ -3018,14 +3018,14 @@ fn parse_string_map(
     Ok(output)
 }
 
-fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, St3Error> {
+fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, FractalError> {
     let nodes = document
         .nodes()
         .iter()
         .filter(|node| node.name().value() == name)
         .collect::<Vec<_>>();
     if nodes.len() > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-field",
             format!("`{name}` repeats"),
         ));
@@ -3033,14 +3033,14 @@ fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, St
     nodes.first().map(|node| first_string(node)).transpose()
 }
 
-fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i64>, St3Error> {
+fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i64>, FractalError> {
     let nodes = document
         .nodes()
         .iter()
         .filter(|node| node.name().value() == name)
         .collect::<Vec<_>>();
     if nodes.len() > 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "duplicate-field",
             format!("`{name}` repeats"),
         ));
@@ -3049,7 +3049,7 @@ fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i64>, St3E
         return Ok(None);
     };
     if node.entries().len() != 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-field",
             format!("`{name}` needs one integer"),
         ));
@@ -3057,24 +3057,24 @@ fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i64>, St3E
     match node.entries()[0].value() {
         KdlValue::Integer(value) => i64::try_from(*value)
             .map(Some)
-            .map_err(|_| St3Error::new("invalid-field", format!("`{name}` is too large"))),
-        _ => Err(St3Error::new(
+            .map_err(|_| FractalError::new("invalid-field", format!("`{name}` is too large"))),
+        _ => Err(FractalError::new(
             "invalid-field",
             format!("`{name}` needs one integer"),
         )),
     }
 }
 
-fn json_value(value: &KdlValue) -> Result<Value, St3Error> {
+fn json_value(value: &KdlValue) -> Result<Value, FractalError> {
     match value {
         KdlValue::String(value) => Ok(Value::String(value.clone())),
         KdlValue::Bool(value) => Ok(Value::Bool(*value)),
         KdlValue::Integer(value) => i64::try_from(*value)
             .map(Value::from)
-            .map_err(|_| St3Error::new("invalid-number", "an integer is too large")),
+            .map_err(|_| FractalError::new("invalid-number", "an integer is too large")),
         KdlValue::Float(value) => serde_json::Number::from_f64(*value)
             .map(Value::Number)
-            .ok_or_else(|| St3Error::new("invalid-number", "a float must be finite")),
+            .ok_or_else(|| FractalError::new("invalid-number", "a float must be finite")),
         KdlValue::Null => Ok(Value::Null),
     }
 }
@@ -3098,16 +3098,16 @@ pub fn is_mission_declaration(name: &str) -> bool {
     )
 }
 
-pub fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Error> {
+pub fn validate_deferred_declaration(node: &KdlNode) -> Result<(), FractalError> {
     validate_deferred_declaration_in(node, None)
 }
 
 /// `parent` is the enclosing node's name. An `account "NAME"` inside a harness block names an
 /// account a root declaration owns, the same reference a top-level seat makes, so a mission's agent
 /// may carry it; an `account` that declares one must stay at the root.
-fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Result<(), St3Error> {
+fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Result<(), FractalError> {
     if node.name().value() == "account" && parent != Some("harness") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "account-inside-mission",
             "an account declaration must be at the root",
         ));

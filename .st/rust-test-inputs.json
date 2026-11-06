@@ -55,6 +55,7 @@
     "crates/fractal-daemon/fixtures/native-records/schema-conformance.jsonl",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
+    "docs/st3/client-v0/schemas/quota-source-v1.schema.json",
     "examples/fractal/custom-review.json",
     "fixtures/clients/stream-timeline-pairs-v1.json",
     "scripts/ci-test-paths.rs"
@@ -109,6 +110,7 @@
     "clients/swift/FractalClient/Sources/FractalClient/Models.swift",
     "clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift",
     "clients/typescript/fractal-client",
+    "clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl",
     "clients/typescript/fractal-declarations/fixtures/daily-review.kdl",
     "clients/typescript/fractal-declarations/index.ts",
     "crates/fractal-client/src/contract.rs",
@@ -325,6 +327,9 @@
     "scripts/ci-test-paths.rs"
    ]
   },
+  "fractal-socket-discovery": {
+   "extra": []
+  },
   "fractal-storage-version": {
    "extra": []
   },
@@ -382,7 +387,8 @@
    "extra": [
     "clients/typescript/fractal-views/tests/fixtures/prompt-forms.json",
     "fixtures/clients/documents-v1.json",
-    "fixtures/clients/sidebar-v2.json",
+    "fixtures/clients/sidebar/behavior-v1.json",
+    "fixtures/clients/sidebar/behavior.schema.json",
     "fixtures/clients/words.json",
     "fixtures/scenarios",
     "scripts/ci-test-paths.rs"

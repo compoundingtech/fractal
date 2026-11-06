@@ -39,7 +39,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
@@ -563,7 +563,7 @@ pub fn watch_ended_tx(
     connection: &Connection,
     subject: &str,
     watch: &crate::model::WatchSpec,
-) -> Result<Option<Value>, St3Error> {
+) -> Result<Option<Value>, FractalError> {
     smallclaims::touched::note_read(|| subject.to_owned());
     let since = watch.since_unix_ms.to_string();
     let mut statement = connection
@@ -593,7 +593,7 @@ pub fn end_watch_tx(
     watch: &crate::model::WatchSpec,
     reason: &str,
     message: Option<&str>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     if watch_ended_tx(transaction, subject, watch)?.is_some() {
         return Ok(false);
     }
@@ -624,7 +624,7 @@ pub fn github_post_agent_tx(
     locator: &str,
     kind: &str,
     id: u64,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let subject = crate::github_watch::github_post_subject(locator, kind, id);
     let body = connection
         .prepare_cached("SELECT body FROM claims WHERE subject=?1 AND kind='github.posted' LIMIT 1")
@@ -959,14 +959,14 @@ pub trait MissionsStoreCore {
     fn apply_drained_revision(
             &self,
             run: &str,
-        ) -> Result<Option<RevisionSubmissionView>, St3Error>;
+        ) -> Result<Option<RevisionSubmissionView>, FractalError>;
     /// Every reference in a publication that resolves neither in the publication nor here: a
     /// pinned mission revision that is not stored, or a mission, agent or observer that nothing
     /// declares. The publication routes refuse them, and their previews list them as blockers.
     fn unresolved_references(
             &self,
             intent: &NormalizedIntent,
-        ) -> Result<Vec<String>, St3Error>;
+        ) -> Result<Vec<String>, FractalError>;
     /// Drop the history an agreed checkpoint at `cut` would drop on this node.
     #[cfg(any(test, feature = "test-support"))]
     fn trim_checkpoint_for_test(&self, cut: u128) -> usize;
@@ -987,7 +987,7 @@ impl MissionsStoreCore for Store {
     fn apply_drained_revision(
             &self,
             run: &str,
-        ) -> Result<Option<RevisionSubmissionView>, St3Error> {
+        ) -> Result<Option<RevisionSubmissionView>, FractalError> {
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
         let proposal = {
             let connection = self.connection.write();
@@ -1073,7 +1073,7 @@ impl MissionsStoreCore for Store {
     fn unresolved_references(
             &self,
             intent: &NormalizedIntent,
-        ) -> Result<Vec<String>, St3Error> {
+        ) -> Result<Vec<String>, FractalError> {
         let connection = self.readers.get();
         crate::references::publication(
             intent,

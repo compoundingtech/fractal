@@ -60,21 +60,37 @@ row to its shown parent is not treated as unchanged.
 returns folder-keyed `{ needsYou, display: 'Always' }` descriptors. Presentation
 copy and widgets remain consumer-owned.
 
-Shared Rust/TypeScript vectors live in `fixtures/clients/sidebar-v2.json`; the
-filename reserves the sidebar contract's vector family, while its
-`scope: "folder-only-v1"` explicitly identifies today's arrangement data.
-Folder identities are fixed UUIDv7 literals, ordered like the original symbolic
-identities so ID tie-breaks stay deterministic. The TypeScript twin tests decode
-every arrangement with the strict generated schema before checking projection.
+Shared Rust/TypeScript vectors live in `fixtures/clients/sidebar/behavior-v1.json`,
+validated by `behavior.schema.json` (JSON Schema 2020-12). `schemaVersion: 1`
+versions the behavior format, independently of arrangement body versions.
+Each case supplies confirmed input, catalog, ordered events, injected identities
+and checkpoints. The current `ProjectAndPlanV1` event preserves the pure v1
+projection/move/rollup cases; it does not dispatch wire actions or use identities,
+memberships or a journal. Those fields are explicitly empty, not skipped tests.
+Unknown fields and unsupported versions are rejected. New event variants arrive
+with passing production-path cases. Folder identities are fixed UUIDv7 literals;
+the TypeScript twin also decodes every arrangement with the strict client schema.
 This seam changes no storage, schema or wire format. Mixed parents, declared
 defaults/reset, availability, optimistic application and revision/cycle-cut
 settlement belong to format-v2 work, not this API.
+
+`node scripts/check-sidebar-fixtures.mjs` gates every sidebar JSON fixture and
+seed snapshot recursively before publication. The TypeScript runner invokes the
+same gate before replay. `node --test scripts/check-sidebar-fixtures.test.mjs`
+exercises the public-data policy and schema checks. Subjects use `person/test`,
+`agent/test/*`, or numbered `machine/test-*` / `host/test-*` identities; the
+retained legacy `machine/retained` is synthetic. Folder IDs use the fixed
+zero-prefixed UUID family. New case names use `synthetic-case-N`, labels use
+`Synthetic Folder N` / `Synthetic Resource N`, and revisions use `claim/test-N`.
+Unknown schema keywords fail closed, so extending the behavior format requires
+updating its validator and public-identity policy together.
 
 From the repository root with Node 24 and Corepack (or `nix develop .#web`):
 
 ```sh
 corepack enable # Outside the Nix web shell
 pnpm install --frozen-lockfile
+node scripts/check-sidebar-fixtures.mjs
 pnpm --filter @fractal/views test
 pnpm --filter @fractal/views typecheck
 ```

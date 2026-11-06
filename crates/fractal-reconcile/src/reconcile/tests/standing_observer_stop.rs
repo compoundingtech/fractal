@@ -15,7 +15,7 @@ fn publish(
     source: &str,
     key: &str,
     actor: &str,
-) -> Result<crate::model::ApplyResponse, crate::model::St3Error> {
+) -> Result<crate::model::ApplyResponse, crate::model::FractalError> {
     let intent = crate::graph::parse_intent(source, "node")?;
     let preview = store.mission(
         &intent,
