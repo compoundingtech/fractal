@@ -37,8 +37,8 @@ The fault is recorded once while open, including across daemon restarts. Elapsed
 not replace it. The ready state is written before the diagnosis. Diagnostic and recovery errors
 are logged without failing admission or execution. The next evaluation records recovery when
 the run no longer waits for first readiness, and termination also closes the fault. Its durable
-fault and recovery history remain available. An open fault appears immediately in `st missions show
-mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in the terminal UI.
+fault and recovery history remain available. An open fault appears immediately in `fractal missions show
+mission-run/EXAMPLE`, `fractal doctor` (`mission-first-readiness`), and the mission blocker in the terminal UI.
 The leaf mission-run response adds optional `scheduler_fault`. Mission client views project
 `state: "blocked"` while the fault is open and set `run.blocker.scope` to
 `"scheduler/first-readiness"` with the fault reason. Pending steps also show that reason. These
@@ -264,12 +264,12 @@ top-level agent seat, not by omission on a mission.
 A mission that should no longer start leaves every list when it is retired:
 
 ```sh
-st missions retire mission/MISSION_ID --as person/operator
+fractal missions retire mission/MISSION_ID --as person/operator
 ```
 
 Retirement publishes the current definition again with `state="retired"`, naming who retired it.
-The mission leaves `st missions ls`, `st missions tree` and every client, and cannot start. Its
-revisions and runs stay in its history (`st missions ls --all`, `st missions show`).
+The mission leaves `fractal missions ls`, `fractal missions tree` and every client, and cannot start. Its
+revisions and runs stay in its history (`fractal missions ls --all`, `fractal missions show`).
 In free mode, a person or agent acting as itself can retire it once no run of it is
 active. Publishing a ready revision brings it back.
 
@@ -281,11 +281,11 @@ finite missions over their lifetime. A person's standalone shell is a top-level 
 `pty/person/NAME/UUID`, with no mission owner and no agent harness. Free-mode local agents
 can likewise create a plain shell at `pty/agent/PATH/UUID`. Only its exact creator may publish its
 `intent.desired` claims, including a stop; local admission and replication enforce this.
-Top-level schedules are also valid authored declarations: `st apply schedules.kdl` previews
+Top-level schedules are also valid authored declarations: `fractal apply schedules.kdl` previews
 and publishes them without creating a mission run. Each schedule names the mission it will
 request at its declared times. Other top-level execution members still require a mission run.
 
-[`st schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
+[`fractal schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
 nominal next declared ticks and explicit per-row knowledge age/unheard-host coverage. It does not
 contact the hosts or inspect occurrence history.
 
@@ -310,7 +310,7 @@ Run-owned runtimes remain scoped to the run and stop during terminal cleanup. A 
 an exact top-level agent seat. Named mission-run cancellation remains the way to stop a run and all
 of its run-owned state.
 
-The default mission permits one nonterminal run. This default also lets `st missions show MISSION` identify the current run.
+The default mission permits one nonterminal run. This default also lets `fractal missions show MISSION` identify the current run.
 
 Bare `concurrent-runs` permits unlimited nonterminal runs. `concurrent-runs max=N` sets a positive limit.
 
@@ -362,9 +362,9 @@ A retry repeats one failed step attempt. It handles a bounded transient failure.
 
 `timeout` is an execution budget for one step attempt. It advances only while a worker holds a live claim in `claimed` or `working`; dependency waits, assignment waits, blocked gates, ready time, verification, and time after lease expiry do not consume it. Release and reclaim resume the same attempt's accumulated budget, while retry starts a new attempt with a fresh budget. Work projections expose the active interval start, accumulated execution milliseconds, and configured timeout so an operator can explain an expiry after restart or replication. A step cannot use a deadline gate because its timeout is its worker-execution budget.
 
-Waiting is not execution. A worker that holds a step while it waits for something outside the seat, such as a host build slot or GitHub's merge queue, declares it with `st work wait STEP --as AGENT --for 2h --reason "build slot"`. The wait is a `work.progress` claim with `clock: "paused"` and a `wait_until_unix_ms` deadline: it closes the running interval, and the attempt's execution clock stays stopped through the lease renewals and progress records that follow. `st work resume STEP` (a `work.progress` claim with `clock: "running"`) opens a new interval. A wait nobody resumes ends at its deadline, and the clock then runs again, so a seat that stopped answering cannot hide a hung step. Waits draw on one budget of 12 hours per step attempt, counted as time actually spent waiting: a wait that is resumed early gives back what it did not use, a wait that runs to its deadline spends its full length, and declaring again during a wait spends the time so far. A declaration larger than what is left is refused with `wait-budget-exhausted` and says how much remains, so a live seat that never finishes cannot chain waits past the execution timeout. A new claim in the same attempt keeps the spent budget; a retry is a new attempt with a fresh one. The lease still needs its renewals: a lapsed lease ends the interval as it always did, and a new claim ends any earlier holder's wait. `work show` prints the stopped clock with the time its wait ends and the wait budget used and left, and the wait's reason is the step's blocked reason until it resumes. A wait adds no time to the budget, so a step that waits two hours and then reviews for ten minutes has used ten minutes; `work extend` remains the way to give a step more work time.
+Waiting is not execution. A worker that holds a step while it waits for something outside the seat, such as a host build slot or GitHub's merge queue, declares it with `fractal work wait STEP --as AGENT --for 2h --reason "build slot"`. The wait is a `work.progress` claim with `clock: "paused"` and a `wait_until_unix_ms` deadline: it closes the running interval, and the attempt's execution clock stays stopped through the lease renewals and progress records that follow. `fractal work resume STEP` (a `work.progress` claim with `clock: "running"`) opens a new interval. A wait nobody resumes ends at its deadline, and the clock then runs again, so a seat that stopped answering cannot hide a hung step. Waits draw on one budget of 12 hours per step attempt, counted as time actually spent waiting: a wait that is resumed early gives back what it did not use, a wait that runs to its deadline spends its full length, and declaring again during a wait spends the time so far. A declaration larger than what is left is refused with `wait-budget-exhausted` and says how much remains, so a live seat that never finishes cannot chain waits past the execution timeout. A new claim in the same attempt keeps the spent budget; a retry is a new attempt with a fresh one. The lease still needs its renewals: a lapsed lease ends the interval as it always did, and a new claim ends any earlier holder's wait. `work show` prints the stopped clock with the time its wait ends and the wait budget used and left, and the wait's reason is the step's blocked reason until it resumes. A wait adds no time to the budget, so a step that waits two hours and then reviews for ten minutes has used ten minutes; `work extend` remains the way to give a step more work time.
 
-A step with a worker does not fail when its budget runs out. Fractal raises one fault for the step, which arrives as a message to the agent assigned to it, and the step and its mission go on. The owner answers with `st work extend STEP --as AGENT --by 2h --reason TEXT`, which adds up to seven days to this attempt's budget and renews the lease, with `work complete` when the goals are met, or with `work fail`. An extension is a `work.extended` claim. The fault ends when the owner extends, completes, fails or releases the step. A step that runs out of the extended budget raises a new fault. Only a step with no worker, such as an agentless step, fails when its budget runs out, because nobody holds it to answer. A step submitted for verification has already used its time and is never timed out.
+A step with a worker does not fail when its budget runs out. Fractal raises one fault for the step, which arrives as a message to the agent assigned to it, and the step and its mission go on. The owner answers with `fractal work extend STEP --as AGENT --by 2h --reason TEXT`, which adds up to seven days to this attempt's budget and renews the lease, with `work complete` when the goals are met, or with `work fail`. An extension is a `work.extended` claim. The fault ends when the owner extends, completes, fails or releases the step. A step that runs out of the extended budget raises a new fault. Only a step with no worker, such as an agentless step, fails when its budget runs out, because nobody holds it to answer. A step submitted for verification has already used its time and is never timed out.
 
 If a step produces a native harness driver, the step waits for a ready, working, or idle harness observation from the current runtime incarnation. An observation with another incarnation cannot satisfy the step. An old observation without an incarnation applies only when it was recorded after the current runtime epoch began.
 
@@ -545,8 +545,8 @@ does not raise a stopped-loop item. Failures still raise an item even before the
 Every loop that starts and stops short raises one attention item: a loop that fails at exhaustion or in its
 human review, and a loop that a cancelled round or a failed keep or discard branch stops. The item
 targets the loop and its run. It names the cause and the command that continues or ends the loop:
-`st work retry STEP` for a failed step, which runs the next round, or `st missions cancel RUN` and
-`st missions start MISSION` for a cancelled one. It asks the person who requested the run, or
+`fractal work retry STEP` for a failed step, which runs the next round, or `fractal missions cancel RUN` and
+`fractal missions start MISSION` for a cancelled one. It asks the person who requested the run, or
 `person/operator` when an agent requested it. Each stop raises its own item, and an item closes
 when the loop runs again, a revision replaces its generation, or its run is cancelled.
 
@@ -625,7 +625,7 @@ A top-level agent seat has no mission steps, so it cannot declare a constraint. 
 
 Fractal shows the effective list when an agent shows or claims work.
 
-Do not repeat universal Fractal behavior as a mission constraint. The skill that `st skill` prints describes how an agent uses st.
+Do not repeat universal Fractal behavior as a mission constraint. The skill that `fractal skill` prints describes how an agent uses Fractal.
 
 Do not disable harness features to make an eval pass. A mission constraint must describe a real mission requirement.
 
@@ -652,13 +652,13 @@ Inputs do not support defaults, lists, secrets, schemas, or automatic environmen
 Nested child missions cannot declare inputs in this version.
 
 ```sh
-# After the mission has been approved through st launch:
-st missions start MISSION_ID \
+# After the mission has been approved through fractal launch:
+fractal missions start MISSION_ID \
   --input message="Review this release." \
   --input source=resource/release-source \
   --as person/operator
 
-st claim resource/mission-inputs/source resource.observed \
+fractal claim resource/mission-inputs/source resource.observed \
   --field kind=custom.st3.document-source \
   --field state=ready
 ```
@@ -759,8 +759,8 @@ restart after exit 0. An observation from an older launch does not fail a new de
 Other subjects and fields retain their pending behavior. This predicate rule is separate from
 the exec gate contract below.
 
-`st missions show RUN` lists unresolved predicates of this kind under `STUCK GATES` (and
-`stuck_gates` in JSON), even when an earlier gate still waits. `st doctor` reports them in
+`fractal missions show RUN` lists unresolved predicates of this kind under `STUCK GATES` (and
+`stuck_gates` in JSON), even when an earlier gate still waits. `fractal doctor` reports them in
 the `terminal-exec-gates` check. These diagnostics only inspect active runs and never decide a
 gate or change a step's state.
 
@@ -804,7 +804,7 @@ gate "the parser suite passes on main" { cargo-test "parser" package="app" }
 - `document "doc/NAME"` passes once any version of the document is stored, and
   `document "doc/NAME@SHA256"` once that exact version is. It is a graph predicate: it waits
   without running anything and passes as soon as the document arrives. Publication neither
-  requires the document nor pins its version. Use it instead of grepping `st documents ls`, which
+  requires the document nor pins its version. Use it instead of grepping `fractal documents ls`, which
   lists 100 documents by default.
 - `merged "OWNER/REPO#NUMBER"` passes once the pull request merged. A pull request that closed
   without merging breaks the gate.
@@ -822,11 +822,11 @@ gate "the parser suite passes on main" { cargo-test "parser" package="app" }
 `"$ST3_BIN" gate KIND ...`. They take the exec gate's `host` (`local` by default), `workspace`
 (`${ST_WORKSPACE}` by default; for `cargo-test`, the repository), and `time-limit` (two minutes,
 or an hour for `cargo-test`). They check again when not yet, break the same way, and
-`st missions check` runs them. `merged` and `ci-passed` read GitHub with the token Fractal's observers
+`fractal missions check` runs them. `merged` and `ci-passed` read GitHub with the token Fractal's observers
 use (`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`); without one, the gate is broken. Each
-`st gate KIND` command also runs by hand and prints its answer; `st gate --help` lists them.
+`fractal gate KIND` command also runs by hand and prints its answer; `fractal gate --help` lists them.
 
-`st gate cargo-test --as agent/example/caller TARGET --package PACKAGE` attributes
+`fractal gate cargo-test --as agent/example/caller TARGET --package PACKAGE` attributes
 the local execution in stderr before running it. The optional actor does not change
 the target, ref, worktree, or gate answer; an agent cannot name a peer or person.
 
@@ -857,12 +857,12 @@ The command's exit status is its answer:
 | anything else | broken | The boundary waits for a revision, and the mission's publisher gets one attention item. |
 
 A check is also broken when it cannot start (its workspace is missing, for example), when something
-kills it, when it runs past its time limit, or when an `st` command inside it was refused or printed
-only part of a listing. st runs each check with `ST_GATE_REPORT` naming a file. An `st` command
+kills it, when it runs past its time limit, or when a `fractal` command inside it was refused or printed
+only part of a listing. Fractal runs each check with `ST_GATE_REPORT` naming a file. A `fractal` command
 that Fractal turns down (a usage error, a limit Fractal does not allow, or an authorization or validation
 refusal) or that lists a page with more items left appends a line to that file, and any line marks
 the check broken, whatever its exit status. A pipeline cannot hide it: in
-`st missions ls --limit 500 | grep -q NAME`, `grep` exits 1, but Fractal refused the limit, so the gate
+`fractal missions ls --limit 500 | grep -q NAME`, `grep` exits 1, but Fractal refused the limit, so the gate
 is broken rather than not yet. A missing subject, an unreachable daemon or a timed-out wait is not a
 refusal. A reader that stops early, such as `grep -q` on a match, closes the listing before Fractal
 reports it, so a gate that found what it looked for still passes.
@@ -884,16 +884,16 @@ from a build this host cannot make (broken). To wait on another test suite rathe
 end its command with `|| exit 1`. A build that cannot start then waits too, so do that only for a
 check already known to run.
 
-Filter or name what a check looks for. `st documents ls` lists 100 documents by default, so a check
+Filter or name what a check looks for. `fractal documents ls` lists 100 documents by default, so a check
 that greps the whole listing breaks once more exist; the built-in `document` gate names the one
 document it needs.
 
 A broken gate does not fail its step. The step keeps waiting, and Fractal raises one attention item for
 the actor that published the run's mission revision. It names the gate, the step, the host, why the
 gate is broken, and the end of the check's output. A person who published the mission sees it in
-`st alerts ls`; an agent receives it as a fault message. When Fractal did not record the revision's
+`fractal alerts ls`; an agent receives it as a fault message. When Fractal did not record the revision's
 publisher, the run's requester receives it. Correct the gate and revise the run with
-`st work revise RUN FILE`. A revision that changes only a step's gates keeps the work its worker
+`fractal work revise RUN FILE`. A revision that changes only a step's gates keeps the work its worker
 already submitted, and the revised gates check that work in the new generation. The item closes
 when the revision replaces the generation. A finally step cannot take a revision, so its broken
 gate fails that step.
@@ -907,7 +907,7 @@ attention item.
 
 #### Check a gate before you publish it
 
-`st missions check FILE` runs ordinary mission and step exec gates in the file once, now,
+`fractal missions check FILE` runs ordinary mission and step exec gates in the file once, now,
 on this host, including per-round step scripts, with the
 environment and `ST_GATE_REPORT` a run gives it, and prints each answer: pass, not yet, broken, or
 unchecked. `--workspace DIR` (the current directory by default) stands for the run's workspace,
@@ -920,16 +920,16 @@ Loop `until` scripts are listed as "not checked, they run after each round", wit
 shown. Publication and dry-run checks use the same scope. A running loop still evaluates its
 `until` scripts at every round boundary, when round outputs exist.
 
-Use `st missions check --as agent/example/caller FILE` to carry execution attribution
+Use `fractal missions check --as agent/example/caller FILE` to carry execution attribution
 on the trusted local Unix daemon request. The actor does not select a mission or
 change the workspace, inputs, or gate environment. An explicit actor must match
 an agent caller's own identity. Omitting it preserves the existing check behavior.
 
 ```sh
-st missions check release.kdl --workspace ~/src/app --input commit=4f2a9c1
+fractal missions check release.kdl --workspace ~/src/app --input commit=4f2a9c1
 ```
 
-`st apply` runs the same check first and refuses a mission with a broken gate, printing
+`fractal apply` runs the same check first and refuses a mission with a broken gate, printing
 each gate's answer and the end of a broken check's output. Not yet does not stop a publication:
 before the work exists, most gates should say not yet. `--workspace` names the workspace for the
 check. `--no-gate-check` publishes without it, for a gate whose check cannot run before its run,
@@ -1004,7 +1004,7 @@ does not hold, an answer could change nothing, so the review is not listed and a
 refused with the reason, such as which parent step failed. It is offered again once that step
 is retried.
 
-`st alerts ls --as person/NAME` shows the selected person's pending KDL human gates together
+`fractal alerts ls --as person/NAME` shows the selected person's pending KDL human gates together
 with their other current decisions and faults.
 
 The human view shows the mission, owner step, question, review targets, age, and exact decision commands. `--json` returns the same current review records as structured data.
@@ -1013,7 +1013,7 @@ The list excludes resolved requests, old generations, changed definitions, old a
 
 ### Person alerts
 
-`st alerts ls --as person/NAME` reads current source state: ready person steps, human
+`fractal alerts ls --as person/NAME` reads current source state: ready person steps, human
 gates, valid launch previews, outstanding proposal reviews, requested person updates,
 and failures whose current source needs a person. Priority precedes waiting age. Each card's
 identity includes its source, recipient and waiting episode. A cancelled or retired owner,
@@ -1021,11 +1021,11 @@ removed source, replacement generation or changed attempt removes the card befor
 Failed sources can retain their own repair fault. Held subscription requests do not appear.
 
 ```sh
-st alerts ls --as person/operator
-st work ask --for person/operator --title "Choose a release date" \
+fractal alerts ls --as person/operator
+fractal work ask --for person/operator --title "Choose a release date" \
   --reason "The release needs a date" --step step-run/release/prepare \
   --as agent/release/operator --idempotency-key release-date
-st work done step-run/release/ask-ID --as person/operator --summary "Friday"
+fractal work done step-run/release/ask-ID --as person/operator --summary "Friday"
 ```
 
 An ask creates a person-assigned runtime step in the live owning generation. Its origin waits in
@@ -1033,7 +1033,7 @@ An ask creates a person-assigned runtime step in the live owning generation. Its
 complete it. The response resumes the same origin attempt with a new readiness epoch, and the
 seat's ready-work wake tells the requester. No step waits on a `--new-run` ask, so the response
 also sends the requester one message from `daemon/runtime` with the answer. A requester
-can use `st work cancel-ask STEP --as AGENT --summary TEXT`. An unclaimed live requester can
+can use `fractal work cancel-ask STEP --as AGENT --summary TEXT`. An unclaimed live requester can
 use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the same source.
 
 #### Deadlines
@@ -1103,7 +1103,7 @@ reconciler count an older ask's deadline from the same default.
 
 #### Structured requests
 
-`st work ask --request FILE` (or `request` on the client `work.ask` action) adds a typed question
+`fractal work ask --request FILE` (or `request` on the client `work.ask` action) adds a typed question
 to the ask. A `decision` proposes one action and names exactly one `accept` answer, one
 `decline` answer and at most one `request_changes` answer. A `choice` names two to five options;
 `custom: true` also accepts the person's own words. `feedback` asks for text. Every request has a
@@ -1111,12 +1111,12 @@ to the ask. A `decision` proposes one action and names exactly one `accept` answ
 `recommendation` naming one of its answers, and `subjects` (pull requests, issues, documents,
 missions, runs, steps, agents, hosts, commits or links) whose `revision` pins what was reviewed.
 Each named answer has a stable `id`, a `label`, the `consequence` that follows, and optional
-`conditions`. Without `--reason`, the person reads the request's question. `st work ask --help`
+`conditions`. Without `--reason`, the person reads the request's question. `fractal work ask --help`
 shows a complete example.
 
 ```sh
-st work done step-run/release/ask-ID --as person/operator --answer land
-st work done step-run/release/ask-ID --as person/operator --answer revise --text "Split the migration"
+fractal work done step-run/release/ask-ID --as person/operator --answer land
+fractal work done step-run/release/ask-ID --as person/operator --answer revise --text "Split the migration"
 ```
 
 The person answers with a named `--answer ID`, adding `--text` where the answer needs words:
@@ -1128,7 +1128,7 @@ answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decl
 `--text` reason) sets any decision or choice aside without answering it: the asker is told the person
 dismissed it, and a request that defines its own `dismiss` answer keeps that meaning. The resumed origin step lists it in
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,
-which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
+which is where a `--new-run` asker reads it. `fractal work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask keeps no `request` field and takes no named answer.
 Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
@@ -1140,7 +1140,7 @@ respondent and all four provenance fields when present.
 #### Updates
 
 An `update` asks nothing: it brings a person information they asked for, such as a report or a
-status. Post one with `st work update --for PERSON --about REF --title TEXT --body TEXT
+status. Post one with `fractal work update --for PERSON --about REF --title TEXT --body TEXT
 --idempotency-key KEY --as AGENT`, or a `{"version": 1, "type": "update", "about": REF}` request
 on `work ask` (optional `summary` and `subjects`; no question, answers or recommendation).
 `about` is the proof that the person asked: their own mission run or step run (the run, or its
@@ -1149,14 +1149,14 @@ returns `update-not-asked`.
 
 The update is a person step in a run of its own, so no step waits on it and the poster keeps
 working. It stays on the person's home until they read it, even after the poster stops; the
-poster can withdraw it with `cancel-ask`. Opening it with `st alerts show` as the person (not
-from an agent seat) reads it, as does `st work done STEP --as PERSON --answer read`. Reading
+poster can withdraw it with `cancel-ask`. Opening it with `fractal alerts show` as the person (not
+from an agent seat) reads it, as does `fractal work done STEP --as PERSON --answer read`. Reading
 records `{type: "update", outcome: "read"}` and tells nobody. The client attention card carries
 the update under `update`, not `request`.
 
 A person message leaves on read or archive, without an age expiry. A launch needs its current
 valid preview. Faults describe source recovery and inspection; they have no independent dismiss
-state. `st doctor` reads the same snapshot for attention age checks.
+state. `fractal doctor` reads the same snapshot for attention age checks.
 
 ## Dependencies
 
@@ -1207,7 +1207,7 @@ mission "release" state="ready" report-to="agent/ops/watcher" stalled-after="45m
 ```
 
 ```sh
-st missions start release --report-to agent/ops/watcher --as person/operator
+fractal missions start release --report-to agent/ops/watcher --as person/operator
 ```
 
 `--report-to` replaces the mission's `report-to` for that run, and `--report-completed` adds the
@@ -1218,9 +1218,9 @@ change who a running run reports to. A run with neither writes nothing extra and
 A running run can be opted in, moved to another agent, or cleared without restarting it:
 
 ```sh
-st missions report-to RUN --agent agent/ops/watcher --stalled-after 1h --as agent/ops/owner
-st missions report-to RUN --agent agent/ops/watcher --report-stalls false --as person/operator
-st missions report-to RUN --clear --as person/operator
+fractal missions report-to RUN --agent agent/ops/watcher --stalled-after 1h --as agent/ops/owner
+fractal missions report-to RUN --agent agent/ops/watcher --report-stalls false --as person/operator
+fractal missions report-to RUN --clear --as person/operator
 ```
 
 Only a person or the agent that requested the run may change it, and only to an agent. Each
@@ -1276,7 +1276,7 @@ deadline on that run's evaluation, so a quiet fleet does no work to watch for st
 Each event is sent once, however many times the run is evaluated and across daemon restarts. A
 run with many failed steps sends one `failed` message that names them. The message names the run,
 its mission and the steps involved, and tells the reporter to look at the run with
-`st missions show`. It does not copy a failure reason, cancellation reason or step output, which
+`fractal missions show`. It does not copy a failure reason, cancellation reason or step output, which
 can contain anything a step printed.
 
 A reporter that is also assigned a step in the run is told like any other. A reporter that is
@@ -1331,7 +1331,7 @@ Back-off: a step gets at most one nudge per idle period. After a nudge, the next
 the seat has taken a turn and gone idle again, and a quiet nudge comes no sooner than 2 hours after
 the step's last nudge. An action nudge is not held by the 2 hours, but each action nudges a step at
 most once. Every nudge is recorded on the step as a `work.nudged` claim that names the message,
-the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and Fractal TUI
+the idle period and the waits. `fractal work show` prints `Nudged:` while the step is held, and Fractal TUI
 shows `nudged … ago` under the working step.
 
 Two daemon settings in `[reconcile]` tune this, and are read again without a restart:
@@ -1390,7 +1390,7 @@ usually an agent's judgment or a false gate, and a repeated attempt repeats its 
 In free mode, a person or agent acting as itself can retry one failed step:
 
 ```sh
-st work retry STEP_RUN --as person/operator --reason "the deploy check host is back"
+fractal work retry STEP_RUN --as person/operator --reason "the deploy check host is back"
 ```
 
 While its run is active, the step starts its next attempt in place. When that step is the only
@@ -1407,13 +1407,13 @@ A finished root run can show another outcome than the one Fractal recorded, for 
 shipped after a gate failed. In free mode, a person or agent acting as itself sets it with a reason:
 
 ```sh
-st missions outcome RUN completed --reason "the change merged after the gate was fixed" --as person/operator
+fractal missions outcome RUN completed --reason "the change merged after the gate was fixed" --as person/operator
 ```
 
 The outcome is `completed`, `failed`, or `cancelled`. The run keeps its steps as they ended. Its
-latest state claim records the new outcome, who set it, and why; `st missions show` prints it with
+latest state claim records the new outcome, who set it, and why; `fractal missions show` prints it with
 the outcome it replaced, and every client shows it on every node. An active run is cancelled with
-`st missions cancel` instead, and nested and eval runs keep their outcome.
+`fractal missions cancel` instead, and nested and eval runs keep their outcome.
 
 The `completion` frontier selects when Fractal checks mission products and gates. Fractal then enters the final phase when one exists.
 
@@ -1446,7 +1446,7 @@ step "compile-mission" {
 The worker must hold the producing step or one of its nested steps with the same assigned agent.
 
 ```sh
-st work publish-mission step-run/GENERATION/compile-mission generated.kdl --as agent/planner
+fractal work publish-mission step-run/GENERATION/compile-mission generated.kdl --as agent/planner
 ```
 
 The published document must contain exactly one ready mission with the declared ID. Fractal publishes the immutable revision and binds it to the producing definition and attempt.
@@ -1493,7 +1493,7 @@ Fractal supplies these exact context names:
 | `ST_GATE` | Gate name in a running gate context. |
 | `ST3_SUBJECT` | Full subject of the current runtime member. |
 | `ST_AGENT` | Full owning agent subject. It is absent for agentless runtimes. |
-| `ST3_BIN` | Absolute path of `STATE_DIR/current/st3`, a link the daemon points at the st executable it runs; see [seat deploys](seat-deploys.md). |
+| `ST3_BIN` | Absolute path of `STATE_DIR/current/st3`, a link the daemon points at the Fractal executable it runs; see [seat deploys](seat-deploys.md). |
 | `ST_LOOP_ROUND` | Current loop round. It is present in loop child missions. |
 | `ST_LOOP_FEEDBACK` | Exact prior feedback document, or an empty value. |
 
@@ -1507,7 +1507,7 @@ Publication rejects an unknown `${NAME}`. Write `$${NAME}` for the literal text 
 
 For example, use `${ST_MISSION_RUN}` directly. Do not write a manual mapping such as `env { MISSION_RUN "${ST_MISSION_RUN}" }` only to rename the built-in value.
 
-The exact built-in names are reserved in authored `env` maps. st rejects an attempt to replace them. Other names, including other `ST_*` names, remain available to applications.
+The exact built-in names are reserved in authored `env` maps. Fractal rejects an attempt to replace them. Other names, including other `ST_*` names, remain available to applications.
 
 `${PATH}` is also available for KDL interpolation. Gates and exec steps use the account's
 interactive login-shell environment, just like agents. Programs resolve through that captured
@@ -1516,20 +1516,20 @@ Declared environment values override the snapshot; `${PATH}` in an override expa
 the captured shell PATH. The active Fractal executable directory is prepended for launched work.
 
 The daemon captures this environment at startup and refreshes it on use every 60 seconds,
-including shell configuration and exported credential changes. `st doctor` reports its PATH
+including shell configuration and exported credential changes. `fractal doctor` reports its PATH
 and whether GitHub observers have a token, without displaying credential values. Observers
 check `GH_TOKEN`, `GITHUB_TOKEN`, then `gh auth token` on every poll. If none supplies a token,
 the observer records an explicit authentication failure and sends no anonymous request.
 Run `gh auth login` as the daemon account or export a token in its shell startup files;
 the next poll retries authentication.
 
-`st doctor` also has a `build-tools` check for hosts that build and gate this repository. It looks
+`fractal doctor` also has a `build-tools` check for hosts that build and gate this repository. It looks
 for `cargo`, `rustc`, `sccache`, `gh`, `git`, and `nix` on that captured PATH, plus `mold` on
 Linux, where the repository links with it. Then it builds and links a small crate offline
 with the same linker setting, giving the build 10 seconds. The check warns, and does not fail, with
 what is missing or the last lines of cargo's error, because a host that does not build can still
 run the graph. When cargo or rustc is missing, it does not try the build. Install what is missing,
-or export its directory from the daemon account's shell startup files; `st doctor` sees the
+or export its directory from the daemon account's shell startup files; `fractal doctor` sees the
 change within a minute.
 
 An agent receives its own subject in both `ST3_SUBJECT` and `ST_AGENT`. A nested task receives its task subject in `ST3_SUBJECT` and its parent agent in `ST_AGENT`.
@@ -1601,7 +1601,7 @@ file. It never validates, stages, or reseeds that declaration again. A person ma
 the incomplete attempt after inspecting it:
 
 ```sh
-st agents acknowledge-seed AGENT --reason "Accept fresh after inspecting the interrupted import" --as ACTOR
+fractal agents acknowledge-seed AGENT --reason "Accept fresh after inspecting the interrupted import" --as ACTOR
 ```
 
 The actor may default to the configured person, as for other seat controls. The command records
@@ -1612,11 +1612,11 @@ acknowledgements, notices, and native bindings survive checkpoint trim.
 
 A harness block cannot declare `prompt`. Parsing refuses it with `harness-prompt-removed`. Put the instruction in a step goal or send the seat a message.
 
-Each native harness driver installs the skill that `st skill` prints before it starts the harness. The skill describes how to use st: messages, work, and attention requests. It contains no mission goal and sets no rules of conduct.
+Each native harness driver installs the skill that `fractal skill` prints before it starts the harness. The skill describes how to use Fractal: messages, work, and attention requests. It contains no mission goal and sets no rules of conduct.
 
 Fractal does not write a `.st3` directory into a native harness workspace.
 
-A declared `render` operation that would change a tracked file fails that member’s render transaction and prevents its runtime from starting. Other members continue rendering and reconciling. Render, start, observation, and stop failures appear as the member’s fault in `st agents show` and `st doctor`; a successful pass clears the fault. Stopped and superseded members bypass rendering.
+A declared `render` operation that would change a tracked file fails that member’s render transaction and prevents its runtime from starting. Other members continue rendering and reconciling. Render, start, observation, and stop failures appear as the member’s fault in `fractal agents show` and `fractal doctor`; a successful pass clears the fault. Stopped and superseded members bypass rendering.
 
 Repeated `git-exclude` operations build on one another. Seats in worktrees sharing a repository’s exclude file contribute their paths to one combined update. Conflicting ordinary file owners are still rejected, without blocking unrelated members.
 
@@ -1667,7 +1667,7 @@ bounded one-line body preview
 ```
 
 `sha256` is the lowercase hex SHA-256 of the complete message body in the graph, and
-`st conversations read message/ID` shows that body. Every attribute value and the preview are
+`fractal conversations read message/ID` shows that body. Every attribute value and the preview are
 XML-escaped, so sender text cannot close the element or add an attribute. A truncated preview ends
 with `…`, and a note after the closing tag says so. Claude receives the plain
 `[PING from st3] message/ID from SENDER: TITLE` notice and preview inside its own channel tag. OpenCode
@@ -1714,22 +1714,22 @@ The seat's next work is the first ready step, in queue order, that is assigned t
 whose steps for the seat are waiting on a gate, a dependency, or another seat is passed over, so
 it never blocks the runs behind it. It becomes next again as soon as it has a ready step. Inside
 one run, `depends-on` and `queue {}` still decide which steps are ready, and ready steps of the
-same run keep creation order. `st agents show`, `st agents ls --enrich`, and the reconciler's
+same run keep creation order. `fractal agents show`, `fractal agents ls --enrich`, and the reconciler's
 work wake all use this one selector.
 
 The queue matters most for a durable top-level seat that serves many runs. A mission-scoped seat
 normally serves one run, so its queue has one entry.
 
 ```sh
-st agents queue agent/example/example/worker
-st agents queue move agent/example/example/worker mission-run/release/2026-09-26 --top \
+fractal agents queue agent/example/example/worker
+fractal agents queue move agent/example/example/worker mission-run/release/2026-09-26 --top \
   --reason "the release needs this first" --as person/operator
-st agents queue move agent/example/example/worker mission-run/docs/2026-09-26 \
+fractal agents queue move agent/example/example/worker mission-run/docs/2026-09-26 \
   --after mission-run/release/2026-09-26 --as person/operator
 ```
 
-`st agents queue AGENT` shows the step the seat holds now, its next work, and then each queued
-run in order with its state: `claimed`, `ready`, or `waiting`. `st missions queued AGENT` is the
+`fractal agents queue AGENT` shows the step the seat holds now, its next work, and then each queued
+run in order with its state: `claimed`, `ready`, or `waiting`. `fractal missions queued AGENT` is the
 same show command reached from the `missions` group. A move places one run at the top, at the
 bottom, or directly before or after another queued run. In free mode a person or agent may move it, acting as itself.
 
@@ -1742,15 +1742,15 @@ change has an author and a time.
 A move changes only which run is next. It never releases, reassigns, or interrupts a step the seat
 already holds; the new order applies when the seat is free again.
 
-`st work show STEP` exposes ready age, assignee state, wake attempts, acknowledgement, and failure.
+`fractal work show STEP` exposes ready age, assignee state, wake attempts, acknowledgement, and failure.
 An operator can request another delivery through the same driver path with:
 
 ```sh
-st work wake STEP --as person/operator --reason "retry native delivery"
+fractal work wake STEP --as person/operator --reason "retry native delivery"
 ```
 
 Any agent may also wake a step, its own or another seat's. Manual wakes are recorded in the inbox but do not consume the three automatic retry
-attempts shown by `st work show`.
+attempts shown by `fractal work show`.
 
 Generic terminal programs without a maintained native driver do not have an automatic wake path.
 
@@ -1774,7 +1774,7 @@ agent "researcher" {
 
 A bare target inside a mission uses the same mission run. A full external agent subject stays full.
 
-The relation is visible in `st agents ls --json`, status, and assigned work. It is suitable for a tree or graph UI.
+The relation is visible in `fractal agents ls --json`, status, and assigned work. It is suitable for a tree or graph UI.
 
 The relation does not create permission, lifecycle, scheduling, or mandatory reporting behavior.
 
@@ -1793,7 +1793,7 @@ host "local" {
 
 The host document gives stable host facts to agents on that host. It must not contain current work.
 
-Fractal writes no file for a host document. `st work claim` on that host prints each exact document after the claimed step, under a `HOST  NODE` heading, each under its exact reference.
+Fractal writes no file for a host document. `fractal work claim` on that host prints each exact document after the claimed step, under a `HOST  NODE` heading, each under its exact reference.
 
 Publication fails with `missing-document` until the exact document bytes exist in the local store.
 
@@ -1841,13 +1841,13 @@ Claimed work uses a renewable claim bound to the agent identity and runtime inca
 A nested work action renews active ancestor leases held by the same agent incarnation.
 
 ```sh
-st work ls --as agent/RUN/node.worker
-st work show step-run/GENERATION/step
-st work claim step-run/GENERATION/step --as agent/RUN/node.worker
-st work progress step-run/GENERATION/step --summary "The tests are running."
-st work complete step-run/GENERATION/step --summary "The product is published."
-st work fail step-run/GENERATION/step --reason "The compiler rejected the source."
-st work release step-run/GENERATION/step --reason "The work needs another owner."
+fractal work ls --as agent/RUN/node.worker
+fractal work show step-run/GENERATION/step
+fractal work claim step-run/GENERATION/step --as agent/RUN/node.worker
+fractal work progress step-run/GENERATION/step --summary "The tests are running."
+fractal work complete step-run/GENERATION/step --summary "The product is published."
+fractal work fail step-run/GENERATION/step --reason "The compiler rejected the source."
+fractal work release step-run/GENERATION/step --reason "The work needs another owner."
 ```
 
 The default work list shows ready, active, and blocked work. It summarizes waiting and terminal work.
@@ -1885,19 +1885,19 @@ The subject is exactly `agent/example/cos/standing/cos`; placement does not chan
 The seat's bare `fresh-context` node starts a new harness session before each step it claims, even when the step has no `fresh-context` node. Omit it when the seat should retain context across ordinary steps.
 Messages use sender-chosen `kind: silent | wake`, defaulting to wake for every seat. Silent messages wait for a real wake; see [silent messages](silent-messages.md).
 
-A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. Only one live seat may carry it: publishing a second is refused with `fault-agent-taken`, so the flag moves by stopping its holder or dropping it there. When two members each accepted a different holder, neither is the fault agent until one steps down, and a fault no agent owns stays visible in `st doctor`. A fault dismissal (`st missions dismiss-fault`) counts only from a person or from the seat that held the flag when it was written. Faults never go to a person's attention.
+A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. Only one live seat may carry it: publishing a second is refused with `fault-agent-taken`, so the flag moves by stopping its holder or dropping it there. When two members each accepted a different holder, neither is the fault agent until one steps down, and a fault no agent owns stays visible in `fractal doctor`. A fault dismissal (`fractal missions dismiss-fault`) counts only from a person or from the seat that held the flag when it was written. Faults never go to a person's attention.
 
-Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault. A seat that restarts always (the default) is not left stopped for good: its parked launch is retried after one minute, then two, four, eight, sixteen and thirty, at most six times since its last successful launch, and each retry is a `retry` reconcile decision that names the failure before it (and the owner run, when the seat has one). A retry that starts the seat ends the fault; after the sixth, one `retries-exhausted` decision says the launch stays stopped until `st agents restart` or a changed declaration. Other restart policies are not retried. `st` runs the first `pty` on the launch PATH that accepts `--env NAME`, so an older build earlier on the PATH no longer parks every restart.
+Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `fractal agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault. A seat that restarts always (the default) is not left stopped for good: its parked launch is retried after one minute, then two, four, eight, sixteen and thirty, at most six times since its last successful launch, and each retry is a `retry` reconcile decision that names the failure before it (and the owner run, when the seat has one). A retry that starts the seat ends the fault; after the sixth, one `retries-exhausted` decision says the launch stays stopped until `fractal agents restart` or a changed declaration. Other restart policies are not retried. `fractal` runs the first `pty` on the launch PATH that accepts `--env NAME`, so an older build earlier on the PATH no longer parks every restart.
 Codex compares the model ID and effort returned by a saved-thread resume with the declaration exactly. If Codex normalizes a declared model alias to a different ID, the driver fails before binding; three failed starts park the seat under the Codex crash-loop guard until its declaration changes.
 Typed harnesses always run their real interactive TUI in a PTY. Claude always loads the native Fractal
 channel. Use `exec {}` for non-interactive provider commands.
 
-Use `st apply FILE --as person/NAME` for authored KDL or `st agents start ...` as a
-convenience. `st agents new NAME --host HOST --attach` declares a new seat with the fleet's
+Use `fractal apply FILE --as person/NAME` for authored KDL or `fractal agents start ...` as a
+convenience. `fractal agents new NAME --host HOST --attach` declares a new seat with the fleet's
 harness defaults, waits until its harness is ready, and attaches from any fleet host.
-`--print-kdl` prints the exact declaration. `st agents stop SUBJECT` publishes an explicit root
+`--print-kdl` prints the exact declaration. `fractal agents stop SUBJECT` publishes an explicit root
 stop. On a seat a mission run declared, that stop holds for the rest of the run's generation: the
-run does not materialize the seat again, even after a daemon restart, and `st agents start SUBJECT`
+run does not materialize the seat again, even after a daemon restart, and `fractal agents start SUBJECT`
 restores the run's own declaration.
 
 For `agents start`, `example/cos/standing/cos` and `agent/example/cos/standing/cos` both name
@@ -1931,9 +1931,9 @@ The terminal state is `cancelled` after successful final work. A final failure m
 
 After final work, Fractal enters cleanup and stops every runtime owned by the mission run. A run-owned stop waits while the seat holds a message nobody has read or work in another run. The final stop step and the run may complete while that retention keeps the driver and its children running. The stop declaration stays; Fractal checks the retention again at most a minute later, and stops the runtime once the mail is read or archived and the other work ends. Cleanup selects the run's owned runtimes; it does not select standing seats or person-assigned work.
 
-When the owner run is terminal and a live seat's stop has been deferred for at least 15 minutes, Fractal raises a fault naming the retention reason and how to end it. The reporting age is bound to the stop declaration and runtime incarnation and survives daemon restarts and unrelated harness diagnostics. Older diagnostics without those fences begin their reporting age when the upgraded daemon first reconciles them. Inspect the fault with `st agents show agent/orchid/review/worker --all`: terminal-owner seats belong to history, so ordinary roster lists omit them. The fault clears when retention ends, the runtime stops, or its declaration or incarnation changes. Each retained seat has its own fault: 17 retained seats produce 17 simultaneous faults when their deferrals reach 15 minutes with terminal owners. There is no cap or roll-up; the fault list can show all 17.
+When the owner run is terminal and a live seat's stop has been deferred for at least 15 minutes, Fractal raises a fault naming the retention reason and how to end it. The reporting age is bound to the stop declaration and runtime incarnation and survives daemon restarts and unrelated harness diagnostics. Older diagnostics without those fences begin their reporting age when the upgraded daemon first reconciles them. Inspect the fault with `fractal agents show agent/orchid/review/worker --all`: terminal-owner seats belong to history, so ordinary roster lists omit them. The fault clears when retention ends, the runtime stops, or its declaration or incarnation changes. Each retained seat has its own fault: 17 retained seats produce 17 simultaneous faults when their deferrals reach 15 minutes with terminal owners. There is no cap or roll-up; the fault list can show all 17.
 
-The 15-minute age reports a retained process; it does not terminate one. Read or archive the retained mail, or complete or hand off work in the other run, to release the pending stop. An explicit `st agents stop agent/orchid/review/worker --as ACTOR` uses the ordinary stop path and ends the driver and children even when mail or work remains. Use the actual operator identity for `ACTOR`.
+The 15-minute age reports a retained process; it does not terminate one. Read or archive the retained mail, or complete or hand off work in the other run, to release the pending stop. An explicit `fractal agents stop agent/orchid/review/worker --as ACTOR` uses the ordinary stop path and ends the driver and children even when mail or work remains. Use the actual operator identity for `ACTOR`.
 
 A final step that stops a seat completes once the stop asks nothing more of it: the seat is stopped, absent, never observed, already being stopped, or kept for the reasons above. A kept seat does not hold the step to its timeout, so the step never fails a run whose work succeeded. The deferral records a `stop-deferred` warning diagnostic on the seat.
 
@@ -2101,7 +2101,7 @@ itself. Human-only revision protection still selects the reviewers who must appr
 `mission-authority` blocks still parse and are ignored.
 
 Publishing a generated nested mission requires a claimed step with the exact `produces-mission`
-declaration. The agent must use `st work publish-mission`.
+declaration. The agent must use `fractal work publish-mission`.
 
 System starts from `uses-mission`, schedules, and subscriptions are unchanged.
 
@@ -2112,13 +2112,13 @@ System starts from `uses-mission`, schedules, and subscriptions are unchanged.
 All distinct reviewers for the changed paths must approve. Each approval names the exact proposal preview token.
 
 ```sh
-st work revise MISSION_RUN replacement.kdl \
+fractal work revise MISSION_RUN replacement.kdl \
   --as agent/RUN/worker \
   --reason "The generated source adds one verification step."
 
-st work revision show MISSION_RUN
-st work revision approve PROPOSAL PREVIEW_TOKEN --as person/reviewer
-st work revision cancel PROPOSAL --as person/reviewer --reason "The request changed."
+fractal work revision show MISSION_RUN
+fractal work revision approve PROPOSAL PREVIEW_TOKEN --as person/reviewer
+fractal work revision cancel PROPOSAL --as person/reviewer --reason "The request changed."
 ```
 
 A run can have one pending proposal. A second proposal fails until the first proposal is applied or cancelled.
@@ -2136,8 +2136,8 @@ Each accepted revision creates one immutable successor generation. The stable mi
 The cutover transaction creates generation-specific step-run subjects. It also marks the old generation as superseded.
 
 ```sh
-st work revision generations MISSION_RUN
-st work revision generation RUN_GENERATION
+fractal work revision generations MISSION_RUN
+fractal work revision generation RUN_GENERATION
 ```
 
 Fractal compares normalized step definition hashes. A changed step and every transitive dependent start without prior completion.
@@ -2204,9 +2204,9 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 `document` on a step always requires `doc/NAME@SHA256`.
 
 ```sh
-st documents put request.md --as doc/project/request
-st documents get doc/project/request@SHA256 --output request.md
-st documents ls doc/project/request
+fractal documents put request.md --as doc/project/request
+fractal documents get doc/project/request@SHA256 --output request.md
+fractal documents ls doc/project/request
 ```
 
 Bare document names can appear in an intent before preview. The preview resolves them to the current exact hash. Apply validates the bytes and binds that exact version.
@@ -2217,12 +2217,12 @@ Store a summary, a redacted sample, or a hash when later work needs durable evid
 
 ## Review, approve, and start
 
-`st apply FILE --as ACTOR` previews and publishes exact authored KDL with authority and
-subject-head checks. `st launch preview SESSION` validates a planner candidate, resolves documents,
+`fractal apply FILE --as ACTOR` previews and publishes exact authored KDL with authority and
+subject-head checks. `fractal launch preview SESSION` validates a planner candidate, resolves documents,
 displays changes, and returns the approval hash.
-`st launch approve SESSION HASH --as person/NAME` applies that exact candidate without starting it.
-`st launch approve-and-launch` performs the approval and idempotent start as one product workflow.
-An authorized agent uses `st work publish-mission`, fenced to its claimed producing step.
+`fractal launch approve SESSION HASH --as person/NAME` applies that exact candidate without starting it.
+`fractal launch approve-and-launch` performs the approval and idempotent start as one product workflow.
+An authorized agent uses `fractal work publish-mission`, fenced to its claimed producing step.
 
 ### References that must resolve
 
@@ -2244,18 +2244,18 @@ A publication that declares an agent on this host whose render would fail is ref
 write different content to one path, or content that disagrees with another agent's render of the
 same path.
 
-The preview lists each refusal as a blocker. `st doctor` lists the references already in the graph
+The preview lists each refusal as a blocker. `fractal doctor` lists the references already in the graph
 that no longer resolve in its `graph-references` check.
 
-`st missions start MISSION --as ACTOR` publishes one mission-run declaration for the current ready revision. Add `--follow` to follow the run until it becomes terminal.
+`fractal missions start MISSION --as ACTOR` publishes one mission-run declaration for the current ready revision. Add `--follow` to follow the run until it becomes terminal.
 
 `apply` prints each mission revision it created. Pass that value to `missions start --revision REVISION` to start exactly that revision. A mission published on another host reaches this host by replication. When the mission or the requested revision is not here yet, `start` waits up to 60 seconds with a plain message instead of failing. When a later revision already replaced the requested one, `start` names the replacement and stops. After a run starts, `start` names its revision on standard error and says whether other revisions share the mission name.
 
-`st missions show MISSION_RUN` reads one exact run. `st missions show MISSION` works only when that mission has exactly one nonterminal run.
+`fractal missions show MISSION_RUN` reads one exact run. `fractal missions show MISSION` works only when that mission has exactly one nonterminal run.
 
 The default mission view shows the complete run summary and its active graph branch. Add `--follow` to watch an existing run.
 
-Each step shows one line from its worker: the `work complete` summary once submitted, otherwise the latest `work progress` summary. Both come from the current attempt, and `--json` carries them as `completion_summary`, `progress_summary`, and `progress_at_unix_ms`. `st agents show` prints each current step with its latest progress summary and age.
+Each step shows one line from its worker: the `work complete` summary once submitted, otherwise the latest `work progress` summary. Both come from the current attempt, and `--json` carries them as `completion_summary`, `progress_summary`, and `progress_at_unix_ms`. `fractal agents show` prints each current step with its latest progress summary and age.
 
 Follow mode redraws one screen on a terminal. It appends each changed snapshot when another program reads the output.
 
@@ -2268,30 +2268,30 @@ The mission shortcut fails when it finds zero or multiple active runs. The error
 Planning mode asks one durable Codex harness to author Markdown and KDL for review.
 
 ```sh
-st launch start --id release-mission request.md \
+fractal launch start --id release-mission request.md \
   --workspace ./project \
   --as person/alex \
   --model gpt-5.6-sol \
   --effort medium
 
-st launch show SESSION
-st launch preview SESSION
-st launch revise SESSION feedback.md --as person/alex
-st launch approve SESSION PREVIEW_TOKEN --as person/alex
-st launch cancel SESSION --as person/alex --reason "The request changed."
+fractal launch show SESSION
+fractal launch preview SESSION
+fractal launch revise SESSION feedback.md --as person/alex
+fractal launch approve SESSION PREVIEW_TOKEN --as person/alex
+fractal launch cancel SESSION --as person/alex --reason "The request changed."
 ```
 
 Planning can also prepare a revision for one current mission run:
 
 ```sh
-st launch start --run MISSION_RUN request.md \
+fractal launch start --run MISSION_RUN request.md \
   --workspace ./project \
   --as person/alex
 
-st launch preview SESSION --variant compact
-st launch preview SESSION --variant extended
-st launch compare SESSION compact extended
-st launch propose SESSION extended \
+fractal launch preview SESSION --variant compact
+fractal launch preview SESSION --variant extended
+fractal launch compare SESSION compact extended
+fractal launch propose SESSION extended \
   --as person/alex \
   --reason "The extended variant covers the discovered risk."
 ```
@@ -2299,7 +2299,7 @@ st launch propose SESSION extended \
 The planner uses this command:
 
 ```sh
-st launch submit SESSION --variant compact --markdown MISSION.md --kdl mission.kdl
+fractal launch submit SESSION --variant compact --markdown MISSION.md --kdl mission.kdl
 ```
 
 The session stores the request, feedback, Markdown, and KDL as immutable documents. Fractal carries document references, not mutable file paths.
