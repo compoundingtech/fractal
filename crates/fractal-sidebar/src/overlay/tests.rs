@@ -1,0 +1,138 @@
+use super::*;
+use crate::{edits::{Base, Event, Identity, Refusal}, paging::{Scope, Snapshot}, plan::{MoveIntent, V2Plan, plan_v2}, projection::build_v2};
+use fractal_schema::arrangements::{self, Register};
+fn folder(id: &str) -> NodeRef { NodeRef::Folder { id: id.into() } }
+fn subject(id: &str) -> NodeRef { NodeRef::Subject { subject: id.into() } }
+fn parent(id: &str) -> Parent { Parent::Folder { id: id.into() } }
+fn scope() -> Scope { Scope { owner: "owner-a".into(), container: "container-a".into(), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
+fn base(n: u64) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot-{n}"), host_id: "host-a".into(), store_index: n, projection_version: "1".into(), created_at: "created".into(), expires_at: "expires".into() }, revision: format!("revision-{n}"), ready: true } }
+fn identity(n: u64) -> Identity { Identity { actor: "actor-a".into(), action_id: format!("action-{n}"), idempotency_key: format!("key-{n}") } }
+fn inputs() -> (ArrangementInput, Vec<MembershipInput>) {
+    let folders = ["folder-a", "folder-b"].into_iter().map(|id| (id.into(), arrangements::Folder {
+        name: Register { value: id.into(), revision: "r1".into() },
+        position: Register { value: arrangements::Position { parent: None, key: "a1".into() }, revision: "r1".into() }, tombstone: None,
+    })).collect();
+    let arrangement = ArrangementInput {
+        subject: "container-a".into(), owner: "owner-a".into(), revision: "r1".into(), deleted: false,
+        body: arrangements::VersionedBody::V2(arrangements::BodyV2 { version: 2, name: Register { value: "Sidebar".into(), revision: "r1".into() }, folders }),
+        resolved: Some(ResolvedInput { parents: [("folder-a".into(), None), ("folder-b".into(), None)].into(), folders: Default::default() }),
+    };
+    let members = ["member-a", "member-b"].into_iter().map(|id| MembershipInput {
+        container: "container-a".into(), member: id.into(), revision: "m1".into(), position: fractal_schema::ordered_membership::Position { bucket: None, key: "a0".into() },
+    }).collect();
+    (arrangement, members)
+}
+fn staged(intent: MoveIntent, plan: V2Plan) -> Edits {
+    let mut edits = Edits::new(scope(), intent);
+    edits.reduce(Event::Plan { base: base(1), plan, folder: identity(1), membership: identity(2) });
+    edits
+}
+fn member_edit() -> (Edits, SidebarTree, SidebarTree) {
+    let (arrangement, mut members) = inputs();
+    let observed = build_v2(&arrangement, &members).unwrap();
+    let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-a"), before: None };
+    let plan = plan_v2(&arrangement, &members, &intent).unwrap();
+    let Member::Place { bucket, key, .. } = &plan.memberships[0] else { panic!("move emits Place"); };
+    members[0].position = fractal_schema::ordered_membership::Position { bucket: bucket.clone(), key: key.clone() };
+    (staged(intent, plan), observed, build_v2(&arrangement, &members).unwrap())
+}
+#[test]
+fn member_move_is_visible_next_frame_without_mutating_observation() {
+    let (edits, observed, expected) = member_edit();
+    assert_eq!(edits.status, Status::AwaitingPersistence);
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
+    assert!(observed.nodes["folder:folder-a"].children.is_empty());
+    assert_eq!(expected.nodes["folder:folder-a"].children, vec![subject("member-a")]);
+    assert_eq!(expected.roots, vec![folder("folder-a"), folder("folder-b"), subject("member-b")]);
+}
+#[test]
+fn folder_move_and_folder_first_row_order_use_real_planner() {
+    let (arrangement, members) = inputs();
+    let observed = build_v2(&arrangement, &members).unwrap();
+    let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
+    let edits = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
+    let visible = edits.project(&observed).unwrap();
+    assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b")]);
+    assert_eq!(visible.roots, vec![folder("folder-a"), subject("member-a"), subject("member-b")]);
+    assert_eq!(visible.nodes["folder:folder-b"].shown_under, parent("folder-a"));
+}
+#[test]
+fn compound_plan_displays_only_staged_folder_step_until_fresh_membership_plan() {
+    let (mut arrangement, members) = inputs();
+    let observed = build_v2(&arrangement, &members).unwrap();
+    let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-a"), before: None };
+    let member_plan = plan_v2(&arrangement, &members, &intent).unwrap().memberships;
+    let mut edits = staged(intent, V2Plan { folders: vec![Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-a".into()), key: "a0".into() }], memberships: member_plan.clone() });
+    let visible = edits.project(&observed).unwrap();
+    assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b")]);
+    assert_eq!(visible.nodes["subject:member-a"].shown_under, Parent::Root {});
+    // Authoritative folder readback arrives before completion persistence/fresh planning.
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    body.folders.get_mut("folder-b").unwrap().position.value.parent = Some("folder-a".into());
+    body.folders.get_mut("folder-b").unwrap().position.value.key = "a0".into();
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-b".into(), Some("folder-a".into()));
+    let confirmed = build_v2(&arrangement, &members).unwrap();
+    edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Observed(identity(1)));
+    assert!(matches!(edits.project(&confirmed).unwrap(), Cow::Borrowed(_)));
+    edits.reduce(Event::CompletionPersisted(identity(1)));
+    assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
+    edits.reduce(Event::Fresh(base(2), Ok(member_plan)));
+    let visible = edits.project(&confirmed).unwrap();
+    assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b"), subject("member-a")]);
+    // Refusing step two rolls back only its rows, never the completed folder step.
+    edits.reduce(Event::Persisted(identity(2))); edits.reduce(Event::Refused(identity(2), Refusal::Unauthorized));
+    assert_eq!(edits.status, Status::PartiallyApplied);
+    assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
+}
+#[test]
+fn refusal_restores_observed_rows_and_retry_does_not_reapply_old_request() {
+    let (mut edits, observed, expected) = member_edit();
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
+    edits.reduce(Event::Persisted(identity(2))); edits.reduce(Event::Refused(identity(2), Refusal::StaleFence));
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &observed);
+    assert!(edits.intent().is_some());
+    edits.reduce(Event::Retry);
+    assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
+}
+#[test]
+fn unknown_delivery_and_ack_keep_visible_overlay_until_observed() {
+    let (mut edits, observed, expected) = member_edit();
+    edits.reduce(Event::Persisted(identity(2))); edits.reduce(Event::Unknown(identity(2)));
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
+    edits.reduce(Event::Replay);
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
+    edits.reduce(Event::Ack(identity(2)));
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
+}
+#[test]
+fn observation_drops_overlay_before_completion_persistence_without_double_apply() {
+    let (mut edits, observed, confirmed) = member_edit();
+    let before = edits.project(&observed).unwrap().into_owned();
+    edits.reduce(Event::Persisted(identity(2))); edits.reduce(Event::Observed(identity(2)));
+    assert_eq!(before, confirmed);
+    assert!(matches!(edits.project(&confirmed).unwrap(), Cow::Borrowed(_)));
+    // A newer concurrent winner must not be overwritten by a completed request.
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &observed);
+    edits.reduce(Event::CompletionPersisted(identity(2)));
+    assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &before);
+}
+#[test]
+fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
+    let (arrangement, members) = inputs();
+    let observed = build_v2(&arrangement, &members).unwrap();
+    let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
+    let mut edits = staged(intent, V2Plan { folders: vec![
+        Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("folder-a".into()), key: "a0".into() },
+        Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-c".into()), key: "a0".into() },
+        Folder::FolderRename { id: "folder-c".into(), name: "Renamed".into() },
+        Folder::FolderDelete { id: "folder-c".into() },
+    ], memberships: vec![] });
+    let visible = edits.project(&observed).unwrap();
+    assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b")]);
+    assert!(!visible.nodes.contains_key("folder:folder-c"));
+    edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Refused(identity(1), Refusal::Conflict));
+    assert_eq!(edits.project(&observed).unwrap().as_ref(), &observed);
+    let intent = MoveIntent { node: subject("member-a"), parent: Parent::Root {}, before: None };
+    let edits = staged(intent, V2Plan { folders: vec![], memberships: vec![Member::Remove { member: "member-a".into() }] });
+    assert!(!edits.project(&observed).unwrap().nodes.contains_key("subject:member-a"));
+}
