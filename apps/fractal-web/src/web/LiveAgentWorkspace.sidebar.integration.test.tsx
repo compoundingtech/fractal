@@ -140,7 +140,7 @@ it('draws served related runs under the host row in server order without joins, 
     expect([...row().querySelectorAll('details[data-fold="finished"] [data-run]')].map(item => item.getAttribute('data-run'))).toEqual([served.rows[2]!.id])
     expect(row().querySelector('[data-waiting-on-you]')).not.toBeNull()
     // A refetch or its failure keeps the last served rows drawn.
-    await act(async () => registry.set(related, observed({ value: served, freshness: 'stale', error: { reason: 'failed', detail: 'Refetch failed' } })))
+    await act(async () => registry.set(related, { _tag: 'Observed', value: served, freshness: 'stale', error: { reason: 'failed', detail: 'Refetch failed' } }))
     expect(row().querySelectorAll('[data-run]')).toHaveLength(3)
     await act(async () => row().querySelector<HTMLElement>('[data-run="mission-run/example/zeta"]')!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('mission/example/zeta:detail')
