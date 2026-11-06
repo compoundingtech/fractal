@@ -72,6 +72,9 @@ memberships or a journal. Those fields are explicitly empty, not skipped tests.
 Unknown fields and unsupported versions are rejected. New event variants arrive
 with passing production-path cases. Folder identities are fixed UUIDv7 literals;
 the TypeScript twin also decodes every arrangement with the strict client schema.
+The Rust integration runner is `crates/fractal-sidebar/tests/behavior.rs`;
+`cargo test -p fractal-sidebar --test behavior` exercises the public core against
+the same validated checkpoints, including exact move refusals and empty effect/action lists.
 This seam changes no storage, schema or wire format. Mixed parents, declared
 defaults/reset, availability, optimistic application and revision/cycle-cut
 settlement belong to format-v2 work, not this API.
