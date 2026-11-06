@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Scope agent-card runtime-start job counts to the selected agent",
+  "replay": { "status": "none", "detail": "Read-only count projections change; no replay or retained-state changes." },
+  "schema": { "status": "none", "detail": "Existing runtime-start subject indexes and stored row shapes are unchanged." },
+  "rules": { "status": "none", "detail": "No launch, cleanup, proof or authority rules change." },
+  "compatibility": { "status": "changed", "detail": "Agent-card running_jobs, revoked_running_jobs, unresolved_jobs and revoked_unresolved_jobs now describe that agent rather than all owner-local starts. Field names and types are unchanged; aggregate store queries retain their owner-wide meaning." },
+  "downtime": { "status": "none", "detail": "No migration or additional downtime is required." },
+  "manual": { "status": "none", "detail": "No operator action or configuration is required." },
+  "recovery": { "status": "none", "detail": "Counts do not close starts or change recovery eligibility." }
+}

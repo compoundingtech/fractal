@@ -1159,6 +1159,31 @@ mod tests {
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
 
     #[test]
+    fn subject_scoped_count_queries_use_subject_indexes() {
+        let store = Store::open_memory("node").unwrap();
+        let connection = store.readers.get();
+        // These are the two subject-count predicates, including the grouped
+        // pending disjunction: every OR branch must remain subject-indexed.
+        for predicate in [
+            "subject=?1 AND finished=0 AND dispatched=1".to_owned(),
+            format!("subject=?1 AND ({PENDING})"),
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*), COALESCE(SUM(revoked_by IS NOT NULL),0) FROM local_runtime_starts WHERE {predicate}"
+            );
+            let plan = connection.prepare(&sql).unwrap()
+                .query_map(["agent/example/worker"], |row| row.get::<_, String>(3))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert!(plan.iter().any(|step| {
+                step.contains("SEARCH local_runtime_starts USING INDEX local_runtime_starts_")
+                    && step.contains("(subject=?)")
+            }), "subject-count query must search a subject index: {plan:?}");
+            assert!(!plan.iter().any(|step| step.contains("SCAN local_runtime_starts")),
+                "subject-count query must not scan unrelated subjects: {plan:?}");
+        }
+    }
+
+    #[test]
     fn stale_failed_start_recovery_fences_interleaved_controls_at_admission_and_dispatch() {
         for action in ["suspend", "resume", "terminate"] {
             for boundary in ["admission", "dispatch", "physical-guard"] {
