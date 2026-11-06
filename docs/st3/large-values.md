@@ -434,3 +434,12 @@ removed: the page-cost test uses the empty replay-order table already created by
 normal file-backed initialization. The production table and its existing inline
 claim-ID representation are unchanged; their producer's representation work stays
 with `fractal_store::store`.
+
+## Dormant loop review history
+
+For [agent-review preparation #4850](https://github.com/compoundingtech/fractal/issues/4850),
+`fractal_missions::store::missions::run_review` owns `lv-hde8dcd507000`.
+The read-only sink binds a loop subject TEXT key and reads existing claim-kind/body
+TEXT values. It adds no writer; inline history remains necessary to validate all
+round references. Its maintainer must trace these keys and bodies into the eventual
+bounded/reference representation; this exception proves neither size nor cost.
