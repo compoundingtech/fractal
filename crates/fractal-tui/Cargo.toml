@@ -46,7 +46,7 @@ name = "phone_client"
 test = true
 
 [dev-dependencies]
-fractal-daemon = { path = "../fractal-daemon" }
+fractal-daemon = { path = "../fractal-daemon", features = ["test-support"] }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }
 portable-pty = "0.9"

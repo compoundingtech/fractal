@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use rusqlite::OptionalExtension as _;
 use crate::sekrets::identity::{self, STATEMENT_VERSION, Statement};
 use crate::sekrets::protocol::Attestation;
-use crate::model::St3Error;
+use crate::model::FractalError;
 use crate::store::Store;
 pub use fractal_missions::sekrets_daemon::*;
 
@@ -13,14 +13,14 @@ pub use fractal_missions::sekrets_daemon::*;
 pub static PERSON: OnceLock<String> = OnceLock::new();
 
 /// The seat a scope belongs to, from the terminal registry.
-pub fn seat_for_scope(pty_root: &Path, scope: &str) -> Result<Option<String>, St3Error> {
+pub fn seat_for_scope(pty_root: &Path, scope: &str) -> Result<Option<String>, FractalError> {
     if let Some(found) = seat_from_registry_file(pty_root, scope) {
         return Ok(Some(found));
     }
     // A scope whose name does not lead to its terminal's file: read the whole registry.
     let observations = fractal_runtime::PtyRuntime::new(pty_root.to_path_buf())
         .snapshot()
-        .map_err(|error| St3Error::new("sekrets-attestation", format!("{error:#}")))?;
+        .map_err(|error| FractalError::new("sekrets-attestation", format!("{error:#}")))?;
     Ok(observations
         .into_iter()
         .filter(|observation| observation.status == "running")
@@ -57,9 +57,9 @@ fn seat_from_registry_file(pty_root: &Path, scope: &str) -> Option<String> {
 }
 
 /// This node and the public key it signs attestations with.
-pub fn node_key(store: &Store, node: &str) -> Result<(String, String), St3Error> {
+pub fn node_key(store: &Store, node: &str) -> Result<(String, String), FractalError> {
     let key = store.keyring.node().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "sekrets-no-node-key",
             "this daemon has no node key yet; it makes one when it creates or joins a fleet",
         )
@@ -76,8 +76,8 @@ pub fn attest(
     pid: u32,
     ancestor: Option<&str>,
     nonce: &str,
-) -> Result<Attestation, St3Error> {
-    let refuse = |message: String| St3Error::new("sekrets-attestation-refused", message);
+) -> Result<Attestation, FractalError> {
+    let refuse = |message: String| FractalError::new("sekrets-attestation-refused", message);
     let person = PERSON.get().ok_or_else(|| {
         refuse("set `person` in this daemon's configuration to use sekrets from seats".into())
     })?;
@@ -129,7 +129,7 @@ pub fn attest(
         issued_at_unix_ms: crate::sekrets::store::now_unix_ms(),
     };
     let text = serde_json::to_string(&statement)
-        .map_err(|error| St3Error::new("internal", error.to_string()))?;
+        .map_err(|error| FractalError::new("internal", error.to_string()))?;
     let signature = key.sign(&identity::signing_message(&text));
     Ok(Attestation {
         statement: text,
@@ -284,7 +284,7 @@ fn import_entries(
     person: &str,
     cursor_path: &Path,
     cursor: &mut i64,
-    mut append: impl FnMut(&smallclaims::ClaimInput) -> Result<(), St3Error>,
+    mut append: impl FnMut(&smallclaims::ClaimInput) -> Result<(), FractalError>,
 ) -> anyhow::Result<()> {
     let Some(last) = entries.last().map(|entry| entry.seq) else {
         return Ok(());
@@ -432,7 +432,7 @@ mod tests {
             "person/ada",
             &path,
             &mut cursor,
-            |_| Err(St3Error::new("rule-denied", "fixture refusal")),
+            |_| Err(FractalError::new("rule-denied", "fixture refusal")),
         )
         .unwrap();
         assert_eq!(cursor, 7);

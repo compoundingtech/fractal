@@ -433,7 +433,7 @@ fn assistant_provenance_generic_signed_and_transaction_appends_refuse_forgery() 
         let transaction = connection.transaction().unwrap();
         let error = append_claim_tx(&transaction, "node", &input.subject, &input.kind,
             input.actor.as_deref(), &json!({"fields":input.fields}), &[], None).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "assistant-send-refused");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "assistant-send-refused");
     }
     assert!(store.latest_claim("message/local-signed-send", None).unwrap().is_none());
 }

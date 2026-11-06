@@ -43,20 +43,20 @@ CREATE INDEX IF NOT EXISTS local_message_outbox_order ON local_message_outbox(qu
 /// the write that sends it. A sender calls this instead of appending to the shard while it holds
 /// a graph transaction; the daemon's drainer sees the row when the transaction commits. A repeat with the same
 /// subject changes nothing. Nothing calls this yet: the daemon's senders move to it in 4c-3.
-pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, St3Error> {
+pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, FractalError> {
     if input.kind != "message.sent" {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-outbox-message",
             format!("the outbox holds only message.sent claims, not `{}`", input.kind),
         ));
     }
     if !input.subject.starts_with("message/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-outbox-message",
             format!("`{}` is not a message subject", input.subject),
         ));
     }
-    let claim = serde_json::to_string(input).map_err(|error| St3Error::new("internal", error.to_string()))?;
+    let claim = serde_json::to_string(input).map_err(|error| FractalError::new("internal", error.to_string()))?;
     let inserted = transaction
         .execute(
             /* sqlite-large-value: allow-for-now lv-he8a78b8d9e13 owner=fractal_store::store::message_outbox TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_outbox(subject, claim, queued_at_unix_ms) VALUES (?1, ?2, ?3)",

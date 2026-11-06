@@ -12,7 +12,7 @@ cancel_run() {
   local run=$1
   [[ -z "$run" ]] && return 0
   printf 'version 2\nmission-run "%s" { cancellation "eval-finished" { reason "the review escalation eval finished" } }\n' "$run" \
-    | st3 publish - --as "$REQUESTER" >/dev/null 2>&1 || true
+    | fractal publish - --as "$REQUESTER" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -21,19 +21,19 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-st3 publish base.kdl --as "$REQUESTER" >/dev/null
-st3 --json claim resource/eval/review-escalation/source resource.observed \
+fractal publish base.kdl --as "$REQUESTER" >/dev/null
+fractal --json claim resource/eval/review-escalation/source resource.observed \
   --actor "$REQUESTER" \
   --field kind=vcs.pull-request \
   --field state=ready >source.json
 source_claim=$(jq -er '.id' source.json)
 
-st3 --json missions start eval/review-escalation/standing \
+fractal --json missions start eval/review-escalation/standing \
   --id eval/review-escalation/standing \
   --workspace "$PWD" \
   --as "$REQUESTER" >standing.json
 standing_run=$(jq -er '.mission_run.subject' standing.json)
-st3 trace wait "$OWNER" --for running --timeout 1m >/dev/null
+fractal trace wait "$OWNER" --for running --timeout 1m >/dev/null
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/review-escalation/work \
@@ -44,31 +44,31 @@ st3 --json missions start eval/review-escalation/work \
 work_run=$(jq -er '.mission_run.subject' work.json)
 old_generation=$(jq -er '.mission_run.generation' work.json)
 
-st3 claim "resource/mission-run/${work_run#mission-run/}/review" resource.observed \
+fractal claim "resource/mission-run/${work_run#mission-run/}/review" resource.observed \
   --actor "$REQUESTER" \
   --field kind=human.review \
   --field target=resource/eval/review-escalation/source >/dev/null
-st3 trace wait "$work_run" --for running --timeout 1m >/dev/null
+fractal trace wait "$work_run" --for running --timeout 1m >/dev/null
 
-route=$(st3 --json missions show "$work_run" | jq -er '.steps[] | select(.step == "route") | .subject')
-st3 trace wait "$route" --for ready --timeout 1m >/dev/null
-st3 work claim "$route" --as "$OWNER" >/dev/null
+route=$(fractal --json missions show "$work_run" | jq -er '.steps[] | select(.step == "route") | .subject')
+fractal trace wait "$route" --for ready --timeout 1m >/dev/null
+fractal work claim "$route" --as "$OWNER" >/dev/null
 
-st3 --json work revise "$work_run" escalation.kdl \
+fractal --json work revise "$work_run" escalation.kdl \
   --as "$OWNER" \
   --reason "the owner selected the human review route" >revised.json
 new_generation=$(jq -er '.mission_run.generation' revised.json)
 [[ "$new_generation" != "$old_generation" ]]
 
 route=$(jq -er '.mission_run.steps[] | select(.step == "route") | .subject' revised.json)
-st3 work claim "$route" --as "$OWNER" >/dev/null
-st3 work complete "$route" --as "$OWNER" --summary "Alex must review this result" >/dev/null
+fractal work claim "$route" --as "$OWNER" >/dev/null
+fractal work complete "$route" --as "$OWNER" --summary "Alex must review this result" >/dev/null
 
-human=$(st3 --json missions show "$work_run" | jq -er '.steps[] | select(.step == "human-review") | .subject')
-st3 trace wait "$human" --for ready --timeout 1m >/dev/null
+human=$(fractal --json missions show "$work_run" | jq -er '.steps[] | select(.step == "human-review") | .subject')
+fractal trace wait "$human" --for ready --timeout 1m >/dev/null
 review_list_ready=false
 for attempt in $(seq 1 100); do
-  st3 review ls --as person/alex --json >pending-reviews.json
+  fractal review ls --as person/alex --json >pending-reviews.json
   if jq -e --arg owner "$human" 'map(select(.owner == $owner)) | length == 1' pending-reviews.json >/dev/null; then
     review_list_ready=true
     break
@@ -93,18 +93,18 @@ jq -e --arg owner "$human" --arg run "$work_run" --arg source "$source_claim" '
 ' pending-reviews.json >/dev/null
 review_requested=false
 for attempt in $(seq 1 100); do
-  if st3 review approve "$human" --actor person/alex --reason "the model-free review route is correct" >/dev/null 2>&1; then
+  if fractal review approve "$human" --actor person/alex --reason "the model-free review route is correct" >/dev/null 2>&1; then
     review_requested=true
     break
   fi
   sleep 0.1
 done
 [[ "$review_requested" == "true" ]]
-st3 trace wait "$work_run" --for completed --timeout 1m >/dev/null
-st3 review ls --as person/alex --json \
+fractal trace wait "$work_run" --for completed --timeout 1m >/dev/null
+fractal review ls --as person/alex --json \
   | jq -e --arg owner "$human" 'map(select(.owner == $owner)) | length == 0' >/dev/null
 
-st3 --json work revision generations "$work_run" >generations.json
+fractal --json work revision generations "$work_run" >generations.json
 jq -e --arg old "$old_generation" --arg new "$new_generation" '
   length == 2
   and .[0].subject == $old
