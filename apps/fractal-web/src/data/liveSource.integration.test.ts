@@ -459,6 +459,28 @@ describe('related runs pushed source binding', () => {
       }
     }), { maxFollows: 4 }),
   )
+  it.live('proves attention completeness only for an untruncated successfully decoded SDK window', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      const release = live.registry.mount(live.source.attention)
+      yield* Effect.addFinalizer(() => Effect.sync(release))
+      yield* settle
+      const cases = [
+        { hasMore: true, items: [], coverage: 'Partial' },
+        { hasMore: false, items: [{ id: 'attention/bad', kind: 'attention', title: 42 }], coverage: 'Partial' },
+        { hasMore: false, items: [], coverage: 'Complete' },
+      ] as const
+      for (const [index, test] of cases.entries()) {
+        gateway.socket?.onmessage?.({ data: JSON.stringify({
+          kind: 'snapshot', id: gateway.subscription('attention').id, collection: 'attention',
+          has_more: test.hasMore, items: test.items, order: test.items.map(item => item.id),
+          snapshot: { ...snapshot, id: `snapshot/completeness-${index}`, store_index: 10 + index },
+        }) })
+        yield* settle
+        expect(live.registry.get(live.source.attention)).toMatchObject({ _tag: 'Observed', coverage: { _tag: test.coverage } })
+      }
+    })),
+  )
 })
 
 describe('session inventory independence', () => {

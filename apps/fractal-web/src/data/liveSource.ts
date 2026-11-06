@@ -334,6 +334,7 @@ export const liveSource = ({
     explicitInterest = false,
     onVisibilityChange,
     observedFreshness,
+    observedCoverage,
     prepareObservation,
     telemetryKind = 'window',
   }: {
@@ -346,6 +347,7 @@ export const liveSource = ({
     readonly initialRead?: (fractal: Fractal['Service']) => Effect.Effect<{ readonly value: A; readonly hasMore: boolean }, AttachFailure>
     /** Freshness of a decoded frame; a frame retaining last-good rows is stale, not live. */
     readonly observedFreshness?: (value: A) => 'live' | 'stale'
+    readonly observedCoverage?: (value: A) => { readonly _tag: 'Complete' | 'Partial' }
     /** Applied only after the observation's authority/ordering guard accepts it. */
     readonly prepareObservation?: (value: A, previous: Feed<A>) => A
     readonly keepAlive?: boolean
@@ -538,7 +540,7 @@ export const liveSource = ({
                   initialReadDeadlineFiber?.interruptUnsafe()
                   initialReadDeadlineFiber = undefined
                   const value = prepareObservation?.(event.value, latest) ?? event.value
-                  latest = observed({ value, freshness: observedFreshness?.(value) ?? 'live' })
+                  latest = { ...observed({ value, freshness: observedFreshness?.(value) ?? 'live' }), coverage: observedCoverage?.(value) }
                   syncLatest = observeFeedSync(syncLatest, value, Date.now())
                 } else if (event._tag === 'Failed') {
                   const failure = syncStatusFromFailure(event.error)
@@ -772,21 +774,21 @@ export const liveSource = ({
       ),
   })
   const missions = missionsRetained.atom
+  const attentionEvidence = new WeakMap<readonly Attention[], { readonly complete: boolean; readonly stale: boolean }>()
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
     onCommit: invalidateRelatedRuns,
+    observedCoverage: value => ({ _tag: attentionEvidence.get(value)?.complete ? 'Complete' : 'Partial' }),
+    observedFreshness: value => attentionEvidence.get(value)?.stale ? 'stale' : 'live',
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter(
-                  (row): row is Attention => row.kind === 'attention',
-                ),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, hasMore, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is Attention => row.kind === 'attention')
+          attentionEvidence.set(value, { complete: !hasMore && !decodeStale && undecodable.length === 0 && value.length === items.length, stale: decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const attention = attentionRetained.atom
