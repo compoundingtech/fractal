@@ -554,6 +554,9 @@ fn parse_mission(
     }
     let declarations_kdl = declarations_document(declarations);
     let mut mission = MissionSpec {
+        declared_priority: None,
+        declared_lane: None,
+        declared_budgets: None,
         subject: format!("mission/{id}"),
         id,
         state,
