@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Recorder spool scans stay idle across symlinked macOS temporary directories without losing receipt publication wakes.",
+  "replay": {"status": "none", "detail": "Receipt ingestion and claim replay are unchanged."},
+  "schema": {"status": "none", "detail": "No table, index or migration changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Watch roots are resolved before registration. Root folder creation and generic or access-time metadata events no longer queue scans; child changes, root rename/removal, unknown events and rescan requests remain actionable."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "No temporary-directory override is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous watcher event filter; receipt files and retry deadlines are unchanged."}
+}
