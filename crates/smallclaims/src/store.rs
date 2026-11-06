@@ -48,6 +48,8 @@ use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
 #[cfg(test)]
+mod startup_profile_label_tests;
+#[cfg(test)]
 mod exchange_budget_tests;
 #[cfg(test)]
 mod projection_busy_tests;
@@ -7102,14 +7104,17 @@ impl Store {
         // Batch-id order walks the envelope batch index sequentially. A rowid-ordered search
         // instead performs random probes over the entire history. Headers with no retained
         // untombstoned claim need no recovery after checkpoint adoption.
-        let missing: Option<i64> = self.readers.get().query_row(
-            "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
-             WHERE batches.rowid<=?1 AND NOT EXISTS (
-                 SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
-               AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
-                 AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
-            [cursor], |row| row.get(0),
-        )?;
+        let missing: Option<i64> = crate::profile::task("replication.sealing_recovery", || {
+            let _span = crate::profile::span("replication.sealing_recovery");
+            self.readers.get().query_row(
+                "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
+                 WHERE batches.rowid<=?1 AND NOT EXISTS (
+                     SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
+                   AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
+                     AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
+                [cursor], |row| row.get(0),
+            )
+        })?;
         if let Some(missing) = missing {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
@@ -7241,8 +7246,12 @@ impl Store {
             .map(|previous| previous.legacy_graph_digest.clone());
         let inventory_generation = inventory_generation::current(connection)?;
         let full = |connection: &Connection| -> Result<_> {
-            let (inventory, max_rowid, envelope_rows) =
-                load_compact_replication_inventory(connection)?;
+            // Every envelope identity this node holds: a full index walk, once per process
+            // unless the inventory generation moves. Named for the profile whoever asks first.
+            let (inventory, max_rowid, envelope_rows) = crate::profile::task("replication.inventory_full", || {
+                let _span = crate::profile::span("replication.inventory_full");
+                load_compact_replication_inventory(connection)
+            })?;
             let buckets = inventory.buckets();
             Ok((inventory, max_rowid, buckets, Vec::new(), 0, envelope_rows))
         };

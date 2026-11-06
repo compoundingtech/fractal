@@ -6819,7 +6819,7 @@ async fn refresh_agent_roster_admitted(
         let submitted = crate::otel::export_enabled().then(Instant::now);
         match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
             roster_worker(true, submitted, None, || {
-                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                let result = crate::task_cpu::profiled_blocking("startup.warmup", || warm_agent_roster(&reader));
                 (result, crate::otel::take_roster_attributes())
             })
         })).await {
