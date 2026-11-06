@@ -155,6 +155,18 @@ ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target
 After an intended mission-rendering change, regenerate its text, style and target golden with
 `FRACTAL_TUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --locked mission_golden`, review the fixture diff,
 then run the same test without `FRACTAL_TUI_UPDATE_GOLDEN`.
+
+The pre-extraction sidebar baseline is `fixtures/clients/sidebar/tui-v1.snapshot`.
+It captures every Buffer cell (symbol and full Debug metadata, including styles) with lossless row-major RLE,
+plus stable-ID row/control hits and context targets. Cases cover reserved/legacy selection,
+retired reservation, focused/unfocused, folding, search, scroll and narrow/zero geometry.
+Generate **only from the original renderer** with
+`STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --features fractal-daemon/test-support sidebar_golden`; review the baseline, run
+`node scripts/check-sidebar-fixtures.mjs`, then rerun without the update flag.
+The extracted widget must compare against this capture, never regenerate it to claim parity.
+The explicit dependency feature reproduces CI's workspace-unified test-support helpers
+without compiling every workspace test target.
+
 The PTY smoke test runs with or without a local daemon or Fractal config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
