@@ -2,6 +2,10 @@ import { Effect, Schema, SubscriptionRef } from 'effect'
 
 export class MutationRefused extends Schema.TaggedError<MutationRefused>()('MutationRefused', {
   message: Schema.String,
+  nonApplication: Schema.optional(Schema.Union([
+    Schema.TaggedStruct('NeverSent', {}),
+    Schema.TaggedStruct('Refused', { code: Schema.String }),
+  ])),
 }) {}
 export class AlreadyAnswered extends Schema.TaggedError<AlreadyAnswered>()('AlreadyAnswered', {
   by: Schema.String,
@@ -111,8 +115,19 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
     for (const entry of pending.values()) frame = options.project(frame, entry)
     return frame
   }))
+  // Only explicit non-application proof permits abandonment: never entered transport,
+  // or a typed definitive admission refusal. Unknown delivery must remain retryable.
+  const discardFailed = Effect.fn('OptimisticMutation.discardFailed')((key: string) =>
+    SubscriptionRef.modify(state, (current) => {
+      const entry = current.pending.get(key)
+      if (entry?.phase !== 'failed' || entry.failure?.nonApplication === undefined) return [false, current] as const
+      const pending = new Map(current.pending)
+      pending.delete(key)
+      return [true, { ...current, pending }] as const
+    }),
+  )
   const dismissNotice = Effect.fn('OptimisticMutation.dismissNotice')((key: string) =>
     SubscriptionRef.update(state, (current) => ({ ...current, notices: current.notices.filter((notice) => notice.key !== key) })),
   )
-  return { state, view, submit, retry, accept, undo, dismissNotice } as const
+  return { state, view, submit, retry, accept, undo, discardFailed, dismissNotice } as const
 }).pipe(Effect.withSpan('OptimisticMutation.make'))

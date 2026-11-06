@@ -115,6 +115,37 @@ describe('memory-only winning Sidebar edits', () => {
     h.editor.close()
   })
 
+  it('keeps an ACK overlay across omitted and unrelated revisions until the exact authoritative revision arrives', async () => {
+    const h = harness()
+    try {
+      h.hideAccepted()
+      expect(await h.editor.edit([rename])).toEqual({ _tag: 'Success' })
+      const accepted = h.items()
+      expect(h.last().phase).toBe('pending')
+      expect(h.last().arrangement?.body.folders[folder]?.name.value).toBe('Renamed')
+      h.replace([optimisticArrangement(testArrangement(), [create])])
+      expect(h.last().phase).toBe('pending')
+      expect(h.last().arrangement?.body.folders[folder]?.name.value).toBe('Renamed')
+      h.replace(accepted)
+      expect(h.last().phase).toBe('synced')
+      expect(h.last().arrangement?.body.folders[folder]?.name.value).toBe('Renamed')
+      expect(h.last().pendingTargets).toEqual([])
+    } finally { h.editor.close() }
+  })
+
+  it('does not rekey structural intent when a typed refusal reports unknown application', async () => {
+    const h = harness()
+    try {
+      const failure = refused('stale-fence')
+      h.behavior(new ActionRefused({ status: failure.status, message: failure.message, response: { ...failure.response, applied: 'unknown' } }))
+      expect((await h.editor.edit([rename], { restage: () => ({ _tag: 'Operations', operations: [rename] }) }))._tag).toBe('Refused')
+      const original = h.requests[0]!
+      h.behavior(undefined)
+      expect(await h.editor.retryEdit()).toEqual({ _tag: 'Success' })
+      expect(h.requests[1]).toMatchObject({ id: original.id, idempotency_key: original.idempotency_key, parameters: original.parameters })
+    } finally { h.editor.close() }
+  })
+
   it('rolls back to the newest authoritative state and retains the affected row refusal', async () => {
     const h = harness()
     const gate = Promise.withResolvers<void>()

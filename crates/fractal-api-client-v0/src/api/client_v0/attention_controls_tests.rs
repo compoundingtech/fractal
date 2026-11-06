@@ -24,7 +24,7 @@ async fn native_attention_controls_are_person_scoped_fenced_and_replay_the_origi
     let original = rows(now).remove(0);
     let request = |kind: &str, key: &str, revision: Value| ActionRequest {
         api_version: CLIENT_API_VERSION.into(), id: format!("action/{key}"),
-        action_type: format!("attention.{kind}"), idempotency_key: key.into(),
+        action_type: format!("attention.{kind}"), idempotency_key: format!("attention-controls-{key}"),
         fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
         parameters: json!({"target_id":original["id"], "source_id":original["source_id"],
             "attention_kind":original["attention_kind"], "episode":original["episode"],
