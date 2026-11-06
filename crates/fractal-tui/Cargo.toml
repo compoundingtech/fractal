@@ -13,6 +13,7 @@ ratatui = { workspace = true }
 smallclaims = { path = "../smallclaims" }
 fractal-client = { path = "../fractal-client" }
 fractal-schema = { path = "../fractal-schema" }
+fractal-sidebar = { path = "../fractal-sidebar", features = ["ratatui"] }
 fractal-terminal-direct = { path = "../fractal-terminal-direct" }
 fractal-feed = { path = "../fractal-feed" }
 fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ratatui"] }

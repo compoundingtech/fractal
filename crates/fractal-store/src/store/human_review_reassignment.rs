@@ -3,16 +3,31 @@
 use super::*;
 use crate::model::PersonRenameRequest;
 
+/// The canonical cut for an assignment lookup, not an authorization or delegation policy.
+#[derive(Clone, Copy)]
+pub(crate) enum AssignmentMoment<'a> {
+    Current,
+    BeforeAnswer { answer: &'a str },
+}
+
+/// SQL for the current reviewer. Historical answers must use `assignment_sql` instead.
+pub fn reviewer_sql(request: &str) -> String {
+    assignment_sql(request, AssignmentMoment::Current)
+}
+
 /// SQL for the reviewer assigned to this exact request. An answer uses the assignment at its
 /// canonical moment, so later repairs cannot erase an answer already made by its reviewer.
 /// Apply accepted edges in canonical order only when their previous reviewer is the
 /// effective reviewer so far; a downstream repair cannot revive a losing concurrent hop.
 /// Unary `+` removes the request ID's TEXT affinity so its JSON-expression index is seekable;
 /// both IDs remain strings, as in the operation-conflict query.
-pub fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
-    let before_answer = answer
-        .map(|answer| format!(" AND {}", canonical::after_sql(answer, "reassignment")))
-        .unwrap_or_default();
+pub(crate) fn assignment_sql(request: &str, moment: AssignmentMoment<'_>) -> String {
+    let before_answer = match moment {
+        AssignmentMoment::Current => String::new(),
+        AssignmentMoment::BeforeAnswer { answer } => {
+            format!(" AND {}", canonical::after_sql(answer, "reassignment"))
+        }
+    };
     let accepted = person_rename::accepted_reassignment_sql(
         "reassignment",
         "previous_reviewer",
@@ -49,10 +64,10 @@ pub(super) fn reviewer_tx(connection: &Connection, request: &ClaimRecord) -> Res
     smallclaims::touched::note_read(|| request.subject.clone());
     connection
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-h1a7e1457e965 owner=fractal_store::store::human_review_reassignment TODO=trace-statement-and-value-representation */
+            /* sqlite-large-value: allow-for-now lv-hdc87d88b5a4d owner=fractal_store::store::human_review_reassignment TODO=trace-statement-and-value-representation */
             &format!(
                 "SELECT {} FROM claims request WHERE request.id=?1 AND request.kind='gate.requested'",
-                reviewer_sql("request", None),
+                reviewer_sql("request"),
             ),
             [&request.id],
             |row| row.get(0),
@@ -120,7 +135,7 @@ pub fn pending_requests_sql(filtered: bool) -> String {
             })
             .join(" AND ")
     };
-    let effective_reviewer = reviewer_sql("request", None);
+    let effective_reviewer = reviewer_sql("request");
     // Finish answer/supersession filtering before looking up an episode's first request.
     // Otherwise SQLite may run that canonical sort for every historical candidate, including
     // answered episodes that cannot contribute a review or its waiting-since timestamp.

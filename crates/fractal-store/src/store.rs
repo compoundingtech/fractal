@@ -33,6 +33,11 @@ pub mod declarations;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
+// Prepared internally; no accepted gate kind or production caller dispatches here.
+#[allow(dead_code)]
+pub(crate) mod agent_review_answer;
+#[allow(dead_code)]
+pub(crate) mod agent_review_decode;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
@@ -13616,7 +13621,10 @@ pub fn human_review_currency(
 /// the gate both read answers by this rule, so a review the list no longer offers is always one
 /// whose answer the gate acts on.
 fn reviewer_answer_sql(result: &str) -> String {
-    let reviewer = human_review_reassignment::reviewer_sql("request", Some(result));
+    let reviewer = human_review_reassignment::assignment_sql(
+        "request",
+        human_review_reassignment::AssignmentMoment::BeforeAnswer { answer: result },
+    );
     format!(
         "{result}.subject=request.subject
          AND {result}.kind='gate.result'
