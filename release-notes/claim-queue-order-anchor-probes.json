@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A work claim reads only the finished runs its seat's queued runs are placed against, directly or through anchors, instead of probing every run its seat's whole queue-move history names; on a production-size copy a seat with 990 moves went from 616 to 52 writer statements a claim, the same as a seat without moves",
+  "replay": {"status": "none", "detail": "No graph replay. The queue order is computed from the same claims, and a randomized test checks it is unchanged."},
+  "schema": {"status": "none", "detail": "No table, trigger or index change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention, authority or admission rule change."},
+  "compatibility": {"status": "none", "detail": "Mixed-version safe: a local read only, with no claim, field, API or wire change. The previous release reads the same store and computes the same queue order."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build as usual. An older build probes every named run again and answers the same order."}
+}
