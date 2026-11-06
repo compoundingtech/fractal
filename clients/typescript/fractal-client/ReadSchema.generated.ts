@@ -717,6 +717,55 @@ export const AgentQueue = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentQueue = typeof AgentQueue.Type
 export type AgentQueueEncoded = typeof AgentQueue.Encoded
 
+export const RelatedRunWait = /*#__PURE__*/ (() => Schema.Struct({
+  "detail": optionalKey(Schema.String),
+  "kind": Schema.String,
+  "lease_expires_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "path": Schema.String,
+  "seat_state": optionalKey(Schema.String),
+  "since_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "state": Schema.String,
+  "step": Schema.String,
+  "title": optionalKey(Schema.String),
+  "until_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "wake_attempts": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "who": optionalKey(Schema.String)
+}).annotate({ identifier: "RelatedRunWait" }))()
+export type RelatedRunWait = typeof RelatedRunWait.Type
+export type RelatedRunWaitEncoded = typeof RelatedRunWait.Encoded
+
+export const AgentRelatedRun = /*#__PURE__*/ (() => Schema.Struct({
+  "completed_at": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "current_step": Schema.OptionFromNullOr(RelatedRunWait),
+  "deadline_at": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "eta": Schema.OptionFromNullOr(Schema.Struct({ "as_of": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "basis": Schema.Struct({ "method": Schema.Literals(["per-step","critical-path"]), "samples": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }), "remaining_high_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "remaining_low_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) })),
+  "folded": Schema.Boolean,
+  "id": Schema.String,
+  "late": Schema.Boolean,
+  "mission_id": Schema.String,
+  "progress": Schema.Struct({ "done": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "status": Schema.String,
+  "status_chip": Schema.Literals(["running","waiting","waiting-on-you","stalled","completed","failed","cancelled"]),
+  "urgency_rank": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(4)),
+  "waiting_on_you": Schema.Boolean,
+  "waits_on": Schema.Array(RelatedRunWait)
+}).annotate({ identifier: "AgentRelatedRun" }))()
+export type AgentRelatedRun = typeof AgentRelatedRun.Type
+export type AgentRelatedRunEncoded = typeof AgentRelatedRun.Encoded
+
+export const AgentRelatedRuns = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": Schema.String,
+  "as_of": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "kind": Schema.Literal("agent-related-runs"),
+  "missions_cut": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "rows": Schema.Array(AgentRelatedRun).check(Schema.isMaxLength(100)),
+  "total_rows": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "truncated": Schema.Boolean,
+  "work_cut": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AgentRelatedRuns" }))()
+export type AgentRelatedRuns = typeof AgentRelatedRuns.Type
+export type AgentRelatedRunsEncoded = typeof AgentRelatedRuns.Encoded
+
 export const AgentRepository = /*#__PURE__*/ (() => Schema.Struct({
   "agent_ids": Schema.Array(Schema.String),
   "path": Schema.String,

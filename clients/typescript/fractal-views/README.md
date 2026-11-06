@@ -33,8 +33,10 @@ and the phone passes `phone` to retain its wording.
 ## Folder-only sidebar semantics
 
 `@fractal/views/sidebarView` is the React-free twin of
-`fractal_ui_model::sidebar`. `build(arrangement, inventory)` projects native version-1
-arrangements using the daemon's authoritative `resolved` maps. Its tagged result
+`fractal_sidebar::projection`. Rust hosts supply `model::ArrangementInput` with
+schema bodies and explicit resolved maps; the default crate has no client dependency.
+`build(arrangement, inventory)` projects native version-1 arrangements using the daemon's
+authoritative `resolved` maps. Its tagged result
 is `Built { tree }` or `Refused { error }`; missing resolution is `NotReady`,
 not a guessed parent graph. Opaque register revisions cannot establish which
 concurrent edge won a cycle.
@@ -70,6 +72,9 @@ memberships or a journal. Those fields are explicitly empty, not skipped tests.
 Unknown fields and unsupported versions are rejected. New event variants arrive
 with passing production-path cases. Folder identities are fixed UUIDv7 literals;
 the TypeScript twin also decodes every arrangement with the strict client schema.
+The Rust integration runner is `crates/fractal-sidebar/tests/behavior.rs`;
+`cargo test -p fractal-sidebar --test behavior` exercises the public core against
+the same validated checkpoints, including exact move refusals and empty effect/action lists.
 This seam changes no storage, schema or wire format. Mixed parents, declared
 defaults/reset, availability, optimistic application and revision/cycle-cut
 settlement belong to format-v2 work, not this API.
