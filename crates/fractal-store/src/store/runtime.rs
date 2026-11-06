@@ -188,6 +188,7 @@ impl FractalRuntime {
             [],
         )?;
         push_registrations::create_schema(connection)?;
+        attention_controls::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5484380b8507 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
         retirements::create_selection_triggers(connection)?;
