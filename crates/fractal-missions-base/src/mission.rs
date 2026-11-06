@@ -2069,6 +2069,7 @@ fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), S
         step.path = format!("{parent}/{}/{}", mission.id, step.id);
         if let Some(loop_spec) = step.loop_spec.as_mut() {
             loop_spec.path.clone_from(&step.path);
+            validate_nested_loop_path(loop_spec)?;
         }
         if let Some(nested) = step.nested_mission.as_mut() {
             rewrite_nested_paths(nested, &step.path)?;
@@ -2078,6 +2079,33 @@ fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), S
     }
     mission.steps = rewritten;
     mission.revision = hash(mission)?;
+    Ok(())
+}
+
+fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), St3Error> {
+    // Generations are 32 hex bytes; outcome is the longest ordinary round document.
+    let suffix = spec.candidates.as_ref().map_or_else(
+        || "/outcome".to_string(),
+        |candidates| format!("/candidate-{}", candidates.count),
+    );
+    let name = format!(
+        "doc/loop-feedback/{}/{}/{}{suffix}",
+        "00000000000000000000000000000000", spec.path, spec.max_rounds
+    );
+    let invalid = |reason: String| {
+        St3Error::new(
+            "invalid-nested-loop-path",
+            format!(
+                "nested loop `{}` owning path `{}`: {reason}",
+                spec.id, spec.path
+            ),
+        )
+    };
+    smallclaims::store::validate_document_name(&name)
+        .map_err(|error| invalid(error.to_string()))?;
+    if name.len() > 512 || name.chars().any(char::is_control) {
+        return Err(invalid("feedback/outcome document must fit the 512-byte claim-subject limit without control characters".into()));
+    }
     Ok(())
 }
 
@@ -3122,6 +3150,31 @@ mod tests {
             left.loop_spec.as_ref().unwrap().path,
             right.loop_spec.as_ref().unwrap().path
         );
+    }
+
+    #[test]
+    fn nested_loop_publication_rejects_unsafe_and_overlong_owning_paths() {
+        for id in ["left@v1", "right..v1"] {
+            let source = format!(
+                r#"mission "bad" state="ready" {{ goal "Bad.";
+              step "{id}" {{ mission "inner" {{ goal "Inner."; loop "repeat" {{ max-rounds 1;
+                round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}; }}; }}
+            }}"#
+            );
+            let error = super::parse_missions(&source.parse().unwrap(), "node").unwrap_err();
+            assert!(error.to_string().contains(&format!("{id}/inner/repeat")));
+        }
+        let id = "x".repeat(150);
+        let leaf = "y".repeat(138);
+        let source = format!(
+            r#"mission "bad" state="ready" {{ goal "Bad.";
+          step "{id}" {{ mission "a" {{ goal "A."; step "{id}" {{ mission "b" {{ goal "B.";
+            step "{leaf}" {{ mission "c" {{ goal "C."; loop "repeat" {{ max-rounds 1;
+              round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}; }}; }}; }}; }}; }}
+        }}"#
+        );
+        let error = super::parse_missions(&source.parse().unwrap(), "node").unwrap_err();
+        assert!(error.to_string().contains("512-byte claim-subject limit"));
     }
 
     #[test]

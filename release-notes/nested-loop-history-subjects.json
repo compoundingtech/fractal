@@ -4,8 +4,8 @@
   "replay": {"status": "none", "detail": "Existing claims are not rewritten. New nested-loop revisions derive distinct loop history subjects."},
   "schema": {"status": "none", "detail": "No claim kind, field or subject pattern changes."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},
-  "compatibility": {"status": "none", "detail": "Publication hashes change for missions containing inline nested loops on the next source apply or sync. Top-level loop hashes and subjects are unchanged. Runs in progress keep their pinned revision and existing history subjects, including any existing collisions, unless a new revision is explicitly adopted."},
+  "compatibility": {"status": "changed", "detail": "Publication hashes change for missions containing inline nested loops on the next source apply or sync. Upgrade all publishers first: mixed old/new publishers can alternate the current revision. Top-level loop hashes and subjects are unchanged. Runs in progress keep their pinned revision and old history subjects, including existing collisions, until deliberate cutover; no history repair is performed."},
   "downtime": {"status": "none", "detail": "No downtime required."},
-  "manual": {"status": "none", "detail": "No migration required; newly published revisions use the corrected paths."},
-  "recovery": {"status": "none", "detail": "Revert the commit; runs retain their pinned revision bodies."}
+  "manual": {"status": "changed", "detail": "Nested owning paths containing @ or .., control characters, or feedback/outcome names exceeding 512 bytes now fail source apply explicitly, preserving the previous published revision. Rename unsafe nested owners before applying."},
+  "recovery": {"status": "none", "detail": "Downgrade or revert preserves pinned revisions: new revisions store raw owning paths valid for the unchanged legacy document writers, not an encoded namespace."}
 }
