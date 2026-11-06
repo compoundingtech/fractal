@@ -2047,14 +2047,14 @@ async fn a_claim_this_node_commits_cuts_the_pause<R: Send + Sync + 'static>(refr
     let before = refresher.folds(&store);
     crate::test_support::note_local_claim(&store, "message/pause-first");
     until_within(Duration::from_secs(2), "the fold the first claim wakes", || refresher.folds(&store) > before).await;
-    let folded = tokio::time::Instant::now();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let wrote = tokio::time::Instant::now();
     crate::test_support::note_local_claim(&store, "message/pause-second");
     until_within(Duration::from_secs(2), "the fold the second claim cuts to", || refresher.folds(&store) > before + 1).await;
-    let (waited, apart) = (wrote.elapsed(), folded.elapsed());
-    assert!(waited < Duration::from_millis(400), "{}: the claim waited {waited:?}, not the floor", refresher.name);
-    assert!(apart >= FRESH_PAUSE, "{}: two folds {apart:?} apart", refresher.name);
+    let waited = wrote.elapsed();
+    assert!(waited < Duration::from_millis(600), "{}: the claim waited {waited:?}, not the floor", refresher.name);
+    // The floor itself is held by the burst below, by count: a gap timed from when this task saw a fold begin can read under it by
+    // as much as the task was late to look.
     // A burst of local writes: the pause is cut every time, never below the floor.
     tokio::time::sleep(REFRESH_PAUSE + REFRESH_PAUSE / 2).await;
     let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));

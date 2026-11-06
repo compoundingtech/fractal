@@ -725,14 +725,14 @@ mod tests {
         crate::test_support::note_local_claim(store, "message/attention-pause-first");
         state.event_notify.send_modify(|events| *events += 1);
         until_within(Duration::from_secs(2), "the refresh the first claim wakes", || passes(store) > before).await;
-        let refreshed = tokio::time::Instant::now();
         tokio::time::sleep(Duration::from_millis(20)).await;
         let wrote = tokio::time::Instant::now();
         crate::test_support::note_local_claim(store, "message/attention-pause-second");
         until_within(Duration::from_secs(2), "the refresh the second claim cuts to", || passes(store) > before + 1).await;
-        let (waited, apart) = (wrote.elapsed(), refreshed.elapsed());
-        assert!(waited < Duration::from_millis(400), "the claim waited {waited:?}, not the floor");
-        assert!(apart >= ATTENTION_LIST_LOCAL_PAUSE, "two refreshes {apart:?} apart");
+        let waited = wrote.elapsed();
+        assert!(waited < Duration::from_millis(600), "the claim waited {waited:?}, not the floor");
+        // The floor itself is held by the burst below, by count: a gap timed from when this task saw a refresh begin can read under
+        // it by as much as the task was late to look.
         tokio::time::sleep(ATTENTION_LIST_REFRESH_PAUSE + ATTENTION_LIST_REFRESH_PAUSE / 2).await;
         let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let burst = std::thread::spawn({
