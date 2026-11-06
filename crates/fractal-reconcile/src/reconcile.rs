@@ -18997,14 +18997,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             wake
         });
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
-        let watch_error = std::cell::RefCell::new(None); // Identity errors stay diagnostic; subscriptions fault.
+        let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
         let (result, reads) = smallclaims::touched::record(|| {
             smallclaims::touched::note_read(|| "launch-identity".into());
             smallclaims::touched::note_read(|| "kind:intent.desired".into());
             crate::contract::declared_ready_inputs(&self.store, subject, &|path| {
                 let key = format!("launch-input/{}", path.display());
                 smallclaims::touched::note_read(|| key.clone());
-                self.ensure_file_watch(&key, path).inspect_err(|error| *watch_error.borrow_mut() = Some(error.to_string()))
+                self.ensure_file_watch(&key, path).inspect_err(|error| if !error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) { *watch_error.borrow_mut() = Some(error.to_string()); })
             })
         });
         self.incremental.evaluated(&item, reads, None);
