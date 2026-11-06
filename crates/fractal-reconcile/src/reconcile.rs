@@ -26946,7 +26946,7 @@ agent "import/omp/fixture" {{
         let denied = root.path().join("denied");
         std::fs::create_dir(&denied).unwrap();
         member.lock().unwrap().environment.insert("PATH".into(), denied.display().to_string());
-        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
         reconciler.incremental.touch("kind:intent.desired");
         for _ in 0..2 {
             assert!(reconciler.isolate(&scope, "daemon/node", || reconciler.watch_launch_inputs(&desired)).is_none());
