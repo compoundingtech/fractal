@@ -34694,7 +34694,7 @@ mission "collision" state="ready" {
                 .is_empty()
         );
         let id = "x".repeat(150);
-        let leaf = "y".repeat(71);
+        let leaf = "y".repeat(62);
         let source = format!(
             r#"version 2
 mission "long" state="ready" {{ goal "Long.";
@@ -34717,7 +34717,7 @@ mission "long" state="ready" {{ goal "Long.";
         let name =
             format!("doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/1/outcome");
         let hash = store.latest_document_hash(&name).unwrap().unwrap();
-        assert_eq!(format!("{name}@{hash}").len(), 512);
+        assert!(format!("{name}@{hash}").len() < 512);
         let subject = format!("loop-run/{generation}/{id}/a/{id}/b/{leaf}/c/repeat");
         assert!(
             !store
@@ -34725,6 +34725,27 @@ mission "long" state="ready" {{ goal "Long.";
                 .unwrap()
                 .is_empty()
         );
+        // Every retry fits, including the full u32 attempt width beyond max-rounds.
+        let name = format!(
+            "doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/{}/outcome",
+            u32::MAX
+        );
+        let document = store
+            .put_document(&name, b"{}", &None, "max-attempt-outcome")
+            .unwrap();
+        let reference = format!("{}@{}", document.name, document.hash);
+        assert_eq!(reference.len(), 512);
+        reconciler
+            .record_once(
+                &subject,
+                "loop.state",
+                BTreeMap::from([
+                    ("status".into(), Value::String("failed".into())),
+                    ("round".into(), Value::from(u32::MAX)),
+                    ("feedback".into(), Value::String(reference)),
+                ]),
+            )
+            .unwrap();
     }
 
     #[test]

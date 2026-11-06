@@ -2088,9 +2088,12 @@ fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), St3Error> {
         || "/outcome".to_string(),
         |candidates| format!("/candidate-{}", candidates.count),
     );
+    // StepRunView.attempt is u32; explicit retries can exceed max_rounds.
     let name = format!(
         "doc/loop-feedback/{}/{}/{}{suffix}",
-        "00000000000000000000000000000000", spec.path, spec.max_rounds
+        "00000000000000000000000000000000",
+        spec.path,
+        u32::MAX
     );
     let invalid = |reason: String| {
         St3Error::new(
@@ -3168,7 +3171,7 @@ mod tests {
             assert!(error.to_string().contains(&format!("{id}/inner/repeat")));
         }
         let id = "x".repeat(150);
-        let leaf = "y".repeat(72);
+        let leaf = "y".repeat(63);
         let source = format!(
             r#"mission "bad" state="ready" {{ goal "Bad.";
               step "{id}" {{ mission "a" {{ goal "A.";
