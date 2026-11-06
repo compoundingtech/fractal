@@ -165,7 +165,9 @@ struct Record {
     ask: Ask,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     background_jobs: Option<u64>,
-    /// Diagnostic only. No consumer branches on it.
+    /// Why the harness ended, as text. A seat's end reason shows it as the diagnostic of a
+    /// `harness-exited` end, and a resume that ended with one fails as `harness-refused` unless
+    /// the driver stopped its provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// Positive credential evidence: true accepted, false rejected; absent proves neither.
