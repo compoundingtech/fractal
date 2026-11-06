@@ -5,7 +5,7 @@ const text = Schema.NonEmptyString
 const nullableText = Schema.NullOr(text)
 const Scope = Schema.Struct({ owner: text, container: text, endpoint: text, host: text, projection: text })
 const Identity = Schema.Struct({ actor: text, action_id: text, idempotency_key: text })
-const Snapshot = Schema.Struct({ id: text, host_id: text, store_index: Schema.Number, projection_version: text, created_at: text, expires_at: text })
+const Snapshot = Schema.Struct({ id: text, host_id: text, store_index: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })), projection_version: text, created_at: text, expires_at: text })
 const Base = Schema.Struct({ scope: Scope, snapshot: Snapshot, revision: text, ready: Schema.Boolean })
 const Folder = Schema.Union([
   Schema.Struct({ op: Schema.Literal('folder.create'), id: text, name: text, parent: nullableText, key: text }),
@@ -26,7 +26,7 @@ const State = Schema.Struct({
   request: Schema.NullOr(Request), dependent: Schema.NullOr(Identity), folder_completed: Schema.Boolean, used: Schema.Array(Identity),
 })
 const Record = Schema.Struct({ version: Schema.Literal(1), state: State })
-const Envelope = Schema.fromJsonString(Schema.Struct({ version: Schema.Number, state: Schema.Unknown }))
+const Envelope = Schema.fromJsonString(Schema.Struct({ version: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 0xffff_ffff })), state: Schema.Unknown }))
 const json = Schema.fromJsonString(Record)
 const decode = Schema.decodeUnknownSync(json, { onExcessProperty: 'error' })
 const encode = Schema.encodeSync(json, { onExcessProperty: 'error' })

@@ -102,3 +102,29 @@ it('replays unknown delivery exactly in-process, but a later failed write revoke
   journal.run('PersistPending', { ...uncertain, status: 'AwaitingObservation' })
   expect(journal.run('Send', { ...uncertain, status: 'Sending' })._tag).toBe('PersistenceRequired')
 })
+it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN])('refuses invalid durable numeric fields: %s', value => {
+  const journal = new SidebarJournal(scope)
+  const pending = state()
+  journal.run('PersistPending', pending)
+  const key = localStorage.key(0)!
+  const bytes = localStorage.getItem(key)!
+  for (const field of ['version', 'store_index']) {
+    const invalid = bytes.replace(`"${field}":${field === 'version' ? 1 : 4}`, `"${field}":${value}`)
+    localStorage.setItem(key, invalid)
+    expect(journal.restore()._tag).toBe('InvalidRecord')
+    expect(journal.run('Send', { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  }
+  const request = pending.request!
+  expect(journal.run('PersistPending', { ...pending, request: { ...request, fence: { ...request.fence, snapshot: { ...request.fence.snapshot, store_index: value } } } })._tag).toBe('InvalidRecord')
+})
+it('accepts the largest exact u64 browser index but refuses a version outside Rust u32', () => {
+  const journal = new SidebarJournal(scope)
+  const pending = state()
+  const request = pending.request!
+  const exact = { ...pending, request: { ...request, fence: { ...request.fence, snapshot: { ...request.fence.snapshot, store_index: Number.MAX_SAFE_INTEGER } } } }
+  expect(journal.run('PersistPending', exact)._tag).toBe('Applied')
+  expect(journal.restore()).toEqual({ _tag: 'Restored', state: exact, effects: ['PersistPending'] })
+  const key = localStorage.key(0)!
+  localStorage.setItem(key, '{"version":4294967296,"state":null}')
+  expect(journal.restore()._tag).toBe('InvalidRecord')
+})

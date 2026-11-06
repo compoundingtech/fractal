@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Add an unwired web Sidebar v2 journal and persistence-effect executor",
   "replay": { "status": "changed", "detail": "The inactive executor re-persists ambiguous requests before exact replay and never replays durable observation/completion markers." },
-  "schema": { "status": "changed", "detail": "Introduces a version-1 browser-local scoped journal record containing intent, request identities, fences, operations and per-step state, never transport credentials. Unknown versions are refused before state decoding." },
+  "schema": { "status": "changed", "detail": "Introduces a version-1 browser-local scoped journal record containing intent, request identities, fences, operations and per-step state, never transport credentials. Versions must fit Rust u32 and unknown versions are refused before state decoding. Snapshot store indexes must be non-negative safe integers for lossless Rust u64 replay." },
   "rules": { "status": "none", "detail": "No daemon rules or activation changes." },
   "compatibility": { "status": "none", "detail": "Unwired module; existing v1 Sidebar behavior is unchanged." },
   "downtime": { "status": "none", "detail": "No startup work or interruption until separate activation." },
