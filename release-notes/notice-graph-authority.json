@@ -7,5 +7,5 @@
   "compatibility": { "status": "changed", "detail": "Generic raw notice reads remain denied. Native recipient-authorized views and typed controls are not exposed by this slice. Mixed-version or dependency gaps cannot fall back to generic notice reads on upgraded members." },
   "downtime": { "status": "none", "detail": "No deployment outage is required." },
   "manual": { "status": "changed", "detail": "Designate exactly one notice runtime and register the reviewed manifests before local notice fact admission." },
-  "recovery": { "status": "changed", "detail": "Restore a unique live designation and reviewed registration dependencies. Runtime handover provenance, partition conflict admission, revocation and replay ordering require B2 before publication rollout." }
+  "recovery": { "status": "changed", "detail": "Restore a unique live designation and reviewed registration dependencies. Invalid declaration JSON is not a designation and cannot break unrelated projection repairs. Runtime handover provenance, partition conflict admission, revocation and replay ordering require B2 before publication rollout." }
 }

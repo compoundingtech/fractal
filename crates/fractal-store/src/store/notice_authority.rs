@@ -14,7 +14,7 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
     let chain = format!(
         "WITH RECURSIVE notice_runs(id) AS (
          SELECT {owner} FROM desired WHERE kind='agent' AND owner_run IS NOT NULL AND EXISTS(
-          SELECT 1 FROM json_each(desired.body,'$.children') WHERE json_extract(value,'$.name')='notice-runtime')
+          SELECT 1 FROM json_each(CASE WHEN json_valid(desired.body) THEN desired.body ELSE '{{}}' END,'$.children') WHERE json_extract(value,'$.name')='notice-runtime')
          UNION SELECT {parent} FROM notice_runs n JOIN mission_runs r ON r.id=n.id
           LEFT JOIN step_runs s ON s.subject=r.parent_step_run
           LEFT JOIN desired d ON d.subject=substr(r.parent_step_run,10)
@@ -35,7 +35,7 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
             let relevant = references.iter().map(|row| {
                 let dependency = match table {
                     "desired" => format!(
-                        "EXISTS(SELECT 1 FROM json_each({row}.body,'$.children')
+                        "EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid({row}.body) THEN {row}.body ELSE '{{}}' END,'$.children')
                           WHERE json_extract(value,'$.name')='notice-runtime')
                          OR EXISTS({chain} SELECT 1 FROM notice_runs n JOIN mission_runs r ON r.id=n.id
                           WHERE r.parent_step_run='step-run/'||{row}.subject)"
@@ -105,7 +105,7 @@ fn unavailable(reason: impl Into<String>) -> FractalError {
 fn holders(connection: &Connection) -> Result<Vec<String>> {
     let mut query = connection.prepare(
         "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
-         SELECT 1 FROM json_each(desired.body, '$.children')
+         SELECT 1 FROM json_each(CASE WHEN json_valid(desired.body) THEN desired.body ELSE '{}' END, '$.children')
          WHERE json_extract(value, '$.name')='notice-runtime') ORDER BY subject",
     )?;
     let candidates = query.query_map([], |row| row.get::<_, String>(0))?
