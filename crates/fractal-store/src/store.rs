@@ -1859,6 +1859,11 @@ fn runtime_view_entry_from(
     })
 }
 
+struct StatusSubjects<'a> {
+    names: Option<BTreeSet<String>>,
+    excluded: Option<&'a BTreeSet<String>>,
+}
+
 /// Which claims — and, for agent cards, which provenance — a status reduction reads.
 /// `Full` carries the whole canonical id vector in `SubjectStatus::claims`, which costs a
 /// claim-by-claim pass over the subject's history: only reductions a public response
@@ -5305,15 +5310,21 @@ impl Store {
     }
 
     pub fn generic_status_subject_names_at(
-        &self, subjects: BTreeSet<String>, index: u64,
+        &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
-        subjects.into_iter().filter_map(|subject| {
-            match self.generic_status_subject_visible_at(&subject, index) {
-                Ok(true) => Some(Ok(subject)),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            }
-        }).collect()
+        subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
+        if subjects.is_empty() { return Ok(subjects); }
+        let connection = self.readers.get();
+        let mut query = connection.prepare_cached(
+            "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
+             JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2",
+        )?;
+        for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
+            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
+            let (subject,kind) = row?;
+            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+        }
+        Ok(subjects)
     }
 
     pub fn status_for_subject_names_at(
@@ -5437,7 +5448,8 @@ impl Store {
                 ).with_detail("reason", "notices-unavailable")));
             }
             self.status_at_view_for_names_in_snapshot(
-                selected, owner, at, history, None, ClaimsReduction::Full, Some(&excluded),
+                selected, owner, at, history,
+                StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
             )
         })
     }
@@ -5477,9 +5489,8 @@ impl Store {
                 selected_owner_run,
                 at_index,
                 include_history,
-                selected_names,
+                StatusSubjects { names: selected_names, excluded: None },
                 claims,
-                None,
             )
         })
     }
@@ -5490,10 +5501,10 @@ impl Store {
         selected_owner_run: Option<&str>,
         at_index: Option<u64>,
         include_history: bool,
-        selected_names: Option<BTreeSet<String>>,
+        subjects: StatusSubjects<'_>,
         claims: ClaimsReduction,
-        excluded: Option<&BTreeSet<String>>,
     ) -> Result<StatusResponse> {
+        let StatusSubjects { names: selected_names, excluded } = subjects;
         let connection = self.readers.get();
         let current = current_index(&connection)?;
         let store_index = selected_index(current, at_index).map_err(anyhow::Error::new)?;

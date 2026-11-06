@@ -41,13 +41,10 @@ impl Store {
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
         let names = if generic {
-            names.into_iter().filter_map(|name| {
-                if fractal_schema::notice::is_reserved_subject(&name) { return None; }
-                if name.starts_with("agent/") { return Some(Ok(name)); }
-                match self.generic_status_subject_visible_at(&name, index) {
-                    Ok(true) => Some(Ok(name)), Ok(false) => None, Err(error) => Some(Err(error)),
-                }
-            }).collect::<Result<BTreeSet<_>>>()?
+            let (mut agents, other): (BTreeSet<_>, BTreeSet<_>) =
+                names.into_iter().partition(|name| name.starts_with("agent/"));
+            agents.extend(self.generic_status_subject_names_at(other, index)?);
+            agents
         } else { names };
         // The view and status passes share what they read of each subject.
         let mut reads = if generic { card_fold::CardReads::for_generic_reads(index) }
