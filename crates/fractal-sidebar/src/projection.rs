@@ -1,4 +1,4 @@
-//! Folder-only sidebar projection and intent validation, without rendering or wire writes.
+//! Sidebar projection and intent validation, without rendering or wire writes.
 //!
 //! Resolved maps are authoritative; inventory adds known subjects but never hides placements.
 //! Revisions remain opaque. Ordering is ordinal, with separate folder/placed/unplaced domains.
@@ -22,7 +22,19 @@ pub fn build(
     arrangement: &ArrangementInput,
     inventory: &[String],
 ) -> Result<SidebarTree, ProjectionError> {
-    let projected = build_available(arrangement, inventory)?;
+    require_complete(build_available(arrangement, inventory)?)
+}
+
+/// Project a complete live v2 membership set, never catalog-only remembered resources.
+/// As in the server's live view, member positions are effective, not raw LWW registers.
+pub fn build_v2(
+    arrangement: &ArrangementInput,
+    memberships: &[MembershipInput],
+) -> Result<SidebarTree, ProjectionError> {
+    require_complete(build_input(arrangement, &[], Some(memberships))?)
+}
+
+fn require_complete(projected: AvailableProjection) -> Result<SidebarTree, ProjectionError> {
     // Completeness precedes ancestry validation, independent of identity ordering.
     if projected.unavailable.values().any(|error| *error == ProjectionError::NotReady) {
         return Err(ProjectionError::NotReady);
@@ -46,17 +58,23 @@ pub fn build_available(
     arrangement: &ArrangementInput,
     inventory: &[String],
 ) -> Result<AvailableProjection, ProjectionError> {
+    build_input(arrangement, inventory, None)
+}
+
+fn build_input(
+    arrangement: &ArrangementInput,
+    inventory: &[String],
+    memberships: Option<&[MembershipInput]>,
+) -> Result<AvailableProjection, ProjectionError> {
     if arrangement.deleted {
         return Err(ProjectionError::ArrangementUnavailable);
     }
-    let body = match &arrangement.body {
-        fractal_schema::arrangements::VersionedBody::V1(body) => body,
-        other => {
-            return Err(ProjectionError::Unsupported {
-                required: 1,
-                advertised: other.version(),
-            });
-        }
+    use fractal_schema::arrangements::VersionedBody;
+    let (folders, placements) = match (&arrangement.body, memberships) {
+        (VersionedBody::V1(body), None) => (&body.folders, Some(&body.placements)),
+        (VersionedBody::V2(body), Some(_)) => (&body.folders, None),
+        (VersionedBody::V1(_), Some(_)) => return Err(ProjectionError::Unsupported { required: 2, advertised: 1 }),
+        (VersionedBody::V2(_), None) => return Err(ProjectionError::Unsupported { required: 1, advertised: 2 }),
     };
     let resolved = arrangement
         .resolved
@@ -69,7 +87,7 @@ pub fn build_available(
         deleted_folders: Vec::new(),
     };
     let mut unavailable = BTreeMap::new();
-    for (id, folder) in &body.folders {
+    for (id, folder) in folders {
         if folder.tombstone.is_some() {
             tree.deleted_folders.push(id.clone());
             continue;
@@ -92,7 +110,7 @@ pub fn build_available(
             },
         );
     }
-    for (subject, register) in &body.placements {
+    for (subject, register) in placements.into_iter().flatten() {
         let Some(shown_under) = resolved.folders.get(subject) else {
             unavailable.insert(format!("subject:{subject}"), ProjectionError::NotReady);
             continue;
@@ -112,6 +130,22 @@ pub fn build_available(
                 children: Vec::new(),
             },
         );
+    }
+    for membership in memberships.into_iter().flatten() {
+        let node = NodeRef::Subject { subject: membership.member.clone() };
+        let key = node_key(&node);
+        if membership.container != arrangement.subject || tree.nodes.contains_key(&key) {
+            return Err(ProjectionError::InvalidResolution);
+        }
+        tree.nodes.insert(key, ProjectedNode {
+            node,
+            parent: folder_parent(&membership.position.bucket),
+            shown_under: folder_parent(&membership.position.bucket),
+            key: Some(membership.position.key.clone()),
+            revision: Some(membership.revision.clone()),
+            source: Source::Person,
+            children: Vec::new(),
+        });
     }
     for subject in inventory {
         if unavailable.contains_key(&format!("subject:{subject}")) {
