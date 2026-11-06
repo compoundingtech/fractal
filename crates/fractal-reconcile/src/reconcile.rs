@@ -12143,6 +12143,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             }
             "completed" => {
+                // Validate both names before metrics, feedback or results can write.
+                let feedback_name = loop_feedback_document_name(&loop_subject, view.attempt, "")?;
+                let outcome_name =
+                    loop_feedback_document_name(&loop_subject, view.attempt, "/outcome")?;
                 let metrics = match self.evaluate_loop_metrics(
                     run,
                     view,
@@ -12163,6 +12167,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let keep = self.loop_round_improves(&loop_subject, loop_spec, &metrics)?;
                 let feedback = self.write_loop_feedback(
                     &loop_subject,
+                    &feedback_name,
                     view.attempt,
                     &child,
                     &metrics,
@@ -12262,7 +12267,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let feedback = if waiting {
                     feedback
                 } else {
-                    self.write_loop_outcome(&loop_subject, view.attempt, &metrics, keep, &gate_results)?
+                    self.write_loop_outcome(
+                        &loop_subject,
+                        &outcome_name,
+                        view.attempt,
+                        &metrics,
+                        keep,
+                        &gate_results,
+                    )?
                 };
                 self.record_once(
                     &loop_subject,
@@ -12623,12 +12635,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn write_loop_outcome(
         &self,
         loop_subject: &str,
+        name: &str,
         round: u32,
         metrics: &BTreeMap<String, f64>,
         keep: bool,
         results: &[LoopGateResult],
     ) -> Result<String> {
-        let name = loop_feedback_document_name(loop_subject, round, "/outcome")?;
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "decision": if keep { "keep" } else { "discard" },
             "metrics": metrics,
@@ -12640,7 +12652,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect::<Vec<_>>(),
         }))?;
         let document = self.store.put_document(
-            &name,
+            name,
             &body,
             &None,
             &format!("loop-outcome:{loop_subject}:{round}"),
@@ -12648,17 +12660,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(format!("{}@{}", document.name, document.hash))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_loop_feedback(
         &self,
         loop_subject: &str,
+        name: &str,
         round: u32,
         child: &MissionRunView,
         metrics: &BTreeMap<String, f64>,
         keep: bool,
         candidate: Option<u32>,
     ) -> Result<String> {
-        let suffix = candidate.map_or_else(String::new, |value| format!("/candidate-{value}"));
-        let name = loop_feedback_document_name(loop_subject, round, &suffix)?;
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "loop": loop_subject,
             "round": round,
@@ -12668,7 +12680,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             "candidate": candidate,
         }))?;
         let document = self.store.put_document(
-            &name,
+            name,
             &body,
             &None,
             &format!("loop-feedback:{loop_subject}:{round}:{candidate:?}"),
@@ -12976,6 +12988,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         };
                         let feedback = self.write_loop_feedback(
                             loop_subject,
+                            &loop_feedback_document_name(loop_subject, round, "")?,
                             round,
                             &child,
                             &metrics,
@@ -13173,6 +13186,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                         };
                         let feedback = self.write_loop_feedback(
                             loop_subject,
+                            &loop_feedback_document_name(
+                                loop_subject,
+                                view.attempt,
+                                &format!("/candidate-{candidate}"),
+                            )?,
                             view.attempt,
                             &child,
                             &metrics,
@@ -34637,19 +34655,7 @@ version 2
     #[test]
     fn loop_document_paths_escape_only_invalid_names_without_collisions() {
         let store = Store::open_memory("node").unwrap();
-        let paths = [
-            "g/repeat",
-            "g/a@b",
-            "g/a..b",
-            "g/a...b",
-            "g/a....b",
-            "g/a/40/b",
-            "g/a/2e2e/b",
-            "g/a%40b",
-            "g/a%40b@v1",
-            "g/a@b%40v1",
-            "g/a/@/../b",
-        ];
+        let paths = "g/repeat g/a@b g/a..b g/a...b g/a....b g/a/40/b g/a/2e2e/b g/a%40b g/a%40b@v1 g/a@b%40v1 g/a/@/../b".split_whitespace();
         let mut names = BTreeSet::new();
         for path in paths {
             let subject = format!("loop-run/{path}");
@@ -34662,13 +34668,6 @@ version 2
                 .unwrap();
             assert!(names.insert(name));
         }
-        let long = format!("loop-run/g/{}repeat", "deep/".repeat(96));
-        assert!(
-            loop_feedback_document_name(&long, 1, "/outcome")
-                .unwrap_err()
-                .to_string()
-                .contains("512-byte claim-subject limit")
-        );
     }
 
     #[test]
@@ -34682,40 +34681,29 @@ resource "right-result" { kind "custom.test.loop-result"; }
 mission "collision" state="ready" {
   goal "Keep nested histories separate."
   completion { when "all-steps-exhausted"; }
-  step "left@v1" { mission "left-inner" {
-    goal "Left."; completion { when "all-steps-exhausted"; }
-    loop "repeat" {
-      max-rounds 2
-      until { gate "left-ready" { field "state" "resource/left-result" is "ready"; }; }
-      round { completion { when "all-steps-exhausted"; }
-        step "work" { agentless; goal "Left round."; }
-      }
+  step "left@v1" { mission "left-inner" { goal "Left."; completion { when "all-steps-exhausted"; };
+    loop "repeat" { max-rounds 2; until { gate "left-ready" { field "state" "resource/left-result" is "ready"; }; }
+      round { completion { when "all-steps-exhausted"; }; step "work" { agentless; goal "Left round."; }; }
     }
   }; }
-  step "right..v1" { mission "right-inner" {
-    goal "Right."; completion { when "all-steps-exhausted"; }
-    loop "repeat" {
-      max-rounds 2
-      until { gate "right-ready" { field "state" "resource/right-result" is "ready"; }; }
-      round { completion { when "all-steps-exhausted"; }
-        step "work" { agentless; goal "Right round."; }
-      }
+  step "right..v1" { mission "right-inner" { goal "Right."; completion { when "all-steps-exhausted"; };
+    loop "repeat" { max-rounds 2; until { gate "right-ready" { field "state" "resource/right-result" is "ready"; }; }
+      round { completion { when "all-steps-exhausted"; }; step "work" { agentless; goal "Right round."; }; }
     }
   }; }
 }"#,
             "nested-loop-collision",
         );
-        let run = store
-            .create_mission_run(&MissionRunRequest {
-                mission: "collision".into(),
-                revision: None,
-                workspace: ".".into(),
-                requester: Some("person/test".into()),
-                mode: Some("run".into()),
-                inputs: BTreeMap::new(),
-                idempotency_key: "nested-loop-collision-run".into(),
-            })
-            .unwrap();
+        let mut request = MissionRunRequest {
+            mission: "collision".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "nested-loop-collision-run".into(),
+        };
+        let run = store.create_mission_run(&request).unwrap();
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -34739,12 +34727,14 @@ mission "collision" state="ready" {
                 .iter()
                 .find(|claim| claim.body.pointer("/fields/round") == Some(&Value::from(1)))
                 .expect("each nested loop records its own first-round result");
-            let child = store
-                .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
-                    "loop-round:step-run/{generation}/{path}:1"
-                )))
-                .unwrap()
-                .unwrap();
+            let [child, second] = [1, 2].map(|round| {
+                store
+                    .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
+                        "loop-round:step-run/{generation}/{path}:{round}"
+                    )))
+                    .unwrap()
+                    .unwrap()
+            });
             assert_eq!(
                 first
                     .body
@@ -34752,12 +34742,6 @@ mission "collision" state="ready" {
                     .and_then(Value::as_str),
                 Some(child.subject.as_str())
             );
-            let second = store
-                .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
-                    "loop-round:step-run/{generation}/{path}:2"
-                )))
-                .unwrap()
-                .unwrap();
             let feedback = &second.inputs[LOOP_FEEDBACK_INPUT].value;
             let (name, hash) = feedback.rsplit_once('@').unwrap();
             let document = store.get_document(name, hash).unwrap().unwrap();
@@ -34768,11 +34752,7 @@ mission "collision" state="ready" {
                 name,
                 format!(
                     "doc/loop-feedback-escaped/{generation}/{}/1/outcome",
-                    if own_gate == "left-ready" {
-                        "left%40v1/left-inner/repeat"
-                    } else {
-                        "right%2e%2ev1/right-inner/repeat"
-                    }
+                    path.replace('@', "%40").replace("..", "%2e%2e")
                 )
             );
             feedbacks.push(feedback.clone());
@@ -34785,6 +34765,35 @@ mission "collision" state="ready" {
                 .unwrap()
                 .is_empty()
         );
+        let id = "x".repeat(150);
+        let leaf = "y".repeat(138);
+        let source = format!(
+            r#"version 2
+mission "long" state="ready" {{ goal "Long.";
+  step "{id}" {{ mission "a" {{ goal "A.";
+    step "{id}" {{ mission "b" {{ goal "B.";
+      step "{leaf}" {{ mission "c" {{ goal "C.";
+        loop "repeat" {{ max-rounds 1; round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}
+      }}; }}; }}; }}; }}; }}
+}}"#
+        );
+        apply_source(&store, &source, "long-loop");
+        request.mission = "long".into();
+        request.idempotency_key = "long-loop-run".into();
+        let long = store.create_mission_run(&request).unwrap();
+        let error = (0..12)
+            .find_map(|_| reconciler.reconcile_once().err())
+            .unwrap();
+        assert!(error.to_string().contains("512-byte claim-subject limit"));
+        let generation = long.generation.strip_prefix("run-generation/").unwrap();
+        let subject = format!("loop-run/{generation}/{id}/a/{id}/b/{leaf}/c/repeat");
+        let name = loop_feedback_document_name(&subject, 1, "").unwrap();
+        assert_eq!(name.len(), 506);
+        assert!(store.latest_document_hash(&name).unwrap().is_none());
+        let results = store
+            .claims_for(&subject, Some("loop.round-result"))
+            .unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
