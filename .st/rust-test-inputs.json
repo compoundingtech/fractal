@@ -291,6 +291,7 @@
   },
   "fractal-schema": {
    "extra": [
+    "crates/fractal-schema/src/notice.rs",
     "docs/st3/schema.md",
     "examples/fractal/custom-review.json",
     "examples/fractal/decision-tree.json"
