@@ -48,7 +48,7 @@ impl Scope<'_> {
     fn size(self, field: &str, value: Option<&str>) -> Result<(), St3Error> {
         let value = value.ok_or_else(|| self.error(field, SIZE))?;
         let bytes =
-            fractal_runtime::lane::parse_memory(value).map_err(|_| self.error(field, SIZE))?;
+            fractal_runtime::parse_lane_memory(value).map_err(|_| self.error(field, SIZE))?;
         if bytes == 0 {
             return Err(self.error(field, SIZE));
         }
