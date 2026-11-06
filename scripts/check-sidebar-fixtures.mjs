@@ -44,13 +44,13 @@ export function checkEnvelope(value, schema = behaviorSchema) {
   if (schema.minimum !== undefined) assert.ok(value >= schema.minimum, 'behavior-schema numeric bound');
   if (Array.isArray(value)) {
     assert.ok(value.length >= (schema.minItems ?? 0) && value.length <= (schema.maxItems ?? Infinity), 'behavior-schema array bound');
-    for (const item of value) checkEnvelope(item, schema.items);
-  } else if (value !== null && typeof value === 'object' && schema.type === 'object') {
+    if (schema.items) for (const item of value) checkEnvelope(item, schema.items);
+  } else if (value !== null && typeof value === 'object') {
     for (const key of schema.required ?? []) assert.ok(Object.hasOwn(value, key), 'behavior-schema required field');
     for (const [key, item] of Object.entries(value)) {
       const child = schema.properties?.[key] ?? schema.additionalProperties;
-      assert.ok(child && typeof child === 'object', 'behavior-schema unknown field');
-      checkEnvelope(item, child);
+      assert.ok(child !== false && (child !== undefined || schema.additionalProperties !== false), 'behavior-schema unknown field');
+      if (child && typeof child === 'object') checkEnvelope(item, child);
     }
   }
 }
@@ -92,7 +92,7 @@ export function scrub(value) {
 }
 function publicStrings(value, schema = behaviorSchema, field = '') {
   if (schema.$ref) return publicStrings(value, behaviorSchema.$defs[schema.$ref.slice(8)], field);
-  if (schema.oneOf) return publicStrings(value, schema.oneOf.find(branch => {
+  if (schema.oneOf && !schema.properties) return publicStrings(value, schema.oneOf.find(branch => {
     try { checkEnvelope(value, branch); return true; } catch { return false; }
   }), field);
   if (typeof value === 'string' && schema.const === undefined && !schema.enum) {
@@ -103,7 +103,7 @@ function publicStrings(value, schema = behaviorSchema, field = '') {
     else if (['revision', 'arrangementRevision'].includes(field)) allowed = /^claim\/(?:head|create|name|place|position|delete|test-[0-9]+)$/.test(value);
     else if (field === 'updated_at') allowed = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value);
     else if (field === 'key') allowed = /^[a-zA-Z][a-zA-Z0-9]*$/.test(value);
-    else if (['parent', 'folder', 'folders', 'deletedFolders', 'parents'].includes(field)) allowed = folderId.test(value);
+    else if (['parent', 'folder', 'bucket', 'folders', 'deletedFolders', 'parents'].includes(field)) allowed = folderId.test(value);
     else allowed = identities.test(value) || (field === 'id' && folderId.test(value));
     assert.ok(allowed, 'non-synthetic fixture identity or label');
   } else if (Array.isArray(value)) value.forEach(item => publicStrings(item, schema.items, field));

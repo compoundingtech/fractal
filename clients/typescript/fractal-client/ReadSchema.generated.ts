@@ -329,6 +329,13 @@ export const AgentState = /*#__PURE__*/ (() => openEnum([
 export type AgentState = typeof AgentState.Type
 export type AgentStateEncoded = typeof AgentState.Encoded
 
+export const AgentStopping = /*#__PURE__*/ (() => Schema.Struct({
+  /** Why the stop waits: mail the seat had not read, or work it held in another run, when the stop was declared. Null while the stop has not been deferred. */
+  "held": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Why the stop waits: mail the seat had not read, or work it held in another run, when the stop was declared. Null while the stop has not been deferred." })
+}).annotate({ identifier: "AgentStopping" }))()
+export type AgentStopping = typeof AgentStopping.Type
+export type AgentStoppingEncoded = typeof AgentStopping.Encoded
+
 export const AgentSubagent = /*#__PURE__*/ (() => Schema.Struct({
   /** One line. */
   "description": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "One line." }),
@@ -623,6 +630,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When this observed state began in this runtime incarnation. Same-state observations never reset it. */
   "since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this observed state began in this runtime incarnation. Same-state observations never reset it." }),
   "state": AgentState,
+  /** The seat's declaration is a stop but its process still runs. An older daemon omits the field. */
+  "stopping": Schema.OptionFromOptionalNullOr(AgentStopping, NULL_NONE).annotate({ description: "The seat's declaration is a stop but its process still runs. An older daemon omits the field." }),
   /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents. */
   "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." }),
   /** The seat's latest suspend or resume and its phase. An older daemon omits the field. */
