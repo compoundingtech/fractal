@@ -127,6 +127,11 @@ pub enum ErrorCode {
     InvalidMembershipKey,
     InvalidMembershipOperations,
     MembershipEditTooLarge,
+    InvalidMembershipCursor,
+    MembershipCollectionChanged,
+    MembershipFrontierReset,
+    UnsupportedMembershipPagingContract,
+    MembershipFrontierInconsistent,
     InvalidSubjectReference,
     NotFound,
     Forbidden,
@@ -5622,6 +5627,8 @@ pub struct OrderedMembershipState {
     pub container: String,
     pub live_count: u64,
     pub changed_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OrderedMembershipPage {
@@ -5631,6 +5638,10 @@ pub struct OrderedMembershipPage {
     pub filters: BTreeMap<String, String>,
     pub items: Vec<OrderedMembership>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paging_contract: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership: Option<OrderedMembershipState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncNotice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
