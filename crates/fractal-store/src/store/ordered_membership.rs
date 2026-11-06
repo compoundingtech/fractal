@@ -29,7 +29,7 @@ fn advance_generation(transaction: &Transaction<'_>) -> Result<()> {
         .and_then(|next| i64::try_from(next).ok())
         .ok_or_else(|| anyhow::anyhow!("ordered membership generation exhausted"))?;
     transaction.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h3b5ec217e92b owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![GENERATION_KEY, next],
     )?;
     Ok(())
