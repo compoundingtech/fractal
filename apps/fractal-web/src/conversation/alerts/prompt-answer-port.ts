@@ -1,10 +1,11 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
+import { isResolutionRefusal, resolvedRefusal } from './alert-resolution.ts'
 
 /** One answer to a native prompt: sent, or refused in words a person reads. */
 export type PromptAnswerResult =
   | { readonly _tag: 'Sent' }
-  | { readonly _tag: 'Refused'; readonly detail: string }
+  | { readonly _tag: 'Refused'; readonly detail: string; readonly alreadyAnsweredBy?: string }
 
 /** A native harness prompt's alert, as much of it as an answer names. */
 export type PromptAlert = Pick<Native.Attention, 'id' | 'revision' | 'source_id'> & {
@@ -66,6 +67,10 @@ export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort =>
       if (key !== undefined) attempts.set(key, send)
       return await send()
     } catch (error) {
+      if (isResolutionRefusal(error)) {
+        const conflict = await resolvedRefusal(client, { ...alert, attention_kind: 'harness-prompt' })
+        if (conflict !== undefined) return conflict
+      }
       return {
         _tag: 'Refused',
         detail:

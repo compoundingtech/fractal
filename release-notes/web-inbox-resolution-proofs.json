@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read exact accepted actors before attributing an inbox answer conflict",
+  "replay": { "status": "none", "detail": "Uncertain delivery keeps its prepared same-key retry; only typed definitive source refusals consult conflict attribution." },
+  "schema": { "status": "none", "detail": "Consume the typed original-locator attention resolution read and authoritative message read state." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "Answers refused because another device resolved the exact source report its accepted actor. Missing or unavailable attribution never fabricates an owner or retries an answer automatically." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Network and timeout outcomes remain uncertain and retryable with the original identity." }
+}
