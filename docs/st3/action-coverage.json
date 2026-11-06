@@ -2611,7 +2611,7 @@
     },
     {
       "command": "st work ask",
-      "description": "Ask a person through a runtime step owned by live work",
+      "description": "Ask a person independently, or block specific work with --step",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],

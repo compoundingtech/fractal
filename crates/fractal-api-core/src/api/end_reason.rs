@@ -115,6 +115,16 @@ mod tests {
         assert_eq!(end["diagnostic"], "auth refused: exact provider text");
     }
     #[test]
+    fn a_provider_its_driver_stopped_ends_as_its_harness_exiting_with_that_diagnostic() {
+        // Not a crash on the stop's signal: the driver stopped the provider (#4743).
+        let mut seat = subject(Some("signal 15"));
+        seat.harness.as_mut().unwrap().reason = Some(fractal_drivers::provider_session::DRIVER_STOPPED.into());
+        let end = project(&seat, None, None, None, None, false, "2026-11-06T00:00:00Z").unwrap();
+        assert_eq!(end["kind"], "harness-exited");
+        assert_eq!(end["exit_signal"], "15");
+        assert_eq!(end["diagnostic"], "driver-stopped");
+    }
+    #[test]
     fn launch_diagnostic_with_clean_exit_is_not_host_lost() {
         let mut seat = subject(Some("exit 0"));
         seat.reachability = "unreachable".into();
