@@ -1,7 +1,9 @@
 import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
-import { ArrangementEditParameters, ErrorCode, decodeUnknownSync, type ActionResult } from '@fractal/client/schema'
+import { ErrorCode, decodeUnknownSync } from '@fractal/client/schema/read'
+import type { ActionResult } from '@fractal/client/schema'
 import type { ActionFailure } from '@fractal/sdk/mutations'
 import type { SdkChunkFailure } from '../data/lazySdk.ts'
+import { loadArrangementSchema } from '../data/lazySdk.ts'
 import { Effect, Schema } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
 
@@ -278,6 +280,9 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
     try {
       while (queue.length > 0 && !closed) {
         let job = queue[0]!
+        const schema = await Effect.runPromise(Effect.result(loadArrangementSchema), { signal: abort.signal })
+        if (closed) return
+        if (schema._tag === 'Failure') { fail(job, arrangementRefusal(schema.failure, targets(job))); return }
         const fresh = await refresh()
         if (closed) return
         if (fresh._tag === 'Failure') { fail(job, arrangementRefusal(fresh.failure, targets(job))); return }
@@ -312,7 +317,7 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
             return
           }
           const parameters = { owner, subject: winner?.id ?? reservation, operations: winner === undefined ? [{ op: 'create', name: 'Sidebar' } as const, ...job.operations] : [...job.operations] }
-          if (!Schema.is(Schema.toEncoded(ArrangementEditParameters))(parameters as unknown)) {
+          if (!Schema.is(Schema.toEncoded(schema.success.ArrangementEditParameters))(parameters as unknown)) {
             fail(job, unknown('The edit does not match the generated arrangement operation contract.', job))
             return
           }

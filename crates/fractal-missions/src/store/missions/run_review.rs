@@ -7,7 +7,6 @@ use fractal_store::store::{
 
 /// Caller-owned snapshot of every generation, descendant and starting parent step, not siblings.
 /// Loops fail closed; start/reassignment is unavailable and public parsers still reject agent-review.
-/// Pooled steps in terminal or superseded generations over-exclude until the raw-row follow-on.
 #[doc(hidden)]
 pub fn validate_run_reviewer(
     scope: &Scope<'_>,
@@ -56,7 +55,7 @@ pub fn validate_run_reviewer(
             if specs.iter().any(|step| step.loop_spec.is_some()) {
                 return Err(FractalError::new("reviewer-history-unsupported", &subject));
             }
-            let view = run_generation_view_tx(connection, &generation).map_err(internal)?;
+            let view = run_generation_rows_tx(connection, &generation).map_err(internal)?;
             let expected: BTreeSet<_> = specs.iter().map(|s| s.path.as_str()).collect();
             let actual: BTreeSet<_> = view.steps.iter().map(|s| s.step.as_str()).collect();
             if view.run != subject || expected.is_empty() || actual != expected {

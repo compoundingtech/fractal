@@ -1418,6 +1418,9 @@ fn parse_agent(
             driver: None,
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         });
     }
 
@@ -2206,6 +2209,9 @@ fn driver_member(
         driver: Some(name),
         terminal_size: None,
         capacity: None,
+        declared_priority: None,
+        declared_lane: None,
+        declared_budgets: None,
     })
 }
 
@@ -2299,6 +2305,9 @@ fn task_member(
         driver: None,
         terminal_size: None,
         capacity: None,
+        declared_priority: None,
+        declared_lane: None,
+        declared_budgets: None,
     })
 }
 
