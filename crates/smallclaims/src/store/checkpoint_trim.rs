@@ -778,10 +778,10 @@ impl Store {
     pub fn adopt_checkpoint(
         &self,
         manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>, St3Error> {
+    ) -> Result<Vec<CheckpointAction>, FractalError> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         if self.trims_locally() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "trim-is-local",
                 "this member trims locally ([trim] local), so it adopts no checkpoint manifest",
             ));
@@ -796,7 +796,7 @@ impl Store {
     pub /* sqlite-large-value-flow: allow-for-now flow-h3436182aecc1 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn restore_checkpoint_history(
         &self,
         manifest: &CheckpointManifest,
-    ) -> Result<Vec<CheckpointAction>, St3Error> {
+    ) -> Result<Vec<CheckpointAction>, FractalError> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let occupied: bool = self
             .readers
@@ -810,7 +810,7 @@ impl Store {
             )
             .map_err(internal)?;
         if occupied {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-history-exists",
                 "checkpoint restore requires empty checkpoint state",
             ));
@@ -822,7 +822,7 @@ impl Store {
         &self,
         manifest: &CheckpointManifest,
         require_newest: bool,
-    ) -> Result<Vec<CheckpointAction>, St3Error> {
+    ) -> Result<Vec<CheckpointAction>, FractalError> {
         let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let claims = self.checkpoint_claims().map_err(internal)?;
@@ -834,7 +834,7 @@ impl Store {
                 .next_back()
                 .is_some_and(|newest| *newest > manifest.cut_unix_ms)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-superseded",
                 format!(
                     "`{}` is older than the newest stable checkpoint here; a node adopts only \
@@ -845,7 +845,7 @@ impl Store {
         }
         let certificates = certificates(&claims, &manifest.checkpoint);
         let Some(certificate) = chosen_certificate(&certificates) else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-not-stable",
                 format!(
                     "`{}` is not stable on this node; it adopts a checkpoint once it holds \
@@ -855,7 +855,7 @@ impl Store {
             ));
         };
         if certificate.terms.cut_unix_ms != manifest.cut_unix_ms {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-manifest-invalid",
                 "the manifest's cut is not the certified one",
             ));

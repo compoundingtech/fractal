@@ -12,7 +12,7 @@ mod revision_provenance_tests;
 
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
-pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>, St3Error> {
+pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>, FractalError> {
     let Some(request) = ask.body["fields"].get("request").filter(|r| !r.is_null()) else {
         return Ok(None);
     };
@@ -21,7 +21,7 @@ pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>
         .filter(|request| request.version == crate::person_request::REQUEST_VERSION)
         .map(Some)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "unsupported-person-request",
                 "this ask's request needs a newer st to answer",
             )
@@ -182,21 +182,21 @@ impl Store {
 pub fn validate_delegated_answer(
     ask: &ClaimRecord,
     fields: &BTreeMap<String, Value>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if fields.get("status").and_then(Value::as_str) != Some("completed")
         || fields
             .get("summary")
             .and_then(Value::as_str)
             .is_none_or(|summary| summary.trim().is_empty())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "delegation-refused",
             "a completion needs completed status and a summary",
         ));
     }
     if let Some(request) = structured_request(ask)? {
         let submitted = fields.get("answer").ok_or_else(|| {
-            St3Error::new("delegation-refused", "the structured answer is missing")
+            FractalError::new("delegation-refused", "the structured answer is missing")
         })?;
         let input = crate::person_request::AnswerInput {
             id: submitted
@@ -209,13 +209,13 @@ pub fn validate_delegated_answer(
                 .map(str::to_owned),
         };
         if request.answer(Some(&input), fields["summary"].as_str().unwrap())? != *submitted {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "delegation-refused",
                 "the answer does not match the offered structured answer",
             ));
         }
     } else if fields.contains_key("answer") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "delegation-refused",
             "a free-text ask has no named answer",
         ));
@@ -769,7 +769,7 @@ pub(super) fn reassign_person_steps_tx(
     tx: &Transaction<'_>,
     origin: &str,
     input: &PersonRenameRequest,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let as_of = now_ms();
     let mut query = tx.prepare(
         "SELECT subject FROM step_runs WHERE assignee=?1 AND status IN ('ready','pending') ORDER BY subject",
@@ -814,7 +814,7 @@ pub fn project_minimal_run(
     generation: &str,
     root: &str,
     reason: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let at = claim.accepted_at_unix_ms.to_string();
     tx.execute(/* sqlite-large-value: allow-for-now lv-hca41158cfea1 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
                 VALUES(?1,?2,'ready',?3,?4,?5)", params![mission.id, mission.revision, serde_json::to_string(&mission).map_err(internal)?, claim.id, claim.store_index]).map_err(internal)?;
@@ -875,7 +875,7 @@ pub fn project_minimal_run(
     Ok(())
 }
 
-pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Error> {
+pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, FractalError> {
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-reassigned" {
         let accepted: bool = tx.query_row(

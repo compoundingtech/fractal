@@ -16,7 +16,7 @@ fn bind_work_incarnation(
     let Some(bound) = bound else { return Ok(None) };
     let seat = &bound.0.0;
     if actor.and_then(normalized_agent_actor).as_deref() != Some(seat.as_str()) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!(
                 "this harness is `{seat}` and cannot act as `{}`",
@@ -56,7 +56,7 @@ pub async fn ask_person(
         && request.new_run.is_none()
         && request.incarnation != expected
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-work-ask",
             format!(
                 "cannot ask from step `{}` with stale incarnation `{}` (current harness incarnation `{}`); refresh the claim with `work ls` and use the current incarnation, or omit --step for an independent ask",
@@ -85,7 +85,7 @@ fn complete_request_images(
         return Ok(());
     };
     let inputs: Vec<crate::model::AttachmentInput> = serde_json::from_value(inputs.clone()).map_err(|error| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "invalid-person-request",
             format!(
                 "each image names an upload, {{\"blob\":\"blob/<sha256>\",\"media_type\":\"image/png\",\"name\":\"sketch.png\"}}: {error}"
@@ -127,7 +127,7 @@ pub async fn list_work(
 ) -> Result<Json<Vec<StepRunView>>, ApiError> {
     let store = state.store.clone();
     if matches!(query.view, WorkView::Renewal) {
-        let actor = query.actor.ok_or_else(|| ApiError::bad(St3Error::new(
+        let actor = query.actor.ok_or_else(|| ApiError::bad(FractalError::new(
             "missing-work-actor", "the renewal work view requires an actor",
         )))?;
         return blocking_store(move || {
@@ -204,7 +204,7 @@ pub async fn wake_work(
     Json(request): Json<WorkWakeRequest>,
 ) -> Result<Json<MessageView>, ApiError> {
     if request.reason.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "missing-wake-reason",
             "a manual work wake needs a reason",
         )));
@@ -215,7 +215,7 @@ pub async fn wake_work(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let agent = step.assigned_to.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "work-has-no-assignee",
             format!("step run `{}` has no exact assignee to wake", step.subject),
         ))
@@ -226,7 +226,7 @@ pub async fn wake_work(
         .is_some_and(|name| !name.is_empty() && !name.contains('/'))
         || normalized_agent_actor(&request.actor).is_some();
     if !allowed {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-wake-actor",
             format!("`{}` is neither a person nor an agent", request.actor),
         )));
@@ -244,7 +244,7 @@ pub async fn wake_work(
         return Ok(Json(message));
     }
     if step.status != "ready" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "work-not-ready",
             format!(
                 "step run `{}` is `{}`, not ready",
@@ -258,7 +258,7 @@ pub async fn wake_work(
         .map_err(ApiError::internal)?
         .filter(crate::model::CurrentHarnessView::is_ready)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "assignee-harness-not-ready",
                 format!("assignee `{agent}` has no ready current harness"),
             ))
@@ -268,7 +268,7 @@ pub async fn wake_work(
         .fresh_context_ready(&step, agent, &harness.incarnation_id)
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "fresh-context-pending",
             format!(
                 "`{agent}` must start a fresh harness session before waking `{}`",
@@ -305,7 +305,7 @@ pub async fn retry_work(
     Json(request): Json<WorkRetryRequest>,
 ) -> Result<Json<MissionRunView>, ApiError> {
     if request.reason.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "missing-retry-reason",
             "a work retry needs a reason",
         )));
@@ -322,7 +322,7 @@ pub async fn retry_work(
     let actor = match request.actor.as_str() {
         actor if actor.starts_with("person/") => actor.to_owned(),
         actor => normalized_agent_actor(actor).ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "retry-authority-denied",
                 "a work retry needs a person or agent actor",
             ))
@@ -371,7 +371,7 @@ pub async fn publish_work_mission(
         .mission_output_authorized(&step.subject, &actor, request.incarnation.as_deref())
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "work-not-claimed",
             format!(
                 "`{actor}` does not hold the mission-producing step `{}` or its nested work",
@@ -392,19 +392,19 @@ pub async fn publish_work_mission(
         )
         .map_err(ApiError::internal)?
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-mission-revision",
                 "the running mission revision is unavailable",
             ))
         })?;
     let definition = crate::mission::find_step(&root, &step.step).ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-step-definition",
             format!("step `{}` is absent from its mission revision", step.step),
         ))
     })?;
     let expected_mission = definition.produces_mission.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "step-does-not-produce-mission",
             format!("step `{}` does not declare produces-mission", step.step),
         ))
@@ -412,13 +412,13 @@ pub async fn publish_work_mission(
 
     let initial = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
     if initial.missions.len() != 1 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-output-intent",
             "a mission output must contain exactly one mission",
         )));
     }
     if !mission_only_subjects(&initial) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-output-intent",
             "a mission output can contain only its mission",
         )));
@@ -431,7 +431,7 @@ pub async fn publish_work_mission(
         resolve_document_references(&request.intent.kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
     if !mission_only_subjects(&intent) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-mission-output-intent",
             "a mission output can contain only its mission",
         )));
@@ -442,7 +442,7 @@ pub async fn publish_work_mission(
         .next()
         .expect("one mission was checked");
     if mission.id != expected_mission || mission.state != crate::model::MissionState::Ready {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "wrong-mission-output",
             format!(
                 "step `{}` must publish ready mission `{expected_mission}`",
@@ -465,7 +465,7 @@ pub async fn publish_work_mission(
         .await?
         .block(&mut planned);
     if !planned.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "mission-output-blocked",
             planned.blockers.join("; "),
         )));
@@ -506,7 +506,7 @@ pub async fn move_agent_queue(
     request.actor = match request.actor.as_str() {
         actor if actor.starts_with("person/") => actor.to_owned(),
         actor => normalized_agent_actor(actor).ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "invalid-queue-move-actor",
                 "a queue move needs a person or agent actor",
             ))
@@ -573,11 +573,11 @@ pub struct WorkActionQuery {
 }
 
 impl WorkActionQuery {
-    pub(crate) fn lease_view(&self, action: &str) -> Result<bool, St3Error> {
+    pub(crate) fn lease_view(&self, action: &str) -> Result<bool, FractalError> {
         match self.view.as_deref() {
             None => Ok(false),
             Some("lease") if action == "renew" => Ok(true),
-            Some(view) => Err(St3Error::new(
+            Some(view) => Err(FractalError::new(
                 "invalid-work-view",
                 format!("`{view}` is not a view of `{action}`; only a renewal answers with `lease`"),
             )),
@@ -633,7 +633,7 @@ pub async fn post_gate_result(
     Json(request): Json<GateResultRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     if !matches!(request.verdict.as_str(), "pass" | "fail") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-gate-result",
             "a gate-result verdict must be pass or fail",
         )));
@@ -648,7 +648,7 @@ pub async fn post_gate_result(
             .latest_claim(&capability.subject, Some("gate.result"))
             .map_err(ApiError::internal)?
             .ok_or_else(|| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "used-capability",
                     "the gate-result capability was already consumed",
                 ))
@@ -663,7 +663,7 @@ pub async fn post_gate_result(
         if same {
             return Ok(Json(prior));
         }
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "used-capability",
             "the gate-result capability was already used for another verdict",
         )));
@@ -690,7 +690,7 @@ pub async fn post_gate_result(
             .evidence_exists(evidence)
             .map_err(ApiError::internal)?
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "missing-evidence",
                 format!("evidence claim `{evidence}` is not stored"),
             )));
@@ -706,7 +706,7 @@ pub async fn post_gate_result(
             .latest_claim(&capability.subject, Some("gate.result"))
             .map_err(ApiError::internal)?
             .ok_or_else(|| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "used-capability",
                     "the gate-result capability was already consumed",
                 ))
@@ -721,7 +721,7 @@ pub async fn post_gate_result(
         if same {
             return Ok(Json(prior));
         }
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "used-capability",
             "the gate-result capability was already used for another verdict",
         )));
