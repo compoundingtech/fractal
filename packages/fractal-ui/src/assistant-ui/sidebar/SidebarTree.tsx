@@ -207,6 +207,10 @@ const RowContent = React.memo(function RowContent<T extends SidebarTreeItem<T>>(
     : content
 }) as <T extends SidebarTreeItem<T>>(props: RowContentProps<T>) => React.ReactNode
 
+/** Nested grids own their keyboard navigation, even when their rows live inside a tree item. */
+export const sidebarTreeOwnsRow = (target: HTMLElement, tree: HTMLElement | null): boolean =>
+  target.getAttribute('role') === 'row' && target.closest('[role="grid"], [role="treegrid"]') === tree
+
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
   const { direction } = useLocale()
@@ -471,6 +475,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const keyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const state = navigation.current
     if (state === undefined || !(event.target instanceof HTMLElement) || event.target.getAttribute('role') !== 'row' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (!sidebarTreeOwnsRow(event.target, tree.current)) return
     const expand = direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight'
     const collapse = direction === 'rtl' ? 'ArrowRight' : 'ArrowLeft'
     if (event.key !== expand && event.key !== collapse) return
