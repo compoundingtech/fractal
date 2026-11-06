@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prove person-step attention resolution from accepted episode responses",
+  "replay": { "status": "none", "detail": "Reads durable claims for one indexed subject and exact episode without writing projections." },
+  "schema": { "status": "none", "detail": "No schema changes or new indexes." },
+  "rules": { "status": "none", "detail": "Mirrors standing response deadline semantics: timely accepted answers override defaults, late answers do not. Ask authorization uses the immutable recipient; authored steps use admitted person, delegation, or assistant-owner metadata." },
+  "compatibility": { "status": "additive", "detail": "Adds a lower-store person_step_resolution_at helper returning the actual accepted claim actor, never the current owner." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No manual action." },
+  "recovery": { "status": "none", "detail": "Missing exact episodes return no proof; no historical fallback scan." }
+}
