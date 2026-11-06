@@ -14,8 +14,8 @@ fn fixture() -> (
     apply_source(
         &store,
         r#"version 2
-agent "worker" { command "true"; workspace "/tmp" }
-agent "free" { command "true"; workspace "/tmp" }
+agent "example/worker" { command "true"; workspace "/tmp" }
+agent "example/free" { command "true"; workspace "/tmp" }
 resource "batch" { kind "custom.test.batch" }
 mission "review" state="ready" { goal "Review branch responsibility."
   loop "cycle" { max-rounds 2
@@ -95,16 +95,16 @@ fn agent_review_loop_branches_include_workers_and_reject_unknown_children() {
             .append_claim(&ClaimInput {
                 subject: branch.steps[0].subject.clone(),
                 kind: "work.progress".into(),
-                actor: Some("agent/worker".into()),
+                actor: Some("agent/example/worker".into()),
                 fields: BTreeMap::new(),
                 evidence: vec![],
                 expected_subject: None,
                 idempotency_key: Some("branch-progress".into()),
             })
             .unwrap();
-        assert_eq!(check(&store, &run, "agent/free"), "ok");
+        assert_eq!(check(&store, &run, "agent/example/free"), "ok");
         assert_eq!(
-            check(&store, &run, "agent/worker"),
+            check(&store, &run, "agent/example/worker"),
             "reviewer-not-independent"
         );
         let extra = store.mission_spec("extra", None).unwrap().unwrap();
@@ -122,7 +122,7 @@ fn agent_review_loop_branches_include_workers_and_reject_unknown_children() {
             )
             .unwrap();
         assert_eq!(
-            check(&store, &run, "agent/free"),
+            check(&store, &run, "agent/example/free"),
             "reviewer-owner-unresolved"
         );
     }
@@ -181,10 +181,10 @@ fn agent_review_loop_empty_legacy_collection_and_missing_item() {
             reconciler
                 .evaluate_loop_step(&run, &steps[0], &run.steps[0], spec)
                 .unwrap();
-            assert_eq!(check(&store, &run, "agent/free"), "ok");
+            assert_eq!(check(&store, &run, "agent/example/free"), "ok");
         } else {
             assert_eq!(
-                check(&store, &run, "agent/free"),
+                check(&store, &run, "agent/example/free"),
                 "reviewer-owner-unresolved"
             );
         }
