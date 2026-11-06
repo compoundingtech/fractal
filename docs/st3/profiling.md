@@ -1157,7 +1157,7 @@ by the same labels:
 
 | Label | What it writes |
 | --- | --- |
-| `maintenance.claim_ranges` | One page of the claim range fold: at startup, then after each store event. |
+| `maintenance.claim_ranges` | One page of the claim range fold: at startup, then after each store event. With task metrics on, the daemon's fold loop is one operation of this label and its pages are part of it. |
 | `maintenance.operation_claim_digests` | One page of the operation claim digest backfill, until it is ready. |
 
 Mailbox streams count why each full read happens as notes on `task mailbox-update`:

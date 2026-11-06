@@ -68,4 +68,10 @@ fn background_writer_pages_are_named_operations_in_the_profile() {
         );
     }
     assert_eq!(records.iter().filter(|record| record["label"] == DIGESTS).count(), 2);
+
+    // Inside the daemon's fold task (task metrics on), a page is part of that task, not another.
+    let before = records.iter().filter(|record| record["label"] == FOLD).count();
+    crate::profile::task(FOLD, || store.fold_claim_ranges().unwrap());
+    let after = slow_records().iter().filter(|record| record["label"] == FOLD).count();
+    assert_eq!(after, before + 1);
 }
