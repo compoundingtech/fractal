@@ -3,6 +3,40 @@
 use super::*;
 use fractal_schema::{custom::Manifest, notice};
 
+/// Watch the projection tables used by declaration_live, not only newly authored claims.
+/// Retirement, owned declarations and ancestor-run liveness can change without intent.desired.
+pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()> {
+    for (table, columns) in [
+        ("desired", &["subject", "kind", "body", "owner_run", "owner_generation"][..]),
+        ("mission_runs", &["id", "status", "current_generation_id", "parent_step_run", "root_run_id"][..]),
+        ("step_runs", &["subject", "status", "run_id", "generation_id"][..]),
+        ("run_generations", &["id"][..]),
+    ] {
+        for action in ["INSERT", "UPDATE", "DELETE"] {
+            let references = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
+            let relevant = if table == "desired" {
+                references.iter().map(|row| format!(
+                    "({row}.subject LIKE 'agent/%' OR {row}.kind IN ('schedule','subscription'))"
+                )).collect::<Vec<_>>().join(" OR ")
+            } else {
+                "EXISTS(SELECT 1 FROM desired WHERE kind='agent' AND owner_run IS NOT NULL AND EXISTS(
+                 SELECT 1 FROM json_each(desired.body,'$.children') WHERE json_extract(value,'$.name')='notice-runtime'))".into()
+            };
+            let changed = if action == "UPDATE" {
+                columns.iter().map(|column| format!("OLD.{column} IS NOT NEW.{column}"))
+                    .collect::<Vec<_>>().join(" OR ")
+            } else { "1".into() };
+            connection.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS notice_authority_{table}_{action} AFTER {action} ON {table}
+                 WHEN ({relevant}) AND ({changed}) BEGIN
+                 INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
+                 WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING; END;"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 /// Authority dependencies are invalidation edges, not optional projection `_basis` inputs.
 /// Retain links from all facts, including unpinned, pending and invalid facts, so a later
 /// source arrival, repair or competing creation revalidates every linked row.

@@ -36,6 +36,26 @@ fn linked(source: &ClaimRecord, control: bool) -> Value {
     fields
 }
 
+fn linked_store() -> Store {
+    let (store, source) = setup();
+    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false))).unwrap();
+    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&source, true))).unwrap();
+    for subject in [SNAPSHOT, CONTROL] {
+        assert_eq!(custom::source(&store.readers.get(), subject).unwrap().unwrap()["state"], "ready");
+    }
+    store
+}
+
+fn assert_links_fail_closed_like_rebuild(tx: &Transaction<'_>) -> Result<()> {
+    let incremental = [SNAPSHOT, CONTROL].map(|subject| custom::source(tx, subject).unwrap().unwrap());
+    for row in &incremental { assert_ne!(row["state"], "ready"); assert!(row["error"].is_string()); }
+    custom::rebuild(tx)?;
+    for (subject, before) in [SNAPSHOT, CONTROL].iter().zip(incremental) {
+        assert_eq!(custom::source(tx, subject)?.unwrap(), before);
+    }
+    Ok(())
+}
+
 #[test]
 fn notice_first_creator_forgery_and_forged_runtime_are_refused() {
     let (store, source) = setup();
@@ -147,4 +167,78 @@ fn notice_later_replicated_source_conflict_invalidates_links_like_rebuild() {
         }
         Ok(())
     }).unwrap().unwrap();
+}
+
+#[test]
+fn notice_source_registration_and_document_removal_revalidate_links_like_rebuild() {
+    for remove_document in [false, true] {
+        let store = linked_store();
+        store.seal_local_batches().unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            let registration: String = tx.query_row(
+                "SELECT claim_id FROM custom_registrations WHERE prefix=?1", [notice::SOURCE_PREFIX], |r| r.get(0),
+            )?;
+            if remove_document {
+                let reference: String = tx.query_row("SELECT json_extract(body,'$.fields.document') FROM claims WHERE id=?1",
+                    [&registration], |r| r.get(0))?;
+                let (name, hash) = split_document_ref(&reference)?;
+                assert_eq!(tx.execute("DELETE FROM documents WHERE name=?1 AND hash=?2", params![name, hash])?, 1);
+            } else {
+                assert_eq!(tx.execute("UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&registration])?, 1);
+            }
+            custom::flush(tx)?;
+            assert_links_fail_closed_like_rebuild(tx)
+        }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
+    for mutation in ["stop", "drop-role", "retire"] {
+        let store = linked_store();
+        let token = store.selected_desired_token(RUNTIME).unwrap().unwrap();
+        if mutation == "retire" {
+            store.connection.batched(|tx| -> Result<()> {
+                append_claim_tx(tx, &store.origin, RUNTIME, retirements::KIND, Some("person/example"),
+                    &json!({"fields":{"reason":"Finished","retired_by":"person/example","declaration":token,"owner_host":store.origin}}), &[], None)?;
+                // Exercise the core retirement projector without depending on the seats command crate.
+                retirements::project_subject(tx, RUNTIME)?;
+                custom::flush(tx)?;
+                assert_links_fail_closed_like_rebuild(tx)
+            }).unwrap().unwrap();
+        } else {
+            let source = if mutation == "stop" { "version 2\nstop \"agent/example/runtime\"" }
+                else { "version 2\nagent \"example/runtime\" { command \"true\"; }" };
+            let intent = crate::parse_intent(source, "example").unwrap();
+            store.apply_as(&intent, &BTreeMap::from([(RUNTIME.into(), vec![token])]),
+                mutation, Some("person/example")).unwrap();
+            store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
+        }
+    }
+}
+
+#[test]
+fn notice_owned_runtime_liveness_mutations_match_rebuild() {
+    for mutation in ["terminal", "generation", "generation-removal"] {
+        let store = linked_store();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute("INSERT INTO mission_runs VALUES('notice-owner','example/notice-owner','revision',
+                'notice-generation','revision','notice-owner',NULL,'.','person/example','{}','run','running','normal','0','0')", [])?;
+            tx.execute("INSERT INTO run_generations VALUES('notice-generation','notice-owner','revision',
+                NULL,'running','person/example','Fixture','0','0')", [])?;
+            tx.execute("UPDATE desired SET owner_run='mission-run/notice-owner',
+                owner_generation='run-generation/notice-generation' WHERE subject=?1", [RUNTIME])?;
+            custom::flush(tx)?;
+            for subject in [SNAPSHOT, CONTROL] {
+                assert_eq!(custom::source(tx, subject)?.unwrap()["state"], "ready");
+            }
+            match mutation {
+                "terminal" => { tx.execute("UPDATE mission_runs SET status='completed' WHERE id='notice-owner'", [])?; }
+                "generation" => { tx.execute("UPDATE mission_runs SET current_generation_id='missing' WHERE id='notice-owner'", [])?; }
+                _ => { tx.execute("DELETE FROM run_generations WHERE id='notice-generation'", [])?; }
+            }
+            custom::flush(tx)?;
+            assert_links_fail_closed_like_rebuild(tx)
+        }).unwrap().unwrap();
+    }
 }

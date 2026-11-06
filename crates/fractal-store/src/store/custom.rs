@@ -163,7 +163,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         }
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3f6849b90a68 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ SCHEMA)?;
-    Ok(())
+    notice_authority::create_invalidation_triggers(connection)
 }
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
     if tx
@@ -196,7 +196,6 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     })? {
         return Ok(());
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h234719a19887 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (SELECT subject FROM local_custom_dirty)", [])?;
     let registry_dirty: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject LIKE 'custom/st3-kinds/%')",
         [],
@@ -216,6 +215,9 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             tx.execute(/* sqlite-large-value: allow-for-now lv-h75147b2df5b4 owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject>=?1 AND subject<?2",params![prefix,prefix_end(&prefix)])?;
         }
     }
+    // Registry refresh can add source subjects to the dirty set. Follow their mandatory
+    // consumers only after prefix expansion, including on registration/document removal.
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h234719a19887 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (SELECT subject FROM local_custom_dirty)", [])?;
     let dirty=tx.prepare("SELECT subject FROM local_custom_dirty WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%' AND subject NOT LIKE 'custom/st3-kinds/%' ORDER BY subject")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     // Build dependency edges before checking cycles, so arrival order cannot choose health.
     for _ in 0..2 {
