@@ -123,6 +123,63 @@ function publicStrings(value, schema = behaviorSchema, field = '') {
 }
 export function checkFixture(value) { scrub(value); checkEnvelope(value); publicStrings(value); }
 
+// Rendered symbols/styles are presentation, not identity fields. Stable targets remain strict.
+export function checkGolden(value) {
+  scrub(value);
+  const keys = (object, expected) => assert.deepEqual(Object.keys(object).sort(), expected.split(' ').sort());
+  keys(value, 'format generatedBy size cases');
+  assert.equal(value.format, 'tui-sidebar-v1');
+  assert.equal(value.generatedBy, 'STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --features fractal-daemon/test-support sidebar_golden');
+  assert.deepEqual(value.size, [44, 14]);
+  const stable = id => typeof id === 'string' && (rowId.test(id) ||
+    /^group:(?:everything|kind\/(?:Agents|Missions|Terminals|Machines|Pull requests|Repositories|Resources|Unavailable))$/.test(id));
+  const rect = r => {
+    assert.ok(Array.isArray(r) && r.length === 4 && r.every(n => Number.isInteger(n) && n >= 0));
+    assert.ok(r[0] + r[2] <= 44 && r[1] + r[3] <= 14);
+  };
+  assert.ok(Array.isArray(value.cases) && value.cases.length === 11);
+  const states = new Set(['reserved', 'legacy', 'retired', 'unfocused', 'fold', 'search',
+    'scroll', 'narrow', 'zero-width', 'zero-height', 'zero']);
+  for (const item of value.cases) {
+    keys(item, 'state area arrangement selected rows cells hits contexts');
+    assert.ok(states.delete(item.state), 'unknown or repeated golden state');
+    rect(item.area);
+    assert.ok(item.arrangement === null || identities.test(item.arrangement));
+    assert.ok(item.selected === null || stable(item.selected));
+    assert.ok(Array.isArray(item.rows) && item.rows.every(stable));
+    assert.ok(Array.isArray(item.cells));
+    let screen = '', count = 0;
+    for (const run of item.cells) {
+      assert.ok(Array.isArray(run) && run.length === 2);
+      const [length, cell] = run;
+      assert.ok(Number.isInteger(length) && length > 0 && count + length <= 616);
+      assert.ok(Array.isArray(cell) && cell.length === 2);
+      assert.ok(typeof cell[0] === 'string' && cell[0].length > 0 && cell[0].length <= 8);
+      assert.ok(typeof cell[1] === 'string' && cell[1].length <= 512);
+      screen += cell[0].repeat(length); count += length;
+    }
+    assert.equal(count, 616);
+    // Inspect decoded adjacent symbols too: per-cell scrubbing alone misses split secrets.
+    scrub(screen);
+    for (const text of [screen, ...item.cells.map(run => run[1][1])]) {
+      for (const match of text.matchAll(/(?:person|agent|machine|host)\/[^\s"'·]+/g)) {
+        assert.ok(identities.test(match[0]), 'non-synthetic rendered identity');
+      }
+    }
+    assert.ok(Array.isArray(item.hits) && Array.isArray(item.contexts));
+    for (const hit of item.hits) {
+      assert.ok(Array.isArray(hit) && hit.length === 3); rect(hit[0]);
+      assert.ok(['filter', 'new', 'row', 'add', 'menu', 'drag'].includes(hit[1]));
+      assert.ok(['filter', 'new'].includes(hit[1]) ? hit[2] === null : stable(hit[2]));
+    }
+    for (const context of item.contexts) {
+      assert.ok(Array.isArray(context) && context.length === 3); rect(context[0]);
+      assert.ok(typeof context[1] === 'string' && context[1].startsWith('subject:') && rowId.test(context[1]));
+      assert.ok(Number.isInteger(context[2]) && context[2] >= 0);
+    }
+  }
+}
+
 export function checkFixtures(directory = fixtureDirectory) {
   let count = 0;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -132,7 +189,9 @@ export function checkFixtures(directory = fixtureDirectory) {
     assert.ok(/\.(?:json|snap|snapshot)$/i.test(entry.name), 'unsupported sidebar fixture file');
     const value = readJson(path);
     if (path === join(fixtureDirectory, 'behavior.schema.json')) { scrub(value); continue; }
-    checkFixture(value); count++;
+    if (entry.name === 'tui-v1.snapshot') checkGolden(value);
+    else checkFixture(value);
+    count++;
   }
   assert.ok(count > 0, 'no sidebar fixtures found');
   return count;
