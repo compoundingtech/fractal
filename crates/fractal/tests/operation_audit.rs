@@ -535,7 +535,7 @@ fn the_digest_backfill_copies_every_claim_while_claims_come_and_go_between_its_p
             [format!("custom/audit/many-{:04}", page * 5)],
         );
     });
-    assert!(pages > 2, "{pages}");
+    assert!(pages > 8, "the writes landed between {pages} pages, not between each of the first 8");
     assert_eq!(digest_differences(&store), 0);
 }
 
