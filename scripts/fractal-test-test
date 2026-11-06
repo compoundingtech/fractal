@@ -987,6 +987,22 @@ class LaneBurstTest(unittest.TestCase):
         self.assertGreaterEqual(burst.waited, 2)
         self.assertEqual(self.released.read_text(), 'released\nreleased\n')
 
+    def test_a_granted_burst_its_holder_says_is_lost_is_read_without_waiting(self):
+        for body, why in (('echo granted; read -t 0.3; echo "lost burst lane 8 cores/24.0G waits behind agent/crew/other"; exit 1',
+                           'burst lane 8 cores/24.0G waits behind agent/crew/other'),
+                          # an older holder goes on after a grant and says only that its renewal waits
+                          ('echo granted; read -t 0.3; echo "waiting burst lane 8 cores/24.0G does not fit"', 'waiting burst lane 8 cores/24.0G does not fit'),
+                          ('echo granted; read -t 0.3; echo "renewing failed" >&2; exit 3', 'its holder ended: renewing failed')):
+            with self.subTest(body=body):
+                burst, _ = self.burst(body)
+                self.assertIsNone(burst.lost())  # still held: nothing to read, and no wait for it
+                deadline = time.monotonic() + 10
+                while (seen := burst.lost()) is None:
+                    self.assertLess(time.monotonic(), deadline, 'timed out')
+                    time.sleep(0.05)
+                self.assertEqual(seen, why)
+                burst.release()
+
     def test_a_run_killed_outright_still_gives_its_burst_back(self):
         env = self.fractal('echo granted')
         script = (f'import importlib.machinery, importlib.util, os\n'
@@ -4212,6 +4228,20 @@ finally:
         self.assertEqual(order, [('tree', None), ('burst', (8, '24G'), 600.0), ('released',)])
         record, = self.runs()
         self.assertEqual((record['burst'], record['burst_wait_s']), ({'cores': 8, 'memory': '24G'}, 42))
+
+    def test_a_run_whose_burst_was_lost_while_it_held_it_fails_and_says_so(self):
+        self.commit('b.txt', 'two')
+
+        def poll(burst, start=False, timeout=0.0):
+            burst.granted = burst.size
+            return True
+
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test.Burst, 'poll', poll), \
+                mock.patch.object(st_test.Burst, 'release', lambda burst: None), mock.patch.object(st_test, 'burst_size', return_value=(8, '24G')), \
+                mock.patch.object(st_test.Burst, 'lost', lambda burst: 'burst lane 8 cores/24.0G waits behind agent/crew/other'):
+            code, out, err = self.run_st_test(command=['sh', '-c', 'echo ran'], extra_env={'ST_EVIDENCE_GOVERN': 'off'})
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'lane-burst +LOST .*the lane burst 8 cores/24G was lost while the run held it: burst lane 8 cores/24.0G waits behind')
 
     def test_a_check_killed_at_its_lane_s_memory_limit_says_so_in_the_summary(self):
         self.commit('b.txt', 'two')
