@@ -2130,7 +2130,6 @@ libc.pthread_exit(None)
     #[cfg(target_os = "linux")]
     #[test]
     fn a_kill_before_the_exec_has_joined_its_scope_ends_it() {
-        use std::os::unix::fs::PermissionsExt as _;
         if crate::isolation_mode() != crate::Isolation::Scope {
             eprintln!("skipped: no systemd user scopes");
             return;
@@ -2145,13 +2144,11 @@ libc.pthread_exit(None)
         let systemd_run = crate::resolve_executable("systemd-run", &environment).unwrap();
         let bin = root.path().join("bin");
         fs::create_dir(&bin).unwrap();
-        let shim = bin.join("systemd-run");
-        fs::write(
-            &shim,
-            format!("#!/bin/sh\nexec '{}' --property=After={} \"$@\"\n", systemd_run.display(), gate.0),
-        )
-        .unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::fake_executable(
+            &bin,
+            "systemd-run",
+            &format!("#!/bin/sh\nexec '{}' --property=After={} \"$@\"\n", systemd_run.display(), gate.0),
+        );
         let path = format!("{}:{}", bin.display(), environment["PATH"]);
         environment.insert("PATH".into(), path);
         let generation = runtime

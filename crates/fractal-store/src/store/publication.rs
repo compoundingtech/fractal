@@ -3,7 +3,7 @@ use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
 
-pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
+pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), FractalError> + Sync;
 
 #[derive(Default)]
 pub struct CommitChecks<'a> {
