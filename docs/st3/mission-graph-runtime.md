@@ -522,7 +522,7 @@ The feedback document is immutable. The next round receives its exact reference 
 
 After the exit gates answer, the round writes a second feedback document, `doc/loop-feedback/<loop>/<round>/outcome`, and the next round receives that one. It records the round's keep or discard decision, its metrics, and what each `until` gate answered (`passed`, `failed` with its reason, `not-yet`, or `pending`), plus the names of the gates that did not pass. A round whose exit gates are still running keeps the first document until they answer. The outcome document holds neither the round number nor the child run, so two rounds that end the same way store identical content.
 
-Publishing an inline nested loop rejects owning paths that cannot form legacy feedback document names (including `@` or `..`) or whose longest round document exceeds the 512-byte claim-subject limit; no name is truncated.
+Publishing an inline nested loop rejects owning paths that cannot form legacy feedback document names (including `@` or `..`) or whose longest round document reference (`name@` plus its SHA-256 hex digest) exceeds the 512-byte claim-subject limit; no name is truncated.
 
 A metric has `direction="higher"` or `direction="lower"`. Its value must be a finite number.
 

@@ -34694,7 +34694,7 @@ mission "collision" state="ready" {
                 .is_empty()
         );
         let id = "x".repeat(150);
-        let leaf = "y".repeat(136);
+        let leaf = "y".repeat(71);
         let source = format!(
             r#"version 2
 mission "long" state="ready" {{ goal "Long.";
@@ -34713,11 +34713,18 @@ mission "long" state="ready" {{ goal "Long.";
             reconciler.reconcile_once().unwrap();
         }
         let generation = long.generation.strip_prefix("run-generation/").unwrap();
-        // The unchanged legacy writer admits this boundary name through real doc.bound claims.
+        // The unchanged legacy writer admits both the name and its boundary name@hash reference.
         let name =
             format!("doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/1/outcome");
-        assert_eq!(name.len(), 512);
-        assert!(store.latest_document_hash(&name).unwrap().is_some());
+        let hash = store.latest_document_hash(&name).unwrap().unwrap();
+        assert_eq!(format!("{name}@{hash}").len(), 512);
+        let subject = format!("loop-run/{generation}/{id}/a/{id}/b/{leaf}/c/repeat");
+        assert!(
+            !store
+                .claims_for(&subject, Some("loop.round-result"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

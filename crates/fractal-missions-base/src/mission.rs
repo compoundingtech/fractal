@@ -2103,8 +2103,11 @@ fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), St3Error> {
     };
     smallclaims::store::validate_document_name(&name)
         .map_err(|error| invalid(error.to_string()))?;
-    if name.len() > 512 || name.chars().any(char::is_control) {
-        return Err(invalid("feedback/outcome document must fit the 512-byte claim-subject limit without control characters".into()));
+    // Writers return name@hex(SHA-256); claim references include that entire string.
+    let reference_len =
+        name.len() + 1 + 2 * <Sha256 as sha2::digest::OutputSizeUser>::output_size();
+    if reference_len > 512 || name.chars().any(char::is_control) {
+        return Err(invalid("feedback/outcome document reference must fit the 512-byte claim-subject limit without control characters".into()));
     }
     Ok(())
 }
@@ -3165,13 +3168,15 @@ mod tests {
             assert!(error.to_string().contains(&format!("{id}/inner/repeat")));
         }
         let id = "x".repeat(150);
-        let leaf = "y".repeat(138);
+        let leaf = "y".repeat(72);
         let source = format!(
             r#"mission "bad" state="ready" {{ goal "Bad.";
-          step "{id}" {{ mission "a" {{ goal "A."; step "{id}" {{ mission "b" {{ goal "B.";
-            step "{leaf}" {{ mission "c" {{ goal "C."; loop "repeat" {{ max-rounds 1;
-              round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}; }}; }}; }}; }}; }}
-        }}"#
+              step "{id}" {{ mission "a" {{ goal "A.";
+                step "{id}" {{ mission "b" {{ goal "B.";
+                  step "{leaf}" {{ mission "c" {{ goal "C.";
+                    loop "repeat" {{ max-rounds 1; round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}
+                  }}; }}; }}; }}; }}; }}
+            }}"#
         );
         let error = super::parse_missions(&source.parse().unwrap(), "node").unwrap_err();
         assert!(error.to_string().contains("512-byte claim-subject limit"));
