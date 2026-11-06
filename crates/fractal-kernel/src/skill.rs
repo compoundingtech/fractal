@@ -219,6 +219,9 @@ mod tests {
         let rule = channel.trim_end_matches('.');
         assert!(skill.contains(rule), "{rule}");
         assert!(SKILL.contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION));
+        assert!(!SKILL.contains("reach a person by printing in the conversation"));
+        assert!(SKILL.contains("Print factual replies to a person in the conversation"));
+        assert!(SKILL.contains("every new question or decision for the person goes through a native `work ask`"));
         assert!(!SKILL.contains("NO REPLY"));
         assert!(!SKILL.contains("people read st replies in st"));
     }
