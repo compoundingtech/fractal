@@ -1,5 +1,5 @@
 use super::*;
-use crate::OwnerListsStore;
+use crate::{OwnerListsStore, PersonWorkStore};
 
 async fn control(state: &AppState, actor: &str, request: ActionRequest) -> Result<Json<Value>, ApiError> {
     let session = ClientSession::for_tests_scoped("client/attention-fixture", actor, &["control.attention"]);
