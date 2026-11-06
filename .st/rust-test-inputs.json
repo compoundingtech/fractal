@@ -327,6 +327,9 @@
     "scripts/ci-test-paths.rs"
    ]
   },
+  "fractal-socket-discovery": {
+   "extra": []
+  },
   "fractal-storage-version": {
    "extra": []
   },
