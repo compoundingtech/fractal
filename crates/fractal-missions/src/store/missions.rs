@@ -6,7 +6,7 @@ use fractal_store::store::identities::resolve_reference_conn;
 
 mod run_review;
 #[doc(hidden)]
-pub use run_review::validate_run_reviewer;
+pub use run_review::{validate_run_reviewer, validate_run_reviewer_assignment};
 
 /// The batches one resource observation seals its claims in. A claim whose retention class
 /// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
