@@ -53,7 +53,7 @@ fn preparation_fence_accepts_only_exact_native_queue_notifier_definitions() {
 
 // Use the public client admission and the same local AUTOINCREMENT publication as log_diet.
 // Warm up its actor key before pinning so a key-creation failure cannot imitate the lock.
-fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {
+fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), FractalError> {
     let subject = "agent/invented.sequence-writer";
     store.append_client_claim_outcome(&ClaimInput {
         subject: subject.into(),
@@ -80,7 +80,7 @@ fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool
     })
 }
 
-fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {
+fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), FractalError> {
     // A separate thread exercises an unrelated caller, not a write through the pinned reader.
     // Join before returning; no task or guard escapes on the error path.
     std::thread::scope(|scope| {

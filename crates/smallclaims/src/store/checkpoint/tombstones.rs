@@ -53,9 +53,9 @@ impl CheckpointManifest {
     pub fn append(
         &mut self,
         page: CheckpointManifestPage,
-    ) -> Result<Option<CheckpointManifestCursor>, St3Error> {
+    ) -> Result<Option<CheckpointManifestCursor>, FractalError> {
         if page.checkpoint != self.checkpoint || page.cut_unix_ms != self.cut_unix_ms {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-manifest-invalid",
                 format!(
                     "a manifest page for `{}` does not continue `{}`",
@@ -69,8 +69,8 @@ impl CheckpointManifest {
     }
 }
 
-pub fn invalid_manifest(message: impl Into<String>) -> St3Error {
-    St3Error::new("checkpoint-manifest-invalid", message)
+pub fn invalid_manifest(message: impl Into<String>) -> FractalError {
+    FractalError::new("checkpoint-manifest-invalid", message)
 }
 
 /// Check a manifest against the `drop_digest` that a stable checkpoint's participants verified,
@@ -79,7 +79,7 @@ pub fn invalid_manifest(message: impl Into<String>) -> St3Error {
 pub fn verify_checkpoint_manifest(
     manifest: &CheckpointManifest,
     expected_drop_digest: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mut envelopes = BTreeSet::new();
     for envelope in &manifest.envelopes {
         if envelope.accepted_at_unix_ms >= manifest.cut_unix_ms {
@@ -127,7 +127,7 @@ pub fn verify_checkpoint_manifest(
     }
     let digest = drop_digest(&manifest.envelopes, &manifest.claims);
     if digest != expected_drop_digest {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "checkpoint-manifest-mismatch",
             format!(
                 "the manifest of `{}` does not match the drop its participants verified",

@@ -506,7 +506,7 @@ fn concurrent_default_v1_and_explicit_v2_creates_preserve_legacy_in_both_orders(
         for target in [&forward, &reverse] {
             assert_eq!(target.arrangement(CONTAINER, u64::MAX).unwrap().unwrap(), expected);
             let read_error = target.ordered_memberships(CONTAINER, u64::MAX, None, 1000).unwrap_err();
-            assert_eq!(read_error.downcast_ref::<St3Error>().unwrap().code, "invalid-arrangement-operations");
+            assert_eq!(read_error.downcast_ref::<FractalError>().unwrap().code, "invalid-arrangement-operations");
             assert_eq!(target.ordered_membership_count(CONTAINER).unwrap(), 0);
             assert_eq!(head(target, SEAT_A).1, placed.id, "v2 raw authority remains retained but inactive");
             assert_eq!(target.edit_ordered_memberships(
@@ -648,7 +648,7 @@ fn creation_repair_invalidates_even_when_the_membership_count_row_disappears() {
         // The surviving rename does not declare a container after its create is repaired.
         // Strict reads must refuse the unknown ID, not return an empty membership page.
         let error = receiver.ordered_memberships(CONTAINER, repaired, None, 1000).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "not-found");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "not-found");
         assert_eq!(layout_digests(&receiver), digests);
         assert_eq!(receiver.ordered_membership_state(CONTAINER).unwrap().changed_index, repaired);
     }
@@ -725,14 +725,14 @@ fn repairing_legacy_creation_releases_only_unrepaired_v2_authority() {
     sync(&legacy, &receiver);
     assert_eq!(receiver.arrangement(CONTAINER, u64::MAX).unwrap().unwrap()["body"]["version"], 1);
     let read_error = receiver.ordered_memberships(CONTAINER, u64::MAX, None, 1000).unwrap_err();
-    assert_eq!(read_error.downcast_ref::<St3Error>().unwrap().code, "invalid-arrangement-operations");
+    assert_eq!(read_error.downcast_ref::<FractalError>().unwrap().code, "invalid-arrangement-operations");
     assert_eq!(receiver.ordered_membership_count(CONTAINER).unwrap(), 0);
     repair(&receiver, &original, &replacement, "repair-legacy-creation");
     let still_legacy = receiver.arrangement(CONTAINER, u64::MAX).unwrap().unwrap();
     assert_eq!(still_legacy["body"]["version"], 1, "unrepaired placements independently prevent implicit migration");
     assert_eq!(still_legacy["body"]["placements"][SEAT_A]["value"]["key"], "a0");
     let read_error = receiver.ordered_memberships(CONTAINER, u64::MAX, None, 1000).unwrap_err();
-    assert_eq!(read_error.downcast_ref::<St3Error>().unwrap().code, "invalid-arrangement-operations");
+    assert_eq!(read_error.downcast_ref::<FractalError>().unwrap().code, "invalid-arrangement-operations");
     assert_eq!(receiver.ordered_membership_count(CONTAINER).unwrap(), 0);
     repair(&receiver, &legacy_placement, &replacement, "repair-legacy-placement");
     let expected = receiver.arrangement(CONTAINER, u64::MAX).unwrap().unwrap();

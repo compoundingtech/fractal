@@ -66,7 +66,7 @@ pub trait AttentionStore {
             subject: &str,
             reason: &str,
             idempotency_key: &str,
-        ) -> Result<AttentionRequestView, St3Error>;
+        ) -> Result<AttentionRequestView, FractalError>;
     fn attention_requests(
             &self,
             person: Option<&str>,
@@ -208,7 +208,7 @@ impl AttentionStore for Store {
             subject: &str,
             reason: &str,
             idempotency_key: &str,
-        ) -> Result<AttentionRequestView, St3Error> {
+        ) -> Result<AttentionRequestView, FractalError> {
         let subject = if subject.starts_with("attention/") {
             subject.to_owned()
         } else {
@@ -218,7 +218,7 @@ impl AttentionStore for Store {
             .attention_request(&subject)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-attention-request",
                     format!("attention request `{subject}` does not exist"),
                 )
@@ -238,7 +238,7 @@ impl AttentionStore for Store {
         })?;
         self.attention_request(&subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention resolution was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention resolution was not stored"))
     }
 
     fn attention_requests(

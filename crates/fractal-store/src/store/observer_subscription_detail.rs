@@ -56,7 +56,7 @@ impl DetailBudget {
 
     pub fn charge(&mut self, bytes: i64) -> Result<()> {
         let Some(bytes) = usize::try_from(bytes).ok().filter(|bytes| *bytes <= self.0) else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "projection-detail-too-large",
                 "observer/subscription detail source exceeds the 256 KiB read budget",
             )
@@ -236,7 +236,7 @@ impl Store {
 
 fn valid_metadata(valid: bool) -> Result<()> {
     if !valid {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "projection-detail-invalid-source",
             "observer/subscription detail has invalid stored metadata types",
         )
@@ -268,7 +268,7 @@ fn decode_time(value: String, column: usize) -> rusqlite::Result<u128> {
 fn detail_read_error(error: rusqlite::Error) -> anyhow::Error {
     match error {
         rusqlite::Error::FromSqlConversionFailure(..) | rusqlite::Error::InvalidColumnType(..) => {
-            St3Error::new(
+            FractalError::new(
                 "projection-detail-invalid-source",
                 "observer/subscription detail has invalid stored encoding or types",
             )

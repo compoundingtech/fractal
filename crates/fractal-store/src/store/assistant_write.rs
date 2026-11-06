@@ -11,15 +11,15 @@ pub struct AssistantWriteAuthorization {
     pub recipient: Option<String>,
 }
 
-pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, St3Error> {
+pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, FractalError> {
     let granted = authorized_grant(connection, origin, authorization)?;
     granted.body["fields"]["grant_id"].as_str().filter(|id| id.starts_with("assistant-grant/") && id.len() > "assistant-grant/".len())
-        .map(str::to_owned).ok_or_else(|| St3Error::new("forbidden", "assistant grant identity is absent"))
+        .map(str::to_owned).ok_or_else(|| FractalError::new("forbidden", "assistant grant identity is absent"))
 }
 
-pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
-    let denied = || St3Error::new("forbidden", "assistant write authorization changed or expired before commit");
-    let claim = |kind: &str| -> Result<Option<ClaimRecord>, St3Error> {
+pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, FractalError> {
+    let denied = || FractalError::new("forbidden", "assistant write authorization changed or expired before commit");
+    let claim = |kind: &str| -> Result<Option<ClaimRecord>, FractalError> {
         connection.query_row(/* sqlite-large-value: allow-for-now lv-hd82c937baff5 owner=fractal_store::store::assistant_write TODO=trace-statement-and-value-representation */ &latest_claim_of_kind_query(),
             params![authorization.grant_subject,kind],claim_from_row).optional().map_err(internal)
     };
@@ -38,29 +38,29 @@ pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &A
     { return Err(denied()); }
     if authorization.scope == "write.assistant.messages" {
         let recipient = authorization.recipient.as_deref().filter(|id| id.starts_with("agent/"))
-            .ok_or_else(|| St3Error::new("forbidden", "assistant messages require an existing agent recipient"))?;
+            .ok_or_else(|| FractalError::new("forbidden", "assistant messages require an existing agent recipient"))?;
         if current_desired_row(connection, recipient).map_err(internal)?.is_none_or(|row| row.kind != "agent") {
-            return Err(St3Error::new("forbidden", "assistant messages require an existing agent recipient"));
+            return Err(FractalError::new("forbidden", "assistant messages require an existing agent recipient"));
         }
     }
     Ok(granted)
 }
 
 /// Local generic writers cannot assert assistant identity or server-owned provenance.
-pub fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&str>, has_provenance: bool) -> Result<(), St3Error> {
+pub fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&str>, has_provenance: bool) -> Result<(), FractalError> {
     if kind == "message.sent"
         && (actor.is_some_and(|actor| actor.starts_with("assistant/"))
             || from.is_some_and(|from| from.starts_with("assistant/"))
             || has_provenance)
     {
-        return Err(St3Error::new("assistant-send-refused", "assistant messages require the authorized native assistant path"));
+        return Err(FractalError::new("assistant-send-refused", "assistant messages require the authorized native assistant path"));
     }
     Ok(())
 }
 
 /// Replication already authenticates the originating writer. Do not reauthorize an old
 /// committed message against a receiver's missing, expired or revoked local grant.
-pub fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), St3Error> {
+pub fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), FractalError> {
     if kind != "message.sent" { return Ok(()); }
     if ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().all(|key| fields.get(*key).is_none()) {
         return refuse_unverified(kind, actor, fields["from"].as_str(), false);
@@ -73,7 +73,7 @@ pub fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> R
             session.strip_prefix("assistant/chatgpt/session/") == fields["assistant_grant_id"].as_str()
         })
     {
-        return Err(St3Error::new("assistant-send-refused", "replicated assistant provenance is inconsistent"));
+        return Err(FractalError::new("assistant-send-refused", "replicated assistant provenance is inconsistent"));
     }
     Ok(())
 }

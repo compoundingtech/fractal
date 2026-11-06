@@ -103,7 +103,7 @@ pub(super) async fn edit_memberships(
     // Validate the original wire value before serde can normalize an omitted bucket
     // into an explicit root position.
     fractal_schema::ordered_membership::operations(&parameters.subject, &fields)
-        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
+        .map_err(|error| ApiError::bad(FractalError::new(error.code, error.message)))?;
     let input = ClaimInput {
         subject: parameters.subject,
         kind: "ordered-membership.edited".into(),

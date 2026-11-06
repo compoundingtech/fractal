@@ -6135,7 +6135,7 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
     record_invalid_replica_envelope(
         &target.connection.lock().unwrap(),
         &legacy,
-        &St3Error::new("claim-hash-mismatch", "failed verification"),
+        &FractalError::new("claim-hash-mismatch", "failed verification"),
     )
     .unwrap();
     assert_eq!(target.replica_records(true).unwrap().len(), 1);
