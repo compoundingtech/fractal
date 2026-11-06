@@ -135,11 +135,11 @@ mod tests {
     fn revision_requires_original_reviewer_generation_and_accepted_preview() {
         let conn = connection();
         let source = "revision-proposal/p1";
-        claim(&conn, "created", source, "revision-proposal.created", "person/requester", json!({"source_generation":"run-generation/g1","preview_hash":"p1","reviewers":["person/ada","person/bob"]}));
+        claim(&conn, "created", source, "revision-proposal.created", "person/requester", json!({"source_generation":"run-generation/g1","preview_hash":"p1","reviewers":["person/ada","person/blair"]}));
         claim(&conn, "approved", source, "revision-proposal.approved", "person/ada", json!({"reviewer":"person/ada","preview_hash":"p1","all_approved":false}));
         let proof = revision_resolution_at(&conn, source, "person/ada", "run-generation/g1:p1").unwrap().unwrap();
         assert_eq!((proof.claim_id.as_str(), proof.resolved_by.as_str()), ("approved","person/ada"));
-        for (person, episode) in [("person/bob","run-generation/g1:p1"),("person/foreign","run-generation/g1:p1"),("person/ada","run-generation/g2:p1"),("person/ada","run-generation/g1:stale")] {
+        for (person, episode) in [("person/blair","run-generation/g1:p1"),("person/intruder","run-generation/g1:p1"),("person/ada","run-generation/g2:p1"),("person/ada","run-generation/g1:stale")] {
             assert!(revision_resolution_at(&conn, source, person, episode).unwrap().is_none());
         }
         assert!(revision_resolution_at(&conn, "revision-proposal/foreign", "person/ada", "run-generation/g1:p1").unwrap().is_none());
@@ -162,7 +162,7 @@ mod tests {
             for (source,person,episode) in [(source,"person/other","preview-1"),(source,"person/ada","stale"),("planning-session/other","person/ada","preview-1")] {
                 assert!(launch_resolution_at(&conn, source, person, episode).unwrap().is_none());
             }
-            conn.execute("UPDATE claims SET actor='person/foreign' WHERE id='preview'", []).unwrap();
+            conn.execute("UPDATE claims SET actor='person/intruder' WHERE id='preview'", []).unwrap();
             assert!(launch_resolution_at(&conn, source, "person/ada", "preview-1").unwrap().is_none());
             conn.execute("UPDATE claims SET actor='person/ada',subject='planning-session/foreign' WHERE id='preview'", []).unwrap();
             assert!(launch_resolution_at(&conn, source, "person/ada", "preview-1").unwrap().is_none());
