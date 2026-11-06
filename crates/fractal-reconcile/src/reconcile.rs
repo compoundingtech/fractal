@@ -4038,7 +4038,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .clear();
         for subject in desired.iter().filter(|subject| subject.kind == "agent"
             && subject.member.as_ref().is_some_and(|member| member.host == self.host)) {
-            self.isolate("stage/launch-inputs", &subject.subject, || self.watch_launch_inputs(subject));
+            self.isolate(&format!("stage/launch-inputs/{}", subject.subject), &daemon, || self.watch_launch_inputs(subject));
         }
         self.isolate("stage/missions", &daemon, || self.evaluate_mission_runs());
         self.release_unused_file_watchers();
@@ -18997,20 +18997,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             wake
         });
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
+        let watch_error = std::cell::RefCell::new(None); // Identity errors stay diagnostic; subscriptions fault.
         let (result, reads) = smallclaims::touched::record(|| {
             smallclaims::touched::note_read(|| "launch-identity".into());
             smallclaims::touched::note_read(|| "kind:intent.desired".into());
             crate::contract::declared_ready_inputs(&self.store, subject, &|path| {
                 let key = format!("launch-input/{}", path.display());
                 smallclaims::touched::note_read(|| key.clone());
-                self.ensure_file_watch(&key, path)
+                self.ensure_file_watch(&key, path).inspect_err(|error| *watch_error.borrow_mut() = Some(error.to_string()))
             })
         });
         self.incremental.evaluated(&item, reads, None);
         if matches!(&result, Ok(None)) || before != self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire) {
             self.incremental.touch("launch-identity");
         }
-        result.map(|_| ())
+        watch_error.into_inner().map_or(Ok(()), |error| Err(anyhow::anyhow!(error)))
     }
 
     fn ensure_file_watch(&self, subject: &str, path: &Path) -> Result<()> {
@@ -26944,10 +26945,9 @@ agent "import/omp/fixture" {{
                 &provider, &|_| unreachable!(), &|path| reconciler.ensure_file_watch(
                     &format!("launch-input/{}", path.display()), path));
             assert_eq!(result.is_ok(), retarget);
-            let key = format!("launch-input/{}", interpreter.display());
             if retarget { assert!(reconciler.file_watchers.lock().unwrap().contains_key(
                 &format!("launch-input/{}", target.display()))); }
-            reconciler.incremental.evaluated("probe", BTreeSet::from([key]), None);
+            reconciler.incremental.evaluated("probe", BTreeSet::from([format!("launch-input/{}", interpreter.display())]), None);
             if retarget {
                 let replacement = root.path().join("replacement");
                 std::os::unix::fs::symlink(&provider, &replacement).unwrap();
