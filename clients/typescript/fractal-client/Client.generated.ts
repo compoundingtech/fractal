@@ -133,6 +133,7 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
+    subscribeOrderedMembershipsCollection(id: string, person: string, subject: ArrangementId, limit?: number): void;
     subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
@@ -173,6 +174,117 @@ export function applyWindow(window: CollectionWindow<{ id: string }> | undefined
     const items = frame.order.flatMap(id => rows.get(id) ?? []);
     const next = { items, hasMore: frame.has_more, snapshot: frame.snapshot };
     return frame.collection === 'ordered-memberships' ? { ...next, membership: frame.membership } : next;
+}
+
+type MembershipFrontier = { scope: string; index: number; count: number };
+export type MembershipPageResult = { kind: 'continue' | 'restart' | 'ignored' } | { kind: 'complete'; items: readonly OrderedMembership[] };
+/** Subscribe with collection-v1 before beginning an attempt. Feed every received metadata frame
+ * and page here; restart means discard the attempt, never retry its continuation cursor. */
+export class MembershipPaging {
+    private stream: MembershipFrontier | undefined;
+    private attempt: MembershipFrontier | undefined;
+    private accepted: MembershipFrontier | undefined;
+    private rows: OrderedMembership[] = [];
+    private ids = new Set<string>();
+    private generation = Symbol();
+    private encoder = new TextEncoder();
+    private precedes(left: OrderedMembership, right: OrderedMembership): boolean {
+        const a = [left.position.bucket ?? '', left.position.key, left.member], b = [right.position.bucket ?? '', right.position.key, right.member];
+        for (let field = 0; field < a.length; field++) {
+            if (a[field] === b[field]) continue;
+            const x = this.encoder.encode(a[field]), y = this.encoder.encode(b[field]);
+            for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] < y[i];
+            return x.length < y.length;
+        }
+        return false;
+    }
+    readonly person: string;
+    readonly container: ArrangementId;
+    constructor(person: string, container: ArrangementId) { this.person = person; this.container = container; }
+    begin(): symbol { this.generation = Symbol(); this.attempt = undefined; this.rows = []; this.ids.clear(); return this.generation; }
+    reject(code: string): 'restart' | 'refused' {
+        this.begin();
+        return code === 'membership-collection-changed' || code === 'membership-frontier-reset' ? 'restart' : 'refused';
+    }
+    private frontier(snapshot: Snapshot, contract: unknown, membership?: OrderedMembershipState): MembershipFrontier {
+        if (contract !== 'collection-v1' || !membership?.epoch || membership.container !== this.container
+            || !Number.isSafeInteger(membership.changed_index) || membership.changed_index < 0
+            || !Number.isSafeInteger(membership.live_count) || membership.live_count < 0
+            || !Number.isSafeInteger(snapshot.store_index) || membership.changed_index > snapshot.store_index) {
+            throw new Error('membership-frontier-inconsistent');
+        }
+        return { scope: JSON.stringify([snapshot.host_id, snapshot.projection_version, this.person, membership.container, membership.epoch]),
+            index: membership.changed_index, count: membership.live_count };
+    }
+    private equalCount(a: MembershipFrontier, b: MembershipFrontier): void {
+        if (a.index === b.index && a.count !== b.count) throw new Error('membership-frontier-inconsistent');
+    }
+    observeStream(frame: OrderedMembershipFrame): 'current' | 'ignored' | 'restart' {
+        try { return this.observe(frame); } catch (error) { this.begin(); throw error; }
+    }
+    private observe(frame: OrderedMembershipFrame): 'current' | 'ignored' | 'restart' {
+        const next = this.frontier(frame.snapshot, frame.paging_contract, frame.membership);
+        const current = this.attempt ?? this.accepted;
+        if (current?.scope === next.scope) {
+            this.equalCount(current, next);
+            if (next.index < current.index) return 'ignored'; // An old held window cannot roll back a completed page.
+        }
+        if (this.stream?.scope === next.scope) {
+            this.equalCount(this.stream, next);
+            if (next.index < this.stream.index) return 'ignored';
+        }
+        this.stream = next;
+        if (current && (current.scope !== next.scope || current.index < next.index)) {
+            this.accepted = undefined; this.begin(); return 'restart';
+        }
+        return 'current';
+    }
+    acceptPage(snapshot: Snapshot, page: OrderedMembershipPage, generation: symbol): MembershipPageResult {
+        if (generation !== this.generation) return { kind: 'ignored' };
+        try { return this.stage(snapshot, page); } catch (error) { this.begin(); throw error; }
+    }
+    private stage(snapshot: Snapshot, page: OrderedMembershipPage): MembershipPageResult {
+        const next = this.frontier(snapshot, page.paging_contract, page.membership);
+        if ((page.filters.person !== undefined && page.filters.person !== this.person)
+            || (page.filters.subject !== undefined && page.filters.subject !== this.container)) {
+            this.begin(); return { kind: 'restart' };
+        }
+        if (this.accepted?.scope === next.scope) {
+            this.equalCount(this.accepted, next);
+            if (this.accepted.index > next.index) { this.begin(); return { kind: 'restart' }; }
+        }
+        else if (this.accepted) { this.accepted = undefined; this.begin(); return { kind: 'restart' }; }
+        if (this.attempt) {
+            if (this.attempt.scope !== next.scope || this.attempt.index !== next.index) {
+                this.begin(); return { kind: 'restart' };
+            }
+            this.equalCount(this.attempt, next);
+        }
+        if (this.stream) {
+            if (this.stream.scope !== next.scope) {
+                this.stream = undefined; this.begin(); return { kind: 'restart' };
+            }
+            this.equalCount(this.stream, next);
+            if (this.stream.index > next.index) { this.begin(); return { kind: 'restart' }; }
+        }
+        this.attempt = next;
+        for (const row of page.items) {
+            if (row.container !== this.container || row.id !== row.member || this.ids.has(row.member)
+                || (this.rows.length > 0 && !this.precedes(this.rows[this.rows.length - 1], row))) {
+                throw new Error('membership-frontier-inconsistent');
+            }
+            this.ids.add(row.member); this.rows.push(row);
+        }
+        if (this.rows.length > next.count) throw new Error('membership-frontier-inconsistent');
+        if (page.page.has_more) {
+            if (!page.page.next_cursor || page.items.length === 0) throw new Error('invalid-membership-cursor');
+            return { kind: 'continue' };
+        }
+        if (this.rows.length !== next.count) throw new Error('membership-frontier-inconsistent');
+        this.accepted = next;
+        const items = [...this.rows]; this.begin();
+        return { kind: 'complete', items };
+    }
 }
 
 function defaultTerminalSocket(url: string, protocols: string[], headers: Record<string, string>): TerminalSocket {
@@ -317,6 +429,18 @@ export class FractalClient {
             || parent.slice(36, 52) === '0000000000000000') return;
         headers.traceparent = parent;
         if (context.tracestate !== undefined) headers.tracestate = context.tracestate;
+    }
+
+    /** Explicit collection-v1 page; use MembershipPaging to join it to a subscribed window. */
+    async arrangementsMembershipsCollection(personName: string, uuid: string, person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<OrderedMembershipPage>> {
+        const response = await this.get<OrderedMembershipPage>(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}/memberships`
+            + query({ ...options, person, paging_contract: 'collection-v1' }), undefined, requestOptions);
+        const membership = response.value.membership;
+        if (response.value.paging_contract !== 'collection-v1' || !membership?.epoch
+            || !Number.isSafeInteger(membership.changed_index) || !Number.isSafeInteger(membership.live_count)) {
+            throw new Error('membership-frontier-inconsistent');
+        }
+        return response;
     }
 
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }, options: RequestOptions = {}, readAuthorization?: { header: string; budget: number }): Promise<EnvelopeOf<T>> {
@@ -637,6 +761,7 @@ export class FractalClient {
             subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
+            subscribeOrderedMembershipsCollection: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit, paging_contract: 'collection-v1'}),
             subscribe: (id, collection, limit, filters = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.
                 if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
