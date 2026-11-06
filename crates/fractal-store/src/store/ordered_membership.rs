@@ -6,6 +6,34 @@ use fractal_schema::ordered_membership::{self as schema, Operation, Position};
 
 pub const MAX_LIVE_MEMBERS: usize = 4096;
 const VERSION_KEY: &str = "ordered_membership_heads_v1";
+const GENERATION_KEY: &str = "local_ordered_membership_generation";
+
+/// One bounded read cut; generation is local maintenance identity, not replicated authority.
+#[derive(Debug)]
+pub struct MembershipPage {
+    pub store_index: u64,
+    pub generation: u64,
+    pub state: schema::State,
+    pub items: Vec<Value>,
+}
+
+fn generation_at(connection: &Connection) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1),0)",
+        [GENERATION_KEY], |row| row.get(0),
+    )?)
+}
+
+fn advance_generation(transaction: &Transaction<'_>) -> Result<()> {
+    let next = generation_at(transaction)?.checked_add(1)
+        .and_then(|next| i64::try_from(next).ok())
+        .ok_or_else(|| anyhow::anyhow!("ordered membership generation exhausted"))?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h3b5ec217e92b owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![GENERATION_KEY, next],
+    )?;
+    Ok(())
+}
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5471ad779977 owner=fractal_store::store::ordered_membership TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS ordered_membership_heads (
     container TEXT NOT NULL, member TEXT NOT NULL, position TEXT,
@@ -256,6 +284,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
 /// A repair can remove the final count row. Keep its invalidation watermark locally,
 /// independent of rebuildable shared rows and their surviving claims' arrival indexes.
 pub fn repair_frontier(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    advance_generation(transaction)?;
     let index = current_index(transaction)?;
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-he69938b2fc65 owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_ordered_membership_repair_index',?1)
@@ -368,6 +397,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
+    advance_generation(transaction)?;
     // Replay restores canonical rows but can replace lifecycle fanout indexes with
     // older claim indexes. Preserve the host's pre-rebuild frontier independently
     // of those rows; this local invalidation metadata is not shared authority.
@@ -473,6 +503,17 @@ impl Store {
         if input.kind != "ordered-membership.edited" { return Err(St3Error::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
         if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }
         append_claim_with_subject_fences(&self.graph,input,None,None,Some(expected),None).map(|(claim,_)| claim)
+    }
+    /// Metadata and keyset rows share a short transaction, including when nested in an API read.
+    /// No transaction or result is retained for a subsequent request.
+    pub fn ordered_membership_page(&self, container: &str, after: Option<(&str,&str,&str)>, limit: usize) -> Result<MembershipPage> {
+        self.read_snapshot(|store_index| {
+            let connection = self.readers.get();
+            let generation = generation_at(&connection)?;
+            let state = state_at(&connection, container)?;
+            let items = items_at(&connection, container, store_index, after, limit)?;
+            Ok(MembershipPage { store_index, generation, state, items })
+        })
     }
     pub fn ordered_memberships(&self, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
         self.read_snapshot(|_| items_at(&self.readers.get(),container,through,after,limit))

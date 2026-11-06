@@ -21,6 +21,8 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+#[cfg(test)]
+mod test_executable;
 pub mod seat_admission;
 pub mod seat_admission_status;
 pub use seat_placement::UnlanedSeatPlacement;
