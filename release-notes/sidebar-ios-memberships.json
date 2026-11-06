@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an unwired iOS sidebar membership paging model and feed conversion contract with bounded restarts and stale last-complete retention.",
+  "replay": { "status": "none", "detail": "The model accepts restored bases only through its explicit testable input; no active storage or replay path changes." },
+  "schema": { "status": "none", "detail": "No database or generated wire schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordination rule change." },
+  "compatibility": { "status": "none", "detail": "Unwired code only; the active iOS sidebar remains v1. Future activation requires explicit daemon collection epochs and frontiers." },
+  "downtime": { "status": "none", "detail": "No service restart or interruption required." },
+  "manual": { "status": "none", "detail": "No upgrade steps required." },
+  "recovery": { "status": "none", "detail": "Revert the unwired model, conversions and tests; no stored state requires recovery." }
+}
