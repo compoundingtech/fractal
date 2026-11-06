@@ -13,10 +13,13 @@ impl Store {
     }
 
     pub fn desired_harness_login_candidates(&self) -> Result<Vec<DesiredSubject>> {
+        self.desired_harness_login_candidates_at(&self.readers.get())
+    }
+
+    pub fn desired_harness_login_candidates_at(&self, connection: &Connection) -> Result<Vec<DesiredSubject>> {
         smallclaims::touched::note_read(|| "desired-kind:agent".to_owned());
         smallclaims::touched::note_read(|| "kind:harness.observed".to_owned());
         smallclaims::touched::note_read(|| "kind:harness.diagnostic".to_owned());
-        let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
              FROM desired WHERE kind='agent'
@@ -208,10 +211,14 @@ impl Store {
     /// the seat's own node knows which pool account it chose, so a pooled seat on another node
     /// stands alone rather than being merged with seats that may use another login.
     pub fn seat_login(&self, desired: &DesiredSubject, host: &str, driver: &str) -> Result<String> {
+        self.seat_login_at(&self.readers.get(), desired, host, driver)
+    }
+
+    pub fn seat_login_at(&self, connection: &Connection, desired: &DesiredSubject, host: &str, driver: &str) -> Result<String> {
         let account = match crate::accounts::harness_binding(&desired.desired).map(|b| b.binding) {
             Some(crate::accounts::Binding::Account(name)) => name,
             Some(crate::accounts::Binding::Pool(_)) if host == self.origin => {
-                match self.seat_account_choice(&desired.subject)? {
+                match self.seat_account_choice_at(connection, &desired.subject)? {
                     Some(name) => name,
                     None => return Ok(format!("the login of {}", desired.subject)),
                 }
@@ -222,8 +229,7 @@ impl Store {
             None => return Ok(format!("the default {driver} login")),
         };
         // One declaration read by its key, not a scan of every declared subject.
-        Ok(self
-            .desired_subject_with_writer(&format!("account/{account}"))?
+        Ok(desired_subject_with_writer_at(connection, &format!("account/{account}"))?
             .and_then(|(declared, _)| {
                 crate::accounts::parse_account(&declared.subject, &declared.desired)
             })
@@ -236,8 +242,14 @@ impl Store {
         subject: &str,
         incarnation: &str,
     ) -> Result<(Option<ClaimRecord>, String)> {
+        self.harness_login_episode_key_at(&self.readers.get(), subject, incarnation)
+    }
+
+    pub fn harness_login_episode_key_at(
+        &self, connection: &Connection, subject: &str, incarnation: &str,
+    ) -> Result<(Option<ClaimRecord>, String)> {
         let base = format!("claude-auth-expired:{subject}:{incarnation}");
-        let Some(latest) = self.harness_auth_episode(subject, incarnation, None)? else {
+        let Some(latest) = self.harness_auth_episode_at(connection, subject, incarnation, None)? else {
             return Ok((None, base));
         };
         if latest.body["fields"]["code"] == "provider-auth-restored" {
@@ -246,7 +258,7 @@ impl Store {
         let key = match latest.body["fields"]["auth_attention_key"].as_str() {
             Some(key) => key.to_owned(),
             None => self
-                .harness_auth_episode(subject, incarnation, Some("provider-auth-restored"))?
+                .harness_auth_episode_at(connection, subject, incarnation, Some("provider-auth-restored"))?
                 .map_or(base.clone(), |restored| format!("{base}:{}", restored.id)),
         };
         Ok((Some(latest), key))
@@ -258,8 +270,13 @@ impl Store {
         incarnation: &str,
         code: Option<&str>,
     ) -> Result<Option<ClaimRecord>> {
+        self.harness_auth_episode_at(&self.readers.get(), subject, incarnation, code)
+    }
+
+    pub fn harness_auth_episode_at(
+        &self, connection: &Connection, subject: &str, incarnation: &str, code: Option<&str>,
+    ) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
-        let connection = self.readers.get();
         let id: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd36f92918948 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims INDEXED BY claims_harness_auth_diagnostic_index
              WHERE subject=?1 AND kind='harness.diagnostic'
@@ -267,7 +284,7 @@ impl Store {
                AND json_extract(body, '$.fields.code') IN ('provider-auth-expired','provider-auth-restored')
                AND (?3 IS NULL OR json_extract(body, '$.fields.code')=?3)
              ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, incarnation, code], |row| row.get(0)).optional()?;
-        id.map(|id| self.claim_by_id(&id))
+        id.map(|id| claim_by_id_tx(connection, &id))
             .transpose()
             .map(Option::flatten)
     }
@@ -335,10 +352,15 @@ impl Store {
         &self,
         subject: &str,
     ) -> Result<Option<crate::model::CurrentHarnessView>> {
+        self.current_harness_for_login_at(&self.readers.get(), subject)
+    }
+
+    pub fn current_harness_for_login_at(
+        &self, connection: &Connection, subject: &str,
+    ) -> Result<Option<crate::model::CurrentHarnessView>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         smallclaims::touched::note_read(|| format!("actor:{subject}"));
-        let connection = self.readers.get();
-        current_harness_fold_at(&connection, subject, None, true, true)
+        current_harness_fold_at(connection, subject, None, true, true)
     }
 
 }

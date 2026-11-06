@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Derive login attention sources on the admitting database connection",
+  "replay": { "status": "none", "detail": "No claim or replay changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "List and point reads share login grouping, account selection, ownership and authentication episodes without acquiring nested pooled readers. A successful authenticated turn still clears the item." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No new public mutation is advertised by this internal source-qualification change." },
+  "recovery": { "status": "none", "detail": "Stored work and approvals are unchanged." }
+}

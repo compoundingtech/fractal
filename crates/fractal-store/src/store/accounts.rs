@@ -29,9 +29,11 @@ pub fn declared_accounts_at(connection: &Connection) -> Result<Vec<AccountDecl>>
 impl Store {
     /// The account a pooled seat on this node was last placed on.
     pub fn seat_account_choice(&self, seat: &str) -> Result<Option<String>> {
-        self.readers
-            .get()
-            .query_row(
+        self.seat_account_choice_at(&self.readers.get(), seat)
+    }
+
+    pub fn seat_account_choice_at(&self, connection: &Connection, seat: &str) -> Result<Option<String>> {
+        connection.query_row(
                 "SELECT account FROM local_seat_accounts WHERE seat=?1",
                 [seat],
                 |row| row.get(0),

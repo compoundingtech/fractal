@@ -695,6 +695,19 @@ impl Store {
         &self,
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
+        self.harness_login_attention_items_at(&self.readers.get(), person)
+    }
+
+    pub fn harness_login_attention_item_at(
+        &self, connection: &Connection, subject: &str, person: &str, episode: &str,
+    ) -> Result<Option<AttentionItemView>> {
+        Ok(self.harness_login_attention_items_at(connection, Some(person))?
+            .into_iter().find(|item| item.subject == subject && item.episode == episode))
+    }
+
+    fn harness_login_attention_items_at(
+        &self, connection: &Connection, person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
         struct Seat {
             subject: String,
             driver: String,
@@ -702,17 +715,17 @@ impl Store {
             requested_at: u128,
         }
         let mut logins: BTreeMap<(String, String, String), Vec<Seat>> = BTreeMap::new();
-        for desired in self.desired_harness_login_candidates()? {
-            if !person_work::declaration_live(&self.readers.get(), &desired.subject)? {
+        for desired in self.desired_harness_login_candidates_at(connection)? {
+            if !person_work::declaration_live(connection, &desired.subject)? {
                 continue;
             }
-            let Some(harness) = self.current_harness_for_login(&desired.subject)? else {
+            let Some(harness) = self.current_harness_for_login_at(connection, &desired.subject)? else {
                 continue;
             };
             if harness.state != "needs-login" {
                 continue;
             }
-            let Some(owner) = self.agent_person(&desired.subject)? else {
+            let Some(owner) = agent_person_at(connection, &desired.subject)? else {
                 continue;
             };
             if person.is_some_and(|person| person != owner) {
@@ -729,9 +742,9 @@ impl Store {
                 .as_ref()
                 .map(|m| m.host.clone())
                 .unwrap_or_else(|| "unknown".into());
-            let login = self.seat_login(&desired, &host, &driver)?;
-            let (fence, episode) =
-                self.harness_login_episode_key(&desired.subject, &harness.incarnation_id)?;
+            let login = self.seat_login_at(connection, &desired, &host, &driver)?;
+            let (fence, episode) = self.harness_login_episode_key_at(
+                connection, &desired.subject, &harness.incarnation_id)?;
             let requested_at = fence.as_ref().map_or(harness.observed_at_unix_ms, |claim| {
                 claim.accepted_at_unix_ms
             });
@@ -1620,5 +1633,58 @@ mod pull_request_state_tests {
         assert_eq!(state(&store).as_deref(), Some("merged"));
         append(&store, "resource.observed", json!({"kind": "vcs.pull-request", "facts": {"state": "open"}}));
         assert_eq!(state(&store).as_deref(), Some("open"), "a newer observation is newer still");
+    }
+}
+
+#[cfg(test)]
+mod login_source_tests {
+    use super::*;
+
+    #[test]
+    fn writer_login_source_matches_group_and_clears_when_authenticated() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; principal \"person/operator\"; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let preview = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+        store.apply_as(&intent, &preview.subject_tokens, "login-seat", Some("person/operator")).unwrap();
+        let seat = "agent/node.worker";
+        store.append_claim(&ClaimInput {
+            subject: seat.into(), kind: "runtime.observed".into(), actor: Some(seat.into()),
+            fields: serde_json::from_value(json!({"status": "running", "incarnation_id": "one"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let observe = |state: &str| store.append_claim(&ClaimInput {
+            subject: seat.into(), kind: "harness.observed".into(), actor: Some(seat.into()),
+            fields: serde_json::from_value(json!({
+                "state": state, "driver": "claude", "incarnation_id": "one"
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        observe("needs-login");
+        let listed = store.harness_login_attention_items(Some("person/operator")).unwrap().pop().unwrap();
+        store.connection.batched(|connection| -> Result<()> {
+            let point = store.harness_login_attention_item_at(
+                connection, seat, "person/operator", &listed.episode,
+            )?.unwrap();
+            assert_eq!(serde_json::to_value(point)?, serde_json::to_value(&listed)?);
+            assert!(store.harness_login_attention_item_at(
+                connection, seat, "person/other", &listed.episode,
+            )?.is_none());
+            assert!(store.harness_login_attention_item_at(
+                connection, seat, "person/operator", "stale-episode",
+            )?.is_none());
+            Ok(())
+        }).unwrap().unwrap();
+        observe("working");
+        store.connection.batched(|connection| -> Result<()> {
+            assert!(store.harness_login_attention_item_at(
+                connection, seat, "person/operator", &listed.episode,
+            )?.is_none());
+            Ok(())
+        }).unwrap().unwrap();
     }
 }
