@@ -78,7 +78,7 @@ pub fn write_request(request: &crate::edits::Request) -> Result<fractal_client::
     match &request.operations {
         Operations::Folders(operations) => ActionRequest::arrangement_edit(&id.action_id, &id.idempotency_key, fence,
             ArrangementEditParameters { subject: request.fence.scope.container.clone(), owner: request.fence.scope.owner.clone(),
-                operations: operations.clone(), version: Some(2) }),
+                operations: operations.clone(), version: None }),
         Operations::Memberships(operations) => ActionRequest::arrangement_membership_edit(&id.action_id, &id.idempotency_key, fence,
             ArrangementMembershipEditParameters { subject: request.fence.scope.container.clone(), owner: request.fence.scope.owner.clone(),
                 operations: operations.clone() }),
@@ -98,13 +98,22 @@ pub fn write_result(request: &crate::edits::Request, result: Result<Envelope<fra
             ActionStatus::Unknown => Event::Unknown(id),
         },
         Err(error) if error.applied() == Some("unknown") => Event::Unknown(id),
-        Err(ClientError::Api(code, _, _)) => Event::Refused(id, match code {
-            ErrorCode::StaleFence => Refusal::StaleFence,
-            ErrorCode::Forbidden | ErrorCode::ArrangementOwnerForbidden | ErrorCode::MembershipOwnerForbidden => Refusal::Unauthorized,
-            ErrorCode::ArrangementFolderDeleted | ErrorCode::ArrangementRetired | ErrorCode::NotFound => Refusal::DestinationMissing,
-            ErrorCode::IdempotencyConflict => Refusal::Conflict,
-            _ => Refusal::InvalidPlan,
-        }),
+        // These arrangement-specific validation/precondition codes precede the write:
+        // api/client_v0/arrangements.rs:44-48,89-106; store/arrangements.rs:328-339,363-369.
+        // Receipt persistence runs AFTER commit (api/client_v0.rs:9586-9588,9625-9665).
+        // In particular idempotency-conflict can occur there and is not proof of refusal.
+        Err(ClientError::Api(code, _, envelope)) => {
+            let reason = match code {
+                ErrorCode::StaleFence => Some(Refusal::StaleFence),
+                ErrorCode::Forbidden | ErrorCode::ArrangementOwnerForbidden | ErrorCode::MembershipOwnerForbidden => Some(Refusal::Unauthorized),
+                ErrorCode::ArrangementFolderDeleted | ErrorCode::ArrangementRetired | ErrorCode::NotFound => Some(Refusal::DestinationMissing),
+                ErrorCode::InvalidMembershipOperations => Some(Refusal::InvalidPlan),
+                ErrorCode::IdempotencyConflict if envelope.details.get("applied").and_then(serde_json::Value::as_str) == Some("none") => Some(Refusal::Conflict),
+                _ if envelope.details.get("applied").and_then(serde_json::Value::as_str) == Some("none") => Some(Refusal::InvalidPlan),
+                _ => None,
+            };
+            match reason { Some(reason) => Event::Refused(id, reason), None => Event::Unknown(id) }
+        },
         _ => Event::Unknown(id),
     }
 }
@@ -235,9 +244,8 @@ mod write_tests {
             assert_eq!(request["idempotency_key"], if compound { "key/1" } else { "key/2" });
             assert_eq!(request["fence"]["snapshot_id"], "snapshot/1");
             assert_eq!(request["fence"]["subject_revisions"], json!({"arrangement/test":"revision/1"}));
-            let mut expected = json!({"subject":"arrangement/test","owner":"person/test",
+            let expected = json!({"subject":"arrangement/test","owner":"person/test",
                 "operations": if compound { serde_json::to_value(folders()).unwrap() } else { serde_json::to_value(members()).unwrap() }});
-            if compound { expected["version"] = json!(2); }
             assert_eq!(request["parameters"], expected);
             assert_eq!(request["type"], if compound { "arrangement.edit" } else { "arrangement.membership.edit" });
             assert!(request.get("actor").is_none());
@@ -252,13 +260,16 @@ mod write_tests {
         for (code, reason) in [(ErrorCode::StaleFence, Refusal::StaleFence), (ErrorCode::Forbidden, Refusal::Unauthorized),
             (ErrorCode::ArrangementOwnerForbidden, Refusal::Unauthorized), (ErrorCode::MembershipOwnerForbidden, Refusal::Unauthorized),
             (ErrorCode::ArrangementFolderDeleted, Refusal::DestinationMissing), (ErrorCode::ArrangementRetired, Refusal::DestinationMissing),
-            (ErrorCode::NotFound, Refusal::DestinationMissing), (ErrorCode::IdempotencyConflict, Refusal::Conflict),
-            (ErrorCode::InvalidMembershipOperations, Refusal::InvalidPlan)] {
-            assert!(matches!(write_result(request, Err(failure(code, Some("none")))), crate::edits::Event::Refused(i, r) if i == id(2) && r == reason));
+            (ErrorCode::NotFound, Refusal::DestinationMissing), (ErrorCode::InvalidMembershipOperations, Refusal::InvalidPlan)] {
+            assert!(matches!(write_result(request, Err(failure(code, None))), crate::edits::Event::Refused(i, r) if i == id(2) && r == reason));
         }
+        assert!(matches!(write_result(request, Err(failure(ErrorCode::IdempotencyConflict, Some("none")))), crate::edits::Event::Refused(_, Refusal::Conflict)));
+        assert!(matches!(write_result(request, Err(failure(ErrorCode::Internal, Some("none")))), crate::edits::Event::Refused(_, Refusal::InvalidPlan)));
         assert!(matches!(write_result(request, Ok(receipt("action/2", "rejected"))), crate::edits::Event::Refused(_, Refusal::Conflict)));
         for result in [Err(ClientError::Transport("timeout".into())), Err(ClientError::Protocol("truncated".into())),
-            Err(failure(ErrorCode::StaleFence, Some("unknown"))), Ok(receipt("action/other", "completed")), Ok(receipt("action/2", "future"))] {
+            Err(failure(ErrorCode::StaleFence, Some("unknown"))), Err(failure(ErrorCode::Internal, None)),
+            Err(failure(ErrorCode::Unknown, None)), Err(failure(ErrorCode::IdempotencyConflict, None)),
+            Ok(receipt("action/other", "completed")), Ok(receipt("action/2", "future"))] {
             assert!(matches!(write_result(request, result), crate::edits::Event::Unknown(i) if i == id(2)));
         }
     }
@@ -266,7 +277,10 @@ mod write_tests {
     fn restore_replays_exact_payload_and_compound_step_refreshes_both_fences() {
         let mut state = staged(true); let first = wire(&state);
         assert_eq!(state.reduce(crate::edits::Event::Persisted(id(1))), vec![Effect::Send]);
-        state.reduce(write_result(state.request().unwrap(), Err(ClientError::Transport("lost".into()))));
+        // HTTP 500/internal after the layout commit cannot prove non-application.
+        state.reduce(write_result(state.request().unwrap(), Err(failure(ErrorCode::Internal, None))));
+        assert_eq!(state.status, Status::UnknownDelivery);
+        assert!(state.reduce(crate::edits::Event::Retry).is_empty());
         let (mut state, effects) = Edits::restore(&state.journal().unwrap(), &base(1).scope).unwrap();
         assert_eq!(effects, vec![Effect::PersistPending]); assert_eq!(wire(&state), first);
         assert_eq!(state.reduce(crate::edits::Event::Persisted(id(1))), vec![Effect::Send]);
