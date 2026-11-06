@@ -62,6 +62,7 @@ vi.mock('../data/react.tsx', async () => {
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', attachmentUpload: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
   usePausedNow: () => undefined,
   useAttention: () => ({ _tag: 'Observed', freshness: 'live', value: [] }),
+  useSubjectNotes: () => ({ _tag: 'Observed', freshness: 'live', value: [] }),
   })
 })
 

@@ -49,6 +49,7 @@ mod tests {
             sender_class: None,
             assistant_grant_id: None,
             created_index: 0,
+            status_from: None,
         }
     }
     #[test]
