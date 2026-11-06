@@ -44,8 +44,22 @@ const onAct = async (alert: Attention, action: AlertAction) => {
   return reply(action)
 }
 
+// CSSOM "serialize an identifier" (https://drafts.csswg.org/cssom/#serialize-an-identifier), the algorithm behind CSS.escape.
+const serializeIdentifier = (value: string) => Array.from(value, (char, index) => {
+  const code = char.codePointAt(0)!
+  const escapeCode = () => `\\${code.toString(16)} `
+  if (code === 0) return '\uFFFD'
+  if (code <= 0x1f || code === 0x7f) return escapeCode()
+  if (code >= 0x30 && code <= 0x39 && (index === 0 || (index === 1 && value.startsWith('-')))) return escapeCode()
+  if (index === 0 && char === '-' && value.length === 1) return '\\-'
+  if (code >= 0x80 || /[\w-]/.test(char)) return char
+  return `\\${char}`
+}).join('')
+
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // React Aria's menu selection escapes keys with CSS.escape, which jsdom does not provide.
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: serializeIdentifier })
   sent.length = 0
   reply = () => ({ _tag: 'Sent' })
   outside = document.createElement('button')
