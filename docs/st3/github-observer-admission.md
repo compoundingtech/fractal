@@ -249,7 +249,7 @@ it does not change direct merge/check gates or claim measured live savings.
 The optional daemon `[github].app_token_root = "/absolute/operator/supplied/path"`
 or explicit `ST3_GITHUB_APP_TOKEN_ROOT` environment input selects installation
 tokens for reads. The environment input overrides the config field. Relative
-roots are rejected. st3 never computes a platform root: Agent Policy's host facts
+roots are rejected. Fractal never computes a platform root: Agent Policy's host facts
 are Linux `$XDG_RUNTIME_DIR/github-app-token` and macOS
 `$(getconf DARWIN_USER_TEMP_DIR)github-app-token`; the operator supplies the
 already-resolved absolute result. The external minter rollout depends on
@@ -271,7 +271,7 @@ Token files must be owner-owned regular mode0600 files, containing only the
 bare token with no whitespace or newline. Sidecars contain numeric
 `installation_id`, RFC3339 `expires_at`, a `permissions` object and
 `repository_selection` (`all` or `selected`). The minter owns atomic publication
-and refresh when less than15minutes remain from a60-minute lifetime. st3 reopens
+and refresh when less than15minutes remain from a60-minute lifetime. Fractal reopens
 the supplied files per read batch, not once per daemon lifetime. A401 permits
 one bounded reload/read replay, then a transition PAT read if still rejected.
 No network retry is made for a failed transport or for a mutation.

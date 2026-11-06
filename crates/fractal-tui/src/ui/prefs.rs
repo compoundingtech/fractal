@@ -24,6 +24,9 @@ pub struct Prefs {
     /// Agent details beside conversations and terminals; absence means visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_details: Option<bool>,
+    /// Sidebar width in terminal columns; absence follows the responsive default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u16>,
 }
 
 /// Whether this device opens agents on their conversation: its own choice, else no. Before the
@@ -118,6 +121,7 @@ mod tests {
                 conversation_first: Some(true),
                 terminal_fallback: Some(false),
                 agent_details: Some(false),
+                sidebar_width: Some(36),
             },
         )
         .unwrap();
@@ -125,6 +129,7 @@ mod tests {
         assert_eq!(load(&path).terminal_first, Some(true));
         assert_eq!(load(&path).terminal_fallback, Some(false));
         assert_eq!(load(&path).agent_details, Some(false));
+        assert_eq!(load(&path).sidebar_width, Some(36));
         assert_eq!(conversation_first(&load(&path)), Some(true));
         // A file from before the setting is no choice: the terminal attaches.
         std::fs::write(&path, br#"{"simple": false}"#).unwrap();
