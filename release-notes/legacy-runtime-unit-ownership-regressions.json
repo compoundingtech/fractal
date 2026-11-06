@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cover exact legacy runtime ownership across colliding seat, work and server unit names",
+  "replay": { "status": "none", "detail": "Regression tests and ownership documentation only; no runtime implementation changes." },
+  "schema": { "status": "none", "detail": "No database, claim or API schema changes." },
+  "rules": { "status": "none", "detail": "Existing exact runtime ownership matching and fail-closed proof rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "No product behavior changes; tests distinguish similarly prefixed runtimes and reject malformed unit suffixes." },
+  "downtime": { "status": "none", "detail": "No deployment downtime or migration is required." },
+  "manual": { "status": "none", "detail": "No operator action is required." },
+  "recovery": { "status": "none", "detail": "Legacy closure eligibility and required physical evidence remain unchanged." }
+}
