@@ -136,3 +136,39 @@ fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
     let edits = staged(intent, V2Plan { folders: vec![], memberships: vec![Member::Remove { member: "member-a".into() }] });
     assert!(!edits.project(&observed).unwrap().nodes.contains_key("subject:member-a"));
 }
+
+#[test]
+fn atomic_delete_move_lifts_from_final_positions_in_every_operation_order() {
+    let (mut arrangement, mut members) = inputs();
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    let template = body.folders["folder-a"].clone();
+    for id in ["folder-c", "folder-d"] { body.folders.insert(id.into(), template.clone()); }
+    body.folders.get_mut("folder-b").unwrap().position.value.parent = Some("folder-a".into());
+    body.folders.get_mut("folder-c").unwrap().position.value.parent = Some("folder-b".into());
+    let resolved = arrangement.resolved.as_mut().unwrap();
+    resolved.parents.insert("folder-b".into(), Some("folder-a".into()));
+    resolved.parents.insert("folder-c".into(), Some("folder-b".into()));
+    resolved.parents.insert("folder-d".into(), None);
+    members[0].position.bucket = Some("folder-b".into());
+    members[1].position.bucket = Some("folder-c".into());
+    let observed = build_v2(&arrangement, &members).unwrap();
+    let operations = [
+        Folder::FolderDelete { id: "folder-a".into() },
+        Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-d".into()), key: "a0".into() },
+        Folder::FolderDelete { id: "folder-b".into() },
+    ];
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    for id in ["folder-a", "folder-b"] { body.folders.get_mut(id).unwrap().tombstone = Some(Register { value: true, revision: "r2".into() }); }
+    body.folders.get_mut("folder-b").unwrap().position.value.parent = Some("folder-d".into());
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-c".into(), Some("folder-d".into()));
+    members[0].position.bucket = Some("folder-d".into());
+    let expected = build_v2(&arrangement, &members).unwrap();
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-d"), before: None };
+        let edits = staged(intent, V2Plan { folders: order.map(|index| operations[index].clone()).into(), memberships: vec![] });
+        let visible = edits.project(&observed).unwrap();
+        assert_eq!(visible.as_ref(), &expected, "order {order:?}");
+        assert_eq!(visible.nodes["folder:folder-d"].children, vec![folder("folder-c"), subject("member-a")]);
+        assert_eq!(visible.nodes["folder:folder-c"].children, vec![subject("member-b")]);
+    }
+}

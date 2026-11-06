@@ -14,6 +14,7 @@ impl Edits {
         }
         let Some(request) = self.request() else { return Ok(Cow::Borrowed(observed)); };
         let mut tree = observed.clone();
+        let mut deleted = std::collections::BTreeSet::new();
         match &request.operations {
             Operations::Folders(operations) => for operation in operations {
                 match operation {
@@ -25,10 +26,7 @@ impl Edits {
                     }
                     Folder::FolderMove { id, parent, key } => position(&mut tree, &NodeRef::Folder { id: id.clone() }, parent, key)?,
                     Folder::FolderDelete { id } => {
-                        let Some(deleted) = tree.nodes.remove(&node_key(&NodeRef::Folder { id: id.clone() })) else { continue; };
-                        for node in tree.nodes.values_mut() {
-                            if node.shown_under == (Parent::Folder { id: id.clone() }) { node.shown_under = deleted.shown_under.clone(); }
-                        }
+                        deleted.insert(NodeRef::Folder { id: id.clone() });
                         if let Err(index) = tree.deleted_folders.binary_search(id) { tree.deleted_folders.insert(index, id.clone()); }
                     }
                     // Names are host decoration, not projected row positions.
@@ -42,6 +40,32 @@ impl Edits {
                     Member::Remove { member } => { tree.nodes.remove(&node_key(&NodeRef::Subject { subject: member.clone() })); }
                 }
             },
+        }
+        // Like server admission, install the whole batch's positions before resolving
+        // tombstones. A deleted folder's final position still governs descendant lift.
+        let mut lifts = std::collections::BTreeMap::<NodeRef, Parent>::new();
+        for node in &deleted {
+            let mut cursor = node;
+            let mut path = Vec::new();
+            let destination = loop {
+                if let Some(parent) = lifts.get(cursor) { break parent.clone(); }
+                if path.contains(&cursor) { return Err(ProjectionError::InvalidResolution); }
+                path.push(cursor);
+                let row = tree.nodes.get(&node_key(cursor)).ok_or(ProjectionError::InvalidResolution)?;
+                let Parent::Folder { id } = &row.shown_under else { break row.shown_under.clone(); };
+                let ancestor = NodeRef::Folder { id: id.clone() };
+                let Some(next) = deleted.get(&ancestor) else { break row.shown_under.clone(); };
+                cursor = next;
+            };
+            for node in path { lifts.insert(node.clone(), destination.clone()); }
+        }
+        tree.nodes.retain(|_, row| !deleted.contains(&row.node));
+        for row in tree.nodes.values_mut() {
+            if let Parent::Folder { id } = &row.shown_under
+                && let Some(parent) = lifts.get(&NodeRef::Folder { id: id.clone() }) {
+                row.shown_under = parent.clone();
+                if matches!(row.node, NodeRef::Subject { .. }) { row.parent = parent.clone(); }
+            }
         }
         // Reuse projection ordering; reject a newly missing destination or conflicting
         // ancestry rather than showing orphaned rows or panicking in child-list rebuild.
