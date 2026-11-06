@@ -22,8 +22,8 @@ describe('authoritative folder request staging', () => {
 
   it('changes identity only when a definitive refusal requires different parameters', () => {
     const edit = job()
-    stageArrangementEdit(edit, testSelection.owner, undefined, 'arrangement/reserved', 'snapshot/first', false)
-    const retried = prepareArrangementRetry(edit, testArrangement(), 'arrangement/reserved')
+    stageArrangementEdit(edit, testSelection.owner, undefined, testSelection.subject, 'snapshot/first', false)
+    const retried = prepareArrangementRetry(edit, { ...testArrangement(), id: 'arrangement/person/example/00000000-0000-7000-8000-000000000009' }, testSelection.subject)
     expect(retried.id).not.toBe(edit.id)
     expect(retried.key).not.toBe(edit.key)
     expect(retried.request).toBeUndefined()
