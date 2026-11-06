@@ -298,7 +298,9 @@ fn memberless_agent_children_still_require_the_barrier() {
         "declared-lane \"check\"",
         "declared-budgets {}",
     ] {
-        let source = format!("version 2\nagent \"example/new\" {{ {child}; exec \"work\" {{ command \"true\"; }}; }}\n");
+        let source = format!(
+            "version 2\nagent \"example/new\" {{ {child}; exec \"work\" {{ command \"true\"; }}; }}\n"
+        );
         let intent = crate::graph::parse_intent(&source, "alder").unwrap();
         let desired = &intent.subjects["agent/example/new"];
         assert!(desired.member.is_none());

@@ -59,6 +59,60 @@ An unrecognized value reads as `background`, so a typo never gives a seat more C
 IO level 7 acts only under the `bfq` and `mq-deadline` disk schedulers. On an NVMe disk with the
 `none` scheduler, as on most hosts, it changes nothing; the CPU priority is what applies there.
 
+## Declared admission
+
+**Declared admission — declared, not enforced.**
+st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.
+
+Agent and mission declarations accept the same optional, declaration-local metadata:
+
+```kdl
+declared-priority "normal"
+declared-lane "check"
+declared-budgets {
+  cpu-seconds 300
+  memory-max "8G"
+  disk-max "20G"
+  token-budget 100000
+}
+```
+
+These children belong directly inside `agent "…" {}` or `mission "…" {}`, not a step.
+Declared priority accepts the complete set `background < normal`; declared lane accepts
+`check` or `build`, without an ordering. Neither selects the runtime `seat_priority`,
+`ST_SEAT_PRIORITY`, or an enforced capacity lane.
+
+CPU seconds are accumulated CPU seconds; token budget counts input plus output tokens.
+“Per seat incarnation” and “per mission run” describe their intended scope only:
+there are no counters, resets or aggregation. Memory and disk describe peak footprints;
+disk is not IO traffic or a free-space floor. CPU and token values must be integers from
+1 to 9007199254740991. Sizes are positive decimal integer strings, optionally followed
+by uppercase `K`, `M`, `G`, or `T` (powers of 1024), with a checked final byte count no
+greater than 18446744073709551615. The original size string is preserved.
+
+Omission means not declared, never zero, unlimited, or a runtime default. There is no
+inheritance or merging between declarations; replacement omission removes the value.
+Empty budgets are omitted from stored typed fields and reads. Duplicate children,
+unknown budget members, authored nulls, invalid types, invalid enum values and
+out-of-range values refuse the entire publication, before writes. Semantic refusals
+use `invalid-declared-admission` with `details.subject` and `details.field`; syntax
+refusals retain the existing declaration syntax codes.
+
+Typed declaration fields are `declared_priority`, `declared_lane`, and
+`declared_budgets`; budget members use snake_case. Existing agent and mission reads
+instead expose a single optional, nonnullable `declared_admission` group:
+
+```json
+{"declared_admission":{"priority":"normal","lane":"check","budgets":{"cpu_seconds":300,"memory_max":"8G","disk_max":"20G","token_budget":100000}}}
+```
+
+Absent members, empty budgets, and the empty group are omitted. Readers preserve future
+enum strings; TypeScript tolerant codecs expose `{_tag:"Unknown",raw:"future-level"}`
+and re-encode the original string. Strict decoding deliberately rejects unknown cases.
+These fields extend existing declaration claims only, with no new table, claim kind,
+index, migration, or backfill. Old declarations without the fields retain their
+canonical bytes and hashes.
+
 ## Linux
 
 On Linux with a systemd user manager, Fractal starts each terminal in a transient scope that it records
