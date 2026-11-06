@@ -167,6 +167,7 @@ type MutationJob = EditJob & {
   entered?: boolean
   outcome?: EditOutcome
   revision?: string
+  receiptFrame?: Arrangement
   satisfied?: boolean
   base?: Arrangement
   snapshot?: string
@@ -198,12 +199,12 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
       return job.outcome
     }).pipe(Effect.flatMap((outcome) => outcome._tag === 'Success' ? Effect.void : Effect.fail(new MutationRefused({
       message: outcome.detail,
-      nonApplication: !job.sent ? { _tag: 'NeverSent' } : job.requestRefused && outcome.error !== undefined ? { _tag: 'Refused', code: outcome.error.code } : undefined,
+      nonApplication: !job.sent ? { _tag: 'NeverSent' } : job.requestRefused ? { _tag: 'Refused', code: outcome.error?.code ?? 'action-rejected' } : undefined,
     }))))), Deferred.await(job.abandon).pipe(Effect.andThen(Effect.fail(new MutationRefused({
       message: 'Not submitted because an earlier arrangement edit failed.', nonApplication: { _tag: 'NeverSent' },
     }))))),
     project: (frame, entry) => entry.phase === 'failed' ? frame : optimisticArrangement(frame ?? entry.action.base ?? emptyArrangement(owner, reservation), entry.action.operations),
-    reconcile: (frame, { action: job }) => job.satisfied || (job.revision !== undefined && frame?.id === job.request?.parameters.subject && frame?.revision === job.revision) ? 'applied' : 'pending',
+    reconcile: (frame, { action: job }) => job.satisfied || (frame !== undefined && frame.id === job.request?.parameters.subject && (frame === job.receiptFrame || (job.revision !== undefined && frame.revision === job.revision))) ? 'applied' : 'pending',
   }))
   const pending = () => Effect.runSync(SubscriptionRef.get(mutations.state)).pending
   const submit = (job: MutationJob, retry = false) => {
@@ -327,20 +328,23 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
       if (closed) return { _tag: 'Refused', ...unknown('The arrangement editor is closed.', job) }
       if (result._tag === 'Failure') {
         const reason = arrangementRefusal(result.failure, targets(job))
-        job.requestRefused = reason.reason._tag === 'Known' && refusalSentences[reason.reason.code] !== undefined &&
+        job.requestRefused = result.failure._tag === 'ActionRefused' &&
           reason.error?.applied !== 'unknown' && reason.error?.details.applied !== 'unknown'
         if (reason.error?.code === 'arrangement-retired' && request.parameters.subject === reservation) reservedRetired = true
         return await fail(job, reason)
       }
       if (result.success.status === 'rejected') {
+        job.requestRefused = true
         return await fail(job, unknown('The action result was rejected without a refusal reason.', job))
       }
       if (request.parameters.operations.some((operation) => operation.op === 'create'))
         creation = { subject: request.parameters.subject, phase: 'acknowledged' }
       if (typeof result.success.arrangement_revision === 'string') job.revision = result.success.arrangement_revision
       if (inventory !== undefined) accept(inventory)
-      // Only the returned authoritative revision can settle the accepted overlay.
-      accept(await read(abort.signal))
+      // A fresh complete read after this exact receipt includes accepted or merged edits.
+      const observed = await read(abort.signal)
+      job.receiptFrame = sidebarWinner(observed.items, owner)
+      accept(observed)
       return { _tag: 'Success' }
     } catch (cause) {
       return await fail(job, unknown(cause instanceof Error ? cause.message : String(cause), job))

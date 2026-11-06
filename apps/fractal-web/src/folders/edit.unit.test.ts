@@ -198,6 +198,7 @@ describe('memory-only winning Sidebar edits', () => {
           return decodeUnknownSync(ActionResult)({
             kind: 'action-result', action_id: request.id, operation_id: 'operation/example',
             snapshot_id: testSnapshot.id, status: 'completed', affected_ids: [base.id],
+            arrangement_revision: `claim/accepted-${requests.length}`,
           })
         }),
       },
@@ -586,6 +587,26 @@ it('keeps a failed stale-fence refresh explicit and refreshes again on user retr
   h.snapshotFailure(undefined)
   h.behavior(undefined)
   expect(await h.editor.retryEdit()).toEqual({ _tag: 'Success' })
-  expect(h.requests[1]?.fence.snapshot_id).toBe('snapshot/fresh/4')
+  expect(h.requests[1]?.fence.snapshot_id).toBe(`snapshot/fresh/${h.counters().snapshots}`)
   h.editor.close()
+})
+
+it('reconciles an edit2 receipt against a fresh complete merged edit3 read', async () => {
+  let items = [optimisticArrangement(testArrangement(), [create])]
+  let state: ArrangementEditorState | undefined
+  const editor = createArrangementEditor({
+    owner: testSelection.owner, read: async () => ({ owner: testSelection.owner, items }),
+    onState: (next) => { state = next },
+    actions: { snapshot: Effect.succeed(testSnapshot.id), submitAction: (request) => Effect.sync(() => {
+      items = [{ ...optimisticArrangement(items[0]!, [rename, { ...create, id: other }]), revision: 'claim/edit3' }]
+      return decodeUnknownSync(ActionResult)({ kind: 'action-result', action_id: request.id, operation_id: 'operation/edit2',
+        snapshot_id: testSnapshot.id, status: 'completed', affected_ids: [testSelection.subject], arrangement_revision: 'claim/edit2' })
+    }) },
+  })
+  try {
+    editor.accept({ owner: testSelection.owner, items })
+    expect(await editor.edit([rename])).toEqual({ _tag: 'Success' })
+    expect(state).toMatchObject({ phase: 'synced', arrangement: { revision: 'claim/edit3' } })
+    expect(Object.keys(state?.arrangement?.body.folders ?? {}).sort()).toEqual([folder, other])
+  } finally { editor.close() }
 })

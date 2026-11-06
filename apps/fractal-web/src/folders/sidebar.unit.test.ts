@@ -120,7 +120,7 @@ it('binds a granted live Sidebar atom to optimistic generated edits and exactly 
         const operations = request.parameters.operations.filter((operation): operation is SidebarOperation =>
           operation.op.startsWith('folder.') || operation.op === 'subject.place')
         submitted.push(operations)
-        items = [optimisticArrangement(items[0] ?? { ...testArrangement(), id: request.parameters.subject }, operations)]
+        items = [{ ...optimisticArrangement(items[0] ?? { ...testArrangement(), id: request.parameters.subject }, operations), revision: 'claim/edit' }]
         return decodeUnknownSync(ActionResult)({ kind: 'action-result', action_id: request.id, operation_id: 'operation/edit', snapshot_id: testSnapshot.id, status: 'completed', affected_ids: [request.parameters.subject], arrangement_revision: 'claim/edit' })
       }),
     },
