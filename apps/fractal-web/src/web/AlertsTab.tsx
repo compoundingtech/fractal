@@ -14,9 +14,9 @@ import { useAttention, useDataSource, useNow } from '../data/react.tsx'
 import type { Feed } from '../data/source.ts'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 
-// The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
-// each, answered in place. It reads the attention collection the conversation strips read, so the tab
-// marker, this list and each conversation agree. It offers only actions the source serves.
+// The sidebar inbox keeps open alerts in served tier order, followed by readable updates.
+// Readable rows do not add needs-you badges. It shares the conversation attention feed and
+// offers only actions the source serves.
 
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
@@ -85,7 +85,7 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
     const at = before.indexOf(lost)
     const next = [...before.slice(at + 1), ...before.slice(0, Math.max(at, 0)).reverse()].find((id) => ids.includes(id)) ?? ids[0]
     const row = next === undefined ? undefined : [...(region.current?.querySelectorAll<HTMLElement>('[data-alert-id]') ?? [])].find((each) => each.dataset.alertId === next)
-    const target = row === undefined ? message.current : row.querySelector<HTMLElement>('button[aria-expanded]')
+    const target = row === undefined ? message.current : row.querySelector<HTMLElement>('button')
     target?.focus()
   }, [rows, expanded])
   return (
@@ -148,6 +148,18 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
+  const [readNote, setReadNote] = React.useState<string>()
+  const [reading, setReading] = React.useState(false)
+  const read = row.read
+  const markRead = () => {
+    if (read === undefined || onAct === undefined) return
+    setReading(true)
+    setReadNote(undefined)
+    void onAct(row.item, read).then((result) => {
+      setReading(false)
+      if (result._tag === 'Refused') setReadNote(result.detail)
+    })
+  }
   const trigger = React.useRef<HTMLButtonElement>(null)
   const panel = React.useRef<HTMLDivElement>(null)
   const panelId = React.useId()
@@ -171,10 +183,11 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
       <div {...stylex.props(styles.row)}>
         <Aria.Button
           ref={trigger}
-          aria-expanded={expanded}
-          aria-controls={expanded ? panelId : undefined}
-          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
-          onPress={() => onExpand(!expanded)}
+          aria-expanded={read === undefined ? expanded : undefined}
+          aria-controls={read === undefined && expanded ? panelId : undefined}
+          aria-label={`${read === undefined ? '' : 'Read '}${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${read === undefined ? GLYPH_WORDS[row.glyph] : 'update'}`}
+          isDisabled={read !== undefined && (reading || onAct === undefined)}
+          onPress={() => read === undefined ? onExpand(!expanded) : markRead()}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
             else event.continuePropagation()
@@ -185,6 +198,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
             <span aria-hidden="true" data-alert-row-glyph={row.glyph} {...stylex.props(styles.glyph, row.glyph === '?' && styles.question, row.glyph === '!' && styles.fault)} />
             <span {...stylex.props(styles.title)}>{row.title}</span>{' '}
             <span {...stylex.props(styles.metric)}>{row.age}</span>
+            {read === undefined ? null : <span {...stylex.props(styles.metric)}>Read</span>}
           </span>
           {row.line2 === '' ? null : <>{' '}<span {...stylex.props(styles.meta)}>{row.line2}</span></>}
         </Aria.Button>
@@ -194,17 +208,19 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
             <Aria.Menu
               aria-label={`Actions for ${row.title}`}
               autoFocus="first"
-              onAction={(key) => (key === 'answer' ? onExpand(true) : onOpen(String(key)))}
+              onAction={(key) => key === 'read' ? markRead() : key === 'answer' ? onExpand(true) : onOpen(String(key))}
               {...stylex.props(styles.menu)}
             >
-              <Aria.MenuItem id="answer" {...stylex.props(styles.item)}>Answer</Aria.MenuItem>
+              {read === undefined ? <Aria.MenuItem id="answer" {...stylex.props(styles.item)}>Answer</Aria.MenuItem>
+                : <Aria.MenuItem id="read" isDisabled={reading || onAct === undefined} {...stylex.props(styles.item)}>Read</Aria.MenuItem>}
               {row.conversation === undefined ? null : <Aria.MenuItem id={row.conversation} {...stylex.props(styles.item)}>Open conversation</Aria.MenuItem>}
               {row.mission === undefined ? null : <Aria.MenuItem id={row.mission} {...stylex.props(styles.item)}>Open mission</Aria.MenuItem>}
             </Aria.Menu>
           </Aria.Popover>
         </Aria.MenuTrigger>
       </div>
-      {expanded ? (
+      {row.item.optimisticNote ?? readNote ? <p role="status" {...stylex.props(styles.meta)}>{row.item.optimisticNote ?? readNote}</p> : null}
+      {expanded && read === undefined ? (
         <div ref={panel} id={panelId} role="region" tabIndex={-1} aria-label={`Answer ${row.title}`} {...stylex.props(styles.panel)}>
           <AgentAlerts alerts={[row.item]} onAct={onAct} onAnswer={onAnswer} />
         </div>

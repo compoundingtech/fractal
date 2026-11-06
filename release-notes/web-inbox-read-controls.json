@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add immediate inbox Read controls and restore refused small actions with a note",
+  "replay": {"status": "none", "detail": "Client overlays do not change authoritative replay."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "Only served message-read and update-acknowledgement actions are offered."},
+  "compatibility": {"status": "none", "detail": "Readable updates follow alert rows without adding needs-you badges. Read sends immediately without confirmation. Read and structured-ask dismissal remove their rows optimistically; a refusal restores the authoritative row with a shared note that survives component remounts."},
+  "downtime": {"status": "none", "detail": "No deployment interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reload discards local overlays and notes; authoritative read and answer state is unchanged."}
+}

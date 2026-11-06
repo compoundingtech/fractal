@@ -135,3 +135,13 @@ describe('AlertsList, after an answer leaves the feed', () => {
     expect(document.activeElement).toBe(outside)
   })
 })
+
+it('sends a served Read action immediately without opening an answer confirmation', async () => {
+  const message: Attention = { ...first, id: 'attention/message', attention_kind: 'unread-message',
+    title: 'Release report', alert: false, actions: ['message.read'] }
+  await show([message])
+  const button = row(message)!.querySelector<HTMLButtonElement>('button')!
+  await act(async () => button.click())
+  expect(sent).toEqual([{ id: message.id, action: { type: 'message.read' } }])
+  expect(row(message)!.querySelector('[aria-label=\"Confirm your answer\"]')).toBeNull()
+})

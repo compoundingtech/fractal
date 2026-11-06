@@ -24,7 +24,7 @@ describe('Alerts tab projection', () => {
       .toEqual([first.id, second.id, today.id, later.id])
   })
 
-  it('keeps open served faults, but excludes resolved cards, updates and messages', () => {
+  it('keeps open served faults, but excludes resolved and unreadable cards', () => {
     const fault = item({ attention_kind: 'fault', actions: [], presentation: presented('today', 'fault') })
     const resolved = item({ state: 'resolved' })
     const message = item({ attention_kind: 'unread-message', alert: false })
@@ -61,4 +61,17 @@ describe('Alerts tab projection', () => {
     expect(alertsTabRows([item({ default_answer: { id: 'skip', label: 'Skip' } })], now)[0]!.line2).toBe('')
     expect(alertsTabRows([item({ requester_id: 'agent/not-served', step_run_id: 'step-run/not-served' })], now)[0]!.line2).toBe('')
   })
+})
+
+it('places served readable updates after alerts without adding needs-you badges', () => {
+  const ask = item()
+  const message = item({ id: 'attention/message', attention_kind: 'unread-message', alert: false, actions: ['message.read'] })
+  const update = item({ id: 'attention/update', alert: false,
+    update: { version: 1, type: 'update', about: 'mission/example', summary: 'Completed' } })
+  const rows = alertsTabRows([message, update, ask], now)
+  expect(rows.map((row) => row.id)).toEqual([ask.id, message.id, update.id])
+  expect(rows[1]?.read).toEqual({ type: 'message.read' })
+  expect(rows[2]?.read).toEqual({ type: 'work.done', summary: 'Read', answer: { id: 'read' } })
+  expect(alertTabMarkers({ _tag: 'Observed', freshness: 'live', value: [message, update, ask] }))
+    .toEqual({ questionCount: 1, needsYouCount: 0 })
 })

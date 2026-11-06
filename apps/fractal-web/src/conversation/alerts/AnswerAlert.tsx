@@ -288,7 +288,7 @@ export const AnswerAlert = ({
   const optimistic = alert.optimisticAnswer
   const held = sending || optimistic !== undefined
   const note = optimistic?.phase === 'sending' ? 'Sending answer…' : optimistic?.phase === 'accepted'
-    ? 'Answered. The alert clears once Fractal records it.' : status
+    ? 'Answered. The alert clears once Fractal records it.' : alert.optimisticNote ?? status
   // A new revision may carry a new question under the same id: a pending confirmation or an
   // earlier answer's status belongs to the revision the person read. Their words stay theirs.
   const [read, setRead] = React.useState(alert.revision)

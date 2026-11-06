@@ -472,3 +472,35 @@ it('rolls back refused message-read actions', async () => {
     .toEqual({ _tag: 'Refused', detail: 'Not permitted' })
   expect(Effect.runSync(SubscriptionRef.get(inbox.state)).pending.size).toBe(0)
 })
+
+it('removes small actions immediately and restores the row with its refusal after remount', async () => {
+  const response = Promise.withResolvers<{ readonly _tag: 'Refused'; readonly detail: string }>()
+  const act = vi.fn(() => response.promise)
+  const inbox = optimisticAlertActions({ act })
+  const alert = item({})
+  await Effect.runPromise(inbox.accept([alert]))
+  const sending = inbox.port.act({ alert, action: { type: 'work.done', summary: 'Dismissed', answer: { id: 'dismiss' } } })
+  await vi.waitFor(() => expect(act).toHaveBeenCalledTimes(1))
+  expect(inbox.project([alert], Effect.runSync(SubscriptionRef.get(inbox.state)).pending)).toEqual([])
+  response.resolve({ _tag: 'Refused', detail: 'Not permitted' })
+  await sending
+  const state = Effect.runSync(SubscriptionRef.get(inbox.state))
+  const projected = inbox.project([alert], state.pending, state.notices)[0]!
+  expect(projected.optimisticNote).toBe('Not permitted')
+  expect(renderToStaticMarkup(<AnswerAlert alert={projected} />)).toContain('Not permitted')
+  await Effect.runPromise(inbox.accept([item({ revision: 'r2' })]))
+  expect(Effect.runSync(SubscriptionRef.get(inbox.state)).notices).toEqual([])
+})
+
+it('sends Read to the served message source with an authoritative fence', async () => {
+  const messageRead = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
+  const attentionGet = vi.fn(async () => ({ snapshot: { id: 'snapshot/read' }, value: {
+    kind: 'attention', state: 'open', revision: 'r1', actions: ['message.read'],
+  } }))
+  const inbox = optimisticAlertActions(gatewayAlertActions({ attentionGet, messageRead } as unknown as FractalClient))
+  await inbox.port.act({ alert: item({ source_id: 'message/report' }), action: { type: 'message.read' } })
+  expect(messageRead.mock.calls[0]?.[0]).toMatchObject({
+    fence: { snapshot_id: 'snapshot/read', subject_revisions: { 'attention/ask': 'r1' } },
+    parameters: { target_id: 'message/report' },
+  })
+})

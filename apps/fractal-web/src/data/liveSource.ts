@@ -777,7 +777,7 @@ export const liveSource = ({
   const attention = Atom.make((get) => {
     const feed = get(attentionRetained.atom)
     const state = get(inboxState)
-    return feed._tag === 'Observed' ? { ...feed, value: inboxActions.project(feed.value, state.pending) } : feed
+    return feed._tag === 'Observed' ? { ...feed, value: inboxActions.project(feed.value, state.pending, state.notices) } : feed
   })
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
