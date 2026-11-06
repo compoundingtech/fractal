@@ -1,8 +1,10 @@
 // Models remain internal: no library export or transport registration.
 #[allow(dead_code)]
 #[path = "../src/notice_models.generated.rs"]
-mod models;
-use models::*;
+mod notice_models;
+#[path = "../src/notice_descriptors.generated.rs"]
+mod descriptors;
+use notice_models::*;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -20,6 +22,14 @@ fn notice_fixture_models() {
     ))
     .unwrap();
     round_trip::<NoticeSnapshot>(&fixture["snapshot"]);
+    let wire = serde_json::to_vec(&fixture["snapshot"]).unwrap();
+    let direct = descriptors::decode_attention_notice(&wire).unwrap();
+    assert_eq!(serde_json::to_value(direct).unwrap(), fixture["snapshot"]);
+    let metadata: Value = serde_json::from_str(descriptors::DESCRIPTORS_JSON).unwrap();
+    assert_eq!(metadata[0], serde_json::json!({
+        "model": "NoticeSnapshot", "kind": "attention-notice", "collection": "notices",
+        "id_schema": "NoticeId", "internal": true
+    }));
     round_trip::<NoticeCreated>(&fixture["snapshot"]["input"]);
     for value in fixture["valid_delivery"].as_array().unwrap() {
         round_trip::<NoticeDelivery>(value);
@@ -37,6 +47,7 @@ fn notice_fixture_models() {
         } else {
             *value.pointer_mut(pointer).unwrap() = mutation["value"].clone();
         }
+        assert!(descriptors::decode_attention_notice(&serde_json::to_vec(&value).unwrap()).is_err());
         assert!(
             decode_notice::<NoticeSnapshot>(value.clone()).is_err(),
             "{pointer}"

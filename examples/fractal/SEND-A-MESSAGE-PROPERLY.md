@@ -62,9 +62,10 @@ has the original message: it derives the recipient and `in-reply-to`, and preser
 subject deliberately.
 
 People have no inbox, so the worker does not answer the operator with `send` or `reply`: both fail
-with a clear error when the recipient is a person. The worker prints its answer in the conversation
-the operator is reading. Only if the operator asked for it does the worker use an attention item
-(`work ask` for a decision, `work update` for information).
+with a clear error when the recipient is a person. The worker prints factual replies in the
+conversation the operator is reading. Every new question or decision for the person goes through
+a native `work ask`, even while the person is present. Use `work update` only for information
+the person asked for.
 
 ## Long bodies
 

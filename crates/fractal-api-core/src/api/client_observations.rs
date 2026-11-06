@@ -28,7 +28,7 @@ pub struct Validated {
 }
 
 pub fn invalid(message: &'static str) -> ApiError {
-    ApiError::bad(St3Error::new("validation-failed", message))
+    ApiError::bad(FractalError::new("validation-failed", message))
 }
 pub fn unavailable() -> ApiError {
     ApiError {

@@ -47,7 +47,7 @@ fn sweep_occasionally(state: &AppState) {
         .expire_blob_uploads(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
 }
 
-pub fn blob_error(error: St3Error) -> ApiError {
+pub fn blob_error(error: FractalError) -> ApiError {
     let status = match error.code {
         "blob-too-large" => StatusCode::PAYLOAD_TOO_LARGE,
         "unsupported-media-type" => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -243,7 +243,7 @@ pub async fn ensure_local(
     if blobs.size(hash).is_some() {
         return Ok(());
     }
-    let missing = |code: &'static str, text: &str| blob_error(St3Error::new(code, text));
+    let missing = |code: &'static str, text: &str| blob_error(FractalError::new(code, text));
     let Some(attachment) = attachment else {
         return Err(missing("blob-not-found", "this member holds no such attachment"));
     };
@@ -344,7 +344,7 @@ pub async fn get(
         .as_ref()
         .is_some_and(|attachment| attachment.media_type == crate::message_body::MEDIA_TYPE)
     {
-        return Err(blob_error(St3Error::new(
+        return Err(blob_error(FractalError::new(
             "blob-not-found",
             "this is a message's body; read it with the message-body route",
         )));
@@ -362,7 +362,7 @@ pub async fn get(
         .read(&hash)
         .map_err(ApiError::internal)?
         .ok_or_else(|| {
-            blob_error(St3Error::new(
+            blob_error(FractalError::new(
                 "blob-expired",
                 "the attachment was removed after its retention window",
             ))
@@ -441,13 +441,13 @@ pub async fn chunk(
                 if expired {
                     super::message_bodies::expired_error(&client_host_id(&state.node))
                 } else {
-                    blob_error(St3Error::new(
+                    blob_error(FractalError::new(
                         "blob-not-found",
                         "the full text of this message is no longer on this machine",
                     ))
                 }
             } else {
-                blob_error(St3Error::new(
+                blob_error(FractalError::new(
                     "blob-expired",
                     "the attachment was removed after its retention window",
                 ))
@@ -469,7 +469,7 @@ pub fn resolve_attachments(
     inputs: &[AttachmentInput],
 ) -> Result<Vec<MessageAttachment>, ApiError> {
     if inputs.len() > blobs::MAX_ATTACHMENTS {
-        return Err(blob_error(St3Error::new(
+        return Err(blob_error(FractalError::new(
             "too-many-attachments",
             format!("a message carries at most {} attachments", blobs::MAX_ATTACHMENTS),
         )));
@@ -489,7 +489,7 @@ pub fn resolve_attachments(
             .read_range(&hash, 0, 16)
             .map_err(ApiError::internal)?;
         let (Some(_), Some((size, head))) = (uploaded, held) else {
-            return Err(blob_error(St3Error::new(
+            return Err(blob_error(FractalError::new(
                 "blob-not-found",
                 format!("{sender} has no held upload `blob/{hash}`; upload it first"),
             )));
@@ -502,7 +502,7 @@ pub fn resolve_attachments(
             .trim()
             .to_ascii_lowercase();
         if blobs::sniff_media_type(&head) != Some(media_type.as_str()) {
-            return Err(blob_error(St3Error::new(
+            return Err(blob_error(FractalError::new(
                 "blob-content-mismatch",
                 format!("`blob/{hash}` is not {media_type}"),
             )));

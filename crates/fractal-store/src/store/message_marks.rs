@@ -159,7 +159,7 @@ pub fn record(
     message: &str,
     kind: &str,
     consumer: &str,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     let mut connection = store.connection.write();
     let transaction = connection.transaction().map_err(internal)?;
     let recorded = record_tx(&transaction, &store.origin, message, kind, consumer)?;
@@ -175,9 +175,9 @@ pub fn record_tx(
     message: &str,
     kind: &str,
     consumer: &str,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     if !MARKS.contains(&kind) && kind != STAGED {
-        return Err(St3Error::new("invalid-message-mark", format!("`{kind}` is not a message mark")));
+        return Err(FractalError::new("invalid-message-mark", format!("`{kind}` is not a message mark")));
     }
     let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
     let receipt = super::messages_shard::lifecycle_receipt(origin, message, kind, Some(consumer), &fields);
@@ -200,7 +200,7 @@ pub fn record_tx(
             .query_row("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)", [message], |row| row.get(0))
             .map_err(internal)?;
         if !known {
-            return Err(St3Error::new("missing-message", format!("`{message}` is not a message this member holds")));
+            return Err(FractalError::new("missing-message", format!("`{message}` is not a message this member holds")));
         }
     } else {
         // The client selectors fold their dirty headers at the end of a write, as a claim's

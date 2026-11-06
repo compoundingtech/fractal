@@ -28,7 +28,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };

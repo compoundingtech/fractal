@@ -1604,6 +1604,7 @@ mod tests {
         let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
         assert!(configured.unlaned_seat.is_some());
     }
+    use crate::test_executable::fake_executable;
     use std::fs;
     use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixListener;
@@ -1695,22 +1696,6 @@ mod tests {
         let pid = child.id();
         assert!(child.wait().unwrap().success());
         assert!(!process_runs(pid).unwrap());
-    }
-
-    fn fake_executable(root: &Path, name: &str, body: &str) -> PathBuf {
-        let source = root.join(format!("{name}.source"));
-        let binary = root.join(name);
-        fs::write(&source, body).unwrap();
-        // A parallel test can fork while this process owns a writable file.
-        // Let install create the executable so no child inherits that writer.
-        let output = Command::new("install")
-            .args(["-m", "700"])
-            .arg(&source)
-            .arg(&binary)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "install failed: {output:?}");
-        binary
     }
 
     /// A fake `pty` whose `run` records its arguments and launch count, then runs `on_run`, which

@@ -104,7 +104,7 @@ mod tests {
             CARD_FAULT_PINNED_WALL_BACKSTOP + std::time::Duration::from_millis(50));
         let started = std::time::Instant::now();
         let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert!(started.elapsed() >= CARD_FAULT_PINNED_WALL_BACKSTOP, "the stall must reach the backstop");
         assert_eq!(store.index().unwrap(), cut);
     }
@@ -119,7 +119,7 @@ mod tests {
         Store::expire_next_card_fault_read_for_test();
         let started = std::time::Instant::now();
         let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert!(started.elapsed() < CARD_FAULT_PINNED_WALL_BACKSTOP, "the forced deadline must not wait for the backstop");
         assert_eq!(store.index().unwrap(), cut);
     }
@@ -143,7 +143,7 @@ mod tests {
         let error = smallclaims::read_budget::with(Some(parent.clone()), ||
             store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index))).unwrap_err();
         let work = scope.finish();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert!(parent.check().is_ok(), "the local work limit must refuse before its parent");
         assert!(work.vm_steps > 1000, "the control must execute real SQLite work");
         assert_eq!(store.index().unwrap(), cut, "a refused read cannot return a repaired cut");
@@ -159,11 +159,11 @@ mod tests {
         AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(move || cancel.cancel())));
         let error = smallclaims::read_budget::with(Some(parent), ||
             store.mailbox_faults_for(&subjects, cut)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         BEFORE_FAULT_READER.with(|hook| *hook.borrow_mut() = Some(Box::new(||
             std::thread::sleep(std::time::Duration::from_millis(60)))));
         let error = store.mailbox_faults_for(&subjects, cut).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert_eq!(store.index().unwrap(), cut);
     }
 
@@ -204,7 +204,7 @@ mod tests {
         let budget = smallclaims::read_budget::ReadBudget::new("expired-card-cut", std::time::Duration::ZERO);
         let error = smallclaims::read_budget::with(Some(budget), ||
             store.mailbox_faults_for(&subjects, second_cut)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert_eq!(store.index().unwrap(), before, "failure cannot backfill or return a partial fault map");
     }
 

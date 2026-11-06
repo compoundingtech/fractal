@@ -2,7 +2,7 @@
 //! A former owner acknowledges the selected placement only after its local runtime is gone.
 use crate::MissionsStore;
 use crate::SeatsStore;
-use crate::model::{ClaimInput, ClaimRecord, DesiredSubject, St3Error};
+use crate::model::{ClaimInput, ClaimRecord, DesiredSubject, FractalError};
 use crate::store::Store;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -25,11 +25,11 @@ pub struct SourceOfflineRequest {
 pub fn source_offline_input(
     store: &Store,
     request: SourceOfflineRequest,
-) -> Result<ClaimInput, St3Error> {
-    let invalid = |message| St3Error::new("invalid-source-offline", message);
+) -> Result<ClaimInput, FractalError> {
+    let invalid = |message| FractalError::new("invalid-source-offline", message);
     let claim = store
         .claim_by_id(&request.desired_token)
-        .map_err(|e| St3Error::new("internal", e.to_string()))?
+        .map_err(|e| FractalError::new("internal", e.to_string()))?
         .ok_or_else(|| invalid("placement declaration is missing"))?;
     if claim.subject != request.subject || claim.kind != "intent.desired" {
         return Err(invalid(
@@ -37,7 +37,7 @@ pub fn source_offline_input(
         ));
     }
     let fence = fence(store, &request.subject, &request.desired_token)
-        .map_err(|e| St3Error::new("internal", e.to_string()))?
+        .map_err(|e| FractalError::new("internal", e.to_string()))?
         .ok_or_else(|| invalid("override needs an agent placement"))?;
     let sources = request.sources.into_iter().collect::<BTreeSet<_>>();
     if sources.is_empty()

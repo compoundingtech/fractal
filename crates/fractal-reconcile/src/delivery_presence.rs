@@ -721,7 +721,7 @@ pub fn finish_legacy_shape(
             if fractal_drivers::claude_process::failure_kind(&error)
                 == Some(fractal_drivers::claude_process::FailureKind::Refused)
                 || error
-                    .downcast_ref::<crate::St3Error>()
+                    .downcast_ref::<crate::FractalError>()
                     .is_some_and(|error| error.code == "stale-mailbox-session") =>
         {
             "would-have-refused direct-chain shape; installed topology remains unverified".into()

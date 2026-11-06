@@ -16,7 +16,7 @@ run_tag="mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
 source ./participants.sh
 
 agent_json() {
-  st3 agents show "$1" --all --json 2>/dev/null
+  fractal agents show "$1" --all --json 2>/dev/null
 }
 
 now_ms() {
@@ -116,7 +116,7 @@ render_prompt() {
 
 message_has_kind() {
   local subject=$1 kind=$2
-  st3 trace show "$subject" --json --limit 100 2>/dev/null \
+  fractal trace show "$subject" --json --limit 100 2>/dev/null \
     | jq -se --arg kind "$kind" 'any(.kind == $kind)' >/dev/null
 }
 
@@ -131,8 +131,8 @@ all_kickoffs_have_kind() {
 messages_to() {
   local recipient=$1
   jq -s 'add | unique_by(.subject)' \
-    <(st3 conversations ls "$recipient" --json) \
-    <(st3 conversations ls "$recipient" --archive --json)
+    <(fractal conversations ls "$recipient" --json) \
+    <(fractal conversations ls "$recipient" --archive --json)
 }
 
 stage_complete() {
@@ -193,7 +193,7 @@ run_phase() {
   for name in "${names[@]}"; do
     agent="${agents[$name]}"
     body="$(render_prompt "$phase" "${tokens[$name]}" "${peers[$name]}")"
-    kickoff="$(st3 conversations send "$agent" --from person/eval-requester \
+    kickoff="$(fractal conversations send "$agent" --from person/eval-requester \
       --subject "Cross-harness consensus: $phase" \
       --tags "$run_tag,consensus-wake:$phase,consensus-wake:kickoff" \
       --body "$body" --json | jq -er .subject)"

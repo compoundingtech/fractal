@@ -38,7 +38,7 @@ assert.equal(actorName({ kind: 'agent', agent: 'agent/keeper', label: 'keeper' }
 assert.equal(actorName({ kind: 'st' }), 'Fractal');
 assert.equal(actorName({ kind: 'nobody' }), undefined);
 
-assert.equal(missionTitle({ id: 'mission/fleet/stui/client-api', title: 'fleet/stui/client-api' }), 'fleet/stui · Client API');
+assert.equal(missionTitle({ id: 'mission/fleet/tui/client-api', title: 'fleet/tui/client-api' }), 'fleet/tui · Client API');
 // Product slugs have a canonical label; stored legacy slugs retain their own label.
 assert.equal(missionTitle({ id: 'mission/fleet/st3', title: 'fleet/st3' }), 'fleet · ST');
 assert.equal(missionTitle({ id: 'mission/fleet/FRACTAL', title: 'fleet/FRACTAL' }), 'fleet · Fractal');

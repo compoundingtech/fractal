@@ -82,6 +82,13 @@ const rustTestJunitUpload = (name: string) => [
   },
 ]
 
+// Run before Rust fixture consumers; the required freshness lane also covers all client lanes.
+const sidebarFixtureStep = nixDevelopStep({
+  name: 'Validate public sidebar fixtures and scrubber self-tests',
+  flake: '.#genie',
+  command: ['bash', '-euc', 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'],
+})
+
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
 // setup, then scripts/ci-linux.
 const baseLinuxStageJob = ({
@@ -118,6 +125,7 @@ const baseLinuxStageJob = ({
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
   steps: [
     ...setup,
+    sidebarFixtureStep,
     {
       name: 'Summarize tested revision',
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
@@ -494,6 +502,7 @@ fi`,
       steps: skipIfCovered('genie-freshness', [
         ...genieSetupSteps,
         megarepoApplyStep,
+        sidebarFixtureStep,
         { ...nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }), id: 'freshness' },
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
         ...evidenceStepSteps('genie-freshness', ['bash', 'scripts/ci-genie-freshness'], ['freshness']),

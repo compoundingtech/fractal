@@ -4842,8 +4842,8 @@ pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
     })
 }
 
-/// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
-/// ratio; an older st is never sent one.
+/// The glasses capability version Fractal grants this TUI. From version 2 (#958) a split carries its
+/// ratio; an older daemon is never sent one.
 static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn set_glasses_version(version: u64) {

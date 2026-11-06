@@ -282,7 +282,7 @@ mod tests {
         let desired = intent.subjects.values().next().unwrap().clone();
         store
             .connection
-            .batched(|transaction| -> Result<(), St3Error> {
+            .batched(|transaction| -> Result<(), FractalError> {
                 let claim = append_claim_tx(
                     transaction,
                     "peer",
@@ -339,7 +339,7 @@ mod tests {
             .unwrap();
         store
             .connection
-            .batched(|transaction| -> Result<(), St3Error> {
+            .batched(|transaction| -> Result<(), FractalError> {
                 validate_replicated(transaction, &claim, &desired)?;
                 let source = PERFORMANCE_REGISTRATION.replace(
                     "on \"main_performance_failures\"",

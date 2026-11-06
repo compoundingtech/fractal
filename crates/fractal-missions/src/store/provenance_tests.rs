@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use crate::MissionsStore;
-use crate::model::{IntentInput, St3Error};
+use crate::model::{IntentInput, FractalError};
 use std::collections::BTreeMap;
 use crate::provenance::tests::*;
 use crate::provenance::*;

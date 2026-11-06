@@ -52,7 +52,7 @@ pub enum Cause {
     Sql(rusqlite::Error),
     Snapshot(anyhow::Error),
     Canonical(anyhow::Error),
-    Budget(crate::model::St3Error),
+    Budget(crate::model::FractalError),
 }
 
 impl fmt::Display for Cause {
