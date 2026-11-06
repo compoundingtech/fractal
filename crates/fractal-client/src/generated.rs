@@ -536,6 +536,14 @@ pub struct Operational {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionPresentationControl {
+    pub source_revision: String,
+    pub revision: Option<String>,
+    pub dismissed: bool,
+    pub snoozed_until: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Attention {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_form: Option<Value>,
@@ -545,6 +553,8 @@ pub struct Attention {
     pub source_kind: String,
     #[serde(default)]
     pub action_parameters: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_control: Option<AttentionPresentationControl>,
     #[serde(flatten)]
     pub header: ResourceHeader,
     #[serde(flatten)]

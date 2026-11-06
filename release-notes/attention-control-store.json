@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Add durable person-owned attention presentation-control registers to the store",
   "replay": { "status": "changed", "detail": "Attention controls reduce replicated attention.control claims in canonical order. Explicit restore and snooze clears survive replay; newer source revisions invalidate suppression." },
-  "schema": { "status": "changed", "detail": "Register the durable attention.control claim and add an additive partial index for person/item/register lookups. No existing rows are rewritten." },
+  "schema": { "status": "changed", "detail": "Register the durable attention.control claim and add an additive partial index for recipient, item and register lookups. No existing rows are rewritten." },
   "rules": { "status": "none", "detail": "No checkpoint rules or coordinated upgrade required." },
   "compatibility": { "status": "changed", "detail": "The store exposes guarded control writes and indexed reads. Writes check source currency and control revision under the writer lock; same-key replay preserves the original receipt. Public inbox actions and serving behavior are unchanged." },
   "downtime": { "status": "none", "detail": "The additive index is created when opening the store." },
