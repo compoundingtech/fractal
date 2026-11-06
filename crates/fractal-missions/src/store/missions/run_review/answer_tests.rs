@@ -77,7 +77,6 @@ fn append(store: &Store, input: &ClaimInput, commit: bool) -> Result<ClaimRecord
     }
     result
 }
-
 #[test]
 fn agent_review_answer_transaction_commit_and_rollback() {
     let (store, mut input, _) = fixture_answer(&[]);
@@ -85,7 +84,9 @@ fn agent_review_answer_transaction_commit_and_rollback() {
     assert!(store.claim_by_id(&rolled_back.id).unwrap().is_none());
     input.fields.insert("decision".into(), json!("rejected"));
     input.fields.insert("verdict".into(), json!("fail"));
-    input.fields.insert("reason".into(), json!("Needs revision"));
+    input
+        .fields
+        .insert("reason".into(), json!("Needs revision"));
     let saved = append(&store, &input, true).unwrap();
     let record = store.claim_by_id(&saved.id).unwrap().unwrap();
     assert_eq!(record.actor.as_deref(), Some(FREE));
@@ -93,7 +94,6 @@ fn agent_review_answer_transaction_commit_and_rollback() {
     assert_eq!(record.body["evidence"][0], input.fields["request"]);
     assert_eq!(record.body["fields"]["reason"], "Needs revision");
 }
-
 #[test]
 fn agent_review_answer_transaction_invalid_fields_do_not_append() {
     let (store, input, _) = fixture_answer(&[]);
