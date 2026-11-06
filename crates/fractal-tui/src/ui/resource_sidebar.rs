@@ -685,7 +685,7 @@ impl Sidebar {
                     "completed" => theme::DONE,
                     _ => theme::QUIET,
                 };
-                let mut first = vec![(format!("     {}", run.status), theme::fg(chip))];
+                let mut first = vec![(format!("     {} {}", run.status, run.mission_id.strip_prefix("mission/").unwrap_or(&run.mission_id)), theme::fg(chip))];
                 if let Some(progress) = run.progress {
                     first.push((format!(" {} {}", progress.text(), progress.bar(6)), theme::soft()));
                 }
@@ -1304,7 +1304,7 @@ mod tests {
         let first = at(&rows, &agents[0]);
         let text = |sidebar: &Sidebar, row: &Row| sidebar.lines(row).iter()
             .map(|line| line.iter().map(|(label, _)| label.as_str()).collect::<String>()).collect::<Vec<_>>();
-        assert_eq!(text(&ui.resource_sidebar, &rows[first + 1]), ["     waiting-on-you 1/2 ███░░░ · waiting on you", "       Check · waits on person/reviewer"]);
+        assert_eq!(text(&ui.resource_sidebar, &rows[first + 1]), ["     waiting-on-you build 1/2 ███░░░ · waiting on you", "       Check · waits on person/reviewer"]);
         assert!(matches!(&rows[first + 2], Row::Finished { count: 1, closed: true, .. }));
         assert!(matches!(&rows[first + 3], Row::Notice(note) if note.trim() == "+ 1 more"));
         let second = at(&rows, &agents[1]);
@@ -1312,7 +1312,7 @@ mod tests {
         ui.open_resource_row(first + 2);
         let rows = ui.resource_sidebar.rows();
         assert!(matches!(&rows[first + 3], Row::Run(run) if run.folded && run.id == "mission-run/done"));
-        assert_eq!(text(&ui.resource_sidebar, &rows[first + 3]), ["     completed 2/2 ██████"]);
+        assert_eq!(text(&ui.resource_sidebar, &rows[first + 3]), ["     completed build 2/2 ██████"]);
         assert_eq!(ui.resource_sidebar.choices.collapsed.get(&format!("runs/{}", agents[0])), Some(&false));
         ui.resource_sidebar.selected = first + 1;
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 32)).unwrap();
