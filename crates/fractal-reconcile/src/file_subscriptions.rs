@@ -151,6 +151,21 @@ impl State {
             }
             self.physical.insert(path.clone(), (recursive, identity));
         }
+        if let Some(id) = acquiring {
+            for (path, _) in &lock(&self.users)[&id].0 {
+                // Root collapse must not hide a vanished acquiring path behind
+                // a missing recursive root retained by another subscriber.
+                stamp(path)?;
+                anyhow::ensure!(
+                    path.ancestors().any(|root| {
+                        self.physical
+                            .get(root)
+                            .is_some_and(|(recursive, _)| root == path || *recursive)
+                    }),
+                    "acquiring path has no physical watch coverage"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -332,6 +347,78 @@ mod tests {
         );
         assert_eq!(lock(&lock(&pool.0).users).len(), 1);
         drop(lease);
+        assert!(lock(&pool.0).physical.is_empty());
+    }
+
+    #[test]
+    fn collapsed_acquiring_child_cannot_succeed_after_ancestor_disappears() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap().join("ancestor");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let pool = Pool::new().unwrap();
+        let retained = pool
+            .subscribe(vec![(parent.clone(), true)], Arc::new(|_| {}))
+            .unwrap();
+        let child = child.canonicalize().unwrap();
+        let mut state = lock(&pool.0);
+        lock(&state.users).insert(u64::MAX, (vec![(child, false)], Arc::new(|_| {})));
+        std::fs::remove_dir_all(&parent).unwrap();
+        let error = state.rebuild(stamp, Some(u64::MAX)).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        state.remove(u64::MAX);
+        assert_eq!(lock(&state.users).len(), 1);
+        assert!(state.physical.is_empty());
+        drop(state);
+        drop(retained);
+    }
+
+    #[test]
+    fn partial_install_rollback_restores_existing_subscriber_notifications() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+        let added = parent.join("a-new");
+        let existing = parent.join("m-existing");
+        let failed = parent.join("z-fail");
+        for path in [&added, &existing, &failed] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let pool = Pool::new().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let retained = pool.subscribe(vec![(existing.clone(), false)], Arc::new(move |event| {
+            let _ = send.send(event);
+        })).unwrap();
+        let mut state = lock(&pool.0);
+        lock(&state.users).insert(u64::MAX, (
+            vec![(added.clone(), false), (existing.clone(), true), (failed.clone(), false)],
+            Arc::new(|_| {}),
+        ));
+        assert!(state.rebuild(|path| {
+            if path.file_name().unwrap() == "z-fail" { Ok((0, 0)) } else { stamp(path) }
+        }, Some(u64::MAX)).is_err());
+        assert!(state.physical.contains_key(&added));
+        assert!(state.physical[&existing].0);
+        assert!(receive.try_iter().any(|event| event.paths.is_empty()));
+        state.remove(u64::MAX);
+        assert_eq!(state.physical.len(), 1);
+        assert!(!state.physical[&existing].0);
+        assert!(state.watcher.unwatch(&added).is_err());
+        assert!(state.watcher.unwatch(&failed).is_err());
+        drop(state);
+        while receive.try_recv().is_ok() {}
+        let target = existing.join("after-rollback");
+        std::fs::write(&target, "still watched").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let event = receive.recv_timeout(
+                deadline.saturating_duration_since(std::time::Instant::now())
+            ).expect("retained subscriber must receive mutations after rollback");
+            if event.paths.contains(&target) { break; }
+        }
+        drop(retained);
         assert!(lock(&pool.0).physical.is_empty());
     }
 }
