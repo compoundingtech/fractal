@@ -25,7 +25,8 @@ pub fn stop_cut(connection: &Connection, seat: &str) -> Result<Option<(Option<St
 
 /// Live work `seat` holds or is assigned in a run outside the root of `owner_run`, at most three
 /// steps, or only `step` when one is named. With `before`, only work in runs this host recorded
-/// before that store index.
+/// before that store index. A run whose creation claim this host no longer has counts as earlier:
+/// a missing record never ends a hold early.
 pub fn held_work(
     connection: &Connection,
     seat: &str,
@@ -46,8 +47,9 @@ pub fn held_work(
            AND mission_runs.phase<>'terminal'
            AND mission_runs.root_run_id<>COALESCE(
                  (SELECT root_run_id FROM mission_runs WHERE id=?2), ?2)
-           AND (?3 IS NULL OR EXISTS (SELECT 1 FROM claims
-                 WHERE claims.subject='mission-run/' || mission_runs.id AND claims.store_index<?3))
+           AND (?3 IS NULL OR COALESCE((SELECT MIN(claims.store_index) FROM claims
+                 WHERE claims.subject='mission-run/' || mission_runs.id
+                   AND claims.kind='mission-run.created'), -1)<?3)
          ORDER BY step_runs.subject LIMIT 3",
     )?;
     let subjects = statement

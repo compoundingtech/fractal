@@ -730,7 +730,8 @@ pub(super) async fn run_agents(
             print_value(&response, json_output)?;
             // The same stop was already declared: say why the seat still runs, if it does.
             if !json_output && !response.changed
-                && let Ok(found) = generated_client(endpoint, None)?.agents_get(&subject).await
+                && let Ok(gateway) = generated_client(endpoint, None)
+                && let Ok(found) = gateway.agents_get(&subject).await
                 && let ClientResource::Agent(agent) = found.value
                 && let Some(stopping) = agent.stopping
             {
