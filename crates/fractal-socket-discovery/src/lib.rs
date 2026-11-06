@@ -13,14 +13,21 @@ pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf 
     };
     if runtime == published {
         // A short parent symlink can be addressable even when its canonical target is not.
-        return if unix_socket_path_fits(&target) { target } else { runtime.to_path_buf() };
+        return if unix_socket_path_fits(&target) {
+            target
+        } else {
+            runtime.to_path_buf()
+        };
     }
     if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
         return runtime.to_path_buf();
     }
-    let target = if unix_socket_path_fits(&target) { target } else { published.to_path_buf() };
-    let answers = |socket: &Path| unix_socket_path_fits(socket)
-        && unix_socket_answers(socket);
+    let target = if unix_socket_path_fits(&target) {
+        target
+    } else {
+        published.to_path_buf()
+    };
+    let answers = |socket: &Path| unix_socket_path_fits(socket) && unix_socket_answers(socket);
     if !answers(runtime) && answers(&target) {
         target
     } else {
@@ -107,9 +114,7 @@ pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
             &runtime.with_file_name(legacy_name),
             &published.with_file_name(legacy_name),
         );
-        if unix_socket_path_fits(&legacy)
-            && (!primary_fits || unix_socket_answers(&legacy))
-        {
+        if unix_socket_path_fits(&legacy) && (!primary_fits || unix_socket_answers(&legacy)) {
             return legacy;
         }
     }
