@@ -65,8 +65,8 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
   }
   private async execute(state: TState, effects: JournalEffect[]): Promise<void> {
     for (const effect of effects) {
-      if (effect === 'Send' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state); continue; }
       if (!sameScope(state.scope, this.scope) || state.request && !sameScope(state.request.fence.scope, this.scope)) throw new Error('Sidebar journal scope mismatch');
+      if (effect === 'Send' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state); continue; }
       let ack: TEvent;
       try {
         if (effect === 'PersistRemoval') { await this.storage.removeItem(this.key); continue; }

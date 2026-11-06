@@ -14,6 +14,7 @@ const reducer = {
     if (e.identity && JSON.stringify(e.identity) !== JSON.stringify(s.request.identity)) return [];
     if (e.type === 'Stage') { s.status = 'AwaitingPersistence'; return ['PersistPending']; }
     if (e.type === 'Persisted' && s.status === 'AwaitingPersistence') { s.status = 'Sending'; return ['Send']; }
+    if (e.type === 'Replay' && s.status === 'UnknownDelivery') { s.status = 'Sending'; return ['Send']; }
     if (e.type === 'Ack' && s.status === 'Sending') { s.status = 'AwaitingObservation'; return ['PersistPending', 'ReadBase']; }
     if (e.type === 'Observed' && ['Sending', 'UnknownDelivery', 'AwaitingObservation'].includes(s.status)) { s.folder_completed = s.dependent; s.status = 'AwaitingCompletionPersistence'; return ['PersistCompletion']; }
     if (e.type === 'CompletionPersisted' && s.status === 'AwaitingCompletionPersistence') { s.status = s.dependent ? 'AwaitingFreshBase' : 'Observed'; return s.dependent ? ['ReadBase'] : ['PersistRemoval']; }
@@ -100,4 +101,20 @@ test('serialized edits retain each exact write and exclude runtime credentials',
   assert.deepEqual(writes.map(raw => JSON.parse(raw).state.status), ['AwaitingPersistence', 'AwaitingObservation']);
   assert.ok(writes.every(raw => !raw.includes('test-private-token') && !raw.includes('transport')));
   assert.equal(env.sent.length, 1); assert.deepEqual(await setup().host().restore(), { empty: true });
+});
+test('switching host scope refuses all restored effects and unknown-delivery replay', async () => {
+  for (const field of Object.keys(scope)) for (const requestOnly of [false, true]) {
+    const env = setup(); seed(env, state('UnknownDelivery'));
+    const restored = await seedHost(env).restore(), calls = [];
+    const selected = { ...scope, [field]: `${scope[field]}-other` };
+    const host = new SidebarJournal(env.storage, selected, reducer, async effect => { calls.push(effect); });
+    if (requestOnly) restored.state.scope = selected;
+    for (const effect of ['Send', 'ReadBase', 'Replan', 'PersistPending', 'PersistCompletion', 'PersistRemoval']) {
+      await assert.rejects(host.resume({ state: restored.state, effects: [effect] }), /scope mismatch/);
+    }
+    restored.state.status = 'UnknownDelivery';
+    await assert.rejects(host.dispatch(restored.state, { type: 'Replay' }), /scope mismatch/);
+    assert.deepEqual(calls, []);
+    assert.equal(env.values.size, 1);
+  }
 });
