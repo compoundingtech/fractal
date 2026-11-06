@@ -992,6 +992,7 @@ export type Attention = ResourceHeader & {
   mission_run_id?: Id;
   person_id: Id;
   presentation?: AttentionPresentation;
+  presentation_control?: AttentionPresentationControl;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -1081,6 +1082,13 @@ export type AttentionPresentation = {
   revision?: AttentionRevision;
   tier: "stopped" | "alert" | "today" | "later" | null;
   waiting: (AttentionWaiting | null);
+};
+
+export type AttentionPresentationControl = {
+  dismissed: boolean;
+  revision: string | null;
+  snoozed_until: string | null;
+  source_revision: Revision;
 };
 
 export type AttentionPrompt = {
