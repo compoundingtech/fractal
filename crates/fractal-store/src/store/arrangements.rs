@@ -304,25 +304,25 @@ pub fn arrangements_at(connection: &Connection, person: &str, through: u64) -> R
     subjects.into_iter().filter_map(|subject| arrangement_at(connection,&subject,through).transpose()).collect()
 }
 
-pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), St3Error> {
+pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), FractalError> {
     if input.kind != "arrangement.edited" { return Ok(()); }
-    let operations = schema::operations(&input.subject,&input.fields).map_err(|e| St3Error::new(e.code,e.message))?;
+    let operations = schema::operations(&input.subject,&input.fields).map_err(|e| FractalError::new(e.code,e.message))?;
     let state = transaction.query_row("SELECT created,retired FROM arrangements WHERE subject=?1", [&input.subject], |row| Ok((row.get::<_,bool>(0)?,row.get::<_,bool>(1)?))).optional().map_err(internal)?;
-    if state.is_some_and(|(_,retired)| retired) { return Err(St3Error::new("arrangement-retired","a retired arrangement ID cannot be reused")); }
+    if state.is_some_and(|(_,retired)| retired) { return Err(FractalError::new("arrangement-retired","a retired arrangement ID cannot be reused")); }
     let creating = operations.iter().any(|op| matches!(op,Operation::Create { .. }));
-    if creating == state.is_some_and(|(created,_)| created) { return Err(St3Error::new(if creating { "arrangement-exists" } else { "not-found" }, "creation requires a new arrangement; other edits require an existing arrangement")); }
+    if creating == state.is_some_and(|(created,_)| created) { return Err(FractalError::new(if creating { "arrangement-exists" } else { "not-found" }, "creation requires a new arrangement; other edits require an existing arrangement")); }
     if !creating {
         let version = version(transaction, &input.subject).map_err(internal)?;
         if input.fields.contains_key("version") {
-            return Err(St3Error::new("invalid-arrangement-operations", "an arrangement version may only be supplied on creation"));
+            return Err(FractalError::new("invalid-arrangement-operations", "an arrangement version may only be supplied on creation"));
         }
         if version == 2 && operations.iter().any(|operation| matches!(operation, Operation::SubjectPlace { .. })) {
-            return Err(St3Error::new("invalid-arrangement-operations", "version-2 placements require ordered membership actions"));
+            return Err(FractalError::new("invalid-arrangement-operations", "version-2 placements require ordered membership actions"));
         }
     }
     if creating {
-        let count: usize = transaction.query_row("SELECT COUNT(*) FROM arrangements WHERE owner=?1 AND created=1 AND retired=0", [schema::owner(&input.subject).map_err(|e| St3Error::new(e.code,e.message))?], |row| row.get(0)).map_err(internal)?;
-        if count >= schema::MAX_ARRANGEMENTS { return Err(St3Error::new("arrangement-limit","at most 100 arrangements may be live locally")); }
+        let count: usize = transaction.query_row("SELECT COUNT(*) FROM arrangements WHERE owner=?1 AND created=1 AND retired=0", [schema::owner(&input.subject).map_err(|e| FractalError::new(e.code,e.message))?], |row| row.get(0)).map_err(internal)?;
+        if count >= schema::MAX_ARRANGEMENTS { return Err(FractalError::new("arrangement-limit","at most 100 arrangements may be live locally")); }
     }
     if matches!(operations.as_slice(), [Operation::Retire {}]) { return Ok(()); }
     let prepared_head = |value| (value, "0".repeat(64), Vec::new());
@@ -340,13 +340,13 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             }
             Operation::Rename { name } => { heads.insert("name".into(), prepared_head(json!(name))); }
             Operation::FolderCreate { id,name,parent,key } => {
-                if known_ids.contains(id) { return Err(St3Error::new("arrangement-folder-exists","folder IDs cannot be reused")); }
+                if known_ids.contains(id) { return Err(FractalError::new("arrangement-folder-exists","folder IDs cannot be reused")); }
                 heads.insert(format!("folder/{id}/name"),prepared_head(json!(name)));
                 heads.insert(format!("folder/{id}/position"),prepared_head(json!({"parent":parent,"key":key})));
             }
             Operation::FolderRename { id,.. } | Operation::FolderMove { id,.. } | Operation::FolderDelete { id } => {
-                if !known_ids.contains(id) && !created_ids.contains(id.as_str()) { return Err(St3Error::new("not-found","the folder does not exist")); }
-                if initial_deleted.contains(id) { return Err(St3Error::new("arrangement-folder-deleted","a deleted folder ID cannot be edited or reused")); }
+                if !known_ids.contains(id) && !created_ids.contains(id.as_str()) { return Err(FractalError::new("not-found","the folder does not exist")); }
+                if initial_deleted.contains(id) { return Err(FractalError::new("arrangement-folder-deleted","a deleted folder ID cannot be edited or reused")); }
                 match op {
                     Operation::FolderRename { name,.. } => { heads.insert(format!("folder/{id}/name"),prepared_head(json!(name))); }
                     Operation::FolderMove { parent,key,.. } => { heads.insert(format!("folder/{id}/position"),prepared_head(json!({"parent":parent,"key":key}))); }
@@ -357,7 +357,7 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             Operation::SubjectPlace { subject,folder,key } => {
                 let identity = super::identities::resolve_reference_conn(transaction, subject)?;
                 if identity != *subject {
-                    return Err(St3Error::new("invalid-arrangement-operations",
+                    return Err(FractalError::new("invalid-arrangement-operations",
                         "signed placement targets must use immutable identities"));
                 }
                 heads.insert(format!("placement/{identity}"),prepared_head(json!({"folder":folder,"key":key})));
@@ -370,7 +370,7 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             let mut cursor = parent.as_deref();
             let mut seen = BTreeSet::new();
             while let Some(ancestor) = cursor {
-                if ancestor == id { return Err(St3Error::new("arrangement-cycle","a folder cannot move into itself or its descendants")); }
+                if ancestor == id { return Err(FractalError::new("arrangement-cycle","a folder cannot move into itself or its descendants")); }
                 if !seen.insert(ancestor) { break; }
                 cursor = heads.get(&format!("folder/{ancestor}/position")).and_then(|h| h.0["parent"].as_str());
             }
@@ -378,12 +378,12 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
     }
     let folders = heads.keys().filter(|k| k.starts_with("folder/") && k.ends_with("/name")).count();
     let placements = heads.keys().filter(|k| k.starts_with("placement/")).count();
-    if folders > schema::MAX_FOLDERS || placements > schema::MAX_PLACEMENTS { return Err(St3Error::new("arrangement-limit","arrangement folder or placement count exceeds its admission bound")); }
+    if folders > schema::MAX_FOLDERS || placements > schema::MAX_PLACEMENTS { return Err(FractalError::new("arrangement-limit","arrangement folder or placement count exceeds its admission bound")); }
     let layout_version = if creating {
         u8::try_from(input.fields.get("version").and_then(Value::as_u64).unwrap_or(1)).expect("validated arrangement version")
     } else { version(transaction, &input.subject).map_err(internal)? };
     let projected = resource(&input.subject, input.fields["owner"].as_str().expect("validated owner"), &"0".repeat(64), now_ms(), &heads, layout_version).map_err(internal)?;
-    if serde_json::to_vec(&projected).map_err(internal)?.len() > schema::MAX_RESOURCE_BYTES { return Err(St3Error::new("arrangement-body-too-large","projected arrangement resource exceeds 512 KiB")); }
+    if serde_json::to_vec(&projected).map_err(internal)?.len() > schema::MAX_RESOURCE_BYTES { return Err(FractalError::new("arrangement-body-too-large","projected arrangement resource exceeds 512 KiB")); }
     Ok(())
 }
 

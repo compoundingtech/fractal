@@ -1,4 +1,4 @@
-use super::{Scope, St3Error, agent_review};
+use super::{Scope, FractalError, agent_review};
 use crate::model::StepRunView;
 use crate::store::{
     ReferenceGraph, identities, mission_run_header_tx, step_claim_expired,
@@ -9,8 +9,8 @@ use smallclaims::error::internal;
 use smallclaims::store::now_ms;
 use std::collections::BTreeSet;
 
-fn unresolved(subject: &str) -> St3Error {
-    St3Error::new("reviewer-owner-unresolved", subject)
+fn unresolved(subject: &str) -> FractalError {
+    FractalError::new("reviewer-owner-unresolved", subject)
 }
 
 /// The caller supplies a raw step/assignment/pool view and requester from the same
@@ -25,9 +25,9 @@ pub fn validate_step_reviewer(
     step: &StepRunView,
     requester: &str,
     reviewer: &str,
-) -> Result<BTreeSet<String>, St3Error> {
+) -> Result<BTreeSet<String>, FractalError> {
     let mut excluded = BTreeSet::new();
-    let mut include = |actor: &str| -> Result<(), St3Error> {
+    let mut include = |actor: &str| -> Result<(), FractalError> {
         if actor.contains("${") {
             return Err(unresolved(actor));
         }
@@ -70,10 +70,10 @@ pub fn validate_step_reviewer(
 fn collect_step(
     connection: &Connection,
     step: &StepRunView,
-    include: &mut impl FnMut(&str) -> Result<(), St3Error>,
+    include: &mut impl FnMut(&str) -> Result<(), FractalError>,
     visiting: &mut BTreeSet<String>,
     snapshot_unix_ms: u128,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if !visiting.insert(step.subject.clone()) {
         return Err(unresolved(&step.subject));
     }

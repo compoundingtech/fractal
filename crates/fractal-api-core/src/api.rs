@@ -83,7 +83,7 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
@@ -454,7 +454,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn bad(error: St3Error) -> Self {
+    pub fn bad(error: FractalError) -> Self {
         let status = match error.code {
             "recipient-retired"
             | "identity-cycle"
@@ -514,15 +514,15 @@ impl ApiError {
             return error;
         }
         if smallclaims::read_budget::check().is_err() {
-            return Self::bad(St3Error::new("read-deadline", "the read exceeded its deadline or was cancelled"));
+            return Self::bad(FractalError::new("read-deadline", "the read exceeded its deadline or was cancelled"));
         }
-        let store_error = typed.downcast_ref::<St3Error>().or_else(|| {
+        let store_error = typed.downcast_ref::<FractalError>().or_else(|| {
             typed
                 .downcast_ref::<anyhow::Error>()
-                .and_then(|error| error.downcast_ref::<St3Error>())
+                .and_then(|error| error.downcast_ref::<FractalError>())
         });
         if let Some(error) = store_error {
-            return Self::bad(St3Error {
+            return Self::bad(FractalError {
                 code: error.code,
                 message: error.message.clone(),
                 details: error.details.clone(),
@@ -3721,7 +3721,7 @@ fn client_agent_cards_presented(
     )?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.code == "read-deadline") => None,
         Err(error) => return Err(error),
     };
     store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), selected);
@@ -6503,7 +6503,7 @@ where
 pub async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, St3Error> + Send + 'static,
+    F: FnOnce() -> Result<T, FractalError> + Send + 'static,
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
@@ -7468,7 +7468,7 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
         )));
@@ -7488,14 +7488,14 @@ pub async fn guard_bound_request(
         .and_then(|value| value.to_str().ok())
         && !is_bound_actor(store, person, &bound_identity)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot act as `{person}`"),
         )));
     }
     let path = request.uri().path();
     if path == "/v1/repair/apply" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             "bound harnesses must use the attributed repair apply route",
         )));
@@ -7503,7 +7503,7 @@ pub async fn guard_bound_request(
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
@@ -7558,7 +7558,7 @@ pub async fn guard_bound_request(
         if parts.uri.path() == "/v1/repair/apply-attributed"
             && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "foreign-agent-actor",
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
@@ -7567,7 +7567,7 @@ pub async fn guard_bound_request(
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
                 )));
@@ -9693,11 +9693,11 @@ mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
-fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, St3Error> {
+fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, FractalError> {
     match result {
         Ok(projected) => Ok(projected),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
-        Err(error) => Err(St3Error::new("internal", error.to_string())),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
+        Err(error) => Err(FractalError::new("internal", error.to_string())),
     }
 }
 
@@ -9811,7 +9811,7 @@ fn concrete_person(person: &str) -> Result<(), ApiError> {
     if person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7 {
         Ok(())
     } else {
-        Err(ApiError::bad(St3Error::new(
+        Err(ApiError::bad(FractalError::new(
             "person-required",
             "fleet operations need a concrete person/NAME",
         )))
@@ -9860,7 +9860,7 @@ async fn refuse_while_leaving(
         // closes the connection under it, and the client then reports a broken pipe instead
         // of this refusal.
         let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
-        return ApiError::bad(St3Error::new(
+        return ApiError::bad(FractalError::new(
             "fleet-leaving",
             "this node is leaving its fleet and accepts no new writes; `st fleet leave --cancel` stops the leave",
         ))
@@ -9896,9 +9896,9 @@ fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
-) -> Result<&'a crate::model::MissionSpec, St3Error> {
+) -> Result<&'a crate::model::MissionSpec, FractalError> {
     let Some(mission) = intent.missions.get(expected) else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}` and no immediate desired state"
@@ -9908,7 +9908,7 @@ fn launch_candidate_mission<'a>(
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
     if !mission_only_subjects(intent) || published != published_closure {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}`, its implicit mission graphs, and no immediate desired state"
@@ -10039,7 +10039,7 @@ struct PublicationRefusals {
 
 impl PublicationRefusals {
     /// The error that refuses the publication, if anything does.
-    fn error(self) -> Option<St3Error> {
+    fn error(self) -> Option<FractalError> {
         let (code, refusals) = if !self.references.is_empty() {
             ("unresolved-reference", self.references)
         } else if !self.renders.is_empty() {
@@ -10047,7 +10047,7 @@ impl PublicationRefusals {
         } else {
             return None;
         };
-        Some(St3Error::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
+        Some(FractalError::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
     }
 
     /// Lists the refusals as the preview's blockers, where each replaces a warning of the same
@@ -10082,7 +10082,7 @@ async fn publication_refusals(
         let renders = if publication.iter().any(|subject| subject.member.is_some()) {
             let current = store
                 .desired_subjects()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             crate::render::publication_refusals(&store, &publication, &current, &node)
         } else {
             Vec::new()
@@ -10129,7 +10129,7 @@ fn suspension_target(
         .map_err(ApiError::bad)?
         .is_some_and(|o| o.holds_seat())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -10143,13 +10143,13 @@ fn suspension_target(
         .into_iter()
         .find(|item| item.subject == subject)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-agent",
                 format!("no seat `{subject}`"),
             ))
         })?;
     if !current.conflicts.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "suspend-conflict",
             "resolve the seat's conflicting declarations first",
         )));
@@ -10163,7 +10163,7 @@ fn suspension_target(
         .and_then(|desired| desired.member)
         .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-declared",
                 "only a declared, started seat can be suspended or resumed",
             ))
@@ -10174,7 +10174,7 @@ fn suspension_target(
         member = incumbent;
     }
     let token = current.desired_token.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "suspend-not-declared",
             "the seat has no selected declaration",
         ))
@@ -10241,7 +10241,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -10252,7 +10252,7 @@ pub fn request_suspend(
         && suspension.holds_seat()
     {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "already-suspended",
                 format!("the seat is already {}", suspension.phase),
             )
@@ -10268,7 +10268,7 @@ pub fn request_suspend(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-running",
                 "only a running seat can be suspended",
             ))
@@ -10276,7 +10276,7 @@ pub fn request_suspend(
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
     if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-authored-session-selection",
                 format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
             )
@@ -10287,7 +10287,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-blocked",
                 format!("the seat is not quiet: {}", blocking.join(", ")),
             )
@@ -10343,14 +10343,14 @@ pub fn request_resume(
         .map_err(ApiError::internal)?
         .filter(|suspension| suspension.phase == "suspended")
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new("not-suspended", "the seat is not suspended"))
+            ApiError::bad(FractalError::new("not-suspended", "the seat is not suspended"))
         })?;
     let suspend = suspension.suspend_operation_id.clone().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("a suspension without its suspend request"))
     })?;
     let host = request.host.unwrap_or_else(|| member.host.clone());
     if host.is_empty() || host.contains('/') {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
         )));
@@ -10359,7 +10359,7 @@ pub fn request_resume(
         crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
     {
         if host != old.host {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "rollout-in-progress",
                 "resume on the current host before applying the pending manual rollout",
             )));
@@ -10384,13 +10384,13 @@ pub fn request_resume(
                 crate::fleet::MemberState::Current(_)
             )
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "unknown-host",
                 "the resume target is not a current fleet member",
             )));
         }
         if !matches!(suspension.harness.as_deref(), Some("pi" | "omp")) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "snapshot-harness-unsupported",
                 "cross-host resume currently supports pi and omp portable transcripts",
             )));
@@ -10427,7 +10427,7 @@ async fn apply_with_authority(
     bound: Option<&str>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let actor = request.actor.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-publication-actor",
             "publication needs an explicit actor",
         ))
@@ -10436,13 +10436,13 @@ async fn apply_with_authority(
     if !intent.direct_message_registrations.is_empty()
         && bound.is_some_and(|bound| normalized_agent_actor(actor).as_deref() != Some(bound))
     {
-        return Err(ApiError::bad(St3Error::new("foreign-agent-actor",
+        return Err(ApiError::bad(FractalError::new("foreign-agent-actor",
             "a bound harness registers a message subscription only as itself")));
     }
     for declaration in intent.mission_runs.values() {
         if let Some(creation) = &declaration.creation {
             if creation.requester == "person/requester" {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "placeholder-run-requester",
                     "a mission run needs a concrete requester, not `person/requester`",
                 )));
@@ -10450,7 +10450,7 @@ async fn apply_with_authority(
             if let Some(agent) = normalized_agent_actor(actor)
                 && creation.requester != agent
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "run-requester-actor-mismatch",
                     format!(
                         "`{actor}` cannot create a run for requester `{}`",
@@ -10507,7 +10507,7 @@ async fn get_delivery_hold(
 ) -> Result<Json<crate::delivery_hold::HoldView>, ApiError> {
     fractal_schema::registry()
         .validate_subject(&query.subject)
-        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
+        .map_err(|error| ApiError::bad(FractalError::new(error.code, error.message)))?;
     let store = state.store.clone();
     blocking_store(move || {
         crate::delivery_hold::view(&store, &query.subject, client_now_ms() as u64)
@@ -10529,13 +10529,13 @@ async fn post_delivery_hold(
         {
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             let driver = subjects
                 .first()
                 .and_then(|subject| subject.member.as_ref())
                 .and_then(|member| member.driver.as_deref());
             if !matches!(driver, Some("codex" | "opencode")) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unsupported-delivery-hold",
                     "delivery holds currently require a declared Codex or OpenCode seat",
                 ));
@@ -10686,7 +10686,7 @@ pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
 
 fn device_signature_error(code: &'static str, message: impl Into<String>) -> ApiError {
-    ApiError::bad(St3Error::new(code, message.into()))
+    ApiError::bad(FractalError::new(code, message.into()))
 }
 
 /// Check a device's signature on the message this daemon is about to write, before writing it.
@@ -10816,7 +10816,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let requested_recipient = normalize_message_party(&request.to);
     let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "external sender imports require the enrolled adapter endpoint",
         )));
@@ -10824,7 +10824,7 @@ pub fn accept_message_receipt_with_upload_owner(
     crate::model::refuse_person_recipient(&normalize_message_party(&request.to))
         .map_err(ApiError::bad)?;
     if request.content.trim().is_empty() && request.attachments.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-message",
             "a message needs nonempty content",
         )));
@@ -10832,7 +10832,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
         && !request.content.starts_with("doc/");
     if long_body && request.content.len() > message_body::MAX_BYTES {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "message-too-large",
             format!(
                 "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
@@ -10843,13 +10843,13 @@ pub fn accept_message_receipt_with_upload_owner(
     }
     if request.content.starts_with("doc/") {
         let (name, hash) = request.content.rsplit_once('@').ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "unpinned-document-reference",
                 "a message document reference needs `doc/NAME@HASH`",
             ))
         })?;
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-document-reference",
                 "a message document reference has an invalid hash",
             )));
@@ -10860,7 +10860,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .map_err(ApiError::internal)?
             .is_none()
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "missing-document",
                 format!("message document `{}` is not stored", request.content),
             )));
@@ -10880,7 +10880,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::reserved_event_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "daemon event tags cannot be asserted by conversation senders",
         )));
@@ -10891,7 +10891,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::is_remaining_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "remaining-count tags are delivery metadata",
         )));
@@ -10935,7 +10935,7 @@ pub fn accept_message_receipt_with_upload_owner(
                 == crate::silent::stored_tags(&from, &stored)
         };
         if !same_tags {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "idempotency-mismatch",
                 "the idempotency key already identifies different message tags",
             )));
@@ -11020,7 +11020,7 @@ pub fn accept_message_receipt_with_upload_owner(
             let mut names = signature.signed_fields.clone();
             names.sort();
             if names == SIGNED_MESSAGE_FIELDS {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "long-message-signature-unsupported",
                     format!(
                         "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
@@ -11269,7 +11269,7 @@ struct EventPage {
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
     let limit = query.limit.unwrap_or(200);
     if !(1..=200).contains(&limit) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-event-limit",
             "event page limit must be 1 through 200",
         )));
@@ -11401,7 +11401,7 @@ async fn quick_agent(
         .cached_idempotency_response::<crate::model::ApplyResponse>(&request.idempotency_key)
         .map_err(ApiError::internal)?;
     if selected_token != request.expected_subject && historical_apply.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-subject",
             format!("the desired state for `{agent_subject}` changed"),
         )));
@@ -11481,7 +11481,7 @@ fn scope_eval_desired_subjects(
     intent: &mut crate::model::NormalizedIntent,
     current: &[crate::model::DesiredSubject],
     owner_run: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let selected = current
         .iter()
         .map(|subject| (subject.subject.as_str(), subject))
@@ -11498,7 +11498,7 @@ fn scope_eval_desired_subjects(
             shared.push(subject.clone());
             continue;
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "eval-desired-conflict",
             format!(
                 "eval declaration `{subject}` conflicts with the selected desired state; use a run-owned declaration or an isolated daemon"
@@ -11516,13 +11516,13 @@ pub async fn start_mission_run_action(
     Json(request): Json<MissionRunRequest>,
 ) -> Result<Json<MissionRunView>, ApiError> {
     let requester = request.requester.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-run-requester",
             "a mission run needs an explicit requester",
         ))
     })?;
     if requester == "person/requester" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "placeholder-run-requester",
             "a mission run needs a concrete requester, not `person/requester`",
         )));
@@ -11688,7 +11688,7 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
         return Ok(actor.to_owned());
     }
     normalized_agent_actor(actor).ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             code,
             format!("`{actor}` is neither a person nor an agent"),
         ))
@@ -11744,13 +11744,13 @@ async fn work_action_response_viewing(
         .as_deref()
         .and_then(normalized_agent_actor)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-work-actor",
                 "a work action needs an exact agent actor",
             ))
         })?;
     let incarnation = request.incarnation.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-work-incarnation",
             "a work action must be fenced to one exact live agent incarnation",
         ))
@@ -11777,7 +11777,7 @@ async fn work_action_response_viewing(
                 } else {
                     store.enrich_work_wake(&mut response, None)
                 };
-                filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
+                filled.map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
                 Ok(response)
             })
             .await?;
@@ -11791,7 +11791,7 @@ async fn work_action_response_viewing(
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "inactive-work-incarnation",
             format!("`{incarnation}` is not the current live incarnation of `{actor}`"),
         )));
@@ -11842,7 +11842,7 @@ pub fn live_session(
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-authority-indeterminate",
             format!("subject `{subject}` has indeterminate runtime authority"),
         )));
@@ -11853,7 +11853,7 @@ pub fn live_session(
         ))
     })?;
     if origin != state.store.origin() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-not-local",
             format!(
                 "subject `{subject}` is owned by `{}` and cannot be controlled through `{}`",
@@ -11881,7 +11881,7 @@ pub fn live_session(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no incarnation")))?;
     if expected_incarnation.is_some_and(|expected| incarnation_id != expected) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-incarnation",
             format!("subject `{subject}` changed incarnation"),
         )));
@@ -11932,7 +11932,7 @@ pub async fn input_session_as(
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)
             .map_err(|error| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "invalid-session-input",
                     format!("raw terminal input is not valid base64: {error}"),
                 ))
@@ -12041,7 +12041,7 @@ pub async fn signal_session_as(
         "user-1" => libc::SIGUSR1,
         "user-2" => libc::SIGUSR2,
         other => {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-session-signal",
                 format!("session signal `{other}` is not registered"),
             )));
@@ -12197,7 +12197,7 @@ fn finish_session_control(
         } else {
             "control-action-failed"
         };
-        return Err(ApiError::bad(St3Error::new(code, reason)));
+        return Err(ApiError::bad(FractalError::new(code, reason)));
     }
     Ok(Json(SessionControlResponse {
         subject: subject.into(),
@@ -12238,7 +12238,7 @@ async fn host_agent_workspace(
     if host_id == client_host_id(&state.node) {
         let workspace =
             crate::config::default_agent_workspace(&query.identity).map_err(|error| {
-                ApiError::bad(St3Error::new("validation-failed", error.to_string()))
+                ApiError::bad(FractalError::new("validation-failed", error.to_string()))
             })?;
         return Ok(Json(json!({ "host_id": host_id, "workspace": workspace })));
     }
@@ -12247,7 +12247,7 @@ async fn host_agent_workspace(
         .and_then(|value| value.to_str().ok())
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-person",
                 format!("asking {host_id} for a workspace needs a concrete person"),
             ))

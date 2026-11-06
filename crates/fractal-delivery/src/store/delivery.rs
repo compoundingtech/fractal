@@ -93,7 +93,7 @@ thread_local! {
 fn mailbox_owner_key(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
-) -> Result<Option<(String, i64, bool)>, St3Error> {
+) -> Result<Option<(String, i64, bool)>, FractalError> {
     connection
         .prepare_cached(
             "SELECT owner.incarnation, owner.epoch,
@@ -112,7 +112,7 @@ fn mailbox_owner_key(
 pub trait DeliveryStore {
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
             parent: Option<&MissionRunView>, subscription: &str, resource: &str, discovery: &str,
-        ) -> Result<MissionRunView, St3Error>;
+        ) -> Result<MissionRunView, FractalError>;
     fn next_subscription_mission_retry_deadline(&self) -> Result<Option<u128>>;
     fn populate_work_wake_for_reconcile(
             &self,
@@ -125,19 +125,19 @@ pub trait DeliveryStore {
             &self,
             input: &ClaimInput,
             signature: &smallclaims::principal::ClaimSignature,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     #[cfg(any(test, feature = "test-support"))]
     fn append_mailbox_receipt(
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
     /// A fenced receipt, and whether it appended a claim rather than repeating or settling one.
     fn append_mailbox_receipt_outcome(
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     /// Called only inside the native lease/authority guard. Metadata commits with
     /// the first new read receipt; replay/settlement never adds or changes a binding.
     fn append_native_mailbox_receipt_outcome(
@@ -145,7 +145,7 @@ pub trait DeliveryStore {
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
             native: Option<&crate::conversation_delivery::NativeReceipt>,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     /// Search refreshes only a person's private message texts, using the same endpoint
     /// indexes as the mailbox. Other fleet writes do not invalidate this source.
     fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String>;
@@ -217,7 +217,7 @@ pub trait DeliveryStore {
             request: &str,
             decision: &str,
             input: &SubscriptionRequestDecision,
-        ) -> Result<SubscriptionRequestView, St3Error>;
+        ) -> Result<SubscriptionRequestView, FractalError>;
     fn pending_subscription_mission_requests(&self, subject: &str) -> Result<Vec<ClaimRecord>>;
     /// Read only one pending request's retry history. The request index covers the count and
     /// locates its newest deadline without materializing every deferral on the subscription.
@@ -237,40 +237,40 @@ pub trait DeliveryStore {
     fn bind_mailbox(
             &self,
             request: &crate::mailbox::Fence,
-        ) -> Result<crate::mailbox::Fence, St3Error>;
+        ) -> Result<crate::mailbox::Fence, FractalError>;
     fn bind_mailbox_with_lease(
             &self,
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
-        ) -> Result<crate::mailbox::Fence, St3Error>;
+        ) -> Result<crate::mailbox::Fence, FractalError>;
     /// Recheck captured physical custody under the writer, before any capability mutation.
     fn bind_mailbox_with_lease_checked(
             &self,
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<crate::mailbox::Fence, St3Error>;
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<crate::mailbox::Fence, FractalError>;
     /// Explicit argv-only transports retain their legacy protocol, never provider custody.
     fn bind_argv_mailbox_checked(
             &self,
             request: &crate::mailbox::Fence,
             member: &crate::model::MemberSpec,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<crate::mailbox::Fence, St3Error>;
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<crate::mailbox::Fence, FractalError>;
     fn bind_mailbox_with_admission_checked(
             &self,
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
             argv_member: Option<&crate::model::MemberSpec>,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<crate::mailbox::Fence, St3Error>;
-    fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), St3Error>;
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<crate::mailbox::Fence, FractalError>;
+    fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), FractalError>;
     /// Durable cursors and the selected declaration/owner in one SQLite read snapshot.
     /// Streams advance this watermark only after capturing their corresponding delta.
     fn mailbox_watermark(
             &self,
             fence: &crate::mailbox::Fence,
-        ) -> Result<MailboxWatermark, St3Error>;
+        ) -> Result<MailboxWatermark, FractalError>;
     /// Whether anything a mailbox stream's snapshot reads changed after `mark`: a claim or local
     /// observation of the seat (its declaration, runtime and harness), its channel ownership, a
     /// message sent to it or newly declared, or a claim of a message in its last snapshot. The
@@ -282,7 +282,7 @@ pub trait DeliveryStore {
             fence: &crate::mailbox::Fence,
             mark: &MailboxWatermark,
             messages: &[String],
-        ) -> Result<bool, St3Error>;
+        ) -> Result<bool, FractalError>;
     /// True only when at least one new claim was projected and every new claim
     /// is a usage sample, a lease renewal, or a lifecycle claim of a message that is not a
     /// work wake (the reconciler reads no other message). Other projection changes must
@@ -294,7 +294,7 @@ impl DeliveryStore for Store {
 
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
             parent: Option<&MissionRunView>, subscription: &str, resource: &str, discovery: &str,
-        ) -> Result<MissionRunView, St3Error> {
+        ) -> Result<MissionRunView, FractalError> {
         let child = parent.map(|parent| ChildMissionContext {
             root_revision: parent.root_revision.clone(),
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
@@ -341,12 +341,12 @@ impl DeliveryStore for Store {
             &self,
             input: &ClaimInput,
             signature: &smallclaims::principal::ClaimSignature,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
             input.fields.get("from").and_then(Value::as_str),
             input.fields.contains_key("sender_class") || input.fields.contains_key("assistant_grant_id"))?;
         if input.kind != "message.sent" || input.actor.is_none() {
-            return Err(St3Error::new("invalid-signature", "a signed message names its actor"));
+            return Err(FractalError::new("invalid-signature", "a signed message names its actor"));
         }
         self.graph.ensure_principal_key(input.actor.as_deref().unwrap())?;
         let signature = serde_json::to_string(signature).map_err(internal)?;
@@ -359,7 +359,7 @@ impl DeliveryStore for Store {
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         self.append_mailbox_receipt_outcome(input, fence)
             .map(|(claim, _)| claim)
     }
@@ -368,7 +368,7 @@ impl DeliveryStore for Store {
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         self.append_claim_fenced_outcome(input, Some(fence))
     }
 
@@ -377,9 +377,9 @@ impl DeliveryStore for Store {
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
             native: Option<&crate::conversation_delivery::NativeReceipt>,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         if native.is_some_and(|native| !native.valid() || input.kind != "message.read") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-native-receipt",
                 "native proof needs a read receipt",
             ));
@@ -816,15 +816,15 @@ impl DeliveryStore for Store {
             request: &str,
             decision: &str,
             input: &SubscriptionRequestDecision,
-        ) -> Result<SubscriptionRequestView, St3Error> {
+        ) -> Result<SubscriptionRequestView, FractalError> {
         if !(input.actor.starts_with("person/") || input.actor.starts_with("agent/")) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-subscription-request-actor",
                 "a subscription request decision needs a person or agent actor",
             ));
         }
         if input.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-subscription-request-reason",
                 "a subscription request decision needs a reason",
             ));
@@ -834,18 +834,18 @@ impl DeliveryStore for Store {
             .map_err(internal)?
             .filter(|claim| claim.kind == "subscription.mission-requested")
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-subscription-request",
                     format!("subscription request `{request}` does not exist"),
                 )
             })?;
-        let view = |store: &Self| -> Result<SubscriptionRequestView, St3Error> {
+        let view = |store: &Self| -> Result<SubscriptionRequestView, FractalError> {
             store
                 .subscription_requests(&claim.subject)
                 .map_err(internal)?
                 .into_iter()
                 .find(|view| view.request == claim.id)
-                .ok_or_else(|| St3Error::new("internal", "the subscription request vanished"))
+                .ok_or_else(|| FractalError::new("internal", "the subscription request vanished"))
         };
         if self
             .operation_claim(&input.idempotency_key)
@@ -859,13 +859,13 @@ impl DeliveryStore for Store {
             ("cancel", "pending" | "held") => "subscription.mission-request-cancelled",
             ("release", "held") => "subscription.mission-request-released",
             ("cancel" | "release", status) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "subscription-request-not-open",
                     format!("subscription request `{request}` is {status}"),
                 ));
             }
             (decision, _) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-subscription-request-decision",
                     format!("`{decision}` is not a subscription request decision"),
                 ));
@@ -985,7 +985,7 @@ impl DeliveryStore for Store {
     fn bind_mailbox(
             &self,
             request: &crate::mailbox::Fence,
-        ) -> Result<crate::mailbox::Fence, St3Error> {
+        ) -> Result<crate::mailbox::Fence, FractalError> {
         self.bind_mailbox_with_lease(request, None)
     }
 
@@ -993,7 +993,7 @@ impl DeliveryStore for Store {
             &self,
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
-        ) -> Result<crate::mailbox::Fence, St3Error> {
+        ) -> Result<crate::mailbox::Fence, FractalError> {
         self.bind_mailbox_with_lease_checked(request, authority, &|| Ok(()))
     }
 
@@ -1001,8 +1001,8 @@ impl DeliveryStore for Store {
             &self,
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<crate::mailbox::Fence, St3Error> {
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<crate::mailbox::Fence, FractalError> {
         self.bind_mailbox_with_admission_checked(request, authority, None, validate)
     }
 
@@ -1010,8 +1010,8 @@ impl DeliveryStore for Store {
             &self,
             request: &crate::mailbox::Fence,
             member: &crate::model::MemberSpec,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<crate::mailbox::Fence, St3Error> {
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<crate::mailbox::Fence, FractalError> {
         self.bind_mailbox_with_admission_checked(request, None, Some(member), validate)
     }
 
@@ -1020,8 +1020,8 @@ impl DeliveryStore for Store {
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
             argv_member: Option<&crate::model::MemberSpec>,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<crate::mailbox::Fence, St3Error> {
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<crate::mailbox::Fence, FractalError> {
         let mut connection = self.connection.write();
         let tx = connection.transaction().map_err(internal)?;
         let mut stable_request;
@@ -1055,7 +1055,7 @@ impl DeliveryStore for Store {
             return Ok(request.clone());
         }
         if request.token.is_empty() || request.token.len() > 128 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-mailbox-token",
                 "binding requires a stable request token",
             ));
@@ -1073,7 +1073,7 @@ impl DeliveryStore for Store {
                     request.incarnation.clone(),
                 )
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-mailbox-token",
                     "binding token belongs to another session",
                 ));
@@ -1107,7 +1107,7 @@ impl DeliveryStore for Store {
             .unwrap_or(0)
             .checked_add(1)
             .filter(|epoch| *epoch <= i64::MAX as u64)
-            .ok_or_else(|| St3Error::new("internal", "mailbox epoch exhausted"))?;
+            .ok_or_else(|| FractalError::new("internal", "mailbox epoch exhausted"))?;
         tx.execute(
             /* sqlite-large-value: allow-for-now lv-he3ce29256ad4 owner=fractal_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_bindings VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -1135,14 +1135,14 @@ impl DeliveryStore for Store {
         Ok(bound)
     }
 
-    fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), St3Error> {
+    fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), FractalError> {
         check_mailbox_fence(&self.readers.get(), fence, &self.origin)
     }
 
     fn mailbox_watermark(
             &self,
             fence: &crate::mailbox::Fence,
-        ) -> Result<MailboxWatermark, St3Error> {
+        ) -> Result<MailboxWatermark, FractalError> {
         let connection = self.readers.get();
         let mut stable_fence;
         let identity = fractal_store::store::identities::resolve_reference_conn(&connection, &fence.subject)?;
@@ -1177,7 +1177,7 @@ impl DeliveryStore for Store {
             fence: &crate::mailbox::Fence,
             mark: &MailboxWatermark,
             messages: &[String],
-        ) -> Result<bool, St3Error> {
+        ) -> Result<bool, FractalError> {
         let connection = self.readers.get();
         let recipient = normalize_message_party(&fence.subject);
         let bare_recipient = recipient

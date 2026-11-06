@@ -332,13 +332,13 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     Ok(())
 }
 
-pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), St3Error> {
+pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), FractalError> {
     if input.kind != "ordered-membership.edited" { return Ok(()); }
     // Selected declaration changes earlier in this writer batch must affect admission too.
     flush(transaction).map_err(internal)?;
-    let operations = schema::operations(&input.subject, &input.fields).map_err(|error| St3Error::new(error.code,error.message))?;
+    let operations = schema::operations(&input.subject, &input.fields).map_err(|error| FractalError::new(error.code,error.message))?;
     if !container_live(transaction, &input.subject).map_err(internal)? {
-        return Err(St3Error::new("invalid-arrangement-operations", "ordered memberships require a live version-2 arrangement; existing version-1 placements require explicit migration"));
+        return Err(FractalError::new("invalid-arrangement-operations", "ordered memberships require a live version-2 arrangement; existing version-1 placements require explicit migration"));
     }
     let initial_count: i64 = transaction.query_row(
         "SELECT COALESCE((SELECT live_count FROM ordered_membership_counts WHERE container=?1),0)", [&input.subject], |row| row.get(0),
@@ -356,7 +356,7 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
         count += i64::from(next) - i64::from(previous);
     }
     if count > MAX_LIVE_MEMBERS as i64 && count > initial_count {
-        return Err(St3Error::new("arrangement-limit", "ordered membership admission exceeds 4096 live entries; hidden lifetime pairs do not count"));
+        return Err(FractalError::new("arrangement-limit", "ordered membership admission exceeds 4096 live entries; hidden lifetime pairs do not count"));
     }
     Ok(())
 }
@@ -443,9 +443,9 @@ fn state_at(connection: &Connection, container: &str) -> Result<schema::State> {
 pub fn items_at(connection: &Connection, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
     anyhow::ensure!(limit <= 1001, "ordered membership pages are bounded to 1000 entries plus one lookahead");
     let created: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM arrangements WHERE subject=?1 AND created=1)", [container], |row| row.get(0))?;
-    if !created { return Err(anyhow::Error::new(St3Error::new("not-found", "ordered membership container is unknown"))); }
+    if !created { return Err(anyhow::Error::new(FractalError::new("not-found", "ordered membership container is unknown"))); }
     if arrangements::version(connection, container)? != 2 {
-        return Err(anyhow::Error::new(St3Error::new("invalid-arrangement-operations", "ordered membership reads require version 2; version-1 placements are not an empty membership collection")));
+        return Err(anyhow::Error::new(FractalError::new("invalid-arrangement-operations", "ordered membership reads require version 2; version-1 placements are not an empty membership collection")));
     }
     anyhow::ensure!(state_at(connection, container)?.changed_index <= through,
         "ordered membership snapshot frontier is stale");
@@ -469,8 +469,8 @@ pub fn items_at(connection: &Connection, container: &str, through: u64, after: O
 }
 
 impl Store {
-    pub fn edit_ordered_memberships(&self, input: &ClaimInput, expected: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {
-        if input.kind != "ordered-membership.edited" { return Err(St3Error::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
+    pub fn edit_ordered_memberships(&self, input: &ClaimInput, expected: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError> {
+        if input.kind != "ordered-membership.edited" { return Err(FractalError::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
         if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }
         append_claim_with_subject_fences(&self.graph,input,None,None,Some(expected),None).map(|(claim,_)| claim)
     }

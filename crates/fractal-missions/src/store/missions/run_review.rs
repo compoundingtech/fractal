@@ -14,8 +14,8 @@ pub fn validate_run_reviewer(
     run: &str,
     requester: &str,
     reviewer: &str,
-) -> Result<BTreeSet<String>, St3Error> {
-    let unresolved = |subject: &str| St3Error::new("reviewer-owner-unresolved", subject);
+) -> Result<BTreeSet<String>, FractalError> {
+    let unresolved = |subject: &str| FractalError::new("reviewer-owner-unresolved", subject);
     let mut pending = vec![run.to_owned()];
     let mut visited = BTreeSet::new();
     let mut excluded = BTreeSet::new();
@@ -53,7 +53,7 @@ pub fn validate_run_reviewer(
             let definition = crate::mission::run_mission(definition, header.after.as_deref())?;
             let specs = flatten_mission_step_specs(&definition);
             if specs.iter().any(|step| step.loop_spec.is_some()) {
-                return Err(St3Error::new("reviewer-history-unsupported", &subject));
+                return Err(FractalError::new("reviewer-history-unsupported", &subject));
             }
             let view = run_generation_rows_tx(connection, &generation).map_err(internal)?;
             let expected: BTreeSet<_> = specs.iter().map(|s| s.path.as_str()).collect();
