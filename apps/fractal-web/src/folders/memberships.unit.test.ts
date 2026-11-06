@@ -124,3 +124,13 @@ it('refuses equal-index page conflicts and permits an incomparable epoch after r
   expect(state.complete?.members.map(row => row.member)).toEqual(['\ue000', '😀'])
   state.reduce({ _tag: 'Disconnect' }); expect(state.complete).toBeDefined(); expect(state.stale).toBe(true)
 })
+it('reports HTTP 404 as Unsupported for needs-newer-daemon, preserving stale data and token isolation', async () => {
+  const { state, token: old } = ready(); const token = refresh(state, 2)
+  expect(state.reduce(membershipHttpFailure(old, 404, 'not-found'))).toEqual([]); expect(state.status).toBe('Paging')
+  const unavailable = new ClientError({ api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', code: 'not-found', message: 'Unsupported endpoint', request_id: 'request/test', retryable: false, details: {} }, 404)
+  const event = await executeMembershipRead({ _tag: 'SubscribeAndRead', token }, { subscribe: async () => {}, read: async () => { throw unavailable } })
+  expect(event).toEqual({ _tag: 'Unsupported', token }); expect(state.reduce(event)).toEqual([])
+  expect(state.status).toBe('Unsupported'); expect(state.stale).toBe(true); expect(state.complete?.members[0]?.member).toBe('a')
+  expect(state.reduce({ _tag: 'Page', token, page: page() })).toEqual([]); expect(state.status).toBe('Unsupported')
+  refresh(state, 3); expect(state.status).toBe('Paging')
+})
