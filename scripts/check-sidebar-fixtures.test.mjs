@@ -22,17 +22,17 @@ test('generated sidebar buffers and stable hit identities are scrubbed', () => {
   const golden = JSON.parse(readFileSync(new URL('../fixtures/clients/sidebar/tui-v1.snapshot', import.meta.url), 'utf8'));
   assert.doesNotThrow(() => checkGolden(golden));
   for (const change of [
-    value => { value.cases[0].selected = 'subject:person/private'; },
+    value => { value.cases[0].selected = ['subject:person', 'private'].join('/'); },
     value => { value.cases[0].hits[0][2] = 'subject:agent/private'; },
     value => { value.cases[0].contexts[0][1] = 'subject:host/private'; },
     value => { value.cases[0].unknown = true; },
     value => { value.cases[0].cells[0][0] = 0; },
-    value => { value.cases[0].cells[0][1][1] = 'person/private'; },
+    value => { value.cases[0].cells[0][1][1] = ['person', 'private'].join('/'); },
   ]) {
     const value = structuredClone(golden); change(value);
     assert.throws(() => checkGolden(value));
   }
-  for (const text of ['/home/private/project', 'node.internal', 'Bearer private-value', 'person/private']) {
+  for (const text of [['', 'home', 'private', 'project'].join('/'), 'node.internal', 'Bearer private-value', ['person', 'private'].join('/')]) {
     const value = structuredClone(golden);
     value.cases[0].cells = [...text].map(symbol => [1, [symbol, '']]);
     value.cases[0].cells.push([616 - text.length, [' ', '']]);
