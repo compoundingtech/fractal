@@ -26,7 +26,7 @@ struct Frontier { host: String, projection: String, state: OrderedMembershipStat
 impl Frontier {
     fn read(snapshot: &Snapshot, contract: Option<&str>, state: Option<&OrderedMembershipState>) -> Result<Self, ErrorCode> {
         if contract != Some("collection-v1") { return Err(ErrorCode::UnsupportedMembershipPagingContract); }
-        let state = state.filter(|s| s.epoch.is_some()).ok_or(ErrorCode::MembershipFrontierInconsistent)?;
+        let state = state.filter(|s| s.epoch.as_ref().is_some_and(|epoch| !epoch.is_empty())).ok_or(ErrorCode::MembershipFrontierInconsistent)?;
         if state.changed_index > snapshot.store_index { return Err(ErrorCode::MembershipFrontierInconsistent); }
         Ok(Self { host: snapshot.host_id.clone(), projection: snapshot.projection_version.clone(), state: state.clone() })
     }

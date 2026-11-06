@@ -67,6 +67,7 @@ fn rejects_count_duplicates_order_scope_and_metadata() {
     let mut reversed = page(10, 2, 2, false); reversed.value.items.reverse(); invalid.push(reversed);
     let mut absent = page(10, 0, 0, false); absent.value.membership = None; invalid.push(absent);
     let mut epoch = page(10, 0, 0, false); epoch.value.membership.as_mut().unwrap().epoch = None; invalid.push(epoch);
+    let mut empty_epoch = page(10, 0, 0, false); empty_epoch.value.membership.as_mut().unwrap().epoch = Some(String::new()); invalid.push(empty_epoch);
     for response in invalid { let mut j = join(); let a = j.begin(); assert_eq!(j.page(a, response), Err(ErrorCode::MembershipFrontierInconsistent)); assert!(j.complete().is_none()); }
     for selector in [None, Some("unknown".into())] {
         let mut response = page(10, 0, 0, false); response.value.paging_contract = selector;
