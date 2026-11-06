@@ -545,6 +545,14 @@ pub struct AttentionPresentationControl {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionResolution {
+    pub claim_id: String,
+    pub resolved_by: String,
+    pub person_id: String,
+    pub resolved_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Attention {
     #[serde(default, skip_serializing_if="Option::is_none")]
     pub custom_form: Option<Value>,
@@ -573,6 +581,8 @@ pub struct Attention {
     #[serde(default, skip_serializing_if="Vec::is_empty")]
     pub conversation_ids: Vec<String>,
     pub requester_id: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub resolved_by: Option<String>,
     pub launch_id: Option<String>,
     pub variant_id: Option<String>,
     pub message_id: Option<String>,

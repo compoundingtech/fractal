@@ -848,6 +848,8 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/attention/{*id}",
         "/v1/client/attention/{attention}",
     ),
+    get("GET /v1/client/attention-resolutions/{*id}",
+        "/v1/client/attention-resolutions/attention/2d60431cc9620c5849f42211adc6a198?source_id=agent%2Fresolution-probe&attention_kind=harness-prompt&episode=claim%2Fresolution-probe"),
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
     get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),

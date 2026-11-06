@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve original launch and revision attention locators from accepted approval actors",
+  "replay": {"status": "none", "detail": "Read-only helpers use durable planning-session.approved and revision-proposal.created/approved claims, not mutable projection ownership."},
+  "schema": {"status": "none", "detail": "No tables or indexes added. Main approved existing claims_subject_kind_index lookups under fractal_store::store::attention_launch_resolution: one subject, 1 MiB JSON parse cap, scalar-only output bounded to 4096-byte identity and 40-byte timestamp. Source-site inventory lv-h86dfd7785502 records the dynamic query sink."},
+  "rules": {"status": "none", "detail": "Launch requires exact original requester and preview hash; revision requires original reviewer, generation, preview and that reviewer's actual approval. Missing proofs return None without inference."},
+  "compatibility": {"status": "none", "detail": "No wire changes. Parent integrates the shared SourceResolution type, module registry and native-ID endpoint dispatch."},
+  "downtime": {"status": "none", "detail": "Normal deployment; no migration."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "Read-only change; rollback does not change stored claims."}
+}

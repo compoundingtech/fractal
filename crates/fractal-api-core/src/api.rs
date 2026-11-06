@@ -132,6 +132,7 @@ pub mod response_body;
 mod owned_sets;
 pub mod published_attention;
 pub mod attention_history;
+pub mod attention_resolutions;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
 pub use revision_changes::revision_card;
@@ -643,6 +644,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
         .route("/v1/client/attention", get(client_reads::client_attention))
         .route("/v1/client/attention/{*id}", get(client_reads::client_attention_detail))
+        .route("/v1/client/attention-resolutions/{*id}", get(attention_resolutions::get))
         // The same rows under the name a person reads.
         .route("/v1/client/alerts", get(client_reads::client_attention))
         .route("/v1/client/alerts/{*id}", get(client_reads::client_attention_detail))
