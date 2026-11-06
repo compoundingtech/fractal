@@ -5,8 +5,9 @@ use super::{
     glass::{Open, pane_for},
     pane::Pane,
     text, theme,
-    view::World,
+    view::{Load, World},
 };
+use fractal_ui_model::related_runs::{self, Eta, RelatedRunRow};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -58,8 +59,25 @@ pub(crate) enum Row {
         closed: bool,
     },
     Resource(ResourceRow),
+    /// A run st relates to the agent above it, in st's order.
+    Run(RelatedRunRow),
+    /// The fold over the agent's finished runs; `id` is its collapse key.
+    Finished {
+        id: String,
+        count: usize,
+        closed: bool,
+    },
     Notice(String),
     Welcome,
+}
+/// What the sidebar shows beneath an agent's row, gathered from the world it last observed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AgentLines {
+    /// Harness state, model, effort, last activity and the person's open asks.
+    extras: Option<String>,
+    runs: Vec<RelatedRunRow>,
+    /// Why the runs are not all shown: still loading, unreadable, or beyond st's row bound.
+    note: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PaletteMode {
@@ -120,6 +138,7 @@ pub(crate) struct Sidebar {
     /// arrangements leave the window, so that refusal is how a client learns it.
     pub reserved_retired: bool,
     seen: BTreeMap<String, ResourceRow>,
+    agents: BTreeMap<String, AgentLines>,
     choices: Choices,
     path: Option<PathBuf>,
     pub selected: usize,
@@ -361,6 +380,26 @@ impl Sidebar {
     pub fn observe(&mut self, world: &World) {
         self.inventory_partial = world.inventory_partial.iter()
             .filter(|name| ["machines", "sessions"].contains(&name.as_str())).cloned().collect();
+        self.agents = world.agents.items().iter().map(|agent| {
+            let asks = world.attention.items().iter()
+                .filter(|item| item.is_alert() && item.is_in(&agent.id)).count();
+            let details = &agent.details;
+            let extras = [
+                details.harness_state.clone(), details.model.clone(), details.effort.clone(),
+                (!agent.activity.is_empty()).then(|| agent.activity.clone()),
+                (asks > 0).then(|| format!("{asks} open ask{}", if asks == 1 { "" } else { "s" })),
+            ].into_iter().flatten().collect::<Vec<_>>();
+            let (runs, note) = match world.related_runs.get(&agent.id) {
+                Some(Load::Ready(runs)) => {
+                    let more = runs.total_rows.saturating_sub(runs.rows.len() as u64);
+                    (related_runs::rows(runs), (runs.truncated && more > 0).then(|| format!("+ {more} more")))
+                }
+                Some(Load::Loading) => (Vec::new(), Some("Loading runs…".into())),
+                Some(Load::Failed(error)) => (Vec::new(), Some(format!("Runs unavailable: {error}"))),
+                None => (Vec::new(), None),
+            };
+            (agent.id.clone(), AgentLines { extras: (!extras.is_empty()).then(|| extras.join(" · ")), runs, note })
+        }).collect();
         // Retain missing subjects until the person explicitly clears them; never prune by age.
         let before = self.seen.clone();
         for row in self.seen.values_mut() {
@@ -490,7 +529,9 @@ impl Sidebar {
                     closed,
                 });
                 if !closed {
-                    rows.extend(resources.into_iter().map(Row::Resource));
+                    for row in resources {
+                        self.push_resource(&mut rows, row);
+                    }
                 }
             };
         for (id, folder) in folders {
@@ -582,7 +623,9 @@ impl Sidebar {
                     closed,
                 });
                 if !closed {
-                    rows.extend(resources.into_iter().map(Row::Resource));
+                    for row in resources {
+                        self.push_resource(&mut rows, row);
+                    }
                 }
             }
         }
@@ -591,8 +634,82 @@ impl Sidebar {
         }
         rows
     }
+    /// A resource row and, beneath an agent, the runs st relates to it in st's order: open runs,
+    /// then a fold over finished ones that stays closed until the person opens it on this device.
+    fn push_resource(&self, rows: &mut Vec<Row>, row: ResourceRow) {
+        let id = format!("runs/{}", row.id);
+        let lines = (!row.missing).then(|| self.agents.get(&row.id)).flatten();
+        rows.push(Row::Resource(row));
+        let Some(lines) = lines else { return };
+        let (finished, open): (Vec<_>, Vec<_>) = lines.runs.iter().cloned().partition(|run| run.folded);
+        rows.extend(open.into_iter().map(Row::Run));
+        if !finished.is_empty() {
+            let closed = self.choices.collapsed.get(&id).copied().unwrap_or(true);
+            rows.push(Row::Finished { id, count: finished.len(), closed });
+            if !closed {
+                rows.extend(finished.into_iter().map(Row::Run));
+            }
+        }
+        if let Some(note) = &lines.note {
+            rows.push(Row::Notice(format!("    {note}")));
+        }
+    }
+    fn height(&self, row: &Row) -> usize {
+        1 + usize::from(match row {
+            Row::Resource(row) => !row.missing && self.agents.get(&row.id).is_some_and(|a| a.extras.is_some()),
+            Row::Run(run) => !run.folded && (run.step.is_some() || !run.waits_on.is_empty()),
+            _ => false,
+        })
+    }
+    /// The lines a row paints: an agent adds its extras, an open run its step and waits.
+    fn lines(&self, row: &Row) -> Vec<Vec<(String, Style)>> {
+        let one = |text: String, style| vec![vec![(text, style)]];
+        match row {
+            Row::Group { title, count, closed, .. } => {
+                one(format!(" {} {title} {count}", if *closed { "▸" } else { "▾" }), theme::label())
+            }
+            Row::Resource(row) => {
+                let style = if row.missing { theme::dim() } else { theme::fg(theme::TEXT) };
+                let mut lines = one(format!("   {}{}", row.title, if row.missing { " · unavailable" } else { "" }), style);
+                if let Some(extras) = self.agents.get(&row.id).filter(|_| !row.missing).and_then(|lines| lines.extras.as_ref()) {
+                    lines.push(vec![(format!("     {extras}"), theme::dim())]);
+                }
+                lines
+            }
+            Row::Run(run) => {
+                let chip = match run.status.as_str() {
+                    "waiting-on-you" => theme::PERSON,
+                    "running" => theme::WORKING,
+                    "waiting" => theme::WAITING,
+                    "stalled" | "failed" => theme::FAULT,
+                    "completed" => theme::DONE,
+                    _ => theme::QUIET,
+                };
+                let mut first = vec![(format!("     {}", run.status), theme::fg(chip))];
+                if let Some(progress) = run.progress {
+                    first.push((format!(" {} {}", progress.text(), progress.bar(6)), theme::soft()));
+                }
+                match &run.eta {
+                    Eta::WaitingOnYou => first.push((" · waiting on you".into(), theme::fg(theme::PERSON))),
+                    Eta::Remaining(eta) => first.push((format!(" · {eta}"), if run.late { theme::fg(theme::FAULT) } else { theme::soft() })),
+                    Eta::Unknown if run.late => first.push((" · late".into(), theme::fg(theme::FAULT))),
+                    Eta::Unknown => {}
+                }
+                let mut lines = vec![first];
+                if let Some(detail) = run.detail().filter(|_| !run.folded) {
+                    lines.push(vec![(format!("       {detail}"), theme::dim())]);
+                }
+                lines
+            }
+            Row::Finished { count, closed, .. } => {
+                one(format!("     {} Finished {count}", if *closed { "▸" } else { "▾" }), theme::dim())
+            }
+            Row::Notice(message) => one(format!(" {message}"), theme::dim()),
+            Row::Welcome => one(" Welcome · Ctrl+K: New terminal".into(), theme::fg(theme::ACCENT)),
+        }
+    }
     pub fn toggle(&mut self, index: usize) {
-        if let Some(Row::Group { id, closed, .. }) = self.rows().get(index) {
+        if let Some(Row::Group { id, closed, .. } | Row::Finished { id, closed, .. }) = self.rows().get(index) {
             self.choices.collapsed.insert(id.clone(), !closed);
             self.save();
         }
@@ -717,59 +834,35 @@ impl Ui {
         }
         let rows = self.resource_sidebar.rows();
         let height = area.height.saturating_sub(1) as usize;
-        let top = self
-            .resource_sidebar
-            .selected
-            .saturating_sub(height.saturating_sub(1));
-        for (index, row) in rows.iter().enumerate().skip(top).take(height) {
-            let y = area.y + 1 + (index - top) as u16;
-            let (label, style) = match row {
-                Row::Group {
-                    title,
-                    count,
-                    closed,
-                    ..
-                } => (
-                    format!(" {} {title} {count}", if *closed { "▸" } else { "▾" }),
-                    theme::label(),
-                ),
-                Row::Resource(row) => (
-                    format!(
-                        "   {}{}",
-                        row.title,
-                        if row.missing { " · unavailable" } else { "" }
-                    ),
-                    if row.missing {
-                        theme::dim()
-                    } else {
-                        theme::fg(theme::TEXT)
-                    },
-                ),
-                Row::Notice(message) => (format!(" {message}"), theme::dim()),
-                Row::Welcome => (
-                    " Welcome · Ctrl+K: New terminal".into(),
-                    theme::fg(theme::ACCENT),
-                ),
-            };
-            let style = if index == self.resource_sidebar.selected
-                && (self.resource_sidebar.focused || self.glasses.sidebar.focused)
-            {
-                Style::default().fg(theme::CRUST).bg(theme::ACCENT)
-            } else {
-                style
-            };
-            buf.set_stringn(
-                area.x,
-                y,
-                text::sanitize(&label),
-                area.width as usize,
-                style,
-            );
-            let rect = Rect {
-                y,
-                height: 1,
-                ..area
-            };
+        // Rows are one or two lines tall: start as far up as still shows the selected row whole.
+        let selected = self.resource_sidebar.selected.min(rows.len().saturating_sub(1));
+        let mut top = selected;
+        let mut used = rows.get(selected).map_or(0, |row| self.resource_sidebar.height(row));
+        while top > 0 && used + self.resource_sidebar.height(&rows[top - 1]) <= height {
+            top -= 1;
+            used += self.resource_sidebar.height(&rows[top]);
+        }
+        let highlight = Style::default().fg(theme::CRUST).bg(theme::ACCENT);
+        let mut y = area.y + 1;
+        for (index, row) in rows.iter().enumerate().skip(top) {
+            if y >= area.bottom() {
+                break;
+            }
+            let lines = self.resource_sidebar.lines(row);
+            let rect = Rect { y, height: (lines.len() as u16).min(area.bottom() - y), ..area };
+            let selected = index == self.resource_sidebar.selected
+                && (self.resource_sidebar.focused || self.glasses.sidebar.focused);
+            if selected {
+                buf.set_style(rect, highlight);
+            }
+            for (line, spans) in lines.iter().take(rect.height as usize).enumerate() {
+                let mut x = area.x;
+                for (label, style) in spans {
+                    let room = area.right().saturating_sub(x) as usize;
+                    let style = if selected { highlight } else { *style };
+                    x = buf.set_stringn(x, y + line as u16, text::sanitize(label), room, style).0;
+                }
+            }
             self.hit(rect, Hit::ResourceRow(index));
             if let Row::Group { id, .. } = row
                 && let Some(folder) = id.strip_prefix("folder/")
@@ -787,19 +880,30 @@ impl Ui {
                     Hit::ResourceFolderDrag(folder.into()),
                 );
             }
-            if let Row::Resource(row) = row
-                && !row.missing
-            {
+            let subject = match row {
+                Row::Resource(row) if !row.missing => Some(&row.id),
+                Row::Run(run) => Some(&run.mission_id),
+                _ => None,
+            };
+            if let Some(subject) = subject {
                 let mut frame = self.frame.borrow_mut();
                 let layer = frame.covers.len();
-                frame.context_rows.push((rect, row.id.clone(), layer));
+                frame.context_rows.push((rect, subject.clone(), layer));
             }
+            y += rect.height;
         }
     }
     pub(crate) fn open_resource_row(&mut self, index: usize) {
         self.resource_sidebar.selected = index;
         match self.resource_sidebar.rows().get(index).cloned() {
-            Some(Row::Group { .. }) => self.resource_sidebar.toggle(index),
+            Some(Row::Group { .. } | Row::Finished { .. }) => self.resource_sidebar.toggle(index),
+            Some(Row::Run(run)) => {
+                if let Some(pane) = pane_for(&run.mission_id) {
+                    self.resource_sidebar.focused = false;
+                    self.glasses.sidebar.focused = false;
+                    self.open_in_glass(pane, Open::Tab);
+                }
+            }
             Some(Row::Resource(row)) if !row.missing => {
                 let pane = if row.kind == "Terminals" {
                     Some(Pane::Terminal(row.open.clone()))
@@ -1166,5 +1270,56 @@ mod tests {
             .collect::<String>();
         assert!(screen.contains("example-linux") && screen.contains("nothing running yet"));
         assert!(screen.contains("Ctrl+K: New terminal") && screen.contains("Welcome"));
+    }
+    fn related(agent: &str) -> fractal_client::AgentRelatedRuns {
+        let check = json!({"step":"step-run/open/check", "path":"check", "title":"Check", "state":"ready",
+            "kind":"ask", "who":"person/reviewer"});
+        serde_json::from_value(json!({
+            "kind":"agent-related-runs", "agent_id":agent, "as_of":1, "work_cut":1, "missions_cut":1,
+            "total_rows":3, "truncated":true, "rows":[
+                {"id":"mission-run/open", "mission_id":"mission/build", "status":"running",
+                    "status_chip":"waiting-on-you", "progress":{"done":1,"total":2}, "eta":null,
+                    "waiting_on_you":true, "late":false, "deadline_at":null, "current_step":check,
+                    "waits_on":[check], "urgency_rank":0, "folded":false, "completed_at":null},
+                {"id":"mission-run/done", "mission_id":"mission/build", "status":"completed",
+                    "status_chip":"completed", "progress":{"done":2,"total":2}, "eta":null,
+                    "waiting_on_you":false, "late":false, "deadline_at":null, "current_step":null,
+                    "waits_on":[], "urgency_rank":4, "folded":true, "completed_at":1}
+            ]
+        })).unwrap()
+    }
+    #[test]
+    fn agent_rows_show_runs_in_st_order_fold_finished_ones_and_name_what_is_missing() {
+        let mut world = super::super::demo::test_world();
+        let agents = world.agents.items().iter().take(2).map(|agent| agent.id.clone()).collect::<Vec<_>>();
+        world.related_runs.insert(agents[0].clone(), Load::Ready(related(&agents[0])));
+        world.related_runs.insert(agents[1].clone(), Load::Loading);
+        let mut ui = Ui::new(world);
+        ui.set_world(ui.world.clone());
+        for group in ["everything", "kind/Agents"] {
+            ui.resource_sidebar.choices.collapsed.insert(group.into(), false);
+        }
+        let rows = ui.resource_sidebar.rows();
+        let at = |rows: &[Row], id: &str| rows.iter().position(|row| matches!(row, Row::Resource(r) if r.id == id)).unwrap();
+        let first = at(&rows, &agents[0]);
+        let text = |sidebar: &Sidebar, row: &Row| sidebar.lines(row).iter()
+            .map(|line| line.iter().map(|(label, _)| label.as_str()).collect::<String>()).collect::<Vec<_>>();
+        assert_eq!(text(&ui.resource_sidebar, &rows[first + 1]), ["     waiting-on-you 1/2 ███░░░ · waiting on you", "       Check · waits on person/reviewer"]);
+        assert!(matches!(&rows[first + 2], Row::Finished { count: 1, closed: true, .. }));
+        assert!(matches!(&rows[first + 3], Row::Notice(note) if note.trim() == "+ 1 more"));
+        let second = at(&rows, &agents[1]);
+        assert!(matches!(&rows[second + 1], Row::Notice(note) if note.trim() == "Loading runs…"));
+        ui.open_resource_row(first + 2);
+        let rows = ui.resource_sidebar.rows();
+        assert!(matches!(&rows[first + 3], Row::Run(run) if run.folded && run.id == "mission-run/done"));
+        assert_eq!(text(&ui.resource_sidebar, &rows[first + 3]), ["     completed 2/2 ██████"]);
+        assert_eq!(ui.resource_sidebar.choices.collapsed.get(&format!("runs/{}", agents[0])), Some(&false));
+        ui.resource_sidebar.selected = first + 1;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let frame = ui.frame.borrow();
+        let shown = |id: &str| frame.context_rows.iter().any(|(rect, subject, _)| subject == id && rect.intersects(frame.glass_sidebar));
+        assert!(shown(&agents[0]) && shown("mission/build"), "the agent keeps its own row beside its runs");
+        assert!(frame.context_rows.iter().any(|(rect, subject, _)| subject == "mission/build" && rect.height == 2));
     }
 }

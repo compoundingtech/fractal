@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show semantic two-line mission rows beneath sidebar agents",
+  "replay": {"status": "none", "detail": "Presentation only; no claim changes."},
+  "schema": {"status": "none", "detail": "No wire contract changes."},
+  "rules": {"status": "none", "detail": "Server urgency, person holds and finished status remain authoritative."},
+  "compatibility": {"status": "changed", "detail": "Agent sidebar entries show harness state, model, effort, activity, asks and mission progress. Finished runs are folded by default with a device-persisted toggle."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Reverting only changes presentation and preserves sidebar preferences."}
+}

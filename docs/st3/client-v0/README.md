@@ -1213,6 +1213,9 @@ The TUI reads visible agents' related runs when attached and after pushed attent
 mission frames. Concurrent invalidations coalesce; an idle sidebar never polls this endpoint.
 Changing the connection discards old-member responses. Agent activity uses `last_activity_at`,
 not the time its roster row happened to change.
+Agent sidebar entries show harness/model/effort, last activity and open asks, followed by two-line
+mission rows. Finished runs start folded under a device-persisted “Finished” toggle; opening a
+mission row navigates to its mission. Late ETA text is red; person holds say “waiting on you”.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run
