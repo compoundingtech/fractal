@@ -1062,6 +1062,157 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
     }
 }
 
+/// The subjects waiting for `resources::refresh`.
+fn pending_resources(store: &Store) -> BTreeSet<String> {
+    let readers = store.readers.get();
+    let mut statement = readers.prepare("SELECT subject FROM local_resource_projection_pending").unwrap();
+    statement.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// What the resource projection holds, and what a rebuild from every claim present holds.
+fn projected_and_rebuilt(store: &Store) -> (Vec<Vec<Option<String>>>, Vec<Vec<Option<String>>>) {
+    let rows = |transaction: &Transaction<'_>| -> Vec<Vec<Option<String>>> {
+        let mut statement = transaction
+            .prepare("SELECT subject, claim_id, facts, opened_by, opened_by_run FROM resource_observations ORDER BY subject")
+            .unwrap();
+        statement.query_map([], |row| (0..5).map(|column| row.get(column)).collect()).unwrap().map(Result::unwrap).collect()
+    };
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let projected = rows(&transaction);
+    super::resources::rebuild(&transaction).unwrap();
+    let rebuilt = rows(&transaction);
+    transaction.rollback().unwrap();
+    (projected, rebuilt)
+}
+
+/// Refresh every pending subject, as the next write that projects would.
+fn flush_resources(store: &Store) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    super::resources::flush(&transaction).unwrap();
+    transaction.commit().unwrap();
+}
+
+/// One observation of each of `subjects` with `fields`, all in one batch, so a trim deletes them
+/// in one step.
+fn observe_in_one_batch(store: &Store, subjects: &[String], fields: &Value) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let mut batch: Option<String> = None;
+    for subject in subjects {
+        let body = json!({"fields": fields});
+        let claim = append_claim_tx(&transaction, &store.origin, subject, "resource.observed", None, &body, &[], batch.as_deref()).unwrap();
+        batch.get_or_insert(claim.batch_id);
+    }
+    transaction.commit().unwrap();
+}
+
+/// An observation that names its opener only at the top level: `refresh` reads it as the opener,
+/// but the keep rule doesn't keep it as one (#5401).
+fn opened_at_the_top_level() -> Value {
+    json!({"kind": "vcs.pull-request", "observer": "observer/watch-0",
+        "facts": {"state": "open", "merge_queue": null}, "opened_by": "agent/node.amber"})
+}
+
+/// A trim deletes only observations a subject's projection doesn't read, so its chunks leave no
+/// subject for the next write that projects to refresh while it holds the writer (#5382).
+#[test]
+fn a_chunk_that_deletes_superseded_observations_queues_no_subject() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    // Open, queued, merged, a receipt, and open with its opener named, over three pull requests.
+    for n in 0..40 {
+        apply(&store, &Write::Resource { resource: (n % 3) as u8, shape: [0, 1, 2, 4, 5][n % 5] }, n);
+    }
+    flush_resources(&store);
+    let observed = claims_of(&store, "resource.observed");
+    let context = context(scratch.path(), 0);
+    let before = answers(&store, context.now_unix_ms);
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    let (hook_store, hook_chunks) = (Arc::clone(&store), Arc::clone(&chunks));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        hook_chunks.lock().unwrap().push((claims_of(&hook_store, "resource.observed"), pending_resources(&hook_store)));
+    }));
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    store.trim_chunk_hook.lock().unwrap().take();
+    let chunks = chunks.lock().unwrap();
+    assert!(chunks.iter().any(|(left, _)| *left < observed), "the cut deletes resource observations ({observed} before)");
+    assert!(chunks.iter().all(|(_, pending)| pending.is_empty()), "no chunk leaves a subject pending: {chunks:?}");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+    assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
+}
+
+/// A chunk whose deletes may change what a subject projects refreshes that subject itself, so no
+/// later write does, and the projection is what a rebuild answers. The subject's first observation
+/// names its opener only at the top level: `refresh` takes it for the opener, but the trim drops it
+/// (#5401), and the next one that names an opener in its facts becomes the first.
+#[test]
+fn a_chunk_that_deletes_what_a_subject_projects_refreshes_it_itself() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    let subject = pull_request(7);
+    observe_in_one_batch(&store, std::slice::from_ref(&subject), &opened_at_the_top_level());
+    // Open with its opener in its facts, then merged twice; a millisecond apart, since the keep
+    // rule keeps what was accepted at the same time as its boundary.
+    for (n, shape) in [5, 2, 2].into_iter().enumerate() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        apply(&store, &Write::Resource { resource: 7, shape }, n);
+    }
+    flush_resources(&store);
+    let opened_by = |store: &Store| -> Option<String> {
+        store.readers.get().query_row("SELECT opened_by FROM resource_observations WHERE subject=?1", [&subject], |row| row.get(0)).unwrap()
+    };
+    assert_eq!(opened_by(&store), None, "the first opener names nobody in its facts");
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let (hook_store, hook_pending) = (Arc::clone(&store), Arc::clone(&pending));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        hook_pending.lock().unwrap().push(pending_resources(&hook_store));
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["trimmed"]);
+    store.trim_chunk_hook.lock().unwrap().take();
+    assert_eq!(claims_of(&store, "resource.observed"), 2, "the newest and the first opener in its facts stay");
+    assert!(pending.lock().unwrap().iter().all(BTreeSet::is_empty), "{:?}", pending.lock().unwrap());
+    assert_eq!(opened_by(&store).as_deref(), Some("agent/node.amber"), "the chunk refreshed the subject");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+}
+
+/// A step whose deletes may change what more than `TRIM_STEP_REFRESHES` subjects project refreshes
+/// that many itself and leaves the rest pending; the run's stop refreshes them, so none waits for a
+/// later write.
+#[test]
+fn past_its_cap_a_step_leaves_subjects_to_the_run_s_stop() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    let extra = 3;
+    let subjects: Vec<String> = (0..super::resources::TRIM_STEP_REFRESHES + extra).map(|n| pull_request(10 + n as u8)).collect();
+    observe_in_one_batch(&store, &subjects, &opened_at_the_top_level());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let merged = resource_fields(2, "observer/watch-0");
+    observe_in_one_batch(&store, &subjects, &Value::Object(merged));
+    flush_resources(&store);
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let (hook_store, hook_pending) = (Arc::clone(&store), Arc::clone(&pending));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        hook_pending.lock().unwrap().push(pending_resources(&hook_store).len());
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["trimmed"]);
+    store.trim_chunk_hook.lock().unwrap().take();
+    assert_eq!(claims_of(&store, "resource.observed"), subjects.len() as i64, "the first batch goes in one step");
+    assert_eq!(pending.lock().unwrap().first(), Some(&extra), "{:?}", pending.lock().unwrap());
+    assert!(pending_resources(&store).is_empty(), "the run's stop refreshed what the step left");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+}
+
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
 /// claim by design (see schema.md), so it is not one.
 fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
