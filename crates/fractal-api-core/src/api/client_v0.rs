@@ -1639,11 +1639,10 @@ pub fn operation_reports() -> std::sync::MutexGuard<'static, BTreeMap<usize, Ope
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Start the first diagnostic report off the request path and hand its operation audit to the
-/// startup repair. Only this first report shares its audit; refreshes inspect current state.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// Start the first diagnostic report off the request path. It reads the last operation audit
+/// rather than making one: the daemon's first audit waits until the reconnect window has passed.
+/// Return whether this call started it.
+pub fn start_operation_report(state: &AppState) -> bool {
     let key = Arc::as_ptr(&state.store) as usize;
     let mut reports = operation_reports();
     if reports.get(&key).is_some_and(|report| {
@@ -1652,7 +1651,7 @@ pub fn start_operation_report(
             .upgrade()
             .is_some_and(|store| Arc::ptr_eq(&store, &state.store))
     }) {
-        return None;
+        return false;
     }
     reports.insert(
         key,
@@ -1664,29 +1663,15 @@ pub fn start_operation_report(
         },
     );
     drop(reports);
-    let (audit_sender, audit_receiver) = tokio::sync::oneshot::channel();
     let state = state.clone();
-    std::thread::spawn(move || refresh_operation_report(&state, key, Some(audit_sender)));
-    Some(audit_receiver)
+    std::thread::spawn(move || refresh_operation_report(&state, key));
+    true
 }
 
-pub fn refresh_operation_report(
-    state: &AppState,
-    key: usize,
-    startup_audit: Option<tokio::sync::oneshot::Sender<anyhow::Result<Vec<String>>>>,
-) {
-    let report = if let Some(sender) = startup_audit {
-        // The store keeps this audit's result, which the report's operation check reads.
-        let drift = state.store.operation_projection_drift();
-        let report = doctor_report(state);
-        // The repair owns these findings, including any scan error. It re-derives just the
-        // drifted rows from current claims, never reuses expected values from this snapshot.
-        let _ = sender.send(drift);
-        report
-    } else {
-        doctor_report(state)
-    };
-    let checks = report.ok().map(|report| Arc::new(report.0.checks));
+pub fn refresh_operation_report(state: &AppState, key: usize) {
+    let checks = doctor_report(state)
+        .ok()
+        .map(|report| Arc::new(report.0.checks));
     let mut reports = operation_reports();
     let Some(report) = reports.get_mut(&key) else {
         return;

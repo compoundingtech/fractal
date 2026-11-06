@@ -3866,7 +3866,7 @@ fn operation_checks(
             {
                 report.refreshing = true;
                 let state = state.clone();
-                std::thread::spawn(move || refresh_operation_report(&state, key, None));
+                std::thread::spawn(move || refresh_operation_report(&state, key));
             }
             return Ok(report.checks.clone());
         }
@@ -14944,8 +14944,12 @@ subscription "watch/source" {
         assert_eq!(statements(40), few.get());
     }
 
+    /// The first report since a start reads the last audit and never makes one: on a busy
+    /// host's store the audit read 335k statements in the first minute after a restart, while
+    /// every reconnecting client waited on the same disk. The daemon audits after that window,
+    /// and later reports show what it found.
     #[test]
-    fn startup_operation_audit_is_shared_and_later_reports_are_fresh() {
+    fn the_first_report_does_not_audit_and_later_reports_show_the_audit() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.append_client_claim(&ClaimInput {
@@ -14970,10 +14974,16 @@ subscription "watch/source" {
             at: Instant::now(),
             refreshing: true,
         });
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        refresh_operation_report(&state, key, Some(sender));
-        let drift = receiver.blocking_recv().unwrap().unwrap();
+        refresh_operation_report(&state, key);
+        assert!(state.store.last_operation_audit().is_none(), "the first report audited");
+        let checks = operation_checks(&state).unwrap().unwrap();
+        let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
+        assert_eq!(projection.status, "warn");
+        assert!(projection.message.starts_with("no operation audit has finished since the daemon started"), "{}", projection.message);
+
+        let drift = state.store.operation_projection_drift().unwrap();
         assert_eq!(drift.len(), 1);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
@@ -14985,7 +14995,7 @@ subscription "watch/source" {
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
         // Doctor reports the last audit and never audits inline: it still shows the drift the
-        // startup audit found until the next audit runs.
+        // audit found until the next audit runs.
         assert_eq!(projection_status(), "fail");
         assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
@@ -14993,7 +15003,7 @@ subscription "watch/source" {
         assert_eq!(projection_status(), "pass");
         assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         assert_eq!(checks.iter().find(|check| check.name == "operation-projection").unwrap().status, "fail");
     }
@@ -15024,7 +15034,7 @@ subscription "watch/source" {
         assert_eq!(pending[0]["severity"], "info");
         assert_eq!(pending[0]["state"], "running");
         assert_eq!(pending[0]["updated_at"], "2026-09-30T00:00:00Z");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let report = operation_resources(&state, "2026-09-30T00:00:00Z").unwrap();
         assert!(
             report.iter().all(|item| item["state"] != "running"),
@@ -15046,11 +15056,9 @@ subscription "watch/source" {
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
         let started = test_state(other.path());
-        let audit = start_operation_report(&started).unwrap();
-        let drift = audit.blocking_recv().unwrap().unwrap();
-        assert!(drift.is_empty());
+        assert!(start_operation_report(&started));
         crate::store::STATEMENTS_RUN.with(|run| run.set(0));
-        assert!(!started.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
+        assert!(!started.store.repair_operation_projection_drift_from_audit(&[]).unwrap());
         assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), 0);
         let deadline = Instant::now() + Duration::from_secs(30);
         while operation_checks(&started).unwrap().is_none() {
@@ -15061,7 +15069,8 @@ subscription "watch/source" {
             std::thread::sleep(Duration::from_millis(10));
         }
         let made = operation_checks(&started).unwrap().unwrap();
-        assert!(start_operation_report(&started).is_none());
+        assert!(started.store.last_operation_audit().is_none());
+        assert!(!start_operation_report(&started));
         assert!(Arc::ptr_eq(
             &made,
             &operation_checks(&started).unwrap().unwrap()
