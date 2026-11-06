@@ -96,7 +96,7 @@ and cache tokens, cost with currency, and model, with a separate subagent breakd
 Responses distinguish `self` from `including_subagents`, carry an explicit `partial`
 flag and observation freshness. An observed read is not a claim of continuous liveness.
 
-The live source installs the st-only layer. It reuses native usage rows and the L3
+The live source installs the Fractal-only layer. It reuses native usage rows and the L3
 agent reader: self-only roster spend meters are labelled `agent-incarnations` and
 always partial. Native aggregate totals can include subagent responses and do not
 establish self-only coverage across historical incarnations. The default therefore
@@ -207,7 +207,7 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   what it holds now (mission › step, the step's goal, since when), its subagents, what is queued
   next, and how it runs (harness and state, runtime, host, worktree, parent, fault).
 - An agent on another host may show only its Fractal mail, not its transcript; say so.
-- An agent not started by st: show its saved transcript when Fractal can identify it; otherwise
+- An agent not started by Fractal: show its saved transcript when Fractal can identify it; otherwise
   explain in plain words why there is no conversation. A found process whose native session
   is unidentified opens into this explanatory state, not a missing-session error. OMP internal
   `__omp_worker_*` helpers are not agents and must not appear in the found-running group.
@@ -490,7 +490,7 @@ publication more than 10,000 claims after the previous one (a catch-up) is none 
 `st.slo.projection_fresh.skipped` counter counts each, by collection), and
 attention's first publication after no window read it (attention folds only while one does)
 is none either. Both targets appear on
-`GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
+`GET /v1/client/request-latency` and in `fractal doctor`. `daemon_load` keeps its 300 ms
 first-snapshot budget for every window, now with projections on its rows, and stays under
 twice main's baseline. Bounds per row: a mission projection stays within 4 KiB, an agent
 projection within 2 KiB, and an attention projection within 16 KiB including its launch preview.
@@ -568,8 +568,8 @@ Served on the `agents` collection as `Agent.presentation`, and on `GET /v1/clien
 
 | Field | Meaning |
 |---|---|
-| `state` | One of the eleven `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `retired`, `unknown`. A retired agent is `retired` whatever else st says of it. |
-| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting), `stopped` (stopped, unknown) or `retired`. Sessions st found running but did not start are not agent rows; clients list them in their own "found running" group. |
+| `state` | One of the eleven `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `retired`, `unknown`. A retired agent is `retired` whatever else Fractal says of it. |
+| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting), `stopped` (stopped, unknown) or `retired`. Sessions Fractal found running but did not start are not agent rows; clients list them in their own "found running" group. |
 | `because` | Why it needs someone, in plain words: the fault or why it is broken, when it lost its session, the ask, or the login it needs, for `fault`, `down`, `needs_you` and `needs_login`; otherwise `null`. |
 | `now` | What it holds: `{step, mission, path, title, label, goal, since, holder_down_since}`, or `null`. `label` is `mission › path`. The step's progress is on the mission projection's step. |
 | `next[]`, `queued` | Up to five queued steps as `{step, mission, path, title, label}`, next first, and how many are queued in all. |
@@ -823,7 +823,7 @@ document. The shared model is `fractal_ui_model::documents` (Rust) and `@fractal
   refers to, so a message, mission or step view can link to them.
 - Nothing here edits or publishes a document.
 - **Who may read:** every session with `read.projections` may list every document and read
-  any version, as the CLI already does (`st documents ls`, `st documents get doc/NAME`). Only a
+  any version, as the CLI already does (`fractal documents ls`, `fractal documents get doc/NAME`). Only a
   message subject in `document-references.get` is gated by who may read that message.
   Per-agent document privacy, if it comes, belongs to the agent isolation work and would gate
   these routes and the CLI together.
