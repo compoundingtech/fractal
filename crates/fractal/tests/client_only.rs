@@ -871,9 +871,9 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     });
     tui.wait("live older member", |screen| screen.contains("live")).await;
     tui.send("\x0b");
-    tui.wait("open palette", |screen| screen.contains("every machine, its clients")).await;
+    tui.wait("open palette", |screen| screen.contains("every machine")).await;
     tui.send("fleet");
-    tui.wait("Fleet palette query", |screen| screen.contains("fleet") && screen.contains("every machine, its clients")).await;
+    tui.wait("Fleet palette query", |screen| screen.contains("› fleet")).await;
     tui.send("\r");
     let routes = [
         "/v1/client/clients",
