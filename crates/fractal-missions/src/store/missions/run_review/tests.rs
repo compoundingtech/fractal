@@ -166,6 +166,16 @@ fn loop_fixture(mission: &str) -> (Store, MissionRunView, String, MissionRunView
         request
             .inputs
             .insert(crate::mission::LOOP_ROUND_INPUT.into(), round.to_string());
+        // Match reconcile.rs:12766-12769; its input builder is private to Reconciler.
+        request
+            .inputs
+            .insert(crate::mission::LOOP_FEEDBACK_INPUT.into(), String::new());
+        request
+            .inputs
+            .insert(crate::mission::LOOP_ITEM_INPUT.into(), "null".into());
+        request
+            .inputs
+            .insert(crate::mission::CANDIDATE_INDEX_INPUT.into(), String::new());
         let child = store
             .create_child_mission_run(&request, &run, &parent.subject, None)
             .unwrap();
