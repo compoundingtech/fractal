@@ -6,6 +6,71 @@ use fractal_store::store::{
     step_run_row_tx,
 };
 
+/// Snapshot loaded only inside the answer writer's transaction.
+#[doc(hidden)]
+pub struct ReviewOwnerSnapshot {
+    pub responsible_agents: BTreeSet<String>,
+    pub reviewer: String,
+    pub agentless: bool,
+}
+
+/// The only responsibility loader for the dormant agent-answer transaction helper.
+/// FINAL must use this loader before enabling the wire; callers cannot supply an owner set.
+#[doc(hidden)]
+pub fn review_owner_snapshot(
+    scope: &Scope<'_>,
+    transaction: &rusqlite::Transaction<'_>,
+    owner: &str,
+    reviewer: &str,
+) -> Result<ReviewOwnerSnapshot, FractalError> {
+    let unresolved = || FractalError::new("reviewer-owner-unresolved", owner);
+    let step = if owner.starts_with("step-run/") {
+        Some(
+            step_run_row_tx(transaction, owner)
+                .map_err(internal)?
+                .ok_or_else(unresolved)?,
+        )
+    } else if let Some(path) = owner.strip_prefix("loop-run/") {
+        Some(
+            step_run_row_tx(transaction, &format!("step-run/{path}"))
+                .map_err(internal)?
+                .ok_or_else(unresolved)?,
+        )
+    } else if owner.starts_with("mission-run/") {
+        None
+    } else {
+        return Err(unresolved());
+    };
+    let run = step.as_ref().map_or(owner, |step| step.run.as_str());
+    let header = mission_run_header_tx(transaction, run.trim_start_matches("mission-run/"))
+        .map_err(internal)?;
+    if step
+        .as_ref()
+        .is_some_and(|step| step.generation != header.generation)
+    {
+        return Err(unresolved());
+    }
+    if let Some(step) = step.as_ref().filter(|_| owner.starts_with("loop-run/")) {
+        let definition =
+            pinned_generation_mission_tx(transaction, generation_id_from_subject(&step.generation))
+                .map_err(internal)?
+                .ok_or_else(unresolved)?;
+        if crate::mission::find_step(&definition, &step.step)
+            .is_none_or(|spec| spec.loop_spec.is_none())
+        {
+            return Err(unresolved());
+        }
+    }
+    validate_reviewer_boundary(
+        scope,
+        transaction,
+        run,
+        &header.requester,
+        reviewer,
+        step.as_ref().map(|step| step.step.as_str()),
+    )
+}
+
 /// Caller-owned snapshot of every generation, descendant and starting parent step, not siblings.
 /// Includes strict loop-round history; public parsers still reject agent-review.
 /// Revisions published before the nested-loop owning-path fix can share a loop path;
@@ -18,10 +83,23 @@ pub fn validate_run_reviewer(
     requester: &str,
     reviewer: &str,
 ) -> Result<BTreeSet<String>, FractalError> {
+    validate_reviewer_boundary(scope, connection, run, requester, reviewer, None)
+        .map(|snapshot| snapshot.responsible_agents)
+}
+
+fn validate_reviewer_boundary(
+    scope: &Scope<'_>,
+    connection: &Connection,
+    run: &str,
+    requester: &str,
+    reviewer: &str,
+    root_step: Option<&str>,
+) -> Result<ReviewOwnerSnapshot, FractalError> {
     let unresolved = |subject: &str| FractalError::new("reviewer-owner-unresolved", subject);
     let mut pending = BTreeSet::from([run.to_owned()]);
     let mut visited = BTreeSet::new();
     let mut excluded = BTreeSet::new();
+    let mut agentless = true;
     while let Some(subject) = pending.pop_first() {
         if !visited.insert(subject.clone()) {
             return Err(unresolved(&subject));
@@ -61,7 +139,37 @@ pub fn validate_run_reviewer(
             if view.run != subject || expected.is_empty() || actual != expected {
                 return Err(unresolved(&generation));
             }
-            for step in &view.steps {
+            let boundary = root_step.filter(|_| subject == run);
+            let selected = |path: &str| {
+                boundary.is_none_or(|root| {
+                    path == root
+                        || path
+                            .strip_prefix(root)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                })
+            };
+            if boundary.is_some_and(|root| !expected.contains(root)) {
+                return Err(unresolved(&generation));
+            }
+            if let Some(root) = boundary {
+                let mut path = root;
+                while let Some(parent) = crate::mission::parent_step_path(&definition, path) {
+                    let step = view
+                        .steps
+                        .iter()
+                        .find(|step| step.step == parent)
+                        .ok_or_else(|| unresolved(parent))?;
+                    excluded.extend(validate_step_reviewer(
+                        scope,
+                        connection,
+                        step,
+                        &header.requester,
+                        reviewer,
+                    )?);
+                    path = parent;
+                }
+            }
+            for step in view.steps.iter().filter(|step| selected(&step.step)) {
                 for requester in [requester, header.requester.as_str()] {
                     excluded.extend(validate_step_reviewer(
                         scope, connection, step, requester, reviewer,
@@ -83,15 +191,47 @@ pub fn validate_run_reviewer(
                 .map_err(internal)?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()
                 .map_err(internal)?;
-            for step in &specs {
+            let children = if boundary.is_some() {
+                let mut selected_children = BTreeSet::new();
+                for child in children {
+                    let header =
+                        mission_run_header_tx(connection, child.trim_start_matches("mission-run/"))
+                            .map_err(internal)?;
+                    let parent = header
+                        .parent_step_run
+                        .as_deref()
+                        .ok_or_else(|| unresolved(&child))?;
+                    let parent = view
+                        .steps
+                        .iter()
+                        .find(|step| step.subject == parent)
+                        .ok_or_else(|| unresolved(&child))?;
+                    if selected(&parent.step) {
+                        selected_children.insert(child);
+                    }
+                }
+                selected_children
+            } else {
+                children
+            };
+            for step in specs.iter().filter(|step| selected(&step.path)) {
                 if let Some(spec) = step.loop_spec.as_deref() {
                     validate_loop_history(connection, &generation, &step.path, spec, &children)?;
+                } else {
+                    agentless &= view
+                        .steps
+                        .iter()
+                        .any(|row| row.step == step.path && row.agentless);
                 }
             }
             pending.extend(children);
         }
     }
-    Ok(excluded)
+    Ok(ReviewOwnerSnapshot {
+        responsible_agents: excluded,
+        reviewer: resolve_reference_conn(connection, reviewer)?,
+        agentless,
+    })
 }
 
 fn validate_loop_history(
