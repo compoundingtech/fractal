@@ -2082,7 +2082,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" | "subject-note-not-found" => "not-found".into(),
         "invalid-person-ask"
-        | "invalid-note-subject" | "invalid-subject-note" | "subject-note-feature-barrier"
+        | "invalid-note-subject" | "invalid-session-subject" | "invalid-subject-note" | "subject-note-feature-barrier"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"

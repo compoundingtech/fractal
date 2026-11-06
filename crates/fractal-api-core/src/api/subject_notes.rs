@@ -137,6 +137,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn invalid_session_subject_returns_typed_validation_code() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        for target in ["session/person/example/first", "session/agent/example/worker/%FF"] {
+            let response = router(state.clone()).oneshot(Request::builder().method("POST")
+                .uri("/v1/subject-notes").header("x-st3-person", "person/example")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"target":target,"text":"Context"}).to_string())).unwrap())
+                .await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["code"], "validation-failed", "{error}");
+        }
+    }
+
     #[test]
     fn subject_note_paired_write_requires_explicit_scope() {
         let session = client_v0::ClientSession::for_tests_scoped("client/example", "person/example", &["read.projections"]);

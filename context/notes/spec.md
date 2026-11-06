@@ -266,6 +266,8 @@ above. This is a subject reference derived from an existing runtime identity,
 not another incarnation allocator. Parent and incarnation must match runtime
 evidence at local admission; a client cannot declare a session by naming it.
 Session target read access is the parent agent's read access.
+Malformed session targets, like malformed note subjects and note fields, return
+the typed client error code `validation-failed`, not `internal`.
 
 A session target is current only while authoritative runtime state says its
 parent agent is running with that exact incarnation. Matching a retained
