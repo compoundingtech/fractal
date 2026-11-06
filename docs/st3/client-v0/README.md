@@ -1213,6 +1213,10 @@ The TUI reads visible agents' related runs when attached and after pushed attent
 mission frames. Concurrent invalidations coalesce; an idle sidebar never polls this endpoint.
 Changing the connection discards old-member responses. Agent activity uses `last_activity_at`,
 not the time its roster row happened to change.
+The singleton-only index cannot replace the general seat-offer index; daemon cost probes cover this route.
+Roll out the daemon before callers. Rust, Swift and TypeScript clients turn this route's HTTP 404
+into typed `unsupported-capability` (including an empty older-router response), never empty rows.
+Clients must show that unsupported result visibly. `fixtures/agent-related-runs.json` is normative.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run
