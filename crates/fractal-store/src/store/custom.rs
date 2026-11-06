@@ -554,7 +554,7 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let history = claims(tx, subject)?;
-    tx.execute("DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
     notice_authority::record_dependencies(tx, subject, &history)?;
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
         if fractal_schema::notice::is_reserved_subject(subject) {
