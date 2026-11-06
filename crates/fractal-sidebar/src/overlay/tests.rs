@@ -22,13 +22,18 @@ fn inputs() -> (ArrangementInput, Vec<MembershipInput>) {
     }).collect();
     (arrangement, members)
 }
+fn observed_inputs() -> (ArrangementInput, Vec<MembershipInput>, SidebarTree) {
+    let (arrangement, members) = inputs();
+    let observed = build_v2(&arrangement, &members).unwrap();
+    (arrangement, members, observed)
+}
 fn staged(intent: MoveIntent, plan: V2Plan) -> Edits {
     let mut edits = Edits::new(scope(), intent);
     edits.reduce(Event::Plan { base: base(1), plan, folder: identity(1), membership: identity(2) });
     edits
 }
 fn member_edit() -> (Edits, SidebarTree, SidebarTree) {
-    let (arrangement, mut members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
+    let (arrangement, mut members, observed) = observed_inputs();
     let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-a"), before: None };
     let plan = plan_v2(&arrangement, &members, &intent).unwrap();
     let Member::Place { bucket, key, .. } = &plan.memberships[0] else { panic!("move emits Place"); };
@@ -41,22 +46,19 @@ fn member_move_is_visible_next_frame_without_mutating_observation() {
     assert_eq!(edits.status, Status::AwaitingPersistence);
     assert_eq!(edits.project(&observed).unwrap().as_ref(), &expected);
     assert!(observed.nodes["folder:folder-a"].children.is_empty());
-    assert_eq!(expected.nodes["folder:folder-a"].children, vec![subject("member-a")]);
-    assert_eq!(expected.roots, vec![folder("folder-a"), folder("folder-b"), subject("member-b")]);
+    assert_eq!((&expected.nodes["folder:folder-a"].children, &expected.roots), (&vec![subject("member-a")], &vec![folder("folder-a"), folder("folder-b"), subject("member-b")]));
 }
 #[test]
 fn folder_move_and_folder_first_row_order_use_real_planner() {
-    let (arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
+    let (arrangement, members, observed) = observed_inputs();
     let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
     let edits = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
     let visible = edits.project(&observed).unwrap();
-    assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b")]);
-    assert_eq!(visible.roots, vec![folder("folder-a"), subject("member-a"), subject("member-b")]);
-    assert_eq!(visible.nodes["folder:folder-b"].shown_under, parent("folder-a"));
+    assert_eq!((&visible.nodes["folder:folder-a"].children, &visible.roots, &visible.nodes["folder:folder-b"].shown_under), (&vec![folder("folder-b")], &vec![folder("folder-a"), subject("member-a"), subject("member-b")], &parent("folder-a")));
 }
 #[test]
 fn compound_plan_displays_only_staged_folder_step_until_fresh_membership_plan() {
-    let (mut arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
+    let (mut arrangement, members, observed) = observed_inputs();
     let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-a"), before: None };
     let member_plan = plan_v2(&arrangement, &members, &intent).unwrap().memberships;
     let mut edits = staged(intent, V2Plan { folders: vec![Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-a".into()), key: "a0".into() }], memberships: member_plan.clone() });
@@ -115,7 +117,7 @@ fn observation_drops_overlay_before_completion_persistence_without_double_apply(
 }
 #[test]
 fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
-    let (arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
+    let (_, _, observed) = observed_inputs();
     let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
     let mut edits = staged(intent, V2Plan { folders: vec![
         Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("folder-a".into()), key: "a0".into() },
@@ -124,15 +126,13 @@ fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
         Folder::FolderDelete { id: "folder-c".into() },
     ], memberships: vec![] });
     let visible = edits.project(&observed).unwrap();
-    assert_eq!(visible.nodes["folder:folder-a"].children, vec![folder("folder-b")]);
-    assert!(!visible.nodes.contains_key("folder:folder-c"));
+    assert_eq!((&visible.nodes["folder:folder-a"].children, visible.nodes.contains_key("folder:folder-c")), (&vec![folder("folder-b")], false));
     edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Refused(identity(1), Refusal::Conflict));
     assert_eq!(edits.project(&observed).unwrap().as_ref(), &observed);
     let intent = MoveIntent { node: subject("member-a"), parent: Parent::Root {}, before: None };
     let edits = staged(intent, V2Plan { folders: vec![], memberships: vec![Member::Remove { member: "member-a".into() }] });
     assert!(!edits.project(&observed).unwrap().nodes.contains_key("subject:member-a"));
 }
-
 #[test]
 fn atomic_delete_move_lifts_from_final_positions_in_every_operation_order() {
     let (mut arrangement, mut members) = inputs();
@@ -170,7 +170,7 @@ fn atomic_delete_move_lifts_from_final_positions_in_every_operation_order() {
 }
 #[test]
 fn create_delete_preserves_tombstone_and_missing_ancestor_rules_in_both_orders() {
-    let (arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
+    let (arrangement, members, observed) = observed_inputs();
     let create = Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("missing".into()), key: "a0".into() }; let delete = Folder::FolderDelete { id: "folder-c".into() };
     for folders in [vec![delete.clone(), create.clone()], vec![create, delete]] {
         let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-c"), before: None }; let mut folders = folders;
