@@ -57,7 +57,7 @@ pub struct WatchesQuery {
 }
 
 fn bad(code: &'static str, message: impl Into<String>) -> ApiError {
-    ApiError::bad(St3Error::new(code, message.into()))
+    ApiError::bad(FractalError::new(code, message.into()))
 }
 
 const DEFAULT_WATCH_DURATION_MS: u128 = 14 * 24 * 60 * 60 * 1_000;
@@ -152,10 +152,10 @@ fn watchable(thread: &ThreadRef, github: &Value) -> Result<(), ApiError> {
         format!("{thread} is already closed, so nothing would wake the seat"),
     ))
 }
-fn declare_seat_watch(store: &Store, thread: &ThreadRef, actor: &str, until: Option<u128>) -> Result<Value, St3Error> {
+fn declare_seat_watch(store: &Store, thread: &ThreadRef, actor: &str, until: Option<u128>) -> Result<Value, FractalError> {
     let actor = resolve_reference_conn(&store.readers.get(), actor)?;
     if !store.seat_live(&actor)? {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "watch-needs-a-seat",
             format!("`{actor}` is not a running seat"),
         ));

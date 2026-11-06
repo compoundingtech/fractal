@@ -30,8 +30,8 @@ only to the isolated daemon's Unix socket and `person/tester`.
 Every check writes `PASS` or `FAIL` to `<out>/report.txt`. Independent checks
 continue after failure; failed setup dependencies stop immediately. The final
 exit is nonzero if any check failed.
-Synthetic pages, chunk responses, TS rows, parent terminal UI capture (`stui.txt`) and
-child capture (`stui-child.txt`) are retained as evidence. Cleanup stops the
+Synthetic pages, chunk responses, TS rows, parent terminal UI capture (`fractal-tui.txt`) and
+child capture (`fractal-tui-child.txt`) are retained as evidence. Cleanup stops the
 terminal and daemon and removes isolation unless `--keep` was supplied.
 
 ## Assertions

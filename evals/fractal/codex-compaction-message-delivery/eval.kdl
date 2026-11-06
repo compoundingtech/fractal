@@ -17,7 +17,7 @@ mission "eval/codex-compaction-message-delivery" state="ready" timeout="25m" {
   step "message-target" timeout="18m" {
     assigned-to "agent/${ST_MISSION_RUN}/compact.codex"
     title "Process the graph-backed delivery sequence"
-    goal "Claim this step, then end your turn and wait at the native harness prompt for the anchor, working-turn steer, and post-compaction Fractal messages sent by this eval. Do not poll, sleep, or invoke trace wait while waiting: st3 will inject each message. Those messages are instructions within this claimed work. Execute them exactly. After replying to the post-compaction message, complete this step."
+    goal "Claim this step, then end your turn and wait at the native harness prompt for the anchor, working-turn steer, and post-compaction Fractal messages sent by this eval. Do not poll, sleep, or invoke trace wait while waiting: fractal will inject each message. Those messages are instructions within this claimed work. Execute them exactly. After replying to the post-compaction message, complete this step."
   }
 
   step "exercise-delivery" timeout="20m" {

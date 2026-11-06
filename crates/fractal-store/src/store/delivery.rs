@@ -125,6 +125,28 @@ impl Store {
         through: u64,
         delivery: bool,
     ) -> Result<Vec<MessageView>> {
+        self.messages_through_listing(recipient, include_closed, through, delivery, false)
+    }
+
+    /// A delivery listing of only the mail a stream can offer: sent, staged or delivered.
+    /// Read mail that is not closed is most of a long-lived seat's mailbox, and a stream drops it;
+    /// this reads its status from the newest claims alone and never builds its view.
+    pub fn offerable_messages_for_delivery_through(
+        &self,
+        recipient: &str,
+        through: u64,
+    ) -> Result<Vec<MessageView>> {
+        self.messages_through_listing(Some(recipient), false, through, true, true)
+    }
+
+    fn messages_through_listing(
+        &self,
+        recipient: Option<&str>,
+        include_closed: bool,
+        through: u64,
+        delivery: bool,
+        offerable: bool,
+    ) -> Result<Vec<MessageView>> {
         smallclaims::touched::note_read(|| match recipient {
             Some(recipient) => format!("mailbox:{recipient}"),
             None => "kind:message.sent".to_owned(),
@@ -132,8 +154,9 @@ impl Store {
         let mut after = None;
         let mut all = Vec::new();
         loop {
-            let (items, next) =
-                self.messages_page_from(recipient, include_closed, after, through, 200, delivery, false)?;
+            let (items, next) = self.messages_page_from(
+                recipient, include_closed, after, through, 200, delivery, false, offerable,
+            )?;
             all.extend(items);
             match next {
                 Some(cursor) => after = Some(cursor),
@@ -309,7 +332,7 @@ impl Store {
         limit: usize,
         delivery: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery)
+        self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery, false)
     }
 
     /// [`Self::messages_page_once`], read on past a page that lists nothing yet has a cursor. The
@@ -326,10 +349,12 @@ impl Store {
         limit: usize,
         delivery: bool,
         stream: bool,
+        offerable: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         loop {
-            let (page, next) =
-                self.messages_page_once(recipient, include_closed, after, through, limit, delivery, stream)?;
+            let (page, next) = self.messages_page_once(
+                recipient, include_closed, after, through, limit, delivery, stream, offerable,
+            )?;
             if !page.is_empty() || next.is_none() || next == after {
                 return Ok((page, next));
             }
@@ -347,6 +372,7 @@ impl Store {
         limit: usize,
         delivery: bool,
         stream: bool,
+        offerable: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let connection = self.readers.get();
         let recipient = recipient.map(|recipient|
@@ -447,6 +473,9 @@ impl Store {
             let mut output = Vec::new();
             let last_listed = subjects.last().map(|(_, index, _)| *index);
             for (subject, created_index, remaining) in subjects {
+                if offerable && !offerable_status(&connection, &subject)? {
+                    continue;
+                }
                 let mut message = self.message_view_cached(&connection, &subject, created_index)?;
                 if message.to == recipient && (include_closed || message.status != "closed") {
                     if remaining > 0 && crate::silent::waits_for_turn(&message) {
@@ -608,6 +637,31 @@ impl Store {
 
 const MESSAGE_CACHE_LIMIT: usize = 4096;
 
+/// Whether a message's view shows it sent, staged or delivered, the statuses a delivery stream
+/// offers. The view's own rule: the newest canonical `status` field (`sent` without one), raised
+/// by a local mark that ranks above it. A read or close mark decides alone, as no offerable
+/// status ranks above it; otherwise only the newest claims are read, and the body of a message
+/// whose newest claim is its send.
+fn offerable_status(connection: &Connection, subject: &str) -> Result<bool> {
+    use super::message_marks::rank;
+    let marked = super::message_marks::status(connection, subject)?;
+    if marked.is_some_and(|marked| rank(marked) >= rank("read")) {
+        return Ok(false);
+    }
+    let claimed = super::latest_actual_fields_at(connection, subject, None, &["status"])?;
+    let mut status = claimed
+        .as_ref()
+        .and_then(|actual| actual.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("sent");
+    if let Some(marked) = marked
+        && rank(marked) > rank(status)
+    {
+        status = marked;
+    }
+    Ok(matches!(status, "sent" | "staged" | "delivered"))
+}
+
 /// A failed subscription request stays a fault while its subscription runs. A failed request is
 /// never retried, so only a stop ends it on its own: a stopped subscription starts nothing more.
 fn subscription_failure_is_current_tx(
@@ -641,6 +695,10 @@ pub fn recipient_names(
     names.dedup();
     Ok(names)
 }
+
+#[cfg(test)]
+#[path = "offerable_mail_tests.rs"]
+mod offerable_mail_tests;
 
 #[cfg(test)]
 mod mailbox_metrics_tests {

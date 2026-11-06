@@ -10,6 +10,7 @@ mod rich;
 mod notice;
 mod notice_schema;
 mod swift_notice;
+mod notice_descriptors;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -88,6 +89,11 @@ fn main() -> Result<()> {
     output(
         &root.join("clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift"),
         &swift_notice::models(&schema)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_descriptors.generated.rs"),
+        &format_rust(&notice_descriptors::models(&schema)?)?,
         check,
     )?;
     output(
@@ -365,6 +371,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
             // A relayed read of the GitHub plugin's mirror on its poller (docs/st3/plugins.md).
             out.push_str(GITHUB_PLUGIN_READ);
+        } else if id == "agent-related-runs.get" {
+            writeln!(out, "    pub async fn agent_related_runs_get(&self, id: &str) -> Result<Envelope<AgentRelatedRuns>, ClientError> {{ self.get(&format!(\"/v1/client/agent-related-runs/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -469,6 +477,10 @@ fn swift_operation_methods(
         }
         if id == "harness-questions.get" {
             writeln!(out, "    public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> {{ try await get(\"v1/client/harness-questions/\\(Self.routedSessionID(id))\") }}")?;
+            continue;
+        }
+        if id == "agent-related-runs.get" {
+            writeln!(out, "    public func agentRelatedRunsGet(_ id: String) async throws -> Envelope<AgentRelatedRuns> {{ try await get(\"v1/client/agent-related-runs/\\(Self.routedSessionID(id))\") }}")?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
@@ -859,6 +871,9 @@ fn validate_surfaces(
         "MissionWake",
         "DeclaredResource",
         "AgentQueue",
+        "AgentRelatedRuns",
+        "AgentRelatedRun",
+        "RelatedRunWait",
         "AgentQueueRun",
         "AgentQueueMove",
         "LaneEntry",

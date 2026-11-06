@@ -15,8 +15,8 @@ fn writer_seek(table: &str, column: &str) -> String {
     format!("SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1")
 }
 
-fn refused(reason: impl Into<String>) -> St3Error {
-    St3Error::new("mission-capacity-unavailable", reason)
+fn refused(reason: impl Into<String>) -> FractalError {
+    FractalError::new("mission-capacity-unavailable", reason)
 }
 
 fn declares_capacity(mission: &MissionSpec) -> bool {
@@ -33,7 +33,7 @@ pub(super) fn validate_publication(
     connection: &Connection,
     origin: &str,
     intent: &NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for mission in intent.missions.values().filter(|mission| declares_capacity(mission)) {
         let published: Option<String> = connection
             .query_row(
@@ -54,7 +54,7 @@ pub(super) fn validate_mission(
     connection: &Connection,
     origin: &str,
     mission: &MissionSpec,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if !declares_capacity(mission) {
         return Ok(());
     }
@@ -138,7 +138,7 @@ mission "plain" state="ready" {
 }
 "#;
 
-    fn publish(store: &Store, source: &str, key: &str) -> Result<Vec<String>, St3Error> {
+    fn publish(store: &Store, source: &str, key: &str) -> Result<Vec<String>, FractalError> {
         let intent = crate::graph::parse_intent(source, &store.origin)?;
         let planned = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None })?;
         store.apply_as(&intent, &planned.subject_tokens, key, Some("person/avery"))?;

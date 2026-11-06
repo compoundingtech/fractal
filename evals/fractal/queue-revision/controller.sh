@@ -9,7 +9,7 @@ run_subject=""
 cleanup() {
   if [[ -n "$run_subject" ]]; then
     printf 'version 2\nmission-run "%s" { cancellation "eval-finished" { reason "the queue eval finished" } }\n' "$run_subject" \
-      | st3 publish - --as "$REQUESTER" >/dev/null 2>&1 || true
+      | fractal publish - --as "$REQUESTER" >/dev/null 2>&1 || true
   fi
 }
 
@@ -23,8 +23,8 @@ st3 --json missions start eval/queue-revision/work \
 
 run_subject=$(jq -er '.mission_run.subject' initial-run.json)
 old_generation=$(jq -er '.mission_run.generation' initial-run.json)
-st3 trace wait "$run_subject" --for standing --timeout 1m >/dev/null
-st3 --json missions show "$run_subject" > initial-standing.json
+fractal trace wait "$run_subject" --for standing --timeout 1m >/dev/null
+fractal --json missions show "$run_subject" > initial-standing.json
 
 jq -e '
   [.steps | sort_by(.queue_position)[] | {step, queue, queue_position, status}]
@@ -35,7 +35,7 @@ jq -e '
   ]
 ' initial-standing.json >/dev/null
 
-st3 --json work revise "$run_subject" revised.kdl \
+fractal --json work revise "$run_subject" revised.kdl \
   --as "$REQUESTER" \
   --reason "put the third investigation before the second" > revised.json
 
@@ -51,7 +51,7 @@ jq -e '
 
 new_generation=$(jq -er '.mission_run.generation' revised.json)
 [[ "$new_generation" != "$old_generation" ]]
-st3 --json work revision generations "$run_subject" > generations.json
+fractal --json work revision generations "$run_subject" > generations.json
 jq -e --arg old "$old_generation" --arg new "$new_generation" '
   length == 2
   and .[0].subject == $old

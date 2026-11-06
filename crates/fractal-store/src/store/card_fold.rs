@@ -108,7 +108,7 @@ impl CardReads {
             match owned.get(&subject).map(BTreeSet::len) {
                 Some(2..) => {
                     // As `owned_sets::owner` refuses it.
-                    return Err(anyhow::Error::new(St3Error::new(
+                    return Err(anyhow::Error::new(FractalError::new(
                         "owned-set-conflict",
                         format!("{subject} has conflicting set owners"),
                     )));

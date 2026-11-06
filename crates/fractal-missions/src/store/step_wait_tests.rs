@@ -87,7 +87,7 @@ fn a_wait_stops_the_clock_a_resume_starts_it_and_the_deadline_ends_a_forgotten_w
 #[test]
 fn a_wait_needs_a_bounded_duration_and_a_reason_and_only_a_wait_takes_one() {
     let Waiting { store, subject, .. } = claimed_step();
-    let code = |result: Result<StepRunView, St3Error>| result.unwrap_err().code;
+    let code = |result: Result<StepRunView, FractalError>| result.unwrap_err().code;
     assert_eq!(
         code(store.work_action(&subject, "wait", &request("no-duration", Some("build slot"), None))),
         "invalid-wait"

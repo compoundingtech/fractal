@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a shared Effect optimistic-mutation primitive for web clients",
+  "replay": {"status": "none", "detail": "Pending mutations are in-memory client overlays; no claims or replay behavior change."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "Server authority and action admission remain unchanged."},
+  "compatibility": {"status": "none", "detail": "The primitive retains overlays until authoritative reconciliation, supports rollback notices or failed same-key retry, drops answers already supplied by another actor, and sends Undo as a fresh inverse action. Existing web consumers are unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reloading discards client-only overlays; authoritative data remains unchanged."}
+}

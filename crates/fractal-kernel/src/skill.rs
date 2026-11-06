@@ -162,6 +162,7 @@ mod tests {
             "it is not a security boundary",
             "work in a subfolder of the install's work root: `~/st` by default",
             "avoid listing or searching `$HOME`",
+            "after `cd`, remove files by literal absolute path, never by a relative glob",
             "`\"$ST3_BIN\" agents handoff write --as \"$ST_AGENT\"`",
             "only this seat writes its own",
             "Prepare for restart",
@@ -218,7 +219,10 @@ mod tests {
         // The channel text is the skill's paragraph without its closing pointer clause.
         let rule = channel.trim_end_matches('.');
         assert!(skill.contains(rule), "{rule}");
-        assert!(SKILL.contains("people have no inbox, so do not reply with st"));
+        assert!(SKILL.contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION));
+        assert!(!SKILL.contains("reach a person by printing in the conversation"));
+        assert!(SKILL.contains("Print factual replies to a person in the conversation"));
+        assert!(SKILL.contains("every new question or decision for the person goes through a native `work ask`"));
         assert!(!SKILL.contains("NO REPLY"));
         assert!(!SKILL.contains("people read st replies in st"));
     }

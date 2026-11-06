@@ -20,7 +20,7 @@ state="$(jq -n --arg agent "$AGENT" --arg nonce "$NONCE" \
 persist_state() { printf '%s\n' "$state" >"$STATE"; }
 persist_state
 
-agent_json() { st3 agents show "$AGENT" --all --json 2>/dev/null; }
+agent_json() { fractal agents show "$AGENT" --all --json 2>/dev/null; }
 
 wait_until() {
   local label=$1 seconds=$2
@@ -58,7 +58,7 @@ target_work_claimed() {
 
 message_has_lifecycle() {
   local subject=$1
-  st3 trace show "$subject" --json --limit 100 2>/dev/null \
+  fractal trace show "$subject" --json --limit 100 2>/dev/null \
     | jq -se '
         map(.kind) as $kinds
         | ($kinds | index("message.staged")) != null
@@ -70,8 +70,8 @@ message_has_lifecycle() {
 requester_has() {
   local marker=$1
   jq -s 'add | unique_by(.subject)' \
-    <(st3 conversations ls "$REQUESTER" --json) \
-    <(st3 conversations ls "$REQUESTER" --archive --json) \
+    <(fractal conversations ls "$REQUESTER" --json) \
+    <(fractal conversations ls "$REQUESTER" --archive --json) \
     | jq -e --arg from "$AGENT" --arg marker "$marker" --arg tag "$RUN_TAG" '
         any(.from == $from and (.tags | index($tag)) and (.content | contains($marker)))
       ' >/dev/null
@@ -80,7 +80,7 @@ requester_has() {
 sent_subject=""
 send_request() {
   local title=$1 body=$2 stage=$3 subject
-  subject="$(st3 conversations send "$AGENT" --from "$REQUESTER" \
+  subject="$(fractal conversations send "$AGENT" --from "$REQUESTER" \
     --subject "$title" --tags "$RUN_TAG,compact-delivery:$stage" \
     --body "$body" --json | jq -er .subject)"
   state="$(jq --arg stage "$stage" --arg subject "$subject" \
@@ -90,7 +90,7 @@ send_request() {
 }
 
 latest_compactions() {
-  st3 trace show "$AGENT" --json --limit 500 2>/dev/null \
+  fractal trace show "$AGENT" --json --limit 500 2>/dev/null \
     | jq -sr '[.[] | select(
         .kind == "harness.usage"
         and .body.fields.semantics == "context_occupancy"
@@ -98,7 +98,7 @@ latest_compactions() {
 }
 
 latest_compaction_trigger() {
-  st3 trace show "$AGENT" --json --limit 500 2>/dev/null \
+  fractal trace show "$AGENT" --json --limit 500 2>/dev/null \
     | jq -sr '[.[] | select(
         .kind == "harness.usage"
         and .body.fields.semantics == "context_occupancy"
@@ -138,7 +138,7 @@ state="$(jq --argjson before "$before_compactions" \
   '.compaction.before = $before' <<<"$state")"
 persist_state
 
-st3 terminals send "$AGENT" /compact --json >compact-control.json
+fractal terminals send "$AGENT" /compact --json >compact-control.json
 wait_until "manual compaction graph edge" 300 compaction_advanced
 wait_until "post-compaction exact idle" 300 is_harness_state idle
 after_compactions="$(latest_compactions)"

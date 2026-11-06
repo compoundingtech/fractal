@@ -1,8 +1,10 @@
 import { ClientError, appliedAnswer, type FractalClient } from '@fractal/client'
-import type { ActionResult } from '@fractal/client/schema'
-import * as Native from '@fractal/client/schema'
+import type { ActionResult, AttachmentInput } from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
+import { Effect } from 'effect'
 
 import { conversationPortFailure, hasConversationCapability } from './conversationPort.ts'
+import { loadAttachmentSchema } from './lazySdk.ts'
 import type { AttachmentPort, ConversationPortResult, MessageSendAction } from './source.ts'
 
 /** Upload, chunk reads and sending use the same gateway client, never a synthetic delivery. */
@@ -34,9 +36,11 @@ export const gatewayAttachments = (
       if (!hasConversationCapability(capabilities, 'control.messages')) {
         return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted attachment upload.' }
       }
+      const { BlobUpload } = await Effect.runPromise(loadAttachmentSchema)
+      signal?.throwIfAborted()
       const uploaded = await client.uploadBlob(bytes, mediaType, { signal })
       signal?.throwIfAborted()
-      return { _tag: 'Success', value: Native.decodeUnknownSync(Native.BlobUpload)(uploaded.value) }
+      return { _tag: 'Success', value: Native.decodeUnknownSync(BlobUpload)(uploaded.value) }
     } catch (cause) {
       signal?.throwIfAborted()
       if (cause instanceof Error && cause.name === 'AbortError') throw cause
@@ -76,10 +80,16 @@ export const gatewayAttachments = (
 export const gatewayMessageSend =
   (client: FractalClient) =>
   async (request: MessageSendAction): Promise<ConversationPortResult<ActionResult>> => {
-    let attachments: readonly Native.AttachmentInput[]
+    let schema
+    try {
+      schema = await Effect.runPromise(loadAttachmentSchema)
+    } catch (cause) {
+      return conversationPortFailure(cause)
+    }
+    let attachments: readonly AttachmentInput[]
     // Validate the actual generated action contract (including max four PNG/JPEG/GIF/WebP references).
     try {
-      const action = Native.decodeUnknownSync(Native.ActionRequest)(request)
+      const action = Native.decodeUnknownSync(schema.ActionRequest)(request)
       if (action.type !== 'message.send') {
         return { _tag: 'Refused', reason: 'invalid', detail: 'Attachment sending requires a message.send action.' }
       }
@@ -103,7 +113,7 @@ export const gatewayMessageSend =
           attachments: [...attachments],
         },
       })
-      return { _tag: 'Success', value: Native.decodeUnknownSync(Native.ActionResult)(response.value) }
+      return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(response.value) }
     } catch (cause) {
       if (cause instanceof ClientError && cause.response.code === 'stale-fence') {
         return { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }

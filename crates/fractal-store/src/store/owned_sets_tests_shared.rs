@@ -19,7 +19,7 @@ pub fn bundle(command: &str, meadow: bool) -> NormalizedIntent {
     .unwrap()
 }
 
-pub fn direct(store: &Store, input: &NormalizedIntent, key: &str) -> Result<ApplyResponse, St3Error> {
+pub fn direct(store: &Store, input: &NormalizedIntent, key: &str) -> Result<ApplyResponse, FractalError> {
     let preview = store
         .mission(
             input,

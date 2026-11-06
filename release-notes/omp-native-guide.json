@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Correct the OMP native launch environment and admission description",
+  "replay": {
+    "status": "none",
+    "detail": "Documentation only; provider launch, native binding and replay behavior are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored binding, checkpoint, ownership or wire format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Admission before claim, current channel binding and resume validation remain unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Describe the existing native path and inherited environment removal; retain current compatibility readers and aliases."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart or provider replacement required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action, admission override or historical state cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Documentation can be reverted without changing runtime or stored state."
+  }
+}

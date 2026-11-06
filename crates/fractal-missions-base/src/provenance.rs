@@ -6,13 +6,13 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::Value;
 pub use fractal_schema::provenance::{Provenance, Source};
 
-use crate::model::{NormalizedIntent, St3Error};
+use crate::model::{NormalizedIntent, FractalError};
 
-fn invalid(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-mission-provenance", message)
+fn invalid(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-mission-provenance", message)
 }
 
-fn bare(node: &KdlNode, arguments: usize, children: bool) -> Result<(), St3Error> {
+fn bare(node: &KdlNode, arguments: usize, children: bool) -> Result<(), FractalError> {
     if node.ty().is_some()
         || node.entries().len() != arguments
         || node.entries().iter().any(|entry| {
@@ -29,12 +29,12 @@ fn bare(node: &KdlNode, arguments: usize, children: bool) -> Result<(), St3Error
     Ok(())
 }
 
-fn string(node: &KdlNode) -> Result<String, St3Error> {
+fn string(node: &KdlNode) -> Result<String, FractalError> {
     bare(node, 1, false)?;
     Ok(node.entries()[0].value().as_string().unwrap().to_owned())
 }
 
-fn singleton(body: &KdlDocument, name: &str) -> Result<String, St3Error> {
+fn singleton(body: &KdlDocument, name: &str) -> Result<String, FractalError> {
     let nodes = body
         .nodes()
         .iter()
@@ -46,7 +46,7 @@ fn singleton(body: &KdlDocument, name: &str) -> Result<String, St3Error> {
     string(nodes[0])
 }
 
-pub fn parse_block(node: &KdlNode) -> Result<Provenance, St3Error> {
+pub fn parse_block(node: &KdlNode) -> Result<Provenance, FractalError> {
     bare(node, 0, true)?;
     let body = node.children().unwrap();
     if body.nodes().iter().any(|node| {
@@ -103,7 +103,7 @@ pub fn parse_block(node: &KdlNode) -> Result<Provenance, St3Error> {
     Ok(provenance)
 }
 
-pub fn parse(document: &KdlDocument) -> Result<BTreeMap<String, Provenance>, St3Error> {
+pub fn parse(document: &KdlDocument) -> Result<BTreeMap<String, Provenance>, FractalError> {
     let mut result = BTreeMap::new();
     for mission in document
         .nodes()
@@ -161,7 +161,7 @@ pub fn read(
 pub fn validate_publication(
     connection: &Connection,
     intent: &NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for (id, provenance) in &intent.mission_provenance {
         provenance
             .validate()
@@ -177,7 +177,7 @@ pub fn validate_publication(
             .is_some_and(|previous| previous != provenance)
             || (exists && previous.is_none())
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "immutable-mission-provenance",
                 "provenance is fixed at first publication; change the mission definition to publish a new revision",
             ));
@@ -186,8 +186,8 @@ pub fn validate_publication(
     Ok(())
 }
 
-pub fn internal(error: impl std::fmt::Display) -> St3Error {
-    St3Error::new("internal", error.to_string())
+pub fn internal(error: impl std::fmt::Display) -> FractalError {
+    FractalError::new("internal", error.to_string())
 }
 
 pub fn render(provenance: &Provenance) -> String {

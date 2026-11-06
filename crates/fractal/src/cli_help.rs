@@ -151,12 +151,12 @@ pub(super) fn agent_state(
             fault.unwrap_or("the agent process failed")
         ),
         "stopped" => "Stopped — the agent is no longer running.".into(),
-        "down" => "Down — st sees no running session for the agent; `fractal agents show` says since when.".into(),
+        "down" => "Down — Fractal sees no running session for the agent; `fractal agents show` says since when.".into(),
         "suspended" => {
             "Suspended — the agent stopped at a quiet moment; `fractal agents resume` brings back its session.".into()
         }
         "waiting" if reachability == "indeterminate" => {
-            "Unknown — st cannot tell which host runs this agent; its processes may be running. `fractal terminals` says the same until the claims agree.".into()
+            "Unknown — Fractal cannot tell which host runs this agent; its processes may be running. `fractal terminals` says the same until the claims agree.".into()
         }
         "waiting" if reachability != "reachable" => {
             "Still starting — the agent process cannot currently be reached.".into()
@@ -165,10 +165,10 @@ pub(super) fn agent_state(
             Some("unauthenticated" | "needs-login") => {
                 "Waiting for you — attach to sign in to the agent's provider.".into()
             }
-            // st withdraws an idle report it has not heard renewed in 90 s (idle seats renew every
+            // Fractal withdraws an idle report it has not heard renewed in 90 s (idle seats renew every
             // five minutes): nothing is known to be waiting on a person.
             Some("indeterminate") => {
-                "Quiet — st has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
+                "Quiet — Fractal has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
             }
             _ => "Waiting for you — attach to inspect what the agent needs.".into(),
         },
@@ -267,7 +267,7 @@ pub(super) fn launch_next_steps(launch: &super::PlanningSessionView) -> String {
 pub(super) fn pairing_next_steps(person: &str) -> String {
     let person = shell_argument(person);
     next_steps(
-        "Waiting for your device — enter the pairing code in its st client before it expires.",
+        "Waiting for your device — enter the pairing code in its Fractal client before it expires.",
         &[
             (
                 "Complete on the device",
@@ -403,9 +403,9 @@ mod tests {
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
             ("waiting", Some("blocked"), "Waiting for you"),
-            ("waiting", Some("indeterminate"), "Quiet — st has no current report"),
+            ("waiting", Some("indeterminate"), "Quiet — Fractal has no current report"),
             ("failed", None, "Could not start"),
-            ("down", None, "Down — st sees no running session"),
+            ("down", None, "Down — Fractal sees no running session"),
         ] {
             let state = agent_state(state, harness, None, "reachable");
             assert!(state.contains(expected), "{state}");

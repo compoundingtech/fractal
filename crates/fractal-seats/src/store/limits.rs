@@ -116,7 +116,7 @@ pub trait LimitsStore {
             &self,
             policy: &LimitsPolicy,
             now: u128,
-        ) -> Result<LimitsOutcome, St3Error>;
+        ) -> Result<LimitsOutcome, FractalError>;
     /// The usage of a period against the declared accounts: every row and limit, and each
     /// account's credits used so far in the calendar month of `until_ms`.
     fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage>;
@@ -269,12 +269,12 @@ impl LimitsStore for Store {
             &self,
             policy: &LimitsPolicy,
             now: u128,
-        ) -> Result<LimitsOutcome, St3Error> {
+        ) -> Result<LimitsOutcome, FractalError> {
         if !policy.notify.starts_with("agent/")
             || policy.notify.split('/').skip(1).any(str::is_empty)
             || policy.notify.chars().any(char::is_whitespace)
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-limits-recipient",
                 "limits notifications require an operations agent",
             ));
@@ -483,7 +483,7 @@ impl LimitsStore for Store {
                             "tags": ["account-limits", format!("account:{}", limit.account), format!("window:{episode}")]
                         }, "evidence": []}), &[], None).map_err(claim_append_error)?;
                 }
-                Ok::<_, St3Error>(())
+                Ok::<_, FractalError>(())
             }).map_err(internal)??;
             outcome.notified.push(subject);
         }

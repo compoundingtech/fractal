@@ -129,16 +129,16 @@ fn a_ready_identity_is_measured_off_the_caller_and_again_when_the_binary_changes
     let later = || SystemTime::now() + Duration::from_secs(120);
     let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the launcher has no shebang") };
     let before = hashed_files();
-    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap(), None);
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later, &|_| Ok(())).unwrap(), None);
     assert_eq!(before, hashed_files(), "the caller never streams the executable");
     identity_measurements_settled();
-    let measured = executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap();
+    let measured = executable_identity_ready_recorded(&binary, &no_runtime, later, &|_| Ok(())).unwrap();
     assert_eq!(measured, Some(executable_identity_with(&binary, &no_runtime).unwrap()));
     // A replaced binary has new metadata: pending again, then measured anew.
     fs::write(&binary, "launcher two, a longer build").unwrap();
-    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap(), None);
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later, &|_| Ok(())).unwrap(), None);
     identity_measurements_settled();
-    let changed = executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap();
+    let changed = executable_identity_ready_recorded(&binary, &no_runtime, later, &|_| Ok(())).unwrap();
     assert_ne!(changed, measured);
     assert_eq!(changed, Some(executable_identity_with(&binary, &no_runtime).unwrap()));
 }
@@ -156,7 +156,7 @@ fn a_ready_identity_the_cache_declines_still_answers_and_is_measured_again_until
     };
     write("first");
     let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the launcher has no shebang") };
-    let ready = || executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now).unwrap();
+    let ready = || executable_identity_ready_recorded(&binary, &no_runtime, SystemTime::now, &|_| Ok(())).unwrap();
     assert_eq!(ready(), None);
     identity_measurements_settled();
     let first = executable_identity_with(&binary, &no_runtime).unwrap();
@@ -192,8 +192,8 @@ fn a_ready_identity_reports_a_failed_measurement_instead_of_staying_pending() {
     }
     let later = || SystemTime::now() + Duration::from_secs(120);
     let no_runtime = |_: &str| -> Result<PathBuf> { unreachable!("the tool has no shebang") };
-    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap(), None);
+    assert_eq!(executable_identity_ready_recorded(&binary, &no_runtime, later, &|_| Ok(())).unwrap(), None);
     identity_measurements_settled();
-    let error = executable_identity_ready_recorded(&binary, &no_runtime, later).unwrap_err();
+    let error = executable_identity_ready_recorded(&binary, &no_runtime, later, &|_| Ok(())).unwrap_err();
     assert!(format!("{error:#}").contains("ermission denied"), "{error:#}");
 }

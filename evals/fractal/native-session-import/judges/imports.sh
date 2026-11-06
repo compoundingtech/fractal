@@ -22,7 +22,7 @@ jq -e '
 
 while IFS=$'\t' read -r driver agent raw_pid; do
   ! kill -0 "$raw_pid" 2>/dev/null
-  st3 agents show "$agent" --all --json \
+  fractal agents show "$agent" --all --json \
     | jq -e --arg driver "$driver" '
         .value.state == "running"
         and .value.reachability == "reachable"

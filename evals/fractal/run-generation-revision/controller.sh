@@ -28,7 +28,7 @@ wait_for_event() {
   local deadline=$((SECONDS + 1200))
 
   : > "$output"
-  st3 --json trace "$subject" --after-index 0 --follow > "$output" &
+  fractal --json trace "$subject" --after-index 0 --follow > "$output" &
   trace_pid=$!
   while (( SECONDS < deadline )); do
     if jq -e --arg kind "$kind" 'select(.kind == $kind)' "$output" >/dev/null 2>&1; then
@@ -46,7 +46,7 @@ wait_for_event() {
   return 1
 }
 
-st3 publish "$EVAL_ROOT/initial.kdl" --as "$REQUESTER" >/dev/null
+fractal publish "$EVAL_ROOT/initial.kdl" --as "$REQUESTER" >/dev/null
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start generation-proof \
   --id "generation-proof/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
@@ -58,13 +58,13 @@ run_id=$(jq -er '.mission_run.id' "$EVAL_ROOT/initial-run.json")
 old_generation=$(jq -er '.mission_run.generation' "$EVAL_ROOT/initial-run.json")
 stable_subject=$(jq -er '.mission_run.steps[] | select(.step == "stable") | .subject' "$EVAL_ROOT/initial-run.json")
 
-st3 claim "resource/generation-proof/$run_id/stable" resource.observed \
+fractal claim "resource/generation-proof/$run_id/stable" resource.observed \
   --actor "$REQUESTER" \
   --field kind=custom.st3.eval-signal \
   --field state=done >/dev/null
-st3 trace wait "$stable_subject" --for completed --timeout 2m >/dev/null
+fractal trace wait "$stable_subject" --for completed --timeout 2m >/dev/null
 
-st3 --json launch start \
+fractal --json launch start \
   --run "$run_subject" \
   "$REQUEST" \
   --workspace "$EVAL_ROOT" \
@@ -81,14 +81,14 @@ wait_for_event \
   "planning-session.candidate-submitted" \
   "$EVAL_ROOT/planning-events.jsonl"
 
-st3 --json work revision generation "$old_generation" > "$EVAL_ROOT/before-approval.json"
+fractal --json work revision generation "$old_generation" > "$EVAL_ROOT/before-approval.json"
 jq -e --arg revision "$(jq -er '.mission_run.revision' "$EVAL_ROOT/initial-run.json")" '
   .status == "running"
   and .revision == $revision
 ' "$EVAL_ROOT/before-approval.json" >/dev/null
 
-variant=$(st3 --json launch show "$session_id" | jq -er '.candidate.variant')
-st3 --json launch preview "$session_id" --variant "$variant" > "$EVAL_ROOT/preview.json"
+variant=$(fractal --json launch show "$session_id" | jq -er '.candidate.variant')
+fractal --json launch preview "$session_id" --variant "$variant" > "$EVAL_ROOT/preview.json"
 preview_hash=$(jq -er '.preview.hash' "$EVAL_ROOT/preview.json")
 jq -e '
   .status == "review"
@@ -99,7 +99,7 @@ jq -e '
   and (.preview.mission.blockers | length == 0)
 ' "$EVAL_ROOT/preview.json" >/dev/null
 
-st3 --json launch approve \
+fractal --json launch approve \
   "$session_id" \
   "$preview_hash" \
   --as "$REQUESTER" \
@@ -113,14 +113,14 @@ jq -e --arg hash "$preview_hash" '
   and .source_generation != null
 ' "$EVAL_ROOT/approved.json" >/dev/null
 
-st3 --json missions show "$run_subject" > "$EVAL_ROOT/applied.json"
+fractal --json missions show "$run_subject" > "$EVAL_ROOT/applied.json"
 new_generation=$(jq -er '.generation' "$EVAL_ROOT/applied.json")
 environment_subject=$(jq -er '.steps[] | select(.step == "generation-environment") | .subject' "$EVAL_ROOT/applied.json")
-st3 trace wait "$environment_subject" --for completed --timeout 2m >/dev/null
+fractal trace wait "$environment_subject" --for completed --timeout 2m >/dev/null
 
-st3 --json work revision generations "$run_subject" > "$EVAL_ROOT/generations.json"
-st3 --json work revision generation "$old_generation" > "$EVAL_ROOT/old-generation.json"
-st3 --json work revision generation "$new_generation" > "$EVAL_ROOT/new-generation.json"
+fractal --json work revision generations "$run_subject" > "$EVAL_ROOT/generations.json"
+fractal --json work revision generation "$old_generation" > "$EVAL_ROOT/old-generation.json"
+fractal --json work revision generation "$new_generation" > "$EVAL_ROOT/new-generation.json"
 
 jq -e --arg old "$old_generation" --arg new "$new_generation" '
   .generation == $new
@@ -148,11 +148,11 @@ jq -e '
 
 test "$(cat "$EVAL_ROOT/observed-generation.txt")" = "${new_generation#run-generation/}"
 
-st3 claim "resource/generation-proof/$run_id/changed" resource.observed \
+fractal claim "resource/generation-proof/$run_id/changed" resource.observed \
   --actor "$REQUESTER" \
   --field kind=custom.st3.eval-signal \
   --field state=done >/dev/null
-st3 trace wait "$run_subject" --for completed --timeout 2m >/dev/null
-st3 trace wait "$planner" --for stopped --timeout 2m >/dev/null
+fractal trace wait "$run_subject" --for completed --timeout 2m >/dev/null
+fractal trace wait "$planner" --for stopped --timeout 2m >/dev/null
 
 printf '%s\n' RUN-GENERATION-REVISION-GREEN > "$EVAL_ROOT/result.txt"

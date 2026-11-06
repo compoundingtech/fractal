@@ -11,6 +11,7 @@ export interface Agent {
   readonly workspace: string
   readonly launch: Launch
   readonly under?: Under
+  readonly principal?: `person/${string}`
 }
 
 export interface Under {
@@ -22,6 +23,7 @@ export interface Step {
   readonly id: string
   readonly assignedTo: AgentReference
   readonly goals: readonly [] | readonly [string] | readonly [string, string] | readonly [string, string, string]
+  readonly capacity?: StepCapacity
 }
 
 export interface Mission {
@@ -31,7 +33,18 @@ export interface Mission {
   readonly goals: readonly [string] | readonly [string, string] | readonly [string, string, string]
   readonly completion: Completion
   readonly steps: readonly Step[]
+  readonly capacity?: Capacity
 }
+
+export interface Capacity {
+  readonly cores?: number
+  readonly memory?: string
+}
+
+export type StepCapacity = {
+  readonly cores?: number
+  readonly memory?: string
+} & ({ readonly cores: number } | { readonly memory: string })
 
 export type Schedule = {
   readonly id: string
@@ -90,11 +103,15 @@ const agentSubject = (agent: AgentReference): string => {
   return `agent/${canonicalAgentId(agent.id)}`
 }
 
+const capacityKdl = (capacity: Capacity, indent: string): string =>
+  `${indent}capacity${capacity.cores === undefined ? '' : ` cores=${capacity.cores}`}${capacity.memory === undefined ? '' : ` memory=${quote(capacity.memory)}`}`
+
 /** Encode authoring data. Mission revisions must come from `st validate`. */
 export const encodeKdl = (declarations: Declarations): string => {
   const lines: string[] = ['version 2']
   for (const agent of declarations.agents ?? []) {
     lines.push('', `agent ${quote(canonicalAgentId(agent.id))} {`, `  workspace ${quote(agent.workspace)}`)
+    if (agent.principal !== undefined) lines.push(`  principal ${quote(agent.principal)}`)
     if (agent.under !== undefined) {
       lines.push(`  under ${quote(agentSubject(agent.under.agent))} reason=${quote(agent.under.reason)}`)
     }
@@ -107,10 +124,12 @@ export const encodeKdl = (declarations: Declarations): string => {
   }
   for (const mission of declarations.missions ?? []) {
     lines.push('', `mission ${quote(mission.id)} state=${quote(mission.state)} report-to=${quote(agentSubject(mission.reportTo))} {`)
+    if (mission.capacity !== undefined) lines.push(capacityKdl(mission.capacity, '  '))
     for (const goal of mission.goals) lines.push(`  goal ${quote(goal)}`)
     lines.push('  completion {', `    when ${quote(mission.completion)}`, '  }')
     for (const step of mission.steps) {
       lines.push(`  step ${quote(step.id)} {`, `    assigned-to ${quote(agentSubject(step.assignedTo))}`)
+      if (step.capacity !== undefined) lines.push(capacityKdl(step.capacity, '    '))
       for (const goal of step.goals) lines.push(`    goal ${quote(goal)}`)
       lines.push('  }')
     }
