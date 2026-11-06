@@ -116,8 +116,11 @@ export const membershipMetadata = (token: MembershipToken, metadata: WireMetadat
 export const membershipFrame = (token: MembershipToken, frame: OrderedMembershipFrame): MembershipEvent =>
   frame.snapshot.host_id !== token.scope.host || frame.snapshot.projection_version !== token.scope.projection
     ? { _tag: 'Expired', token } : membershipMetadata(token, frame.membership)
-export const membershipHttpFailure = (token: MembershipToken, status: number, code: string): MembershipEvent =>
-  ({ _tag: status === 404 ? 'Unsupported' : status === 409 && (code === 'membership-frontier-reset' || code === 'page-cursor-expired') ? 'Expired' : 'Refused', token })
+export const membershipHttpFailure = (token: MembershipToken, status: number, code: string): MembershipEvent => {
+  const restart = status === 409 && (code === 'membership-frontier-reset' || code === 'membership-collection-changed')
+    || status === 410 && code === 'page-cursor-expired'
+  return { _tag: status === 404 ? 'Unsupported' : restart ? 'Expired' : 'Refused', token }
+}
 export interface MembershipReadPort {
   /** Resolve only after the attempt's metadata subscription is installed; host owns cancellation. */
   readonly subscribe: (token: MembershipToken) => Promise<void>

@@ -103,6 +103,8 @@ set. Epoch/index/count conflicts, cursor resets and transport errors retain a
 matching-scope last-complete base as stale, with at most three automatic attempts.
 HTTP 404 produces a distinct `Unsupported` status for a needs-newer-daemon
 presentation, not an authorization/protocol refusal; stale data remains available.
+HTTP 409 `membership-collection-changed` / `membership-frontier-reset` and HTTP 410
+`page-cursor-expired` discard the whole staged attempt and resubscribe from page one.
 The adapter requires explicit authoritative page/frame epochs and refuses the
 current epoch-free wire shape; it never derives collection frontiers from host
 snapshots. Hosts own subscription cancellation and execute effects serially.
