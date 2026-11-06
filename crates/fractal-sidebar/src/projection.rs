@@ -6,74 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use fractal_client::Arrangement;
+use crate::model::*;
 
-/// A stable folder or subject identity; prefixes keep their key domains disjoint.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "_tag")]
-pub enum NodeRef {
-    Folder { id: String },
-    Subject { subject: String },
-}
-
-/// Subjects are accepted in intents only so the planner can explicitly refuse them.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "_tag")]
-pub enum Parent {
-    Root {},
-    Folder { id: String },
-    Subject { subject: String },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Source {
-    Person,
-    Fallback,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectedNode {
-    pub node: NodeRef,
-    /// The raw register parent, even when resolved placement lifts it elsewhere.
-    pub parent: Parent,
-    /// The authoritative resolved parent used for display and ancestry.
-    pub shown_under: Parent,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    /// Registers are person-owned, including lifted ones; inventory-only nodes are fallback.
-    pub source: Source,
-    pub children: Vec<NodeRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SidebarTree {
-    pub roots: Vec<NodeRef>,
-    pub nodes: BTreeMap<String, ProjectedNode>,
-    pub arrangement_revision: String,
-    pub deleted_folders: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag")]
-pub enum ProjectionError {
-    NotReady,
-    ArrangementUnavailable,
-    Unsupported { required: u8, advertised: u8 },
-    InvalidResolution,
-}
-
-/// Stable, injective keys. Identity strings are not parsed or normalized.
-pub fn node_key(node: &NodeRef) -> String {
-    match node {
-        NodeRef::Folder { id } => format!("folder:{id}"),
-        NodeRef::Subject { subject } => format!("subject:{subject}"),
-    }
-}
 
 fn folder_parent(id: &Option<String>) -> Parent {
     match id {
@@ -85,7 +19,7 @@ fn folder_parent(id: &Option<String>) -> Parent {
 /// Build only from a live v1 arrangement with complete, acyclic resolved maps.
 /// Tombstones are omitted, and every placement survives regardless of inventory membership.
 pub fn build(
-    arrangement: &Arrangement,
+    arrangement: &ArrangementInput,
     inventory: &[String],
 ) -> Result<SidebarTree, ProjectionError> {
     if arrangement.deleted {
@@ -107,7 +41,7 @@ pub fn build(
     let mut tree = SidebarTree {
         roots: Vec::new(),
         nodes: BTreeMap::new(),
-        arrangement_revision: arrangement.header.revision.clone(),
+        arrangement_revision: arrangement.revision.clone(),
         deleted_folders: Vec::new(),
     };
     for (id, folder) in &body.folders {
@@ -230,179 +164,6 @@ pub fn build(
     Ok(tree)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MoveIntent {
-    pub node: NodeRef,
-    pub parent: Parent,
-    pub before: Option<NodeRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CycleStep {
-    pub node: NodeRef,
-    pub source: Source,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ParentMissingCause {
-    Unknown,
-    FolderDeleted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ParentNotAllowedCause {
-    SubjectParentUnsupported,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all_fields = "camelCase")]
-pub enum MoveRefusal {
-    NodeMissing {
-        node: NodeRef,
-    },
-    ParentNotAllowed {
-        parent: Parent,
-        cause: ParentNotAllowedCause,
-    },
-    #[serde(rename = "Self")]
-    SelfMove {
-        node: NodeRef,
-    },
-    ParentMissing {
-        parent: Parent,
-        cause: ParentMissingCause,
-    },
-    Cycle {
-        node: NodeRef,
-        parent: Parent,
-        path: Vec<CycleStep>,
-    },
-    AnchorMoved {
-        before: NodeRef,
-        parent: Parent,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        found_under: Option<Parent>,
-    },
-    NoChange {
-        node: NodeRef,
-        parent: Parent,
-    },
-}
-
-fn same_kind(a: &NodeRef, b: &NodeRef) -> bool {
-    matches!(
-        (a, b),
-        (NodeRef::Folder { .. }, NodeRef::Folder { .. })
-            | (NodeRef::Subject { .. }, NodeRef::Subject { .. })
-    )
-}
-
-/// Validate without generating ordering keys or changing the tree.
-/// Cycle paths run moved node → proposed parent → ancestors → moved node; each step
-/// carries that projected node's own source. No-change requires raw and shown parents to agree.
-pub fn plan_move(tree: &SidebarTree, intent: &MoveIntent) -> Result<MoveIntent, MoveRefusal> {
-    validate_move(tree, intent)?;
-    Ok(intent.clone())
-}
-
-fn validate_move(tree: &SidebarTree, intent: &MoveIntent) -> Result<(), MoveRefusal> {
-    let Some(node) = tree.nodes.get(&node_key(&intent.node)) else {
-        return Err(MoveRefusal::NodeMissing {
-            node: intent.node.clone(),
-        });
-    };
-    if matches!(intent.parent, Parent::Subject { .. }) {
-        return Err(MoveRefusal::ParentNotAllowed {
-            parent: intent.parent.clone(),
-            cause: ParentNotAllowedCause::SubjectParentUnsupported,
-        });
-    }
-    if let (NodeRef::Folder { id: node_id }, Parent::Folder { id: parent_id }) =
-        (&intent.node, &intent.parent)
-        && node_id == parent_id
-    {
-        return Err(MoveRefusal::SelfMove {
-            node: intent.node.clone(),
-        });
-    }
-    let parent = if let Parent::Folder { id } = &intent.parent {
-        let Some(parent) = tree.nodes.get(&format!("folder:{id}")) else {
-            return Err(MoveRefusal::ParentMissing {
-                parent: intent.parent.clone(),
-                cause: if tree.deleted_folders.binary_search(id).is_ok() {
-                    ParentMissingCause::FolderDeleted
-                } else {
-                    ParentMissingCause::Unknown
-                },
-            });
-        };
-        Some(parent)
-    } else {
-        None
-    };
-    if matches!(intent.node, NodeRef::Folder { .. }) {
-        let ancestors = || {
-            std::iter::successors(parent, |ancestor| match &ancestor.shown_under {
-                Parent::Folder { id } => tree.nodes.get(&format!("folder:{id}")),
-                _ => None,
-            })
-        };
-        if ancestors().any(|ancestor| ancestor.node == intent.node) {
-            // Materialize diagnostic identities only for an actual cycle refusal.
-            let mut path = vec![CycleStep {
-                node: node.node.clone(),
-                source: node.source,
-            }];
-            for ancestor in ancestors() {
-                path.push(CycleStep {
-                    node: ancestor.node.clone(),
-                    source: ancestor.source,
-                });
-                if ancestor.node == intent.node {
-                    break;
-                }
-            }
-            return Err(MoveRefusal::Cycle {
-                node: intent.node.clone(),
-                parent: intent.parent.clone(),
-                path,
-            });
-        }
-    }
-    if let Some(before) = &intent.before {
-        let anchor = tree.nodes.get(&node_key(before));
-        if before == &intent.node
-            || !same_kind(before, &intent.node)
-            || anchor.is_none_or(|anchor| anchor.shown_under != intent.parent)
-        {
-            return Err(MoveRefusal::AnchorMoved {
-                before: before.clone(),
-                parent: intent.parent.clone(),
-                found_under: anchor.map(|anchor| anchor.shown_under.clone()),
-            });
-        }
-    }
-    if node.parent == intent.parent && node.shown_under == intent.parent {
-        let siblings = parent.map_or(tree.roots.as_slice(), |parent| parent.children.as_slice());
-        let mut following = siblings
-            .iter()
-            .skip_while(|sibling| *sibling != &intent.node)
-            .skip(1);
-        let next = following.find(|sibling| same_kind(sibling, &intent.node));
-        if next == intent.before.as_ref() {
-            return Err(MoveRefusal::NoChange {
-                node: intent.node.clone(),
-                parent: intent.parent.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// The same checks, precedence, and no-change semantics as [`plan_move`].
-pub fn can_place(tree: &SidebarTree, intent: &MoveIntent) -> Result<(), MoveRefusal> {
-    validate_move(tree, intent)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RollupDisplay {
@@ -452,6 +213,7 @@ pub fn rollup(tree: &SidebarTree, needs_you: &BTreeSet<String>) -> BTreeMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::*;
     use serde_json::{Value, json};
 
     fn folder(id: &str) -> NodeRef {
@@ -470,7 +232,7 @@ mod tests {
         fn v1(&mut self) -> &mut fractal_schema::arrangements::Body;
     }
 
-    impl V1Body for Arrangement {
+    impl V1Body for ArrangementInput {
         fn v1(&mut self) -> &mut fractal_schema::arrangements::Body {
             match &mut self.body {
                 fractal_schema::arrangements::VersionedBody::V1(body) => body,
@@ -486,10 +248,10 @@ mod tests {
         })
     }
 
-    fn arrangement() -> Arrangement {
+    fn arrangement() -> ArrangementInput {
         serde_json::from_value(json!({
-            "id": "arrangement/person/test/id", "kind": "arrangement",
-            "revision": "opaque/head", "updated_at": "", "owner": "person/test",
+            "subject": "arrangement/person/test/id",
+            "revision": "opaque/head", "owner": "person/test",
             "deleted": false,
             "body": {
                 "version": 1, "name": {"value": "Sidebar", "revision": "opaque/name"},
@@ -500,7 +262,7 @@ mod tests {
         .unwrap()
     }
 
-    fn add_folder(arrangement: &mut Arrangement, id: &str, parent: Option<&str>, key: &str) {
+    fn add_folder(arrangement: &mut ArrangementInput, id: &str, parent: Option<&str>, key: &str) {
         arrangement.v1().folders.insert(
             id.into(),
             serde_json::from_value(json!({
@@ -520,7 +282,7 @@ mod tests {
             .insert(id.into(), parent.map(str::to_owned));
     }
 
-    fn place(arrangement: &mut Arrangement, id: &str, parent: Option<&str>, key: &str) {
+    fn place(arrangement: &mut ArrangementInput, id: &str, parent: Option<&str>, key: &str) {
         arrangement.v1().placements.insert(
             id.into(),
             serde_json::from_value(json!({
@@ -540,7 +302,15 @@ mod tests {
     fn shared_vectors() {
         let vectors = behavior_vectors();
         for case in vectors["cases"].as_array().unwrap() {
-            let arrangement = serde_json::from_value(case["initial"]["arrangement"].clone()).unwrap();
+            let input = &case["initial"]["arrangement"];
+            let arrangement = ArrangementInput {
+                subject: input["id"].as_str().unwrap().into(),
+                owner: input["owner"].as_str().unwrap().into(),
+                revision: input["revision"].as_str().unwrap().into(),
+                deleted: input["deleted"].as_bool().unwrap(),
+                body: serde_json::from_value(input["body"].clone()).unwrap(),
+                resolved: serde_json::from_value(input["resolved"].clone()).unwrap(),
+            };
             let inventory: Vec<String> = serde_json::from_value(case["catalog"].clone()).unwrap();
             let event = &case["events"][0];
             let checkpoint = &case["checkpoints"][0];
@@ -638,7 +408,7 @@ mod tests {
         );
         arrangement.body = original;
         assert_eq!(build(&arrangement, &[]), Err(ProjectionError::NotReady));
-        arrangement.resolved = Some(fractal_client::ArrangementResolved {
+        arrangement.resolved = Some(ResolvedInput {
             parents: BTreeMap::new(),
             folders: BTreeMap::new(),
         });
@@ -681,7 +451,7 @@ mod tests {
             .parents
             .insert("a".into(), None);
         arrangement.v1().folders.get_mut("a").unwrap().tombstone =
-            Some(fractal_client::ArrangementRegister {
+            Some(fractal_schema::arrangements::Register {
                 value: true,
                 revision: "opaque/delete".into(),
             });
@@ -843,7 +613,7 @@ mod tests {
         let mut arrangement = arrangement();
         add_folder(&mut arrangement, "gone", None, "a0");
         arrangement.v1().folders.get_mut("gone").unwrap().tombstone =
-            Some(fractal_client::ArrangementRegister {
+            Some(fractal_schema::arrangements::Register {
                 value: false,
                 revision: "opaque/delete".into(),
             });
