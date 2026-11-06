@@ -6757,6 +6757,9 @@ async fn agent_roster_pause_scanning(
     };
     let started = tokio::time::Instant::now();
     let pause = folded.max(AGENT_ROSTER_FRESH_PAUSE);
+    // The full pause stays max(fold, 1 s), whatever this node writes: a local claim only ever
+    // shortens it, so a fold over half a second keeps the pause, and the half-core bound, it had
+    // before. Whether costly folds need a lower bound of their own is #5517.
     let local_floor = started + (folded * 2).max(AGENT_ROSTER_LOCAL_PAUSE);
     tokio::time::sleep(pause).await;
     let rest = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause));
