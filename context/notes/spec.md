@@ -427,6 +427,8 @@ recipient-set changes such as a step assignee or `lease_owner` change.
 It also emits a digest at every session start of every incarnation, including
 the first, when the agent has at least one current note. Digest delivery is
 idempotent per `(agent, incarnation, sorted note revisions)`.
+No-notes reconciliation checks for a prior daemon digest with a recipient-indexed
+`SELECT 1 … LIMIT 1`; it does not materialize or sort the recipient's mailbox.
 
 The message sender is the daemon, not the note author. Author attribution
 stays in the content. The digest is non-waking, has no session-start wake tag,

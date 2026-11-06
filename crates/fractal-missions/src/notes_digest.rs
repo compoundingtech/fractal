@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use rusqlite::OptionalExtension;
 use sha2::{Digest as _, Sha256};
 
 use crate::{model::ClaimInput, store::{Store, subject_notes::SubjectNote}};
@@ -123,6 +124,18 @@ fn emit_notes(store: &Store, agent: &str, incarnation: &str, changed: bool,
     Ok(true)
 }
 
+const PRIOR_DIGEST: &str = "SELECT 1 FROM claims
+    WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1
+      AND json_extract(body, '$.fields.from')='daemon/runtime'
+      AND EXISTS (SELECT 1 FROM json_each(body, '$.fields.tags') WHERE value=?2)
+    LIMIT 1";
+
+fn has_prior_digest(store: &Store, agent: &str) -> Result<bool> {
+    smallclaims::touched::note_read(|| format!("mailbox:{agent}"));
+    Ok(store.readers.get().query_row(PRIOR_DIGEST, [agent, TAG], |_| Ok(()))
+        .optional()?.is_some())
+}
+
 /// Also detect removals after a daemon restart, without emitting empty initial-session context.
 pub fn reconcile_agent(store: &Store, agent: &str) -> Result<(bool, Option<u128>)> {
     let incarnation = store.current_subject_note_incarnation(agent)?.unwrap_or_default();
@@ -135,10 +148,7 @@ pub fn reconcile_agent(store: &Store, agent: &str) -> Result<(bool, Option<u128>
                 + u128::from(at.timestamp_subsec_nanos() % 1_000_000 != 0);
             Ok(Some(earliest.map_or(expiry, |earliest| earliest.min(expiry))))
         })?;
-    if notes.is_empty()
-        && !store.messages(Some(agent), true)?.iter().any(|message| {
-            message.from == "daemon/runtime" && message.tags.iter().any(|value| value == TAG)
-        }) {
+    if notes.is_empty() && !has_prior_digest(store, agent)? {
         return Ok((false, expiry));
     }
     Ok((emit_notes(store, agent, &incarnation, true, &notes)?, expiry))
@@ -274,6 +284,44 @@ mod tests {
             crate::silent::refresh_notes(&store, &mut messages).unwrap();
             assert!(messages[0].content.contains("Historical context"));
         }
+    }
+
+    #[test]
+    fn empty_reconcile_only_clears_a_prior_digest_for_this_recipient() {
+        let store = enabled_store();
+        assert_eq!(reconcile_agent(&store, AGENT).unwrap(), (false, None));
+        for (index, from, tags) in [
+            (0, "daemon/runtime", json!([crate::silent::SILENT_TAG])),
+            (1, "agent/example/other", json!([TAG])),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: format!("message/non-digest-{index}"), kind: "message.sent".into(), actor: None,
+                fields: serde_json::from_value(json!({"from":from,"to":AGENT,"content":"Not notes",
+                    "status":"sent","tags":tags})).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        assert!(!has_prior_digest(&store, AGENT).unwrap());
+        assert_eq!(reconcile_agent(&store, AGENT).unwrap(), (false, None));
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Context"), None).unwrap();
+        assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, None, None).unwrap();
+        assert!(!has_prior_digest(&store, "agent/example/other").unwrap());
+        assert_eq!(reconcile_agent(&store, "agent/example/other").unwrap(), (false, None));
+        assert!(has_prior_digest(&store, AGENT).unwrap());
+        assert_eq!(reconcile_agent(&store, AGENT).unwrap(), (true, None));
+        assert_eq!(reconcile_agent(&store, AGENT).unwrap(), (false, None));
+    }
+
+    #[test]
+    fn prior_digest_lookup_seeks_recipient_without_sorting_mailbox() {
+        let store = enabled_store();
+        let connection = store.readers.get();
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {PRIOR_DIGEST}")).unwrap()
+            .query_map([AGENT, TAG], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|step| step.contains("SEARCH claims USING INDEX claims_message_to")), "{plan:?}");
+        assert!(!plan.iter().any(|step| step.contains("SCAN claims") || step.contains("TEMP B-TREE")), "{plan:?}");
     }
 
     #[test]
