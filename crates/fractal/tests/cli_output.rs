@@ -129,6 +129,7 @@ async fn json_repair_refusal_preserves_structured_details_and_failure_exit() {
     }));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("credential-must-not-appear"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("credential-must-not-appear"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("legacy-start-proof-unavailable"));
 }
 
 #[tokio::test]

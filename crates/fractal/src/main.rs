@@ -5577,10 +5577,13 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             }
             if json_output {
                 let _ = print_value(&cli_error_json(&error), true);
-            } else {
-                let message = cli_error_message(&error, native_driver);
-                stderr_message("st", format_args!("{message}"));
             }
+            let message = if json_output {
+                json_error_diagnostic(&error, native_driver)
+            } else {
+                cli_error_message(&error, native_driver)
+            };
+            stderr_message("st", format_args!("{message}"));
             if refused_command(&error) {
                 fractal_daemon::gate_report::note_refusal(&plain_error(&error));
             }
@@ -5679,6 +5682,22 @@ fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
         doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, mode))
     } else {
         render_client_error(error, mode)
+    }
+}
+
+fn json_error_diagnostic(error: &anyhow::Error, native_driver: bool) -> String {
+    let unstructured_response = fractal_daemon::client::http_status(error).is_some()
+        && fractal_daemon::client::api_error_parts(error).is_none();
+    let unstructured_client_error = error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<GeneratedClientError>(),
+            Some(GeneratedClientError::Transport(_) | GeneratedClientError::Protocol(_))
+        )
+    });
+    if unstructured_response || unstructured_client_error {
+        "the command failed; rerun without --json for diagnostics".into()
+    } else {
+        cli_error_message(error, native_driver)
     }
 }
 

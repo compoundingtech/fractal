@@ -1750,7 +1750,12 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
             }
             .into();
         }
-        return anyhow::anyhow!("st API returned {status}: {message}");
+        return UnexpectedResponse {
+            status,
+            body: message.into(),
+            empty: false,
+        }
+        .into();
     }
     UnexpectedResponse {
         status,

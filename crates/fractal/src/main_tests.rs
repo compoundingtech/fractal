@@ -721,6 +721,11 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
     assert_eq!(structured["code"], "stale-fence");
     assert_eq!(structured["details"], json!({}));
     assert!(!structured.to_string().contains("start the terminal"));
+    assert_eq!(json_error_diagnostic(&error, false), cli_error_message(&error, false));
+    assert_eq!(json_error_diagnostic(&anyhow::anyhow!("invalid local argument"), false),
+        "invalid local argument");
+    let protocol = anyhow::Error::new(GeneratedClientError::Protocol("bearer-secret".into()));
+    assert!(!json_error_diagnostic(&protocol, false).contains("bearer-secret"));
 }
 
 #[test]

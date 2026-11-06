@@ -112,8 +112,10 @@ stdout and exits nonzero. Legacy API failures include `status`, `code`, `message
 and `details`; for a 422 `legacy-start-proof-unavailable` refusal, inspect
 `details.stage`, `details.pid`, and `details.errno` when present. Client-v0 failures
 retain their typed error envelope. Unstructured failures emit a generic JSON
-diagnostic rather than copying potentially private response bodies or error chains;
-rerun without `--json` when human diagnostics are needed.
+diagnostic rather than copying potentially private response bodies or error chains.
+Human diagnostics for typed API errors and local validation remain on stderr.
+Unstructured HTTP failures use a generic stderr diagnostic too; rerun without
+`--json` when those human diagnostics are needed.
 
 ## What the watchdog does
 
