@@ -20,6 +20,11 @@ import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
+/** A native presentation control: it hides or snoozes the row for this person and never answers the work. */
+type Control = (row: AlertsTabRow, type: 'attention.dismiss' | 'attention.snooze') => Promise<AlertActionResult>
+type Undoable = { readonly title: string; readonly done: string; readonly undo: () => Promise<AlertActionResult>; readonly undoing?: boolean; readonly note?: string }
+
+const SNOOZE_MS = 60 * 60_000
 
 const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a question', '◆': 'needs you', '!': 'fault' }
 
@@ -56,6 +61,24 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const [expanded, setExpanded] = React.useState<string>()
+  const touch = React.useContext(NarrowLayoutContext)
+  // The last native control the source accepted, with its server undo. It lives here, not on the row, because the row
+  // leaves the feed as soon as the control applies; the Undo stays reachable after that.
+  const [undoable, setUndoable] = React.useState<Undoable>()
+  const control: Control | undefined = onAct === undefined ? undefined : (row, type) => {
+    const snooze = type === 'attention.snooze'
+    return onAct(row.item, snooze ? { type, until: new Date(now + SNOOZE_MS).toISOString() } : { type }).then((result) => {
+      if (result._tag === 'Sent' && result.undo !== undefined) setUndoable({ title: row.title, done: snooze ? 'Snoozed for 1 hour' : 'Dismissed', undo: result.undo })
+      return result
+    })
+  }
+  const undo = () => {
+    if (undoable === undefined || undoable.undoing === true || undoable.note !== undefined) return
+    const sent = undoable.undo
+    setUndoable({ ...undoable, undoing: true })
+    void sent().then((result) => setUndoable((current) => current?.undo !== sent ? current
+      : result._tag === 'Sent' ? undefined : { ...current, undoing: false, note: `Could not undo: ${result.detail}` }))
+  }
   const region = React.useRef<HTMLDivElement>(null)
   const message = React.useRef<HTMLParagraphElement>(null)
   // The row that last held focus: its own controls, its answer, or its menu. It stays recorded when focus falls to
@@ -98,6 +121,15 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
       }}
       {...stylex.props(styles.scroll)}
     >
+      {undoable === undefined ? null : (
+        <div data-alerts-undo="" {...stylex.props(styles.undo)}>
+          <p role="status" {...stylex.props(styles.undoText)}>{undoable.note ?? `${undoable.done}: ${undoable.title}`}</p>
+          {undoable.note === undefined
+            ? <Aria.Button isDisabled={undoable.undoing === true} onPress={undo} {...stylex.props(styles.undoButton, touch && styles.touch)}>Undo</Aria.Button>
+            : null}
+          <Aria.Button aria-label="Close" onPress={() => setUndoable(undefined)} {...stylex.props(styles.more, touch && styles.touch)}>×</Aria.Button>
+        </div>
+      )}
       {feed._tag === 'Waiting' ? <p ref={message} role="status" tabIndex={-1} {...stylex.props(styles.empty)}>Loading alerts…</p>
         : feed._tag === 'Unavailable' ? (
           <p ref={message} role="alert" tabIndex={-1} {...stylex.props(styles.empty)}>
@@ -125,6 +157,7 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
                     onFocusWithin={() => { focused.current = row.id }}
                     onOpen={onOpen}
                     onAct={onAct}
+                    onControl={control}
                     onAnswer={onAnswer}
                   />
                 ))}
@@ -136,7 +169,7 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
   )
 }
 
-const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer }: {
+const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onControl, onAnswer }: {
   readonly row: AlertsTabRow
   readonly expanded: boolean
   readonly onExpand: (open: boolean) => void
@@ -144,21 +177,26 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
   readonly onFocusWithin: () => void
   readonly onOpen: (ref: string) => void
   readonly onAct: Act | undefined
+  readonly onControl: Control | undefined
   readonly onAnswer: Answer | undefined
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
   const [readNote, setReadNote] = React.useState<string>()
-  const [reading, setReading] = React.useState(false)
+  const [pending, setPending] = React.useState(false)
   const read = row.read
-  const markRead = () => {
-    if (read === undefined || onAct === undefined) return
-    setReading(true)
+  // Native controls are offered on rows that carry a presentation control; the transport still checks capability.
+  const controls = row.item.presentation_control === undefined ? undefined : onControl
+  const send = (sent: () => Promise<AlertActionResult>) => {
+    setPending(true)
     setReadNote(undefined)
-    void onAct(row.item, read).then((result) => {
-      setReading(false)
+    void sent().then((result) => {
+      setPending(false)
       if (result._tag === 'Refused') setReadNote(result.detail)
     })
+  }
+  const markRead = () => {
+    if (read !== undefined && onAct !== undefined) send(() => onAct(row.item, read))
   }
   const trigger = React.useRef<HTMLButtonElement>(null)
   const panel = React.useRef<HTMLDivElement>(null)
@@ -186,7 +224,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
           aria-expanded={read === undefined ? expanded : undefined}
           aria-controls={read === undefined && expanded ? panelId : undefined}
           aria-label={`${read === undefined ? '' : 'Read '}${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${read === undefined ? GLYPH_WORDS[row.glyph] : 'update'}`}
-          isDisabled={read !== undefined && (reading || onAct === undefined)}
+          isDisabled={read !== undefined && (pending || onAct === undefined)}
           onPress={() => read === undefined ? onExpand(!expanded) : markRead()}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -208,13 +246,20 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
             <Aria.Menu
               aria-label={`Actions for ${row.title}`}
               autoFocus="first"
-              onAction={(key) => key === 'read' ? markRead() : key === 'answer' ? onExpand(true) : onOpen(String(key))}
+              onAction={(key) => key === 'read' ? markRead()
+                : key === 'answer' ? onExpand(true)
+                  : (key === 'attention.dismiss' || key === 'attention.snooze') && controls !== undefined ? send(() => controls(row, key))
+                    : onOpen(String(key))}
               {...stylex.props(styles.menu)}
             >
               {read === undefined ? <Aria.MenuItem id="answer" {...stylex.props(styles.item)}>Answer</Aria.MenuItem>
-                : <Aria.MenuItem id="read" isDisabled={reading || onAct === undefined} {...stylex.props(styles.item)}>Read</Aria.MenuItem>}
+                : <Aria.MenuItem id="read" isDisabled={pending || onAct === undefined} {...stylex.props(styles.item)}>Read</Aria.MenuItem>}
               {row.conversation === undefined ? null : <Aria.MenuItem id={row.conversation} {...stylex.props(styles.item)}>Open conversation</Aria.MenuItem>}
               {row.mission === undefined ? null : <Aria.MenuItem id={row.mission} {...stylex.props(styles.item)}>Open mission</Aria.MenuItem>}
+              {controls === undefined ? null : <>
+                <Aria.MenuItem id="attention.dismiss" isDisabled={pending} {...stylex.props(styles.item)}>Dismiss</Aria.MenuItem>
+                <Aria.MenuItem id="attention.snooze" isDisabled={pending} {...stylex.props(styles.item)}>Snooze for 1 hour</Aria.MenuItem>
+              </>}
             </Aria.Menu>
           </Aria.Popover>
         </Aria.MenuTrigger>
@@ -250,4 +295,7 @@ const styles = stylex.create({
   item: { paddingBlock: s.xs, paddingInline: s.md, borderRadius: 4, cursor: 'pointer', outline: 'none', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { backgroundColor: c.rowHover } },
   panel: { paddingInline: s.row, paddingBlockEnd: s.md, outline: 'none' },
   empty: { margin: 0, padding: s.md, color: c.fgMuted, fontSize: t.metaSize, outline: 'none', ...focus },
+  undo: { display: 'flex', alignItems: 'center', gap: s.sm, paddingBlock: s.xs, paddingInlineStart: s.row, borderBottom: `1px solid ${c.border}` },
+  undoText: { flexGrow: 1, minWidth: 0, margin: 0, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  undoButton: { flexShrink: 0, minHeight: 24, paddingInline: s.sm, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.primary, fontFamily: t.fontSans, fontSize: t.metaSize, fontWeight: 600, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ...focus },
 })

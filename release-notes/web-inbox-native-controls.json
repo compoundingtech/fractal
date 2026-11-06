@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Offer native Dismiss and Snooze for 1 hour in the web Alerts row menu, with an Undo that stays available after the row leaves the inbox.",
+  "replay": { "status": "none", "detail": "Controls and Undo are sent through the shared optimistic alert actions; the web UI adds no request identity of its own." },
+  "schema": { "status": "none", "detail": "No schema or persistent data changes." },
+  "rules": { "status": "none", "detail": "No coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "Controls appear only on alerts that carry a presentation control; servers still enforce capability and authorization." },
+  "downtime": { "status": "none", "detail": "No startup work or expected interruption." },
+  "manual": { "status": "none", "detail": "No operator actions or configuration changes." },
+  "recovery": { "status": "none", "detail": "No persistent state changes or recovery restrictions." }
+}

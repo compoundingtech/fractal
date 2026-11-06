@@ -7,14 +7,14 @@ import { Attention, decodeUnknownSync } from '@fractal/client/schema'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn(), useNow: vi.fn() }))
 
-import type { AlertAction } from '../conversation/alerts/alert-action-port.ts'
+import type { AlertAction, AlertActionResult } from '../conversation/alerts/alert-action-port.ts'
 import { observed } from '../data/source.ts'
 import { AlertsList } from './AlertsTab.tsx'
 
 const now = Date.parse('2026-11-01T12:00:00Z')
 
 /** An open ask whose served request names two answers, so the Alerts row expands to the real answer controller. */
-const ask = (id: string, title: string) => decodeUnknownSync(Attention)({
+const ask = (id: string, title: string, extra: Record<string, unknown> = {}) => decodeUnknownSync(Attention)({
   id, kind: 'attention', revision: 'r1', attention_kind: 'person-step', title, detail: '', priority: 'high', state: 'open', alert: true,
   person_id: 'person/avery', source_id: `step-run/release/${id.split('/')[1]}`, requester_id: 'agent/example/atlas',
   requested_at: '2026-11-01T11:00:00Z', updated_at: '2026-11-01T11:00:00Z', actions: ['work.done'],
@@ -26,6 +26,7 @@ const ask = (id: string, title: string) => decodeUnknownSync(Attention)({
       { id: 'hold', label: 'Hold', consequence: 'The builder waits.', outcome: 'decline' },
     ],
   },
+  ...extra,
 })
 
 const first = ask('attention/first', 'Merge the parser change?')
@@ -36,15 +37,17 @@ let host: HTMLDivElement
 let outside: HTMLButtonElement
 let root: Root
 const sent: Array<{ id: string; action: AlertAction }> = []
+let reply: (action: AlertAction) => AlertActionResult = () => ({ _tag: 'Sent' })
 // The served answer port: it records the answer and reports it sent. The feed drops the card later, as Fractal does.
 const onAct = async (alert: Attention, action: AlertAction) => {
   sent.push({ id: alert.id, action })
-  return { _tag: 'Sent' } as const
+  return reply(action)
 }
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   sent.length = 0
+  reply = () => ({ _tag: 'Sent' })
   outside = document.createElement('button')
   outside.textContent = 'Elsewhere in the workspace'
   host = document.createElement('div')
@@ -144,4 +147,64 @@ it('sends a served Read action immediately without opening an answer confirmatio
   await act(async () => button.click())
   expect(sent).toEqual([{ id: message.id, action: { type: 'message.read' } }])
   expect(row(message)!.querySelector('[aria-label=\"Confirm your answer\"]')).toBeNull()
+})
+
+describe('native presentation controls', () => {
+  const control = { dismissed: false, revision: null, snoozed_until: null, source_revision: 'source/r1' }
+  const card = ask('attention/native', 'Review the release notes', { presentation_control: control })
+  const choose = async (target: Attention, label: string) => {
+    await act(async () => row(target)!.querySelector<HTMLButtonElement>(`button[aria-label="Actions for ${target.title}"]`)!.click())
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((each) => each.textContent === label)
+    if (item === undefined) return false
+    await act(async () => item.click())
+    return true
+  }
+  const status = () => host.querySelector('[data-alerts-undo] [role="status"]')?.textContent
+  const undoButton = () => [...host.querySelectorAll<HTMLButtonElement>('[data-alerts-undo] button')].find((each) => each.textContent === 'Undo')
+
+  it('offers them only on rows that carry a presentation control', async () => {
+    await show([first])
+    expect(await choose(first, 'Dismiss')).toBe(false)
+    expect(sent).toEqual([])
+  })
+
+  it('sends Dismiss as a native action, not as an answer, and keeps Undo after the row leaves the feed', async () => {
+    const undo = vi.fn(async (): Promise<AlertActionResult> => ({ _tag: 'Sent' }))
+    reply = () => ({ _tag: 'Sent', undo })
+    await show([card, first])
+    expect(await choose(card, 'Dismiss')).toBe(true)
+    expect(sent).toEqual([{ id: card.id, action: { type: 'attention.dismiss' } }])
+    await show([first])
+    expect(row(card)).toBeNull()
+    expect(status()).toBe('Dismissed: Review the release notes')
+    await act(async () => undoButton()!.click())
+    expect(undo).toHaveBeenCalledTimes(1)
+    expect(host.querySelector('[data-alerts-undo]')).toBeNull()
+  })
+
+  it('snoozes for one hour from the list clock', async () => {
+    reply = () => ({ _tag: 'Sent', undo: async () => ({ _tag: 'Sent' }) })
+    await show([card])
+    expect(await choose(card, 'Snooze for 1 hour')).toBe(true)
+    expect(sent).toEqual([{ id: card.id, action: { type: 'attention.snooze', until: '2026-11-01T13:00:00.000Z' } }])
+    expect(status()).toBe('Snoozed for 1 hour: Review the release notes')
+  })
+
+  it('says why an Undo was refused and does not offer it again', async () => {
+    reply = () => ({ _tag: 'Sent', undo: async () => ({ _tag: 'Refused', detail: 'The alert changed since it was dismissed.' }) })
+    await show([card])
+    await choose(card, 'Dismiss')
+    await show([])
+    await act(async () => undoButton()!.click())
+    expect(status()).toBe('Could not undo: The alert changed since it was dismissed.')
+    expect(undoButton()).toBeUndefined()
+  })
+
+  it('shows a refused control on its row and offers no Undo', async () => {
+    reply = () => ({ _tag: 'Refused', detail: 'Dismiss is not available on this connection.' })
+    await show([card])
+    await choose(card, 'Dismiss')
+    expect(row(card)!.textContent).toContain('Dismiss is not available on this connection.')
+    expect(host.querySelector('[data-alerts-undo]')).toBeNull()
+  })
 })
