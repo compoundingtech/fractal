@@ -420,6 +420,8 @@ pub struct Ui {
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
+    /// Sidebar columns chosen in this terminal UI; absent follows the responsive default.
+    sidebar_width: Option<u16>,
     /// Reply context follows the conversation draft through navigation.
     replies: HashMap<String, String>,
     /// A menu owns its press through release, even after an action closes it.
@@ -795,6 +797,7 @@ impl Ui {
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
+            sidebar_width: None,
             replies: HashMap::new(),
             context_button: None,
             middle_tab: None,
@@ -1013,14 +1016,16 @@ impl Ui {
     /// This device's remembered choices, read once when Fractal TUI starts.
     pub(crate) fn load_prefs(&mut self) {
         if let Some(path) = prefs::path() {
-            // Simplified is the default, as on the phone (Nathan, 2026-10-04); a device that
-            // chose the full view keeps it.
-            let loaded = prefs::load(&path);
-            self.simple = simplified(&loaded);
-            self.conversation_first = prefs::conversation_first(&loaded);
-            self.terminal_fallback = loaded.terminal_fallback != Some(false);
-            self.agent_details = loaded.agent_details != Some(false);
+            self.apply_prefs(prefs::load(&path));
         }
+    }
+
+    fn apply_prefs(&mut self, loaded: prefs::Prefs) {
+        self.simple = simplified(&loaded);
+        self.conversation_first = prefs::conversation_first(&loaded);
+        self.terminal_fallback = loaded.terminal_fallback != Some(false);
+        self.agent_details = loaded.agent_details != Some(false);
+        self.sidebar_width = loaded.sidebar_width;
     }
 
     /// Bring back what was typed and not sent when the last Fractal TUI ended, read once at start. A box
@@ -1108,6 +1113,7 @@ impl Ui {
                     conversation_first: self.conversation_first,
                     terminal_fallback: Some(self.terminal_fallback),
                     agent_details: Some(self.agent_details),
+                    sidebar_width: self.sidebar_width,
                 },
             );
         }
@@ -3804,6 +3810,10 @@ impl Ui {
                 ),
                 ("ctrl+o", "zoom the split, and back"),
                 ("ctrl+s", "show or hide the sidebar"),
+                (
+                    "sidebar: ctrl+←/→",
+                    "narrow/widen; ctrl+home resets the width",
+                ),
                 ("ctrl+g", "another space, or a new one"),
                 ("1-5", "open the palette at a section"),
             ],
@@ -6074,6 +6084,16 @@ impl Ui {
                 return;
             }
         }
+        // The sidebar owns its resize through release, even over a mouse-enabled program.
+        if self.glasses.sidebar_resizing()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+            && self.drag_mouse(mouse)
+        {
+            return;
+        }
         if self.terminal_mouse(mouse) {
             return;
         }
@@ -6384,7 +6404,7 @@ impl Ui {
             self.prompt_keys = None;
         }
         match hit {
-            Hit::Message | Hit::Subject | Hit::Resize => {}
+            Hit::Message | Hit::Subject | Hit::Resize | Hit::SidebarResize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
             Hit::Home => self.open_home(),

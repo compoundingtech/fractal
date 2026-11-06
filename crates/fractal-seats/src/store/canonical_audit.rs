@@ -150,6 +150,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_run_eta_pending",
         "local_run_eta_dirty",
         "local_run_eta_samples",
+        "local_run_eta_terminal",
+        "local_run_eta_terminal_pending",
+        "local_run_eta_mission_changes",
         // Member-local preparation state and queues, rebuildable from canonical claims.
         "local_resource_preparation",
         "local_resource_preparation_claims",

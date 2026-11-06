@@ -88,6 +88,7 @@ pub mod client_messages;
 #[cfg(any(test, feature = "test-support"))]
 pub mod client_messages_version_benchmark;
 pub mod rollouts;
+pub mod refresh_intake;
 pub mod refresh;
 pub mod publication;
 pub mod publication_facts;
@@ -750,7 +751,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h41cc86459915 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha2f85639d60c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1233,6 +1234,9 @@ CREATE INDEX IF NOT EXISTS step_runs_run_index ON step_runs(run_id, generation_i
 -- it scanned every mission run, then built a throwaway index on parent_step_run for each level:
 -- 3.6 to 4.7 ms a call, 1,213 calls in one run-tree rebuild on a real store.
 CREATE INDEX IF NOT EXISTS step_runs_generation_index ON step_runs(generation_id);
+-- The runs that ran one step definition. Without it the run-ETA window for each definition scanned
+-- every terminal run: 29 ms a definition, about 2 minutes for 4,152 on a real store's first open.
+CREATE INDEX IF NOT EXISTS step_runs_definition_index ON step_runs(definition_hash, run_id, generation_id);
 CREATE INDEX IF NOT EXISTS mission_runs_parent_step_index ON mission_runs(parent_step_run)
 WHERE parent_step_run IS NOT NULL;
 CREATE INDEX IF NOT EXISTS step_runs_assignee_index ON step_runs(assignee, status);
@@ -3217,6 +3221,7 @@ impl Store {
                 let normalized_actor = actor.map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
                 let actor = normalized_actor.as_deref();
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
+                validate_standing_observer_stop(intent, actor)?;
                 if let Some(options) = owned {
                     let digest = canonical_hash(&(intent, options, actor)).map_err(internal)?;
                     let cache_key = opaque_cache_key(&format!("owned-set-request:{idempotency_key}"));
@@ -15983,7 +15988,7 @@ fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, St3Er
 
 /// Every value of the first column `sql` returns for `value`, without nulls.
 fn string_column_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     value: &str,
 ) -> Result<Vec<String>, St3Error> {
@@ -16240,8 +16245,9 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
 }
 
 /// The generations of one run: projected, created by claims, or named by its asks.
-fn run_generation_ids_tx(
-    transaction: &Transaction<'_>,
+#[doc(hidden)]
+pub fn run_generation_ids_tx(
+    transaction: &Connection,
     run: &str,
 ) -> Result<BTreeSet<String>, St3Error> {
     let subject = format!("mission-run/{run}");
@@ -17411,6 +17417,34 @@ fn clear_quarantined_claims_tx(
         )
         .map_err(internal)?;
     Ok(())
+}
+
+/// A stop of a repository's standing GitHub observer moves its polling to the next member a watch
+/// declares it on (#5182). Only a person may: an agent moving polling waits on #4607. A host's own
+/// declarations carry no actor.
+fn validate_standing_observer_stop(
+    intent: &NormalizedIntent,
+    actor: Option<&str>,
+) -> Result<(), St3Error> {
+    let Some(actor) = actor.filter(|actor| !actor.starts_with("person/")) else {
+        return Ok(());
+    };
+    match intent
+        .subjects
+        .values()
+        .find(|desired| {
+            desired.kind == "observer"
+                && desired.owner_run.is_none()
+                && crate::graph::standing_github_observer(&desired.subject).is_some()
+                && crate::graph::observer_spec(&desired.desired).is_some_and(|spec| spec.stopped)
+        })
+    {
+        Some(observer) => Err(St3Error::new(
+            "observer-stop-person-only",
+            format!("only a person stops `{}`; `{actor}` cannot", observer.subject),
+        )),
+        None => Ok(()),
+    }
 }
 
 pub fn select_replicated_desired(
@@ -19606,6 +19640,23 @@ pub fn enrich_step_queue_cached(
     enrich_step_queue_with(connection, view, snapshot_unix_ms, definitions, WakeHistory::Read)
 }
 
+/// [`enrich_step_queue_at`] without the wake, which a work action fills from a reader after its
+/// batch commits with [`enrich_step_wake_at`] at the same snapshot: the wake reads every message
+/// the assignee was ever sent, and it must not hold the writer for that.
+pub fn enrich_step_queue_but_wake_at(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+) -> rusqlite::Result<()> {
+    enrich_step_queue_with(
+        connection,
+        view,
+        snapshot_unix_ms,
+        &mut PinnedDefinitions::default(),
+        WakeHistory::Deferred,
+    )
+}
+
 fn enrich_step_queue_with(
     connection: &Connection,
     view: &mut StepRunView,
@@ -19873,11 +19924,13 @@ pub fn fresh_context_ready_tx(
 
 /// Whether a step's wake view reads its wake history. A step created in the open transaction has
 /// none: its wake messages and wake-exhausted diagnostics name it, so none can predate it. Reading
-/// them means scanning every message its assignee was ever sent.
+/// them means scanning every message its assignee was ever sent. A deferred wake is left unset,
+/// for a reader to fill once the writer is given back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WakeHistory {
     Read,
     NewStep,
+    Deferred,
 }
 
 pub fn enrich_step_wake_at(
@@ -19899,6 +19952,9 @@ fn enrich_step_wake_with(
     let Some(assignee) = view.assigned_to.as_deref() else {
         return Ok(());
     };
+    if history == WakeHistory::Deferred {
+        return Ok(());
+    }
     // A new step shows a wake only once it is ready; until then its assignee's harness is unread.
     if history == WakeHistory::NewStep && view.status != "ready" {
         return Ok(());
@@ -20678,6 +20734,15 @@ pub fn apply_effective_step_state(
 
 pub type EffectiveStepOwner = (String, String, String, String, String, String);
 
+pub(crate) fn step_claim_expired(view: &StepRunView, snapshot_unix_ms: u128) -> bool {
+    matches!(
+        view.status.as_str(),
+        "claimed" | "working" | "verifying" | "blocked"
+    ) && view
+        .claim_expires_at_unix_ms
+        .is_some_and(|expiry| expiry <= snapshot_unix_ms)
+}
+
 pub fn apply_effective_step_state_with_owner(
     connection: &Connection,
     view: &mut StepRunView,
@@ -20730,13 +20795,7 @@ pub fn apply_effective_step_state_with_owner(
         view.claim_expires_at_unix_ms = None;
         return Ok(());
     }
-    if matches!(
-        view.status.as_str(),
-        "claimed" | "working" | "verifying" | "blocked"
-    ) && view
-        .claim_expires_at_unix_ms
-        .is_some_and(|expiry| expiry <= snapshot_unix_ms)
-    {
+    if step_claim_expired(view, snapshot_unix_ms) {
         view.status = "ready".into();
         view.blocked_reason = Some("the worker lease expired".into());
         // Expiry is a new readiness episode even before a repair writes it. Old
@@ -21153,7 +21212,7 @@ fn terminalize_projected_run_tree_tx(
 }
 
 pub fn step_owner_is_terminal_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<bool, St3Error> {
     let owner = transaction

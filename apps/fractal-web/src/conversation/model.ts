@@ -7,7 +7,7 @@
 // context/agent-ecosystem/03-coding-agents/08-clients/02-webfractal/02-conversation/spec.md#items.
 
 import { Schema } from 'effect'
-import { TimelineBlock } from '@fractal/client/schema'
+import { TimelineBlock } from '@fractal/client/schema/read'
 
 /** Native facts are retained for semantic app adapters and the explicit inspector. */
 const sourceFacts = {

@@ -9,6 +9,16 @@ use crate::model::{
     WorkSelector,
 };
 
+// Prepared internally; publication stays closed until the complete agent-review safety path lands.
+#[allow(dead_code)]
+pub(crate) mod agent_review;
+
+// Prepared for concrete start/reassignment validation; no public gate kind dispatches here.
+#[allow(dead_code)]
+mod step_review;
+#[doc(hidden)]
+pub use step_review::validate_step_reviewer;
+
 /// What the graph holds, as far as the reference checks need it.
 pub trait Graph {
     /// Whether `subject` has a current declaration.
@@ -109,8 +119,11 @@ impl<'a> Scope<'a> {
     }
 
     fn subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, St3Error> {
-        Ok(subject.contains(RUN_VALUE)
-            || self.run.contains(subject)
+        Ok(subject.contains(RUN_VALUE) || self.declared_subject(graph, subject)?)
+    }
+
+    fn declared_subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, St3Error> {
+        Ok(self.run.contains(subject)
             || self
                 .intent
                 .is_some_and(|intent| intent.subjects.contains_key(subject))

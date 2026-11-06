@@ -39,8 +39,8 @@ import {
   decodeUnknownSync,
   Resource,
   Runtime,
-  TerminalScreen,
-} from '@fractal/client/schema'
+} from '@fractal/client/schema/read'
+import type { TerminalScreen } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
@@ -233,6 +233,8 @@ export interface ConversationChunk {
   readonly id?: string
   readonly replace: boolean
   readonly hasMore: boolean
+  readonly olderCursor?: string
+  readonly sessionId?: string
   readonly entries: readonly (ConversationEntry | UnrecognizedEntry)[]
   /** Raw page evidence before decoding/filtering; only explicit has_more=false proves emptiness. */
   readonly observation?: { readonly empty: boolean }
@@ -359,7 +361,6 @@ export interface FractalOptions {
 }
 
 
-const decodeScreen = decodeUnknownSync(TerminalScreen)
 const decodeRuntime = decodeUnknownSync(Runtime)
 const decodeCapabilities = decodeUnknownSync(CapabilitiesCodec)
 
@@ -388,6 +389,8 @@ export const decodeConversationChunk = (
   id: frame.id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
+  ...(frame.older_cursor === undefined ? {} : { olderCursor: frame.older_cursor }),
+  sessionId: frame.session_id,
   ...(frame.header !== null && typeof frame.header === 'object' && !Array.isArray(frame.header)
     ? { header: Object.fromEntries(Object.entries(frame.header)) } : {}),
   ...(frame.replace || frame.items.length > 0
@@ -407,12 +410,14 @@ const RETRY_DELAY = '1 second'
 
 /** How one kind of follow talks on the socket. */
 interface FollowProtocol<A> {
+  /** Scoped decoder setup runs alongside transport; only data frames wait for it. */
+  readonly prepare?: Effect.Effect<void, FollowFailure>
   readonly subscribe: (args: {
     readonly stream: CollectionStream
     readonly id: string
   }) => Effect.Effect<void, FollowFailure>
   /** The decoded value a data frame carries, or `undefined` for a frame that changes nothing. */
-  readonly onData: (frame: CollectionFrame) => A | undefined
+  readonly onData: (frame: CollectionFrame) => A | DecodeFailure | undefined
   /** The socket dropped: forget anything the next snapshot replaces. */
   readonly reset: () => void
 }
@@ -652,14 +657,25 @@ const make = (options: FractalOptions) =>
             emit({ _tag: 'Observed', value })
           }
           const protocol = makeProtocol(observe)
+          let decoderReady = protocol.prepare === undefined
+          let stopped = false
+          // Projected terminal frames are complete replacements (client-v0 terminal protocol).
+          // Retain at most one cold screen; raw PTY deltas never use this follow path.
+          let pendingScreen: Extract<CollectionFrame, { kind: 'screen' }> | undefined
+          const resetProtocol = () => {
+            pendingScreen = undefined
+            protocol.reset()
+          }
           // Status writes precede the terminal FollowEvent so no consumer teardown races a verdict.
           const fail = (error: FollowFailure, status = syncStatusFromFailure(error)) => {
+            if (stopped) return
             setSync(status)
             endAttempt('failed')
             emit({ _tag: 'Failed', error })
             stop()
           }
           const stop = () => {
+            stopped = true
             endAttempt('disposed')
             followKeys.delete(id)
             fresheners.delete(id)
@@ -667,7 +683,7 @@ const make = (options: FractalOptions) =>
               freshnessTable.delete(key)
               publishFreshness()
             }
-            protocol.reset()
+            resetProtocol()
             channel.unregister(id)
             if (open.get(key)?.id === id) {
               open.delete(key)
@@ -675,6 +691,22 @@ const make = (options: FractalOptions) =>
               reportFollows()
             }
             Queue.endUnsafe(queue)
+          }
+          const decodeFrame = (frame: CollectionFrame) => {
+            if (stopped) return
+            const started =
+              options.onDiagnostics === undefined || spec._tag === 'Window'
+                ? undefined
+                : performance.now()
+            let value: A | DecodeFailure | undefined
+            try {
+              value = protocol.onData(frame)
+            } finally {
+              if (started !== undefined)
+                options.onDiagnostics?.({ _tag: 'Decode', elapsedMs: performance.now() - started })
+            }
+            if (value instanceof DecodeFailure) fail(value)
+            else if (value !== undefined) observe(value)
           }
           // Register cleanup before the interruptible budget latch: cancellation while the
           // first probe is pending must remove routing/freshness entries too.
@@ -700,10 +732,11 @@ const make = (options: FractalOptions) =>
           open.set(key, {
             id,
             evict: () => {
+              stopped = true
               endAttempt('disposed')
               applyFreshness({ _tag: 'Evicted' })
               emit({ _tag: 'Stale' })
-              protocol.reset()
+              resetProtocol()
               channel.unregister(id)
               open.delete(key)
               reportFollows()
@@ -716,6 +749,7 @@ const make = (options: FractalOptions) =>
           const context = yield* Effect.context()
           const subscribe = ({ stream, id: wireId }: { readonly stream: CollectionStream; readonly id: string }) =>
             Effect.suspend(() => {
+              if (stopped) return Effect.void
               endAttempt('superseded')
               // The early-connect roster subscribe answers an identical first window subscribe.
               const adopted = spec._tag === 'Window'
@@ -749,8 +783,9 @@ const make = (options: FractalOptions) =>
               probeEligible: spec._tag !== 'Terminal',
               onRejected: (message, code) => fail(new Rejected({ code, message })),
               onDrop: () => {
+                if (stopped) return
                 endAttempt('dropped')
-                protocol.reset()
+                resetProtocol()
                 applyFreshness({
                   _tag: 'SocketDropped',
                   attempt: 1,
@@ -759,9 +794,10 @@ const make = (options: FractalOptions) =>
                 emit({ _tag: 'Stale' })
               },
               onFrame: (frame) => {
+                if (stopped) return
                 if (frame.kind === 'resync') {
                   options.onDiagnostics?.({ _tag: 'Resync' })
-                  protocol.reset()
+                  resetProtocol()
                   applyFreshness({
                     _tag: 'Resync',
                     ...(frame.code === undefined ? {} : { code: frame.code }),
@@ -781,6 +817,7 @@ const make = (options: FractalOptions) =>
                     return
                   }
                   if (isSubscriptionLimit(frame)) {
+                    resetProtocol()
                     applyFreshness({ _tag: 'Retry' })
                     const retried = admission.serverLimit(key, lane)
                     reportFollows()
@@ -796,7 +833,7 @@ const make = (options: FractalOptions) =>
                     return
                   }
                   if (isTransientCode(frame.code)) {
-                    protocol.reset()
+                    resetProtocol()
                     applyFreshness({
                       _tag: 'Retry',
                       ...(frame.code === undefined ? {} : { code: frame.code }),
@@ -821,24 +858,25 @@ const make = (options: FractalOptions) =>
                   )
                   return
                 }
-                const started =
-                  options.onDiagnostics === undefined || spec._tag === 'Window'
-                    ? undefined
-                    : performance.now()
-                let value: A | undefined
-                try {
-                  value = protocol.onData(frame)
-                } finally {
-                  if (started !== undefined)
-                    options.onDiagnostics?.({
-                      _tag: 'Decode',
-                      elapsedMs: performance.now() - started,
-                    })
-                }
-                if (value !== undefined) observe(value)
+                if (!decoderReady && frame.kind === 'screen') pendingScreen = frame
+                else decodeFrame(frame)
               },
             },
           })
+          // Transport admission and attach must never wait for an optional codec chunk.
+          // Only the latest complete screen waits; control frames invalidate it synchronously.
+          if (protocol.prepare !== undefined && !stopped) {
+            yield* Effect.forkIn(protocol.prepare.pipe(Effect.match({
+              onSuccess: () => {
+                if (stopped) return
+                decoderReady = true
+                const screen = pendingScreen
+                pendingScreen = undefined
+                if (screen !== undefined) decodeFrame(screen)
+              },
+              onFailure: (error) => fail(error),
+            })), scope)
+          }
         }),
       )
 
@@ -991,7 +1029,16 @@ const make = (options: FractalOptions) =>
         spec,
         makeProtocol: () => {
           let initialRuntime = spec.initialRuntime
+          let decodeScreen: (value: unknown) => TerminalScreen
           return {
+            prepare: Effect.tryPromise({
+              try: async () => {
+                // Optional PTY and mutation validators must not load on read startup.
+                const { TerminalScreen } = await import('@fractal/client/schema')
+                decodeScreen = decodeUnknownSync(TerminalScreen)
+              },
+              catch: () => new DecodeFailure({ message: 'Fractal terminal screen codec could not load' }),
+            }),
             subscribe: ({ stream, id }) =>
               Effect.suspend(() => {
                 const observation = initialRuntime
@@ -1005,9 +1052,8 @@ const make = (options: FractalOptions) =>
               try {
                 return decodeScreen(frame.value)
               } catch {
-                // The schema failure quotes the frame, which carries screen text: log fixed text only.
-                console.warn('Fractal terminal screen did not decode')
-                return undefined
+                // Decoder errors quote screen text; expose only a fixed diagnostic.
+                return new DecodeFailure({ message: 'Fractal terminal screen did not decode' })
               }
             },
             reset: () => {},
