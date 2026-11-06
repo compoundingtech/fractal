@@ -111,3 +111,45 @@ it.effect('Undo immediately sends the inverse under a fresh key', () => Effect.g
   yield* mutations.accept({ value: 0, applied: ['first', 'inverse'] })
   expect((yield* SubscriptionRef.get(mutations.state)).pending.size).toBe(0)
 }))
+
+it.effect('interrupted delivery remains recoverable with the same key', () => Effect.gen(function* () {
+  const started = yield* Deferred.make<void>()
+  let attempts = 0
+  const mutations = yield* make(() => Effect.gen(function* () {
+    attempts++
+    if (attempts === 1) {
+      yield* Deferred.succeed(started, undefined)
+      yield* Effect.never
+    }
+  }))
+  const sending = yield* mutations.submit(command).pipe(Effect.forkChild)
+  yield* Deferred.await(started)
+  yield* Fiber.interrupt(sending)
+  expect((yield* mutations.view).value).toBe(1)
+  expect((yield* SubscriptionRef.get(mutations.state)).pending.get('first')?.phase).toBe('failed')
+  yield* mutations.retry('first')
+  expect(attempts).toBe(2)
+  expect((yield* SubscriptionRef.get(mutations.state)).pending.get('first')).toMatchObject({ key: 'first', phase: 'accepted' })
+}))
+
+it.effect('authoritative settlement wins over late success and interruption', () => Effect.gen(function* () {
+  for (const interrupt of [false, true]) {
+    const started = yield* Deferred.make<void>()
+    const finish = yield* Deferred.make<void>()
+    const mutations = yield* make(() => Effect.gen(function* () {
+      yield* Deferred.succeed(started, undefined)
+      yield* Deferred.await(finish)
+    }))
+    const sending = yield* mutations.submit(command).pipe(Effect.forkChild)
+    yield* Deferred.await(started)
+    yield* mutations.accept({ value: 1, applied: ['first'] })
+    if (interrupt) yield* Fiber.interrupt(sending)
+    else {
+      yield* Deferred.succeed(finish, undefined)
+      yield* Fiber.join(sending)
+    }
+    expect((yield* SubscriptionRef.get(mutations.state)).pending.size).toBe(0)
+    expect((yield* SubscriptionRef.get(mutations.state)).notices).toEqual([])
+    expect((yield* mutations.view).value).toBe(1)
+  }
+}))

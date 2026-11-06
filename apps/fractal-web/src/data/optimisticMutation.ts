@@ -59,7 +59,16 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
       return { ...current, pending, notices }
     })
   })
-  const submit = Effect.fn('OptimisticMutation.submit')(function* (mutation: Mutation<TAction>) {
+  const interrupted = (entry: PendingMutation<TAction>) => SubscriptionRef.update(state, (current) => {
+    if (current.pending.get(entry.key) !== entry) return current
+    const pending = new Map(current.pending)
+    // Cancellation cannot prove non-delivery, even for normally rolled-back actions.
+    pending.set(entry.key, { ...entry, phase: 'failed', failure: new MutationRefused({
+      message: 'Delivery was interrupted; retry to confirm the outcome.',
+    }) })
+    return { ...current, pending }
+  })
+  const submit = Effect.fn('OptimisticMutation.submit')((mutation: Mutation<TAction>) => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
     const entry: PendingMutation<TAction> = { ...mutation, phase: 'sending' }
     const admitted = yield* SubscriptionRef.modify(state, (current) => {
       if (current.pending.has(entry.key)) return [false, current] as const
@@ -67,9 +76,9 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
       pending.set(entry.key, entry)
       return [true, { ...current, pending }] as const
     })
-    if (admitted) yield* deliver(entry)
-  })
-  const retry = Effect.fn('OptimisticMutation.retry')(function* (key: string) {
+    if (admitted) yield* restore(deliver(entry)).pipe(Effect.onInterrupt(() => interrupted(entry)))
+  })))
+  const retry = Effect.fn('OptimisticMutation.retry')((key: string) => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
     const entry = yield* SubscriptionRef.modify(state, (current) => {
       const failed = current.pending.get(key)
       if (failed?.phase !== 'failed') return [undefined, current] as const
@@ -78,8 +87,8 @@ export const makeOptimisticMutations = <TFrame, TAction, TRequirements = never>(
       pending.set(key, next)
       return [next, { ...current, pending }] as const
     })
-    if (entry !== undefined) yield* deliver(entry)
-  })
+    if (entry !== undefined) yield* restore(deliver(entry)).pipe(Effect.onInterrupt(() => interrupted(entry)))
+  })))
   const accept = Effect.fn('OptimisticMutation.accept')((frame: TFrame) =>
     SubscriptionRef.update(state, (current) => {
       const pending = new Map(current.pending)
