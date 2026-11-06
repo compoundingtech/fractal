@@ -1,7 +1,19 @@
 //! Custom schema administration and generic client reads; paired devices cannot register kinds.
+//! Raw notice subjects stay unavailable here until recipient-authorized native reads exist.
 use crate::CustomStore;
 use super::*;
 use crate::store::custom::{RegistrationRequest, ReplyRequest};
+
+fn notices_unavailable() -> ApiError {
+    ApiError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "unsupported-capability".into(),
+        message: "Notices require recipient-authorized native reads; generic custom reads are unavailable.".into(),
+        details: Box::new(serde_json::Map::from_iter([
+            ("reason".into(), json!("notices-unavailable")),
+        ])),
+    }
+}
 
 pub async fn register(
     State(state): State<AppState>,
@@ -41,6 +53,13 @@ pub async fn list(
     Query(query): Query<ListQuery>,
 ) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
     client_v0::require_scope(&session, "read.projections")?;
+    if query
+        .kind
+        .as_deref()
+        .is_some_and(fractal_schema::notice::is_reserved_kind)
+    {
+        return Err(notices_unavailable());
+    }
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let cursor = query
         .cursor
@@ -67,6 +86,7 @@ pub async fn list(
                 return Ok(None);
             }
             let after = cursor.as_ref().and_then(|v| v["after"].as_str());
+            // The store excludes reserved rows before LIMIT, preserving generic pagination.
             let mut items = state.store.custom_subjects(query.kind.as_deref(), query.version, after, limit + 1)?;
             let more = items.len() > limit;
             items.truncate(limit);
@@ -90,6 +110,9 @@ pub async fn read(
     AxumPath(id): AxumPath<String>,
 ) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
     client_v0::require_scope(&session, "read.projections")?;
+    if fractal_schema::notice::is_reserved_subject(&id) {
+        return Err(notices_unavailable());
+    }
     let result = blocking_store(move || {
         state.store.read_snapshot(|index| {
             Ok(state
@@ -131,4 +154,55 @@ pub async fn basis(
     Ok(Json(
         json!({"subject":query.subject,"kinds":kinds,"revision":state.store.custom_basis_revision(&query.subject,&kinds).map_err(ApiError::internal)?}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::tests_shared_client_v0_tests::get_request as client_json;
+
+    fn test_state(root: &std::path::Path) -> AppState {
+        let mut state = crate::api::tests_shared::state(root);
+        state.store = Arc::new(Store::open(&root.join("claims.sqlite3"), "node").unwrap());
+        state
+    }
+    #[tokio::test]
+    async fn notice_generic_detail_and_filters_are_explicitly_unavailable_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let before = state.store.index().unwrap();
+        let app = router(state.clone());
+        for subject in [
+            "custom/attention",
+            "custom/attention/source/absent",
+            "custom/attention/snapshot/absent",
+            "custom/attention/control/absent",
+        ] {
+            let (status, error) =
+                client_json(app.clone(), &format!("/v1/client/custom-subjects/{subject}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+            assert_eq!(error["code"], "unsupported-capability");
+            assert_eq!(error["details"]["reason"], "notices-unavailable");
+        }
+        for kind in [
+            "attention.notice-source",
+            "attention.notice-snapshot",
+            "attention.notice-control",
+            "custom.attention.notice-created",
+            "custom.attention.snapshot-created",
+            "custom.attention.snapshot-updated",
+            "custom.attention.control-created",
+            "custom.attention.control-updated",
+        ] {
+            let (status, error) = client_json(
+                app.clone(),
+                &format!("/v1/client/custom-subjects?kind={kind}&version=1&cursor=invalid"),
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+            assert_eq!(error["details"]["reason"], "notices-unavailable");
+        }
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
+
 }

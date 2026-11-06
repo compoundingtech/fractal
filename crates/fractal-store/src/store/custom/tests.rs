@@ -441,3 +441,32 @@ fn custom_late_document_recovers_only_its_source_and_cycles_are_invalid() {
     assert_eq!(before, projection_digest::oracle(&s.readers.get()).unwrap());
 }
 
+
+#[test]
+fn notice_reserved_roots_and_legacy_attention_preserve_unrelated_items() {
+    let store = Store::open_memory("example").unwrap();
+    registration(&store);
+    let ordinary = "custom/garden/review/v1/ordinary";
+    request(&store, ordinary);
+    store.connection.batched(|tx| -> Result<()> {
+        for subject in ["custom", "custom/attention", "custom/attention/source",
+            "custom/attention/snapshot", "custom/attention/control", "custom/attention/source/legacy"] {
+            tx.execute("INSERT INTO custom_sources SELECT ?1,registration,kind,revision,state,
+                json_set(body,'$.id',?1),person,episode,active,requested_at FROM custom_sources WHERE subject=?2",
+                params![subject, ordinary])?;
+        }
+        Ok(())
+    }).unwrap().unwrap();
+    for kind in [None, Some("garden.review")] {
+        for version in [None, Some(1)] {
+            let page = store.custom_subjects(kind, version, None, 1).unwrap();
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0]["id"], ordinary);
+        }
+    }
+    for person in [None, Some("person/lichen")] {
+        let items = store.custom_attention_items(person).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].subject, ordinary);
+    }
+}
