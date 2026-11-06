@@ -183,6 +183,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case invalidMembershipKey
     case invalidMembershipOperations
     case membershipEditTooLarge
+    case invalidMembershipCursor
+    case membershipCollectionChanged
+    case membershipFrontierReset
+    case unsupportedMembershipPagingContract
+    case membershipFrontierInconsistent
     case staleFence
     case cursorGap
     case pageCursorExpired
@@ -272,6 +277,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "invalid-membership-key": .invalidMembershipKey
         case "invalid-membership-operations": .invalidMembershipOperations
         case "membership-edit-too-large": .membershipEditTooLarge
+        case "invalid-membership-cursor": .invalidMembershipCursor
+        case "membership-collection-changed": .membershipCollectionChanged
+        case "membership-frontier-reset": .membershipFrontierReset
+        case "unsupported-membership-paging-contract": .unsupportedMembershipPagingContract
+        case "membership-frontier-inconsistent": .membershipFrontierInconsistent
         case "cursor-gap": .cursorGap
         case "page-cursor-expired": .pageCursorExpired
         case "projection-detail-too-large": .projectionDetailTooLarge
@@ -362,6 +372,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .invalidMembershipKey: "invalid-membership-key"
         case .invalidMembershipOperations: "invalid-membership-operations"
         case .membershipEditTooLarge: "membership-edit-too-large"
+        case .invalidMembershipCursor: "invalid-membership-cursor"
+        case .membershipCollectionChanged: "membership-collection-changed"
+        case .membershipFrontierReset: "membership-frontier-reset"
+        case .unsupportedMembershipPagingContract: "unsupported-membership-paging-contract"
+        case .membershipFrontierInconsistent: "membership-frontier-inconsistent"
         case .cursorGap: "cursor-gap"
         case .pageCursorExpired: "page-cursor-expired"
         case .projectionDetailTooLarge: "projection-detail-too-large"
@@ -1792,10 +1807,21 @@ public struct OrderedMembership: Codable, Sendable, Identifiable { public let id
 public struct OrderedMembershipState: Codable, Sendable, Equatable {
     public let container: String
     public let liveCount, changedIndex: UInt64
-    public init(container: String, liveCount: UInt64, changedIndex: UInt64) { self.container = container; self.liveCount = liveCount; self.changedIndex = changedIndex }
-    enum CodingKeys: String, CodingKey { case container, liveCount = "live_count", changedIndex = "changed_index" }
+    public let epoch: String?
+    public init(container: String, liveCount: UInt64, changedIndex: UInt64, epoch: String? = nil) { self.container = container; self.liveCount = liveCount; self.changedIndex = changedIndex; self.epoch = epoch }
+    enum CodingKeys: String, CodingKey { case container, epoch, liveCount = "live_count", changedIndex = "changed_index" }
 }
-public struct OrderedMembershipPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [OrderedMembership]; public let page: PageInfo; public let sync: SyncNotice?; public let replicated: ReplicatedNotice? }
+public struct OrderedMembershipPage: Codable, Sendable {
+    public let kind, collection: String
+    public let filters: [String: String]
+    public let items: [OrderedMembership]
+    public let page: PageInfo
+    public let pagingContract: String?
+    public let membership: OrderedMembershipState?
+    public let sync: SyncNotice?
+    public let replicated: ReplicatedNotice?
+    enum CodingKeys: String, CodingKey { case kind, collection, filters, items, page, membership, sync, replicated, pagingContract = "paging_contract" }
+}
 /// One `ordered-memberships` socket frame. `snapshot` and `changes` frames always carry
 /// `membership`; decoding refuses one without it.
 public struct OrderedMembershipCollectionFrame: Codable, Sendable {
@@ -1803,11 +1829,12 @@ public struct OrderedMembershipCollectionFrame: Codable, Sendable {
     public let id: String?
     public let snapshot: Snapshot?
     public let membership: OrderedMembershipState?
+    public let pagingContract: String?
     public let items, upserts: [OrderedMembership]?
     public let removes, order: [String]?
     public let hasMore: Bool?
     public let code, message: String?
-    enum CodingKeys: String, CodingKey { case kind, id, snapshot, membership, items, upserts, removes, order, code, message, hasMore = "has_more" }
+    enum CodingKeys: String, CodingKey { case kind, id, snapshot, membership, items, upserts, removes, order, code, message, hasMore = "has_more", pagingContract = "paging_contract" }
     public init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
         kind = try box.decode(String.self, forKey: .kind)
@@ -1816,6 +1843,7 @@ public struct OrderedMembershipCollectionFrame: Codable, Sendable {
         membership = kind == "snapshot" || kind == "changes"
             ? try box.decode(OrderedMembershipState.self, forKey: .membership)
             : try box.decodeIfPresent(OrderedMembershipState.self, forKey: .membership)
+        pagingContract = try box.decodeIfPresent(String.self, forKey: .pagingContract)
         items = try box.decodeIfPresent([OrderedMembership].self, forKey: .items)
         upserts = try box.decodeIfPresent([OrderedMembership].self, forKey: .upserts)
         removes = try box.decodeIfPresent([String].self, forKey: .removes)
