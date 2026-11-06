@@ -36,7 +36,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = tests_shared::state(root.path());
         let source = "agent/seat";
-        let episode = "claim/permission";
+        let mut opening = tests_shared::probe_claim("resolution-opening", "working");
+        opening.subject = source.into();
+        opening.actor = Some(source.into());
+        let observation = state.store.claim(opening).unwrap();
+        let episode = observation.id.as_str();
         let person = "person/reader";
         let id = fractal_store::client_values::client_attention_id(source, person, episode).unwrap();
         let lookup = |person: &str, id: &str| get(State(state.clone()),
