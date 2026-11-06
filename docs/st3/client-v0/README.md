@@ -1209,6 +1209,10 @@ bound explicit. Individual offers seek the recipient's indexed singleton offer, 
 `fractal-ui-model::related_runs` presents these same facts for Rust clients: status, a done/total
 bar, remaining-time range or “waiting on you”, and a second line naming the current step and waits.
 It preserves the served order and folded flag; renderers do not recompute urgency or deadlines.
+The TUI reads visible agents' related runs when attached and after pushed attention, agent or
+mission frames. Concurrent invalidations coalesce; an idle sidebar never polls this endpoint.
+Changing the connection discards old-member responses. Agent activity uses `last_activity_at`,
+not the time its roster row happened to change.
 
 A lane is one ordered line of entries that a mission run works through front first, such as a merge
 train of pull requests. `/v1/client/lanes` lists open lanes; `history=true` adds lanes whose run

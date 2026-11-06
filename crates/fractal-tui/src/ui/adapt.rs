@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 #[derive(Default)]
 pub struct Extras {
     pub conversations: BTreeMap<String, Load<Vec<Entry>>>,
+    pub related_runs: BTreeMap<String, Load<fractal_client::AgentRelatedRuns>>,
     /// Loaded messages behind unread-message items: sender, title, text.
     pub bodies: BTreeMap<String, (String, Option<String>, String)>,
     pub live: bool,
@@ -53,6 +54,7 @@ pub struct Extras {
 impl Extras {
     pub fn reset_connection(&mut self) {
         self.summary = None;
+        self.related_runs.clear();
         self.live = false;
         self.attention_live = false;
         self.agents_live = false;
@@ -265,6 +267,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
             .and_then(|(summary, _)| summary.alerts.map(|alerts| alerts as usize)),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
+        related_runs: extras.related_runs.clone(),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
         machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model, now), extras.window_errors.get("machines")),
         worktrees: Load::Failed("Worktrees are not modeled by the graph".into()),
@@ -791,7 +794,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                 worktree: agent.checkout.as_ref().map(fractal_client::checkout_label),
                 mission: work.map(|work| work.mission_id.clone()),
                 step: work.map(|work| work.path.clone()),
-                activity: age(&agent.header.updated_at, now),
+                activity: agent.last_activity_at.as_deref().map(|at| age(at, now)).unwrap_or_else(|| "?".into()),
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
@@ -2190,6 +2193,8 @@ mod tests {
             "current_work": [], "upcoming_work": [], "under": [],
         })]);
         let world = world(&model, "person/avery", &Extras::default());
+        let Load::Ready(agents) = &world.agents else { panic!("agents load") };
+        assert_eq!(agents[0].activity, "1m", "activity is not the roster row's update age");
         let Load::Ready(machines) = &world.machines else {
             panic!("machines load")
         };

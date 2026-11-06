@@ -61,6 +61,7 @@ pub fn world() -> World {
         "This codex process was found running on lark, but Fractal cannot tell which session file it writes, so there is no conversation to show. Start it through fractal to see it here.",
     )));
     World {
+        related_runs: BTreeMap::new(),
         inventory_supported: None, inventory_partial: Vec::new(),
         person: s("person/robin"),
         host: s("lark"),

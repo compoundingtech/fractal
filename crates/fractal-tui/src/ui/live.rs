@@ -388,6 +388,7 @@ impl AnswerTiming {
 }
 
 enum Fetched {
+    RelatedRuns { agent: String, epoch: u64, outcome: Result<fractal_client::AgentRelatedRuns, String> },
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
     Protocol(super::content::Key, u16, u16, super::content::Encoding),
@@ -532,6 +533,7 @@ pub fn run(context: Context) -> Result<()> {
     // The attention window is already this person's; nothing else names the actor.
     model.actor = person.clone();
     let mut extras = Extras::default();
+    let mut related_reads = super::sidebar_runs::Reads::default();
     // Each conversation st has sent, kept after it closes so reopening it shows its last entries.
     let mut timelines: BTreeMap<String, fractal_conversation_ui::Timeline> = BTreeMap::new();
     let mut failed: BTreeMap<String, String> = BTreeMap::new();
@@ -733,6 +735,7 @@ pub fn run(context: Context) -> Result<()> {
                     // Another member's objectives are not this one's: drop them until it answers.
                     extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
                     extras.reset_connection();
+                    related_reads.reset();
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
@@ -807,6 +810,9 @@ pub fn run(context: Context) -> Result<()> {
                         });
                     }
                     extras.window_errors.remove(&window_label(window));
+                    if matches!(window, Window::Attention | Window::Agents | Window::Missions) {
+                        related_reads.invalidate();
+                    }
                     if matches!(window, Window::Attention | Window::Agents) {
                         let first = windows_seen.insert(window_label(window));
                         sync_due = sync_due_after_frame(first, sync_read_at, sync_due, Instant::now());
@@ -991,6 +997,14 @@ pub fn run(context: Context) -> Result<()> {
         }
         while let Ok(result) = fetched.try_recv() {
             match result {
+                Fetched::RelatedRuns { agent, epoch, outcome } => {
+                    if related_reads.finish(&agent, epoch) {
+                        extras.related_runs.insert(agent, match outcome {
+                            Ok(rows) => Load::Ready(rows),
+                            Err(reason) => Load::Failed(reason),
+                        });
+                    }
+                }
                 Fetched::Content(key, result) => {
                     content_reads.complete(&key);
                     ui.content.finish(key, result);
@@ -1259,6 +1273,21 @@ pub fn run(context: Context) -> Result<()> {
         // What a tab needs when it opens: harness sessions st did not start (Agents), and the
         // machines and devices (Fleet). They are read then, never on a timer.
         let showing_resources = ui.glasses.sidebar.shown;
+        if showing_resources && extras.live {
+            for row in ui.resource_sidebar.rows() {
+                if let super::resource_sidebar::Row::Resource(row) = row
+                    && row.id.starts_with("agent/")
+                    && let Some(epoch) = related_reads.begin(&row.id)
+                {
+                    let reader = client.clone(); let tx = fetched_tx.clone(); let agent = row.id;
+                    extras.related_runs.entry(agent.clone()).or_insert(Load::Loading);
+                    runtime.spawn(async move {
+                        let outcome = reader.agent_related_runs_get(&agent).await.map(|reply| reply.value).map_err(|error| error.human());
+                        let _ = tx.send(Fetched::RelatedRuns { agent, epoch, outcome });
+                    });
+                }
+            }
+        }
         let focused_resource = match ui.focused_pane() { Some(super::pane::Pane::Resource(id)) => Some(id), _ => None };
         if tab != shown_tab || showing_resources && !resources_shown || focused_resource.is_some() && focused_resource != resource_pane { resources_stale = true; }
         resource_pane = focused_resource.clone();
@@ -1935,7 +1964,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
-        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
+        let wanted_now = ui.missions_wanted() || ui.glasses.sidebar.shown || open_requests.wants_missions();
         if wanted_now {
             missions_until = Some(Instant::now() + MISSIONS_GRACE);
         }

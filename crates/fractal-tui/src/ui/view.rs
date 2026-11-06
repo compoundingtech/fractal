@@ -88,6 +88,8 @@ pub struct World {
     pub inbox_alerts: Option<usize>,
     pub attention: Load<Vec<Attention>>,
     pub agents: Load<Vec<Agent>>,
+    #[serde(skip)]
+    pub related_runs: BTreeMap<String, Load<fractal_client::AgentRelatedRuns>>,
     pub missions: Load<Vec<Mission>>,
     pub machines: Load<Vec<Machine>>,
     pub worktrees: Load<Vec<Worktree>>,

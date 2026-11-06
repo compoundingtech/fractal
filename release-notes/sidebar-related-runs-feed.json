@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read sidebar mission rows from the semantic projection without polling",
+  "replay": {"status": "none", "detail": "Client reads only; no claim changes."},
+  "schema": {"status": "none", "detail": "Uses the existing agent-related-runs endpoint."},
+  "rules": {"status": "none", "detail": "No authority or execution changes."},
+  "compatibility": {"status": "changed", "detail": "The TUI caches visible agents' related runs, refreshes after graph frames and rejects responses from previous connections. Activity uses the reported last-activity time."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Reverting changes no stored state."}
+}
