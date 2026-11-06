@@ -3,7 +3,9 @@
  * mission shared across project folders, a long slug, a question waiting on you with and without a decision handle,
  * unknown progress, an unknown step, rows without a mission, missions queued behind the current one and retained Stale
  * (with and without a reported update time) and Failed mission info. The phone frame proves the merged 44px mission
- * target on a touch layout. A separate scenario story projects the catalog roster without these fixed contract cases.
+ * target on a touch layout. The ETA stories prove a served range or single value adds only its hidden description and the
+ * row's accessible name, never a drawn slot, so every ETA state lays out identically; null, absent or finished ETAs add
+ * nothing. A separate scenario story projects the catalog roster without these fixed contract cases.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -14,6 +16,7 @@ import { SidebarTree, SidebarTreeDisclosure, type SidebarTreeItem } from './Side
 import type { Key } from 'react-aria-components'
 import { missionHues } from './SidebarMissionLine'
 import { statuses, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
+import type { MissionEta } from '../MissionEta'
 import { sidebarRowAccessibleName } from './rowPresentation.tsx'
 import { geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
@@ -149,6 +152,13 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'EtaAbsent:contract-fixture',
+  'EtaFinishing:contract-fixture',
+  'EtaNull:contract-fixture',
+  'EtaRange:contract-fixture',
+  'EtaSingle:contract-fixture',
+  'EtaStates:contract-fixture',
+  'EtaStatesLight:contract-fixture',
   'MissionRows:contract-fixture',
   'MissionRowsLight:contract-fixture',
   'Phone:contract-fixture',
@@ -366,6 +376,90 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
 
 export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed +1 and +2 mission queues prove popover geometry, keyboard focus, Escape and hover-free disclosure; catalog queues vary with work.' } }, play: queuedPlay }
 export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued missions · "+N" popover · light', args: { scheme: 'light' } }
+
+const etaAsOf = storyNow - 120_000
+const etaRange: MissionEta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000, basis: { method: 'critical-path', samples: 12 }, as_of: etaAsOf }
+const etaStep = { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Review hover scopes' }, queued: [] } as const
+/**
+ * Served range, served single value, served null, an older daemon that omits it, and a finished run that must hide it.
+ * One slug and step throughout, so their line 2 geometry must match exactly whatever the ETA state.
+ */
+const etaRows: readonly Row[] = [
+  row('eta-range', 'ETA range', { missionContext: mission('eta-range', 'sidebar-polish', { ...etaStep, eta: etaRange }) }),
+  row('eta-single', 'ETA single', { missionContext: mission('eta-single', 'sidebar-polish', { ...etaStep, eta: { ...etaRange, remaining_high_ms: 720_000, basis: { method: 'per-step', samples: 1 } } }) }),
+  row('eta-finishing', 'ETA finishing', { missionContext: mission('eta-finishing', 'sidebar-polish', { ...etaStep, eta: { ...etaRange, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method: 'critical-path', samples: 0 } } }) }),
+  row('eta-null', 'ETA null', { missionContext: mission('eta-null', 'sidebar-polish', { ...etaStep, eta: null }) }),
+  row('eta-absent', 'ETA absent', { missionContext: mission('eta-absent', 'sidebar-polish', etaStep) }),
+  row('eta-finished', 'ETA finished', { missionContext: mission('eta-finished', 'sidebar-polish', { ...etaStep, progress: { _tag: 'Known', done: 5, total: 5 }, eta: null }) }),
+]
+function EtaStatesStory({ scheme, only }: { readonly scheme: Scheme; readonly only?: string }) {
+  return <main data-testid="mission-eta-rows" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}>
+    <ThemePortal><div data-host="designed" {...stylex.props(styles.column)}>{etaRows.filter(item => only === undefined || item.title === only).map(item => <MilestoneAgentRow key={item.ref} row={item} now={storyNow} />)}</div></ThemePortal>
+  </main>
+}
+
+/** Line 2 as drawn, relative to its row: `[pill] · step` with the step keeping a readable width. */
+const line2Geometry = (row: HTMLElement) => {
+  const origin = rect(row)
+  const box = (selector: string) => { const found = rect(row.querySelector(selector)!); return [found.left - origin.left, found.top - origin.top, found.width, found.height].map(Math.round) }
+  return { row: [Math.round(origin.width), Math.round(origin.height)], mission: box('[data-line2-slot="mission"]'), pill: box('[data-box="pill"]'), step: box('[data-line2-slot="step"]') }
+}
+const expectDrawnLine = async (row: HTMLElement) => {
+  await waitFor(() => expect(row.querySelector('[data-line2-slot="step"]')).not.toBeNull())
+  await expect(row.querySelector('[data-line2-slot="eta"]')).toBeNull()
+  const sep = row.querySelector('[data-line2-slot="mission"]')!.nextElementSibling!
+  await expect(sep.textContent).toBe('·')
+  await expect(sep.nextElementSibling).toBe(row.querySelector('[data-line2-slot="step"]'))
+  // The step stays readable: at least "Review h…" at the narrowest sidebar.
+  await expect(rect(row.querySelector('[data-row-field="step"]')!).width).toBeGreaterThanOrEqual(56)
+}
+/** A served ETA: only a visually hidden description in the mission slot, plus the row's accessible name; nothing drawn. */
+const expectEta = async (row: HTMLElement, item: Row, text: string, tail: RegExp, name: RegExp) => {
+  await expectDrawnLine(row)
+  const description = await waitFor(() => { const found = row.querySelector<HTMLElement>('[data-line2-slot="mission"] [data-mission-eta]'); expect(found).not.toBeNull(); return found! })
+  await expect(description).toHaveAttribute('data-mission-eta', text)
+  await expect(description.textContent).toMatch(tail)
+  await expect(getComputedStyle(description).position).toBe('absolute')
+  await expect(rect(description).width).toBeLessThanOrEqual(1)
+  await expect(sidebarRowAccessibleName(item)).toMatch(name)
+}
+/** No ETA: no description, nothing in the name, and the same drawn line. */
+const expectNoEta = async (row: HTMLElement, item: Row) => {
+  await expectDrawnLine(row)
+  await expect(row.querySelector('[data-mission-eta]')).toBeNull()
+  await expect(line2(row).textContent).not.toContain('left')
+  await expect(sidebarRowAccessibleName(item)).not.toContain('Estimated')
+}
+// The basis, retained samples, exact as_of and its age relative to the story's fixed now; never a recomputed range.
+const etaChecks: Readonly<Record<string, (row: HTMLElement, item: Row) => Promise<void>>> = {
+  'ETA range': (row, item) => expectEta(row, item, '~12–18 min left', /^Estimated 12–18 min left, served as of .+, 2m ago\. Critical-path basis, 12 retained samples\.$/,
+    /, Step Review hover scopes, Estimated 12–18 min left, served as of 2026-10-21T09:28:00\.000Z\. Critical-path basis, 12 retained samples\.$/),
+  'ETA single': (row, item) => expectEta(row, item, '~12 min left', /^Estimated 12 min left, served as of .+, 2m ago\. Per-step basis, 1 retained sample\.$/,
+    /, Estimated 12 min left, served as of 2026-10-21T09:28:00\.000Z\. Per-step basis, 1 retained sample\.$/),
+  'ETA finishing': (row, item) => expectEta(row, item, 'Finishing', /^No remaining steps, served as of .+, 2m ago\. Critical-path basis\.$/,
+    /, No remaining steps, served as of 2026-10-21T09:28:00\.000Z\. Critical-path basis\.$/),
+  'ETA null': expectNoEta,
+  'ETA absent': expectNoEta,
+  'ETA finished': expectNoEta,
+}
+const etaPlay = (titles: readonly string[]): NonNullable<Story['play']> => async ({ canvasElement }) => {
+  await waitFor(() => expect(canvasElement.querySelectorAll('[data-milestone-row]').length).toBe(titles.length))
+  for (const title of titles) await etaChecks[title]!(designedRow(canvasElement, title), etaRows.find(item => item.title === title)!)
+  // No layout shift between states: every row's drawn line 2 matches the first, to the pixel.
+  const [first, ...rest] = titles.map(title => line2Geometry(designedRow(canvasElement, title)))
+  for (const geometry of rest) await expect(geometry).toEqual(first)
+}
+const etaScenario = { scenario: { _tag: 'contract-fixture', reason: 'Fixed served ETA rows prove the exact served description with its basis and as_of, and that no ETA state (range, single, null, absent, finished) changes the drawn row; catalog runs rarely serve every state.' } } as const
+const etaState = (title: string, name: string): Story => ({ tags: ['critical'], name: `Mission ETA · ${name}`, parameters: etaScenario, render: ({ scheme }) => <EtaStatesStory scheme={scheme} only={title} />, play: etaPlay([title]) })
+
+export const EtaFinishing: Story = etaState('ETA finishing', 'no remaining steps')
+export const EtaRange: Story = etaState('ETA range', 'served range')
+export const EtaSingle: Story = etaState('ETA single', 'served single value')
+export const EtaNull: Story = etaState('ETA null', 'served null')
+export const EtaAbsent: Story = etaState('ETA absent', 'absent')
+/** All states side by side, including a finished run whose served ETA must stay hidden. */
+export const EtaStates: Story = { tags: ['critical'], name: 'Mission ETA · all states', parameters: etaScenario, render: ({ scheme }) => <EtaStatesStory scheme={scheme} />, play: etaPlay(etaRows.map(item => item.title)) }
+export const EtaStatesLight: Story = { ...EtaStates, name: 'Mission ETA · all states · light', args: { scheme: 'light' } }
 
 /** Bounding hit area after every rectangular CSS clip, including a visually hidden ancestor's 1px wrapper. */
 const clippedTouchRect = (control: HTMLElement): DOMRect => {

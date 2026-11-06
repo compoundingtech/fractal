@@ -412,79 +412,6 @@ fn ensure_no_authored_session_selection(authored_args: &[String]) -> Result<()> 
     Ok(())
 }
 
-fn with_required_resume(mut argv: Vec<String>, native_session_id: &str) -> Result<Vec<String>> {
-    anyhow::ensure!(!argv.is_empty(), "OMP provider argv is empty");
-    ensure_no_authored_session_selection(&argv[1..])?;
-    argv.splice(
-        1..1,
-        ["--resume".to_string(), native_session_id.to_string()],
-    );
-    Ok(argv)
-}
-
-/// Run one host-owned cold-residency attempt under its exact incarnation.
-pub fn run_residency_attempt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    omp_argv: Vec<String>,
-    resume_generation: crate::residency::Generation,
-    required_incarnation: String,
-) -> Result<()> {
-    anyhow::ensure!(
-        !required_incarnation.is_empty(),
-        "OMP required runtime incarnation is empty"
-    );
-    run_with_required_resume(
-        catalog_root,
-        identity,
-        runtime_id,
-        omp_argv,
-        resume_generation,
-        required_incarnation,
-    )
-}
-
-fn run_with_required_resume(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    omp_argv: Vec<String>,
-    resume_generation: crate::residency::Generation,
-    required_incarnation: String,
-) -> Result<()> {
-    anyhow::ensure!(
-        !omp_argv.is_empty(),
-        "omp driver '{runtime_id}' has no provider argv"
-    );
-    let native_session = required_residency_resume(
-        &state_dir(catalog_root, &identity),
-        &identity,
-        &runtime_id,
-        resume_generation,
-        &omp_argv[1..],
-    )?;
-    let omp_argv = with_required_resume(omp_argv, &native_session)?;
-    let residency_env = [
-        (
-            CHANNEL_RESUME_GENERATION.to_string(),
-            resume_generation.0.to_string(),
-        ),
-        (CHANNEL_EXPECTED_NATIVE_SESSION.to_string(), native_session),
-    ];
-    pi_family_session::run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        omp_argv,
-        &OMP_KIND,
-        &residency_env,
-        &RESUME_FENCE_ENV,
-        Some(required_incarnation),
-        true,
-    )
-}
-
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 /// Admit the same installed producer and shipped extension before the RPC heal touches a session.
 /// Interactive launch still admits its own fork after the asynchronous heal.
@@ -529,42 +456,6 @@ mod tests {
                 hook();
             }
         });
-    }
-
-    struct FakeExecutable {
-        _directory: tempfile::TempDir,
-        path: PathBuf,
-    }
-
-    impl FakeExecutable {
-        fn new(body: &str) -> Self {
-            let directory = tempfile::Builder::new()
-                .prefix("st-omp-version-")
-                .tempdir()
-                .unwrap();
-            let source = directory.path().join("omp.source");
-            let path = directory.path().join("omp");
-            std::fs::write(&source, body).unwrap();
-            // A writer opened by one libtest thread is inherited by a child forked concurrently
-            // from another, which can make the writer's later exec fail with ETXTBSY even after
-            // the parent closes it. Let `install` create and close the executable in its own child:
-            // the test process never owns a writable descriptor for the file it will execute.
-            let output = std::process::Command::new("install")
-                .args(["-m", "755"])
-                .arg(&source)
-                .arg(&path)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "install failed: {output:?}");
-            Self {
-                _directory: directory,
-                path,
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
     }
 
     fn claim_omp(agent_dir: &Path, incarnation: &str) -> u64 {
@@ -721,46 +612,6 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_residency_validation_precedes_any_provider_child() {
-        let temp = tempfile::tempdir().unwrap();
-        let empty_incarnation = run_residency_attempt(
-            temp.path(),
-            "residency-no-spawn.worker".into(),
-            "residency-no-spawn.worker".into(),
-            vec!["omp".into()],
-            crate::residency::Generation(2),
-            String::new(),
-        )
-        .unwrap_err();
-        assert!(
-            empty_incarnation
-                .to_string()
-                .contains("required runtime incarnation is empty")
-        );
-        let marker = temp.path().join("provider-started");
-        let fake = FakeExecutable::new(&format!(
-            "#!/bin/sh\ntouch '{}'\nprintf 'omp v18.1.7\\n'\n",
-            marker.display()
-        ));
-
-        let error = run_residency_attempt(
-            temp.path(),
-            "residency-no-spawn.worker".into(),
-            "residency-no-spawn.worker".into(),
-            vec![fake.path().display().to_string(), "boot".into()],
-            crate::residency::Generation(2),
-            "attempt-test".into(),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("residency checkpoint"));
-        assert!(
-            !marker.exists(),
-            "the OMP provider started before mandatory resume validation"
-        );
-    }
-
-    #[test]
     fn residency_resume_binds_the_exact_native_session_generation_and_incarnation() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path().join("state");
@@ -805,21 +656,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(native, "session-exact");
-        assert_eq!(
-            with_required_resume(
-                vec!["omp".into(), "--model".into(), "test".into(), "boot".into()],
-                &native,
-            )
-            .unwrap(),
-            [
-                "omp",
-                "--resume",
-                "session-exact",
-                "--model",
-                "test",
-                "boot",
-            ]
-        );
         assert!(
             !residency_ready(
                 &state,
@@ -1070,13 +906,7 @@ mod tests {
             vec!["--from-codex".into()],
             vec!["--no-session".into()],
         ] {
-            assert!(
-                with_required_resume(
-                    std::iter::once("omp".into()).chain(authored).collect(),
-                    "session-exact",
-                )
-                .is_err()
-            );
+            assert!(ensure_no_authored_session_selection(&authored).is_err());
         }
 
         let temp = tempfile::tempdir().unwrap();
@@ -1123,8 +953,6 @@ pub fn run_native(
         &OMP_KIND,
         &environment,
         &RESUME_FENCE_ENV,
-        None,
-        false,
     )
 }
 
