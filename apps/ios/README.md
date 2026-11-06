@@ -439,6 +439,13 @@ edit planners. The runner's explicit divergence table locks down the current
 flat-folder presentation, UTF-16 ties and native planner validation differences;
 it does not claim recursive layouts, structured refusal parity or v2 support.
 
+`sidebarMemberships.ts` and the exported membership feed conversions are unwired:
+the active sidebar still follows its existing v1 path. The read model stages pages,
+retains a stale last-complete base, joins collection epochs/frontiers and bounds
+automatic restarts to three attempts. Epochs must be supplied by a capable daemon;
+missing epochs refuse rather than deriving a frontier from whole-host snapshots.
+Run `pnpm --dir apps/ios test sidebarMemberships.test.mjs` for its paging contract.
+
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
 tab orders are intentionally retired. A fresh workspace names its host and points to
 Now → New → New terminal; New mission is available there too.

@@ -1,3 +1,4 @@
+import type { MembershipEffect, MembershipEvent, MembershipPage, MembershipToken } from './sidebarMemberships';
 import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import type { InventoryName } from '@fractal/views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
@@ -5,6 +6,28 @@ import type { SidebarArrangement } from './sidebarEdits';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
+
+/** Unwired membership conversion: epoch must come from the daemon capability, never a snapshot ID. */
+export const sidebarMembershipFrame = (token: MembershipToken, subscription: string, frame: CollectionFrame, epoch?: string): MembershipEvent | undefined => {
+  if ((frame.kind === 'error' || frame.kind === 'resync') && frame.id === subscription) return { type: frame.kind === 'resync' || frame.retryable ? 'Expired' : 'Refused', token };
+  if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'ordered-memberships' || frame.id !== subscription) return undefined;
+  if (!epoch || frame.membership.container !== token.scope.container) return { type: 'Refused', token };
+  if (frame.snapshot.host_id !== token.scope.host || frame.snapshot.projection_version !== token.scope.projection) return { type: 'Expired', token };
+  return { type: 'Metadata', token, frontier: { epoch, changed_index: frame.membership.changed_index, live_count: frame.membership.live_count } };
+};
+
+/** A reset invalidates the whole attempt; transport loss retains a stale last-complete base. */
+export const sidebarMembershipFailure = (token: MembershipToken, error: { status?: number; response?: { code: string } }): MembershipEvent => {
+  if (error.status === 409 && error.response?.code === 'membership-frontier-reset') return { type: 'Expired', token };
+  return error.status === undefined ? { type: 'Disconnect', token } : { type: 'Refused', token };
+};
+
+/** Unwired transport port: joining the stream must finish before a first-page request. */
+export const readSidebarMemberships = async (effect: Exclude<MembershipEffect, { type: 'PersistBase' }>, subscribe: (token: MembershipToken) => Promise<void>, read: (token: MembershipToken, cursor?: string) => Promise<MembershipPage>): Promise<MembershipEvent> => {
+  if (effect.type === 'SubscribeAndRead') await subscribe(effect.token);
+  const page = await read(effect.token, effect.type === 'Read' ? effect.cursor : undefined);
+  return { type: 'Page', token: effect.token, page };
+};
 
 // The app holds three windows on one collections socket. It needs no work window: missions carry
 // their steps and agents name theirs. Subscription IDs are the window names.
