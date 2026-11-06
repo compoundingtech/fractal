@@ -7,9 +7,13 @@
 //! from then on every claim write keeps it exact, under whichever binary makes the write, since
 //! the triggers are part of the schema. The pages after it copy the claims already stored, in
 //! the audit's own order. Each page reads its claims on a reader. The writer then re-reads only
-//! those few bodies, which the reader has just brought into cache, to check that each claim
-//! still holds the keys it read. The audit reads the table only once the last page has marked
-//! it ready.
+//! those bodies, which the reader has just brought into cache, to check that each claim still
+//! holds the keys it read. The audit reads the table only once the last page has marked it
+//! ready.
+//!
+//! Each page is its own transaction, so each costs one WAL sync at commit. The copying itself is
+//! about half a millisecond for 32 claims; on a busy host the sync is what holds the writer, for
+//! hundreds of milliseconds at worst. So a page copies as many claims as its budgets allow.
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -18,7 +22,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::sqlite::{ReadPool, WriterConnection};
 
 pub const NAME: &str = "operation_claim_digests";
-pub const PAGE_SIZE: i64 = 32;
+/// At most this many claims a page. Checking and copying this many took about 6 ms when
+/// measured on a production-size store, inside [`PAGE_WRITE_BUDGET`]; whatever they cost
+/// elsewhere, the budgets end a slower page sooner. `backfill_writer_hold_by_page_size` measures
+/// a page's hold on a file store.
+pub const PAGE_SIZE: i64 = 512;
 /// A page stops reading claims after this long, so its reader snapshot stays short.
 pub const PAGE_READ_BUDGET: Duration = Duration::from_millis(20);
 /// A page stops copying after this long under the writer and commits what it copied; the next
@@ -110,12 +118,13 @@ pub fn ready(connection: &Connection) -> Result<bool> {
 }
 
 pub fn advance(readers: &ReadPool, writer: &WriterConnection) -> Result<Page> {
-    advance_with_budget(readers, writer, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {})
+    advance_with_budget(readers, writer, PAGE_SIZE, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {})
 }
 
 fn advance_with_budget(
     readers: &ReadPool,
     writer: &WriterConnection,
+    page_size: i64,
     read_budget: Duration,
     write_budget: Duration,
     // Runs between a page's read and its write, where other writers may change its claims.
@@ -149,10 +158,10 @@ fn advance_with_budget(
         let connection = readers.get();
         let started = Instant::now();
         let transaction = connection.unchecked_transaction()?;
-        while (rows.len() as i64) < PAGE_SIZE {
+        while (rows.len() as i64) < page_size {
             let (cursor, after) = rows.last().map_or((operation.as_str(), claim_rowid), |row: &(i64, String, String, String)| (row.2.as_str(), row.0));
             let (cursor, after) = (cursor.to_owned(), after);
-            let left = PAGE_SIZE - rows.len() as i64;
+            let left = page_size - rows.len() as i64;
             let page = transaction
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hedc149804801 owner=smallclaims::store::operation_claim_digests TODO=trace-statement-and-value-representation */ if remainder { REMAINDER_PAGE } else { NEXT_PAGE })?
                 .query_map(params![cursor, after, left], |row| {
@@ -247,12 +256,12 @@ mod tests {
                 ).unwrap();
             }
         }
-        let install = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
+        let install = advance_with_budget(&store.readers, &store.connection, PAGE_SIZE, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
         assert!(!install.ready);
         assert_eq!(install.copied, 0);
         // The audit's order: by operation, then by store index; one claim per page.
         for cursor in [("op/a", 6), ("op/a", 15), ("op/b", 3), ("op/b", 18)] {
-            let page = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
+            let page = advance_with_budget(&store.readers, &store.connection, PAGE_SIZE, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
             assert_eq!((page.ready, page.copied), (false, 1));
             let stored: (String, i64) = store.readers.get().query_row(
                 "SELECT operation, claim_rowid FROM operation_claim_digests_backfill", [],
@@ -261,7 +270,7 @@ mod tests {
             assert_eq!(stored, (cursor.0.to_owned(), cursor.1));
             assert!(!ready(&store.readers.get()).unwrap());
         }
-        let last = advance_with_budget(&store.readers, &store.connection, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
+        let last = advance_with_budget(&store.readers, &store.connection, PAGE_SIZE, Duration::ZERO, Duration::ZERO, &mut || {}).unwrap();
         assert_eq!((last.ready, last.copied), (true, 0));
         assert!(ready(&store.readers.get()).unwrap());
         let copied = store.readers.get()
@@ -276,6 +285,81 @@ mod tests {
                 (store_index, format!("invented-claim/{store_index}"), operation.to_owned(), digest.to_owned())
             });
         assert_eq!(copied, expected);
+    }
+
+    /// `count` operation claims with bodies of about `padding` bytes, one batch each.
+    fn store_operation_claims(store: &Store, count: i64, padding: usize) {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let pad = "x".repeat(padding);
+        for store_index in 1..=count {
+            transaction.execute(
+                "INSERT INTO batches(id, origin, replica_sequence, hash, accepted_at_unix_ms)
+                 VALUES (?1, 'local', ?2, ?1, '1')",
+                params![format!("invented-batch/{store_index}"), store_index],
+            ).unwrap();
+            let body = serde_json::json!({
+                "_operation": {"id": format!("op/{:06}", store_index % 997), "request_digest": format!("d/{store_index}")},
+                "note": pad,
+            });
+            transaction.execute(
+                "INSERT INTO claims(id, batch_id, subject, kind, origin, body,
+                 predecessors, accepted_at_unix_ms, store_index)
+                 VALUES (?1, ?2, 'invented/subject', 'invented.kind', 'local', ?3, '[]', '1', ?4)",
+                params![format!("invented-claim/{store_index}"), format!("invented-batch/{store_index}"),
+                    body.to_string(), store_index],
+            ).unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn a_page_copies_up_to_its_size_in_one_commit() {
+        let store = Store::open_memory("invented-origin", Arc::new(Plain)).unwrap();
+        store_operation_claims(&store, 1_100, 0);
+        let budget = Duration::from_secs(60);
+        let mut advance = || advance_with_budget(&store.readers, &store.connection, PAGE_SIZE, budget, budget, &mut || {}).unwrap();
+        assert_eq!(advance().copied, 0, "the first page installs the table");
+        let pages = std::iter::from_fn(|| Some(advance()))
+            .take_while(|page| !page.ready)
+            .map(|page| page.copied)
+            .collect::<Vec<_>>();
+        // A page per 512 claims, each one commit: 32 claims a page took 35 commits.
+        assert_eq!(pages, [512, 512, 76]);
+        assert!(ready(&store.readers.get()).unwrap());
+    }
+
+    /// The writer hold of a backfill on a file store, at the old and the current page size.
+    /// Ignored: it measures, and prints one JSON line per page size. Run it with TMPDIR on the
+    /// disk a member's store lives on.
+    #[test]
+    #[ignore = "measures writer holds on a file store; prints them"]
+    fn backfill_writer_hold_by_page_size() {
+        for page_size in [32, PAGE_SIZE] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(&directory.path().join("store.sqlite3"), "invented-origin", Arc::new(Plain)).unwrap();
+            store_operation_claims(&store, 20_000, 1_500);
+            let started = Instant::now();
+            let mut holds = Vec::new();
+            loop {
+                let page = advance_with_budget(&store.readers, &store.connection, page_size, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {}).unwrap();
+                holds.push(page.write_hold);
+                if page.ready {
+                    break;
+                }
+            }
+            holds.sort_unstable();
+            let ms = |hold: Duration| hold.as_secs_f64() * 1_000.0;
+            println!("{}", serde_json::json!({
+                "page_size": page_size,
+                "pages": holds.len(),
+                "hold_total_ms": ms(holds.iter().sum()),
+                "hold_p50_ms": ms(holds[holds.len() / 2]),
+                "hold_p99_ms": ms(holds[holds.len() * 99 / 100]),
+                "hold_max_ms": ms(holds[holds.len() - 1]),
+                "wall_ms": ms(started.elapsed()),
+            }));
+        }
     }
 
     #[test]
@@ -305,7 +389,7 @@ mod tests {
         }
         advance(&store.readers, &store.connection).unwrap();
         // The page reads all four, then each is rewritten or deleted before its copy.
-        let page = advance_with_budget(&store.readers, &store.connection, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {
+        let page = advance_with_budget(&store.readers, &store.connection, PAGE_SIZE, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {
             store.connection.write().execute_batch(
                 "UPDATE claims SET body='{\"note\":\"no operation\"}' WHERE store_index=3;
                  UPDATE claims SET body=json_set(body, '$._operation.request_digest', 'd/8') WHERE store_index=6;

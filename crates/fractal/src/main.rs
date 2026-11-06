@@ -20537,11 +20537,18 @@ async fn build_transport_observation_index(store: Arc<Store>) {
     }
 }
 
-/// This starts only after both APIs serve. Each page reads up to 32 operation claims on a
-/// reader, then joins the managed background writer queue only to insert their keys, and
-/// yields for 100 ms. The operation audit reads bodies until the last page marks it ready.
+/// Peers and seats reconnect in the first minutes after a restart, and the writer is busiest
+/// then: a busy member took about 400 writer holds in the first minute after one. The
+/// digest backfill can wait them out; nothing reads its table until it is ready.
+const OPERATION_CLAIM_DIGESTS_DELAY: Duration = Duration::from_secs(120);
+
+/// This starts [`OPERATION_CLAIM_DIGESTS_DELAY`] after both APIs serve. Each page reads up to
+/// 512 operation claims on a reader, then joins the managed background writer queue only to
+/// insert their keys, and yields for 100 ms. The operation audit reads bodies until the last
+/// page marks it ready.
 async fn build_operation_claim_digests(store: Arc<Store>) {
     use smallclaims::store::operation_claim_digests as digests;
+    tokio::time::sleep(OPERATION_CLAIM_DIGESTS_DELAY).await;
     let started = Instant::now();
     fractal_daemon::otel::record_index_migration(digests::NAME, false, None, None);
     loop {
