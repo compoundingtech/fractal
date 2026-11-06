@@ -301,7 +301,8 @@ its first read. Nor is `stream_operations`, the idempotency keys this member's o
 used: a send retried after a restore writes its message again. The graph's mirror of the shard
 (`local_stream_sent` and `local_stream_lifecycle`, which the graph's idle, unread, held and usage
 indexes read) is not carried either; the restored member's daemon rebuilds it from the restored
-shard when it starts.
+shard when it starts, and the mirror's triggers queue each stream item's client selector header
+as it goes, so the phone's list holds the restored stream mail once the mirror has caught up.
 
 ### Message marks
 

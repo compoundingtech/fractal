@@ -337,7 +337,7 @@ pub(super) async fn page(
                 state: query.state.clone(),
                 native_only: false,
                 items_digest: "retained-source.v1".into(),
-                before_index: Some(before),
+                before_index: Some(before), before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms: expires,
             })
