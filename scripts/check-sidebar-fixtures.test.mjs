@@ -19,7 +19,7 @@ test('real sidebar fixtures pass the CLI and the shared schema/public policy', (
 });
 
 const forbidden = {
-  'POSIX home': '/home/private-user/project', 'macOS home': '/Users/private-user/project',
+  'POSIX home': ['', 'home', 'private-user', 'project'].join('/'), 'macOS home': ['', 'Users', 'private-user', 'project'].join('/'),
   'Windows home': 'C:\\Users\\private-user\\project', 'tilde home': '~/private/project',
   'file URL': 'file:///private/project', 'private hostname': 'private-node.local',
   'private domain': 'service.example.internal', 'tailnet domain': 'node.example.ts.net',
@@ -47,11 +47,11 @@ for (const [name, text] of Object.entries(forbidden)) {
 
 test('schema-aware allowlist refuses identities that do not use synthetic namespaces', () => {
   for (const change of [
-    v => { v.cases[0].initial.arrangement.owner = 'person/private-person'; },
+    v => { v.cases[0].initial.arrangement.owner = ['person', 'private-person'].join('/'); },
     v => { v.cases[0].initial.arrangement.owner = 'Private Person'; },
     v => { v.cases[0].catalog = ['agent/private-agent']; },
     v => { v.cases[0].catalog = ['machine/private-node']; },
-    v => { v.cases[0].initial.arrangement.id = `arrangement/person/private-person/${folder}`; },
+    v => { v.cases[0].initial.arrangement.id = ['arrangement', 'person', 'private-person', folder].join('/'); },
     v => { v.cases[0].initial.arrangement.body.name.value = 'Private Person'; },
     v => { v.cases[0].initial.arrangement.revision = 'private-revision'; },
     v => { v.cases[0].name = 'private-person'; },
