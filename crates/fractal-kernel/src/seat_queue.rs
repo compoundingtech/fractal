@@ -391,10 +391,12 @@ mod tests {
             Placement::After,
         ];
         for case in 0..5_000 {
-            let joins = runs
-                .iter()
-                .filter_map(|run| (next(5) != 0).then(|| join(run, u128::from(next(40)))))
-                .collect::<Vec<_>>();
+            let mut joins = Vec::new();
+            for run in runs {
+                if next(5) != 0 {
+                    joins.push(join(run, u128::from(next(40))));
+                }
+            }
             let mut at = 0;
             let moves = (0..next(14))
                 .map(|_| {
