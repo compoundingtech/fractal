@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use smallclaims::Error as St3Error;
+pub use smallclaims::Error as FractalError;
 pub use smallclaims::claim::{
     ClaimInput, ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
     ReplicaEnvelopeId, ReplicaEnvelopeSignature,
@@ -112,9 +112,9 @@ pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your an
 
 /// Refuse a message addressed to a person. `recipient` is the canonical recipient subject.
 /// Messages to agents are unchanged.
-pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
+pub fn refuse_person_recipient(recipient: &str) -> Result<(), FractalError> {
     if recipient.starts_with("person/") {
-        return Err(St3Error::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
+        return Err(FractalError::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
     }
     Ok(())
 }
@@ -554,14 +554,14 @@ impl Serialize for DesiredSubject {
 
 impl DesiredSubject {
     /// Keep the authored KDL name and its normalized member projection identical.
-    pub fn set_display_name(&mut self, name: Option<&str>) -> Result<(), St3Error> {
+    pub fn set_display_name(&mut self, name: Option<&str>) -> Result<(), FractalError> {
         let body = self.desired.as_object_mut()
-            .ok_or_else(|| St3Error::new("invalid-agent-declaration", "agent has no canonical body"))?;
+            .ok_or_else(|| FractalError::new("invalid-agent-declaration", "agent has no canonical body"))?;
         if !body.contains_key("children") {
             body.insert("children".into(), serde_json::json!([]));
         }
         let children = body.get_mut("children").and_then(Value::as_array_mut)
-            .ok_or_else(|| St3Error::new("invalid-agent-declaration", "agent body must be an array"))?;
+            .ok_or_else(|| FractalError::new("invalid-agent-declaration", "agent body must be an array"))?;
         if let Some(name) = name {
             if let Some(child) = children.iter_mut()
                 .find(|child| child.get("name").and_then(Value::as_str) == Some("name"))
@@ -2530,14 +2530,14 @@ pub enum LifecycleUnavailableReason {
 }
 
 impl MessageSendRefusal {
-    pub fn into_error(self) -> St3Error {
+    pub fn into_error(self) -> FractalError {
         let (code, variant, recipient) = match &self {
             Self::Retired { recipient, .. } => ("recipient-retired", "Retired", recipient),
             Self::LifecycleUnavailable { recipient, .. } => {
                 ("lifecycle-unavailable", "LifecycleUnavailable", recipient)
             }
         };
-        St3Error::new(
+        FractalError::new(
             code,
             format!("{variant}: recipient `{recipient}` refuses this first send"),
         )

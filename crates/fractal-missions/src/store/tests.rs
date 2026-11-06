@@ -3927,7 +3927,7 @@ fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() 
         .unwrap()
         .unwrap();
     let reports = || store.claims_for(run, Some(RUN_REPORT_KIND)).unwrap().len();
-    let code = |result: Result<MissionRunReportView, St3Error>| result.unwrap_err().code;
+    let code = |result: Result<MissionRunReportView, FractalError>| result.unwrap_err().code;
 
     // Only a person or the agent that requested the run may change it, and only to an
     // agent; a limit or completion means nothing without one.
