@@ -221,3 +221,37 @@ fn a_keyed_stream_send_replays_and_refuses_another_request_under_its_key() {
         Some(written.id)
     );
 }
+
+/// The graph file's size as SQLite counts it, its write-ahead log included.
+fn graph_bytes(graph: &Store) -> i64 {
+    graph.connection.write().query_row("SELECT page_count*page_size FROM pragma_page_count(), pragma_page_size()", [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn a_long_body_stays_in_the_shard_and_the_mirror_row_stays_small() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    let mut long = sent("message/mirror-long", "agent/cedar", &["st3-silent"]);
+    long.fields.insert("content".into(), json!("x".repeat(4 << 20)));
+    long.fields.insert("title".into(), json!(format!("Re: soak request {}", "y".repeat(1 << 20))));
+    append(&graph, &long);
+    let before = graph_bytes(&graph);
+
+    assert_eq!(stream_mirror::mirror(&graph).unwrap(), 1);
+    let rows: Vec<(String, i64)> = graph
+        .readers
+        .get()
+        .prepare("SELECT subject, length(fields) FROM local_stream_sent ORDER BY subject")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(rows.iter().all(|(_, bytes)| *bytes < 256), "{rows:?}");
+    assert!(graph_bytes(&graph) - before < 1 << 20, "the body never reaches the graph's file");
+    // The long title still marks the item synthetic, so it is neither agent-to-agent usage nor
+    // coordination, and its silent tag still holds it.
+    assert_eq!(usage(&graph, "message/mirror-long"), None);
+    assert_eq!(coordination(&graph, "message/mirror-long"), Some((false, true)));
+    assert_eq!(idle(&graph, "message/mirror-long"), Some(("agent/cedar".into(), true, false)));
+}

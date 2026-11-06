@@ -1,7 +1,8 @@
 //! The messages shard's items and lifecycle, mirrored into the graph's file for the graph's own
 //! mail indexes (db break-up step 4c-2a). SQLite can't join across database files, and the
 //! graph's idle, unread, held and usage indexes fold from what the graph holds. Each stream
-//! item this member holds therefore gets a row in `local_stream_sent`, and each lifecycle step
+//! item this member holds therefore gets a row in `local_stream_sent` (its sender, recipient
+//! and tags, never its content: see [`mirrored_fields`]), and each lifecycle step
 //! this member records gets one in `local_stream_lifecycle`. Their triggers queue the same
 //! index work a graph `message.sent` or lifecycle claim queues, and the folds read the mirror
 //! wherever they read the graph's claims.
@@ -111,7 +112,13 @@ pub fn mirror(graph: &Store) -> Result<usize> {
             let connection = shard.readers.get();
             let sent = connection
                 .prepare_cached(
-                    "SELECT claims.subject, claims.accepted_at_unix_ms, json_extract(claims.body,'$.fields'),
+                    "SELECT claims.subject, claims.accepted_at_unix_ms,
+                            json_object('to', json_extract(claims.body,'$.fields.to'),
+                                        'from', json_extract(claims.body,'$.fields.from'),
+                                        -- Admission keeps tags a list; anything else would stop json().
+                                        'tags', CASE json_type(claims.body,'$.fields.tags')
+                                                WHEN 'array' THEN json(json_extract(claims.body,'$.fields.tags')) END,
+                                        'title', json_extract(claims.body,'$.fields.title')),
                             stream_messages.store_index
                      FROM stream_messages JOIN claims ON claims.store_index=stream_messages.store_index
                      WHERE stream_messages.store_index>?1 ORDER BY stream_messages.store_index LIMIT ?2",
@@ -141,6 +148,7 @@ pub fn mirror(graph: &Store) -> Result<usize> {
                 for (subject, accepted, fields, index) in &sent {
                     // An accepted time that does not parse counts from when the mirror saw it.
                     let sent_ms = accepted.parse::<i64>().unwrap_or_else(|_| now_ms() as i64);
+                    let fields = mirrored_fields(fields)?;
                     added += transaction.prepare_cached(
                         /* sqlite-large-value: allow-for-now lv-h2a0161203901 owner=fractal_store::store::stream_mirror TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_stream_sent(subject, sent_ms, fields, stream_index)
                          SELECT ?1, ?2, ?3, ?4",
@@ -168,6 +176,26 @@ pub fn mirror(graph: &Store) -> Result<usize> {
         }
     }
 }
+
+/// What the graph's folds read of an item: its sender, recipient and tags, and a fixed marker
+/// for a title that marks it synthetic. Its content and every other field stay in the shard,
+/// so the mirror never copies a mail body into the graph's file.
+pub(crate) fn mirrored_fields(fields: &str) -> Result<String> {
+    let fields: Value = serde_json::from_str(fields)?;
+    let mut mirrored = serde_json::Map::new();
+    for key in ["to", "from", "tags"] {
+        if let Some(value) = fields.get(key).filter(|value| !value.is_null()) {
+            mirrored.insert(key.into(), value.clone());
+        }
+    }
+    if agent_messages::synthetic_title(fields["title"].as_str().unwrap_or_default()) {
+        mirrored.insert("title".into(), SYNTHETIC_TITLE.into());
+    }
+    Ok(Value::Object(mirrored).to_string())
+}
+
+/// The title a mirrored synthetic item carries; [`agent_messages::synthetic_title`] reads it.
+const SYNTHETIC_TITLE: &str = "delivery probe";
 
 fn cursor(connection: &Connection, key: &str) -> Result<i64> {
     Ok(connection

@@ -107,10 +107,12 @@ pub fn synthetic(fields: &Value) -> bool {
     }) {
         return true;
     }
-    let title = fields["title"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    synthetic_title(fields["title"].as_str().unwrap_or_default())
+}
+
+/// Whether a title marks a probe, soak or canary message.
+pub fn synthetic_title(title: &str) -> bool {
+    let title = title.to_ascii_lowercase();
     let mut title = title.trim();
     while let Some(rest) = title.strip_prefix("re:") {
         title = rest.trim_start();
