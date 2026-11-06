@@ -335,11 +335,11 @@ export class FractalClient {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        // Old routers can return an empty 404 for this collection; do not parse it as JSON
-        // or try a history endpoint. This route has no missing-item 404 meaning.
-        if (response.status === 404 && path.split('?')[0] === '/v1/client/schedules') {
+        // These projections have no missing-item 404, including an old router's empty response.
+        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
+        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: 'This server does not support schedules.list; upgrade the server',
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
