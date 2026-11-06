@@ -985,6 +985,11 @@ mod tests {
         store
             .apply_internal(&stopped, "intentional-stop-fixture")
             .unwrap();
+        // A stop parsed from a person's or an agent's intent names no owning run, so it never
+        // keeps the mailbox of the declaration it ended, as a run's end does.
+        let ended = store.declaration_ended_by_stop("agent/eval.worker").unwrap().unwrap();
+        assert_eq!(ended.stop.owner_run, None);
+        assert!(ended.declaration.member.is_some());
         assert!(
             store.check_mailbox(&fence).is_err(),
             "a live wrapper must not read after intentional stop"
