@@ -371,9 +371,18 @@ mod tests {
         let wake = Arc::new(Notify::new());
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let queued_events = events.clone();
+        let raw_spool = spool.to_owned();
+        let canonical_spool = spool.canonicalize().unwrap();
         let _watcher = spool_watcher_observed(spool, wake.clone(), move |event| {
             queued_events.lock().unwrap().push(format!(
-                "kind={:?}, paths={:?}, attrs={:?}, need_rescan={}",
+                "raw_spool={raw_spool:?}, canonical_spool={canonical_spool:?}, root_only={}, path_relations={:?}, classification=actionable (not Access, not root Folder-create/Any-or-AccessTime metadata; rescan overrides), kind={:?}, paths={:?}, attrs={:?}, need_rescan={}",
+                !event.paths.is_empty() && event.paths.iter().all(|path| path == &canonical_spool),
+                event.paths.iter().map(|path| {
+                    if path == &canonical_spool { "root" }
+                    else if path.parent() == Some(canonical_spool.as_path()) { "direct-child" }
+                    else if path.starts_with(&canonical_spool) { "descendant" }
+                    else { "outside" }
+                }).collect::<Vec<_>>(),
                 event.kind, event.paths, event.attrs, event.need_rescan()
             ));
         }).unwrap();
