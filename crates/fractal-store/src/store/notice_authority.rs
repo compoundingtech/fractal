@@ -88,9 +88,10 @@ pub(super) fn validate(
     notice::validate_registration(&source_manifest, &source_hash)?;
     anyhow::ensure!(source_fields.get("_registration").and_then(Value::as_str) == Some(source_hash.as_str()),
         "notices unavailable: source registration mismatch");
-    anyhow::ensure!(custom::claims(connection, source_id)?.iter()
-        .filter(|claim| claim.kind == source_manifest.creation_kind).count() == 1,
-        "notices unavailable: conflicting source creations");
+    let source_history = custom::claims(connection, source_id)?;
+    let mut creations = source_history.iter().filter(|claim| claim.kind == source_manifest.creation_kind);
+    anyhow::ensure!(creations.next().is_some_and(|claim| claim.id == source.id) && creations.next().is_none(),
+        "notices unavailable: conflicting or ineligible source creation");
     let recipient = source_fields.get("recipient").and_then(Value::as_str)
         .filter(|p| p.starts_with("person/"))
         .ok_or_else(|| unavailable("invalid source recipient"))?;
