@@ -274,7 +274,7 @@ impl RuntimeStartsStore for Store {
                 .filter(|(path, _)| path == &self.path)
                 .map(|(_, epoch)| *epoch)
         });
-        let admission = |connection: &Connection| -> Result<(), St3Error> {
+        let admission = |connection: &Connection| -> Result<(), FractalError> {
             let latest: Option<RuntimeStartOperation> = connection.query_row(
                 "SELECT * FROM local_runtime_starts WHERE subject=?1
                  AND json_extract(result,'$.verification') IN ('operation-incarnation','operation-ended','operation-retired')
@@ -300,7 +300,7 @@ impl RuntimeStartsStore for Store {
                 if observed != Some(actual)
                     && (stale_capture || (observed.is_some() && observed == prior))
                 {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "stale-runtime-observation",
                         "physical snapshot precedes the verified start incarnation",
                     ));

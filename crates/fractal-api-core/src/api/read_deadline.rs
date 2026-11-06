@@ -399,8 +399,8 @@ async fn envelope_work(
 pub enum WorkError {
     Join(tokio::task::JoinError),
     Panic,
-    Deadline(crate::model::St3Error),
-    Store(crate::model::St3Error),
+    Deadline(crate::model::FractalError),
+    Store(crate::model::FractalError),
 }
 
 impl std::fmt::Display for WorkError {
@@ -827,11 +827,11 @@ pub fn query<T>(
 
 pub fn error(error: &WorkError) -> Option<ApiError> {
     match error {
-        WorkError::Deadline(_) => Some(ApiError::bad(crate::model::St3Error::new(
+        WorkError::Deadline(_) => Some(ApiError::bad(crate::model::FractalError::new(
             "read-deadline",
             "the read exceeded its deadline or was cancelled",
         ))),
-        WorkError::Store(error) => Some(ApiError::bad(crate::model::St3Error {
+        WorkError::Store(error) => Some(ApiError::bad(crate::model::FractalError {
             code: error.code,
             message: error.message.clone(),
             details: error.details.clone(),
@@ -1857,9 +1857,9 @@ use super::*;
                     writing.connection.batched(|transaction| {
                         transaction.execute(
                             "INSERT INTO meta(key,value) VALUES('blocking-ack','committed')", [],
-                        ).map_err(|error| crate::model::St3Error::new("internal", error.to_string()))?;
+                        ).map_err(|error| crate::model::FractalError::new("internal", error.to_string()))?;
                         Ok(())
-                    }).map_err(|error| crate::model::St3Error::new("internal", error))?
+                    }).map_err(|error| crate::model::FractalError::new("internal", error))?
                 }))
             }).await;
             let acknowledged_before_release = !released_flag.load(Ordering::SeqCst);
@@ -2472,7 +2472,7 @@ use super::*;
                         read_budget::check()?;
                         count.fetch_add(1, Ordering::Relaxed);
                     }
-                    Ok::<_, crate::model::St3Error>(())
+                    Ok::<_, crate::model::FractalError>(())
                 })();
                 let _ = done_tx.send(result);
             })
@@ -2521,7 +2521,7 @@ use super::*;
                         std::hint::black_box(items);
                     }
                     #[allow(unreachable_code)]
-                    Ok::<_, crate::model::St3Error>(())
+                    Ok::<_, crate::model::FractalError>(())
                 })();
                 let _ = done_tx.send((items, result));
             })

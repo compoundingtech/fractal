@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 use crate::model::MessageView;
 use smallclaims::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
-use smallclaims::error::Error as St3Error;
+use smallclaims::error::Error as FractalError;
 use smallclaims::store::runtime::{IncrementalProjection, LegacyDigestTable, Runtime};
 use smallclaims::store::{
     DropPlan, ReplicatedClaimAdmission, SealedSet, Store as GraphStore, append_claim_record_tx,
@@ -315,7 +315,7 @@ pub fn record_fenced_lifecycle(
     kind: &str,
     actor: Option<&str>,
     fields: &std::collections::BTreeMap<String, Value>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     {
         let connection = graph.readers.get();
         super::check_mailbox_fence(&connection, fence, &graph.graph.origin)?;
@@ -332,7 +332,7 @@ pub fn record_lifecycle(
     kind: &str,
     actor: Option<&str>,
     fields: &std::collections::BTreeMap<String, Value>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     record_lifecycle_checked(graph, subject, kind, actor, fields, true)
 }
 
@@ -344,7 +344,7 @@ pub fn record_admitted_lifecycle(
     kind: &str,
     actor: Option<&str>,
     fields: &std::collections::BTreeMap<String, Value>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     record_lifecycle_checked(graph, subject, kind, actor, fields, false)
 }
 
@@ -355,18 +355,18 @@ fn record_lifecycle_checked(
     actor: Option<&str>,
     fields: &std::collections::BTreeMap<String, Value>,
     checked: bool,
-) -> Result<bool, St3Error> {
-    let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
+) -> Result<bool, FractalError> {
+    let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
     let shard = shard(graph)
-        .ok_or_else(|| St3Error::new("missing-message", "this member holds no messages shard"))?;
+        .ok_or_else(|| FractalError::new("missing-message", "this member holds no messages shard"))?;
     let rank = lifecycle_rank(kind)
         .filter(|rank| *rank > 0)
-        .ok_or_else(|| St3Error::new("invalid-message-transition", format!("`{kind}` is not a lifecycle step")))?;
+        .ok_or_else(|| FractalError::new("invalid-message-transition", format!("`{kind}` is not a lifecycle step")))?;
     if matches!(kind, "message.read" | "message.closed") && actor.is_none() {
-        return Err(St3Error::new("missing-message-actor", format!("`{kind}` needs an actor")));
+        return Err(FractalError::new("missing-message-actor", format!("`{kind}` needs an actor")));
     }
     let Some((sent, _)) = stream_item(&shard, subject).map_err(internal)? else {
-        return Err(St3Error::new("missing-message", format!("no stream item `{subject}`")));
+        return Err(FractalError::new("missing-message", format!("no stream item `{subject}`")));
     };
     // The step is decided and recorded under the shard's writer, in one transaction, so two
     // steps at once can't both pass a check made before either was recorded.
@@ -401,7 +401,7 @@ fn record_lifecycle_checked(
         || (rank == 4 && fields.contains_key("delegation"));
     if !valid {
         const STATUS: [&str; 5] = ["sent", "staged", "delivered", "read", "closed"];
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-message-transition",
             format!(
                 "message `{subject}` cannot move from `{}` to `{}`",
@@ -434,7 +434,7 @@ fn record_lifecycle_checked(
             .and_then(|fields| serde_json::from_str::<Value>(&fields).ok())
             .is_some_and(|recorded| recorded.get("acting_for") == acting_for.as_ref());
         if !same {
-            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+            return Err(FractalError::new("invalid-message-transition", "custody read is already recorded"));
         }
     }
     transaction.commit().map_err(internal)?;
@@ -603,9 +603,9 @@ const ASSISTANT_FIELDS: &[&str] = &[
 pub struct MessagesRuntime;
 
 /// Refuse anything the stream may not carry, before the schema checks the fields.
-fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), St3Error> {
+fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), FractalError> {
     if kind != "message.sent" {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "shard-kind-refused",
             format!("the messages shard holds only message.sent claims, not `{kind}`"),
         ));
@@ -614,13 +614,13 @@ fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<
     if actor.is_some_and(|actor| actor.starts_with("person/"))
         || from.is_some_and(|from| from.starts_with("person/"))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "shard-kind-refused",
             "a person's message stays a graph claim: its device signature is judged there",
         ));
     }
     if ASSISTANT_FIELDS.iter().any(|field| fields.get(field).is_some()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "shard-kind-refused",
             "an external assistant's message stays a graph claim: its grant is judged there",
         ));
@@ -629,7 +629,7 @@ fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<
 }
 
 /// Whether the messages shard admits this replicated claim.
-pub fn classify_stream_item(claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, St3Error> {
+pub fn classify_stream_item(claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, FractalError> {
     refuse_ineligible(
         &claim.kind,
         claim.actor.as_deref(),
@@ -638,13 +638,13 @@ pub fn classify_stream_item(claim: &ClaimRecord) -> Result<ReplicatedClaimAdmiss
     super::classify_replicated_claim_with_registry(claim, fractal_schema::registry())
 }
 
-fn validate_input(input: &ClaimInput) -> Result<(), St3Error> {
+fn validate_input(input: &ClaimInput) -> Result<(), FractalError> {
     let fields = serde_json::to_value(&input.fields).unwrap_or(Value::Null);
     refuse_ineligible(&input.kind, input.actor.as_deref(), &fields)?;
     fractal_schema::registry()
         .validate_claim(&input.subject, &input.kind, &input.fields)
         .map(|_| ())
-        .map_err(|error| St3Error::new(error.code, error.message))
+        .map_err(|error| FractalError::new(error.code, error.message))
 }
 
 impl Runtime for MessagesRuntime {
@@ -675,7 +675,7 @@ impl Runtime for MessagesRuntime {
         _connection: &Connection,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Result<ReplicatedClaimAdmission, St3Error> {
+    ) -> Result<ReplicatedClaimAdmission, FractalError> {
         classify_stream_item(claim)
     }
 
@@ -683,7 +683,7 @@ impl Runtime for MessagesRuntime {
         &self,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Option<Result<ReplicatedClaimAdmission, St3Error>> {
+    ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
         // The answer depends only on the claim and this build's schema.
         Some(classify_stream_item(claim))
     }
@@ -692,7 +692,7 @@ impl Runtime for MessagesRuntime {
         &self,
         store: &GraphStore,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         validate_input(input)?;
         let body = json!({ "fields": input.fields, "evidence": input.evidence });
         store
@@ -711,7 +711,7 @@ impl Runtime for MessagesRuntime {
                 .map(|claim| (claim, true))
                 .map_err(smallclaims::error::typed)
             })
-            .map_err(|error| St3Error::new("internal", error))?
+            .map_err(|error| FractalError::new("internal", error))?
     }
 
     fn apply_repair_tx(
@@ -752,15 +752,15 @@ impl Runtime for MessagesRuntime {
         _transaction: &Transaction<'_>,
         _origin: &str,
         _through: u64,
-    ) -> Result<IncrementalProjection, St3Error> {
+    ) -> Result<IncrementalProjection, FractalError> {
         Ok(IncrementalProjection::Projected)
     }
 
-    fn replay_from_nothing(&self, _transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn replay_from_nothing(&self, _transaction: &Transaction<'_>) -> Result<(), FractalError> {
         Ok(())
     }
 
-    fn after_projection(&self, _transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn after_projection(&self, _transaction: &Transaction<'_>) -> Result<(), FractalError> {
         Ok(())
     }
 

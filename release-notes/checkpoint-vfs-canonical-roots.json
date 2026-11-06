@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "summary": "Match checkpoint proof admission roots to SQLite's resolved filesystem paths",
+  "replay": { "status": "none", "detail": "Proof VFS path classification only; no replay changes." },
+  "schema": { "status": "none", "detail": "No schema or migration changes." },
+  "rules": { "status": "none", "detail": "No rule, checkpoint payload or digest changes." },
+  "compatibility": {
+    "status": "none",
+    "detail": "The proof VFS canonicalizes its existing live, scratch and temporary roots before comparing SQLite filenames, so symlinked temporary directories reach the guarded write path instead of being rejected as unknown. The mandatory self-test still requires an actual refused write; unknown and live-file writes remain refused. Failed self-tests now retain their original attempt and refusal diagnostics. A symlink-root regression covers refusal and cleanup."
+  },
+  "downtime": { "status": "none", "detail": "No production restart change." },
+  "manual": { "status": "none", "detail": "No installation action." },
+  "recovery": { "status": "none", "detail": "No database or recovery change." }
+}

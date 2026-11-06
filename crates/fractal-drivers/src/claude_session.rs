@@ -6,9 +6,9 @@
 //! itself lives in [`crate::provider_session`], which every interactive harness wrapper shares.
 //!
 //! Observed harness state for Claude has two producers with one owner each: hook invocations
-//! (`st2 driver claude-observe`, [`run_observe`]) write turn transitions, and the wrapper's poll
-//! loop re-stamps and terminates the record through [`SessionObserver`] without ever overwriting a
-//! state a hook wrote in between.
+//! ([`run_observe_payload_paths`] and [`run_observe_payload`]) write turn transitions. The wrapper's
+//! poll loop re-stamps and terminates the record through [`SessionObserver`] without ever
+//! overwriting a state a hook wrote in between.
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -1163,30 +1163,6 @@ pub fn residency_ready(
     crate::residency::atomic_json(&state_dir.join(BINDING_FILE), &candidate)?;
     let _ = fs::remove_file(state_dir.join(PENDING_BINDING_FILE));
     Ok(true)
-}
-
-pub fn run_observe(
-    catalog_root: &Path,
-    identity: &str,
-    runtime_id: Option<&str>,
-    event: &str,
-) -> Result<()> {
-    let agent_dir =
-        message::resolve_declared_dir(catalog_root, identity, &crate::run::detect_host())?
-            .with_context(|| format!("Claude driver agent '{identity}' is not declared"))?;
-    let mut raw = String::new();
-    let _ = std::io::stdin().read_to_string(&mut raw);
-    let var = |name: &str| std::env::var(name).ok();
-    observe_payload(
-        &state_dir(catalog_root, identity),
-        &agent_dir,
-        false,
-        identity,
-        runtime_id,
-        event,
-        &raw,
-        &var,
-    )
 }
 
 /// Apply one Claude hook event whose payload the caller already read. st3 answers its seats'

@@ -31,7 +31,7 @@ pub async fn change_transports(
 ) -> Result<Json<Value>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-transport-actor")?;
     if request.mutation_id.is_empty() {
-        return Err(ApiError::bad(St3Error::new("invalid-transport-mutation", "mutation_id is required")));
+        return Err(ApiError::bad(FractalError::new("invalid-transport-mutation", "mutation_id is required")));
     }
     if request.dry_run {
         return Ok(Json(json!({"authorized": true})));
@@ -113,7 +113,7 @@ pub async fn fleet_invite_create(
 ) -> Result<Json<FleetInviteCreated>, ApiError> {
     concrete_person(&request.person)?;
     let fleet_id = state.fleet_id.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "not-in-a-fleet",
             "this node is not in a fleet; run st fleet create first",
         ))
@@ -340,7 +340,7 @@ pub async fn fleet_pairing_admission(
     Json(request): Json<FleetPairingAdmission>,
 ) -> Result<Json<smallclaims::fleet::handshake::JoinResponse>, ApiError> {
     let fleet_id = state.fleet_id.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new("not-in-a-fleet", "this node is not in a fleet"))
+        ApiError::bad(FractalError::new("not-in-a-fleet", "this node is not in a fleet"))
     })?;
     let sponsor_key = state.store.member_public_key().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("this fleet has no member signing key"))

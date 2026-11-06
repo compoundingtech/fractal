@@ -11,8 +11,8 @@ latest_critique=0
 for recipient in fd.a fd.b fd.c; do
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   recipient_agent="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$recipient"
-  inbox="$(st3 conversations ls "$recipient_agent" --json)"
-  archive="$(st3 conversations ls "$recipient_agent" --archive --json)"
+  inbox="$(fractal conversations ls "$recipient_agent" --json)"
+  archive="$(fractal conversations ls "$recipient_agent" --archive --json)"
   messages="$(jq -s 'add | unique_by(.subject)' <(printf '%s' "$inbox") <(printf '%s' "$archive"))"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   critiques="$(jq --arg recipient "$recipient_agent" --arg prefix "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/fd." --arg run_tag "$run_tag" '
@@ -29,8 +29,8 @@ for recipient in fd.a fd.b fd.c; do
   fi
 done
 
-requester_inbox="$(st3 conversations ls person/eval-requester --json)"
-requester_archive="$(st3 conversations ls person/eval-requester --archive --json)"
+requester_inbox="$(fractal conversations ls person/eval-requester --json)"
+requester_archive="$(fractal conversations ls person/eval-requester --archive --json)"
 requester_messages="$(jq -s 'add | unique_by(.subject)' <(printf '%s' "$requester_inbox") <(printf '%s' "$requester_archive"))"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 recommendations="$(jq --arg run_tag "$run_tag" --arg sup "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/fd.sup" '

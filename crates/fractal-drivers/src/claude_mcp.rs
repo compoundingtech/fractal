@@ -344,8 +344,8 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_owned();
-        assert!(instructions.contains("answered in this conversation"));
-        assert!(instructions.contains("people have no inbox, so do not reply with st"));
+        assert!(instructions.contains(crate::ding::PERSON_REPLY_INSTRUCTION));
+        assert!(instructions.contains("even when the person is present"));
         assert!(instructions.contains("conversations reply"));
     }
 
