@@ -136,7 +136,7 @@ pub struct World {
 /// A client connected to this member, as it describes itself.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Connected {
-    /// Its reported name and build, "stui 0.1.0+ab12cd3"; empty when it sent none.
+    /// Its reported name and build, "fractal-tui 0.1.0+ab12cd3"; empty when it sent none.
     pub client: String,
     /// The person or agent it acts for, and the paired device when one is acting.
     pub who: String,
