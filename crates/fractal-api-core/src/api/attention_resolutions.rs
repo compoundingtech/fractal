@@ -13,6 +13,7 @@ pub async fn get(
     State(state): State<AppState>, Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>, Query(locator): Query<Locator>,
 ) -> Result<Json<Value>, ApiError> {
+    client_v0::require_scope(&session, "read.projections")?;
     if !session.authority_actor.starts_with("person/") {
         return Err(ApiError::bad(St3Error::new("forbidden", "Attention resolutions require an authenticated person")));
     }
