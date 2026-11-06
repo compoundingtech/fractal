@@ -135,9 +135,12 @@ const PromptAlert = ({
   const [status, setStatus] = React.useState<string>()
   const [sending, setSending] = React.useState(false)
   const optimistic = alert.optimisticAnswer
-  const held = sending || optimistic !== undefined
+  const held = sending || optimistic !== undefined || alert.optimisticResolvedBy !== undefined
   const note = optimistic?.phase === 'sending' ? 'Sending answer…' : optimistic?.phase === 'accepted'
-    ? 'Answered. The alert clears once the harness moves on.' : status
+    ? 'Answered. The alert clears once the harness moves on.' : alert.optimisticNote ?? status
+  React.useEffect(() => {
+    if (alert.optimisticResolvedBy !== undefined) setChosen([])
+  }, [alert.optimisticResolvedBy])
   const offered = prompt === null || onAnswer === undefined ? [] : servedAnswers(prompt, served)
   const questions = pendingQuestions(shown.filter(call => call.complete === true))
   const gated = prompt?.answers.find((answer) => answer === 'allow' || answer === 'approve' || answer === 'answer')
@@ -158,6 +161,7 @@ const PromptAlert = ({
     setStatus(`Answering ${answerLabel(answer).toLowerCase()}…`)
     void onAnswer(alert, answer, sent).then((result) => {
       setSending(false)
+      if (result._tag === 'Refused' && result.alreadyAnsweredBy !== undefined) setChosen([])
       setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once the harness moves on.' : result.detail)
     })
   }

@@ -286,9 +286,12 @@ export const AnswerAlert = ({
   const [sending, setSending] = React.useState(false)
   const [status, setStatus] = React.useState<string>()
   const optimistic = alert.optimisticAnswer
-  const held = sending || optimistic !== undefined
+  const held = sending || optimistic !== undefined || alert.optimisticResolvedBy !== undefined
   const note = optimistic?.phase === 'sending' ? 'Sending answer…' : optimistic?.phase === 'accepted'
     ? 'Answered. The alert clears once Fractal records it.' : alert.optimisticNote ?? status
+  React.useEffect(() => {
+    if (alert.optimisticResolvedBy !== undefined) { setWords(''); setConfirming(undefined) }
+  }, [alert.optimisticResolvedBy])
   // A new revision may carry a new question under the same id: a pending confirmation or an
   // earlier answer's status belongs to the revision the person read. Their words stay theirs.
   const [read, setRead] = React.useState(alert.revision)
@@ -306,6 +309,7 @@ export const AnswerAlert = ({
     setStatus(`Sending “${label}”…`)
     void onAct(alert, action).then((result) => {
       setSending(false)
+      if (result._tag === 'Refused' && result.alreadyAnsweredBy !== undefined) setWords('')
       setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once Fractal records it.' : result.detail)
     })
   }

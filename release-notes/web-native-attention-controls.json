@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Route native inbox dismiss, restore and snooze through shared optimistic mutations with receipt-fenced Undo. Small-action refusals restore the alert with a visible note; bounded-page omission never proves native control application.",
+  "replay": {"status": "none", "detail": "Same-key transport retries preserve the exact prepared request, including semantic source revision and control CAS. Undo submits a fresh action key."},
+  "schema": {"status": "none", "detail": "Uses existing generated attention control actions and presentation metadata."},
+  "rules": {"status": "none", "detail": "Native controls change presentation only and never answer waiting work."},
+  "compatibility": {"status": "none", "detail": "Alerts without native control metadata refuse honestly. Existing minimal prompt callers, structured Dismiss and message-read actions remain supported."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert the web adapter change; accepted controls remain server-owned presentation state."}
+}

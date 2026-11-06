@@ -190,6 +190,8 @@ export const liveSource = ({
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
   const networkLoss = Atom.keepAlive(Atom.make<FeedSyncObservation | undefined>(undefined))
   const degradeReaders = new Set<(status: SyncStatus) => void>()
+  const reconnectReaders = new Set<() => void>()
+  let connectionLive = false
   const network = Atom.keepAlive(Atom.make<NetworkReachability>({
     _tag: typeof navigator !== 'undefined' && navigator.onLine === false ? 'Offline' : 'Online',
   }))
@@ -213,6 +215,9 @@ export const liveSource = ({
       onDiagnostics: (event) => {
         switch (event._tag) {
           case 'Connection':
+            if (event.state._tag === 'Live' && !connectionLive)
+              for (const refresh of reconnectReaders) refresh()
+            connectionLive = event.state._tag === 'Live'
             if (event.state._tag === 'Live' && !online) {
               // A successful transport attempt overrides a false browser offline hint.
               online = true
@@ -759,6 +764,7 @@ export const liveSource = ({
   })
   const missions = missionsRetained.atom
   const inboxActions = optimisticAlertActions(gatewayAlertActions(client))
+  reconnectReaders.add(() => { runtime.runFork(inboxActions.refreshProofs) })
   const inboxState = Atom.subscriptionRef(inboxActions.state)
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
@@ -1282,7 +1288,7 @@ export const liveSource = ({
       },
       terminalResize: gatewayTerminalResize(client),
       agentControls: gatewayAgentControls(client),
-      prompts: { respond: ({ alert, answer }) => inboxActions.port.act({ alert,
+      prompts: { respond: ({ alert, answer }) => inboxActions.port.act({ alert: { ...alert, attention_kind: 'harness-prompt' },
         action: { type: 'prompt.respond', target_id: alert.target_id, episode: alert.episode, answer } }) },
       alertActions: inboxActions.port,
       documents: gatewayDocuments(client),

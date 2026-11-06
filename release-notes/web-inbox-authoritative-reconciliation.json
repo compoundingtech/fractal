@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reconcile inbox overlays only from original-source authoritative proofs",
+  "replay": { "status": "none", "detail": "Unconfirmed answers retain their original idempotency key across reconnects." },
+  "schema": { "status": "none", "detail": "Consume exact resolution and presentation-control receipts after acknowledgement and on reconnect, without polling." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "additive", "detail": "Bounded feed omission and unrelated revisions no longer settle answers. Proven actor conflicts discard local drafts and show the actual answering actor." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Failed point reads keep acknowledged overlays until an authoritative proof becomes available." }
+}
