@@ -522,6 +522,8 @@ The feedback document is immutable. The next round receives its exact reference 
 
 After the exit gates answer, the round writes a second feedback document, `doc/loop-feedback/<loop>/<round>/outcome`, and the next round receives that one. It records the round's keep or discard decision, its metrics, and what each `until` gate answered (`passed`, `failed` with its reason, `not-yet`, or `pending`), plus the names of the gates that did not pass. A round whose exit gates are still running keeps the first document until they answer. The outcome document holds neither the round number nor the child run, so two rounds that end the same way store identical content.
 
+Loop paths containing `@` or `..` instead use `doc/loop-feedback-escaped/`, with `%`, `@` and `..` percent-escaped; other names stay unchanged. A name exceeding the 512-byte claim-subject limit fails explicitly rather than being truncated.
+
 A metric has `direction="higher"` or `direction="lower"`. Its value must be a finite number.
 
 A metric can read a numeric resource field, run an exec command, or normalize one exit gate to zero or one.

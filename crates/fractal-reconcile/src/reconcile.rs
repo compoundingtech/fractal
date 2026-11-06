@@ -12628,10 +12628,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         keep: bool,
         results: &[LoopGateResult],
     ) -> Result<String> {
-        let name = format!(
-            "doc/loop-feedback/{}/{round}/outcome",
-            loop_feedback_document_path(loop_subject),
-        );
+        let name = loop_feedback_document_name(loop_subject, round, "/outcome")?;
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "decision": if keep { "keep" } else { "discard" },
             "metrics": metrics,
@@ -12661,10 +12658,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         candidate: Option<u32>,
     ) -> Result<String> {
         let suffix = candidate.map_or_else(String::new, |value| format!("/candidate-{value}"));
-        let name = format!(
-            "doc/loop-feedback/{}/{round}{suffix}",
-            loop_feedback_document_path(loop_subject),
-        );
+        let name = loop_feedback_document_name(loop_subject, round, &suffix)?;
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "loop": loop_subject,
             "round": round,
@@ -20281,26 +20275,47 @@ fn with_failing_gates(reason: &str, failing: &str) -> String {
     }
 }
 
-fn loop_feedback_document_path(subject: &str) -> std::borrow::Cow<'_, str> {
+fn loop_feedback_document_name(subject: &str, round: u32, suffix: &str) -> Result<String> {
+    use std::fmt::Write as _;
     let path = subject.strip_prefix("loop-run/").unwrap_or(subject);
-    let extra = path.matches('@').count() * 4 + path.matches("..").count() * 5;
-    if extra == 0 {
-        return std::borrow::Cow::Borrowed(path);
-    }
-    // IDs cannot contain `//`, so these escapes cannot collide with an unescaped path.
-    let mut escaped = String::with_capacity(path.len() + extra);
-    let mut chars = path.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '@' => escaped.push_str("//40/"),
-            '.' if chars.peek() == Some(&'.') => {
-                chars.next();
-                escaped.push_str("//2e2e/");
+    let encode = path.contains('@') || path.contains("..");
+    // A sibling prefix separates escaped names from every unchanged legacy name.
+    let prefix = if encode {
+        "doc/loop-feedback-escaped/"
+    } else {
+        "doc/loop-feedback/"
+    };
+    let extra = if encode {
+        2 * (path.matches('@').count() + path.matches('%').count()) + 4 * path.matches("..").count()
+    } else {
+        0
+    };
+    let size =
+        prefix.len() + path.len() + extra + 2 + round.max(1).ilog10() as usize + suffix.len();
+    anyhow::ensure!(
+        size <= 512,
+        "loop feedback document name exceeds the 512-byte claim-subject limit"
+    );
+    let mut name = String::with_capacity(size);
+    name.push_str(prefix);
+    if encode {
+        let mut chars = path.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '@' => name.push_str("%40"),
+                '%' => name.push_str("%25"),
+                '.' if chars.peek() == Some(&'.') => {
+                    chars.next();
+                    name.push_str("%2e%2e");
+                }
+                _ => name.push(ch),
             }
-            _ => escaped.push(ch),
         }
+    } else {
+        name.push_str(path);
     }
-    std::borrow::Cow::Owned(escaped)
+    write!(&mut name, "/{round}{suffix}")?;
+    Ok(name)
 }
 
 /// The document name and content hash of a round's outcome document reference.
@@ -34621,6 +34636,7 @@ version 2
 
     #[test]
     fn loop_document_paths_escape_only_invalid_names_without_collisions() {
+        let store = Store::open_memory("node").unwrap();
         let paths = [
             "g/repeat",
             "g/a@b",
@@ -34630,20 +34646,29 @@ version 2
             "g/a/40/b",
             "g/a/2e2e/b",
             "g/a%40b",
+            "g/a%40b@v1",
+            "g/a@b%40v1",
             "g/a/@/../b",
         ];
         let mut names = BTreeSet::new();
         for path in paths {
             let subject = format!("loop-run/{path}");
-            let encoded = loop_feedback_document_path(&subject);
+            let name = loop_feedback_document_name(&subject, 1, "/outcome").unwrap();
             if !path.contains('@') && !path.contains("..") {
-                assert_eq!(encoded, path);
-                assert!(matches!(encoded, std::borrow::Cow::Borrowed(_)));
+                assert_eq!(name, format!("doc/loop-feedback/{path}/1/outcome"));
             }
-            let name = format!("doc/loop-feedback/{encoded}/1/outcome");
-            smallclaims::store::validate_document_name(&name).unwrap();
+            store
+                .put_document(&name, b"{}", &None, &format!("loop-doc:{path}"))
+                .unwrap();
             assert!(names.insert(name));
         }
+        let long = format!("loop-run/g/{}repeat", "deep/".repeat(96));
+        assert!(
+            loop_feedback_document_name(&long, 1, "/outcome")
+                .unwrap_err()
+                .to_string()
+                .contains("512-byte claim-subject limit")
+        );
     }
 
     #[test]
@@ -34742,11 +34767,11 @@ mission "collision" state="ready" {
             assert_eq!(
                 name,
                 format!(
-                    "doc/loop-feedback/{generation}/{}/1/outcome",
+                    "doc/loop-feedback-escaped/{generation}/{}/1/outcome",
                     if own_gate == "left-ready" {
-                        "left//40/v1/left-inner/repeat"
+                        "left%40v1/left-inner/repeat"
                     } else {
-                        "right//2e2e/v1/right-inner/repeat"
+                        "right%2e%2ev1/right-inner/repeat"
                     }
                 )
             );
