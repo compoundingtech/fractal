@@ -85,3 +85,54 @@ pub fn admit_claim(tx: &Connection, actor: &str, step: &str) -> Result<(), Fract
     };
     if held { Ok(()) } else { Err(stopping(actor)) }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A run counts as held when this host recorded its creation before the stop, or no longer
+    /// has its creation record at all; a run created after the stop does not.
+    #[test]
+    fn a_run_created_before_the_stop_or_with_no_creation_record_holds_the_seat() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            r#"CREATE TABLE mission_runs(id,root_run_id,status,phase,current_generation_id);
+            CREATE TABLE step_runs(subject,run_id,generation_id,assignee,lease_owner,status);
+            CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject,kind);
+            INSERT INTO mission_runs VALUES
+                ('ended','ended','completed','terminal','g0'),
+                ('before','before','running','normal','g1'),
+                ('unrecorded','unrecorded','running','normal','g2'),
+                ('after','after','running','normal','g3');
+            INSERT INTO step_runs VALUES
+                ('step-run/before/unit','before','g1','agent/example/worker',NULL,'ready'),
+                ('step-run/unrecorded/unit','unrecorded','g2','agent/example/worker',NULL,'ready'),
+                ('step-run/after/unit','after','g3','agent/example/worker',NULL,'ready');
+            INSERT INTO claims VALUES
+                (5,'mission-run/before','mission-run.created'),
+                (8,'mission-run/unrecorded','mission-run.state'),
+                (12,'mission-run/after','mission-run.created');"#,
+        )
+        .unwrap();
+        let held = |before| {
+            super::held_work(
+                &db,
+                "agent/example/worker",
+                "mission-run/ended",
+                before,
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            held(Some(10)),
+            ["step-run/before/unit", "step-run/unrecorded/unit"]
+        );
+        assert_eq!(
+            held(None),
+            [
+                "step-run/after/unit",
+                "step-run/before/unit",
+                "step-run/unrecorded/unit"
+            ]
+        );
+    }
+}
