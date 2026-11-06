@@ -1660,7 +1660,7 @@ mod login_source_tests {
         let observe = |state: &str| store.append_claim(&ClaimInput {
             subject: seat.into(), kind: "harness.observed".into(), actor: Some(seat.into()),
             fields: serde_json::from_value(json!({
-                "state": state, "driver": "claude", "incarnation_id": "one"
+                "state": "working", "provider_auth": state != "needs-login", "driver": "claude", "incarnation_id": "one"
             })).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();

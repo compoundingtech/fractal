@@ -1216,8 +1216,7 @@ impl Store {
              ) FROM claims request WHERE request.id=?1",
             canonical::after_sql("newer", "request"),
         )));
-        /* sqlite-large-value: allow-for-now lv-h39d90a315c78 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */
-        let current: bool = connection.query_row(&*CURRENT, [episode], |row| row.get(0))?;
+        let current: bool = connection.query_row(/* sqlite-large-value: allow-for-now lv-h39d90a315c78 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &*CURRENT, [episode], |row| row.get(0))?;
         if !current { return Ok(None); }
         let failure = Self::operational_failure_view(claim);
         Ok(self.broken_gate_item(connection, failure, Some(person), as_of)?
