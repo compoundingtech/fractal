@@ -36,6 +36,8 @@ pub mod identities;
 // Prepared internally; no accepted gate kind or production caller dispatches here.
 #[allow(dead_code)]
 pub(crate) mod agent_review_answer;
+#[allow(dead_code)]
+pub(crate) mod agent_review_decode;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
