@@ -256,6 +256,9 @@ mod message_outbox_tests;
 pub mod relayed_closes;
 #[cfg(test)]
 mod relayed_closes_tests;
+pub mod stream_mirror;
+#[cfg(test)]
+mod stream_mirror_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};

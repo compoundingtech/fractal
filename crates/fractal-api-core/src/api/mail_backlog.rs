@@ -154,10 +154,12 @@ fn relayed_backlog(
         .readers
         .get()
         .prepare_cached(
-            "SELECT unread.subject, json_extract(sent.body,'$.fields.to') FROM unread_mail unread
-             JOIN claims sent ON sent.subject=unread.subject AND sent.kind='message.sent'
+            "SELECT unread.subject, COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to')) AS recipient
+             FROM unread_mail unread
+             LEFT JOIN claims sent ON sent.subject=unread.subject AND sent.kind='message.sent'
+             LEFT JOIN local_stream_sent stream ON stream.subject=unread.subject
              WHERE unread.sent_time < ?1
-               AND json_extract(sent.body,'$.fields.to') IN (SELECT value FROM json_each(?2))
+               AND recipient IN (SELECT value FROM json_each(?2))
                AND NOT EXISTS(SELECT 1 FROM coordination_sends held WHERE held.subject=unread.subject AND held.held=1)
              LIMIT ?3",
         )?

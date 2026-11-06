@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 pub mod mailbox_reads;
 pub mod stream_reads;
+pub mod stream_operations;
 
 /// The shard's ID, its directory under the store root and its name on the replication wire.
 pub const SHARD_ID: &str = "messages";
@@ -655,6 +656,7 @@ impl Runtime for MessagesRuntime {
     fn create_schema(&self, connection: &Connection) -> anyhow::Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbed1ce264b3a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_operations::LOCAL_SCHEMA)?;
         Ok(())
     }
 
@@ -694,11 +696,19 @@ impl Runtime for MessagesRuntime {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), St3Error> {
         validate_input(input)?;
+        // An idempotency key replays as it does in the graph: the same request returns the claim it
+        // wrote, and another request under the key is refused.
+        let operation = smallclaims::store::claim_operation(input)?;
         let body = json!({ "fields": input.fields, "evidence": input.evidence });
         store
             .connection
             .batched(|transaction| {
-                append_claim_record_tx(
+                if let Some((operation_id, request_digest)) = &operation
+                    && let Some(claim) = stream_operations::replay_tx(transaction, operation_id, request_digest)?
+                {
+                    return Ok((claim, false));
+                }
+                let claim = append_claim_record_tx(
                     transaction,
                     &store.origin,
                     &input.subject,
@@ -708,8 +718,12 @@ impl Runtime for MessagesRuntime {
                     &[],
                     None,
                 )
-                .map(|claim| (claim, true))
-                .map_err(smallclaims::error::typed)
+                .map_err(smallclaims::error::typed)?;
+                if let Some((operation_id, request_digest)) = &operation {
+                    stream_operations::record_tx(transaction, operation_id, request_digest, &claim.id)
+                        .map_err(smallclaims::error::typed)?;
+                }
+                Ok((claim, true))
             })
             .map_err(|error| St3Error::new("internal", error))?
     }

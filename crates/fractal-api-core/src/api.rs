@@ -8120,8 +8120,10 @@ pub fn relayed_held_mail(
             .get()
             .prepare_cached(
                 "SELECT held.subject, held.sent_ms FROM coordination_sends held
-                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
-                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
                  LIMIT ?3",
             )?
             .query_map(

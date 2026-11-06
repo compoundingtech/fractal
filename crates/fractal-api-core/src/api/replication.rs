@@ -636,13 +636,16 @@ pub async fn shard_replication_wake(
 pub async fn test_shard_append(
     State(state): State<AppState>,
     Json(input): Json<smallclaims::claim::ClaimInput>,
-) -> Result<Json<smallclaims::claim::ClaimRecord>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
-    let claim = blocking_action(move || store.append_claim(&input)).await?;
+    let (claim, appended) = blocking_action(move || store.append_claim_outcome(&input)).await?;
     // The dialers wake on the graph's replication file, as they do for a graph write.
     let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
     stream_admitted(&state).await;
-    Ok(Json(claim))
+    // The claim, and whether this append wrote it or replayed its idempotency key's send.
+    let mut answer = serde_json::to_value(claim).map_err(ApiError::internal)?;
+    answer["appended"] = serde_json::Value::Bool(appended);
+    Ok(Json(answer))
 }
 
 /// Test support: the claims the messages shard holds about one subject.

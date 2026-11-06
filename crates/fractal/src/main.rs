@@ -7358,7 +7358,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
-                    "messages_stream": u8::from(messages_shard.is_ok())}),
+                    "messages_stream": u8::from(messages_shard.is_ok()),
+                    // Counts its stream mail in its idle, unread, held and usage indexes. It
+                    // says nothing about routing: `messages_stream_inbox` will (4c-2a-3).
+                    "messages_stream_mirror": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -7492,6 +7495,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
+    spawn_stream_mirror(store.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -20885,6 +20889,50 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 /// is in this build, a commit costs no more than that. A message a drain could not write (the
 /// shard or the graph refused it, or the drain failed) is tried again after a pause, not on every
 /// commit, so it never holds up new mail.
+/// Mirror the messages shard into the graph's mail indexes (store/stream_mirror.rs): once at
+/// start, which catches up on what a crash left unmirrored, then after each shard commit. A
+/// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
+/// after a pause; the cursors keep what it already mirrored.
+fn spawn_stream_mirror(store: Arc<Store>) {
+    const RETRY: Duration = Duration::from_secs(30);
+    let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
+        return;
+    };
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = shard.observe_commits(move |_| {
+        changed.send_replace(());
+    });
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.stream_mirror", async move {
+        let _observer = observer;
+        loop {
+            receiver.borrow_and_update();
+            let mirror_store = store.clone();
+            let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {
+                    fractal_store::store::stream_mirror::mirror(&mirror_store)
+                })
+            })
+            .await;
+            let failed = match mirrored {
+                Ok(Ok(_)) => false,
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("mirroring the messages stream failed: {error:#}"));
+                    true
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("mirroring the messages stream stopped: {error}"));
+                    true
+                }
+            };
+            if failed {
+                tokio::time::sleep(RETRY).await;
+            } else if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }));
+}
+
 fn spawn_message_outbox(store: Arc<Store>) {
     const RETRY: Duration = Duration::from_secs(30);
     let (changed, mut receiver) = tokio::sync::watch::channel(());
