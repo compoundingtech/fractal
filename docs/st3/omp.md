@@ -22,7 +22,7 @@ one.
 
 The session JSONL is stored in Fractal's driver state for the seat. The `model_change` entry and each
 assistant turn identify the selected provider and model. omp's Python `eval` tool has a filtered
-environment; run st commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
+environment; run Fractal commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
 available.
 
 ## Driver launch and native binding
@@ -97,7 +97,7 @@ A person whose machine cannot run the isolated probe can allow its exact install
 from their own terminal, outside an agent seat:
 
 ```sh
-st admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
+fractal admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
 ```
 
 Use the executable the affected seat actually launches. Omitting `--binary` uses that
@@ -112,7 +112,7 @@ exception. The exception persists across Fractal updates with the same producer 
 To restore normal admission at the next launch:
 
 ```sh
-st admission revoke omp --binary /path/to/omp
+fractal admission revoke omp --binary /path/to/omp
 ```
 
 The exception cannot supply a missing interpreter or repair an incompatible producer or
@@ -155,8 +155,8 @@ The declared `name` is the human label; the desired-state declaration and normal
 `display_name` retain the same value and the original declaring actor. Change that label with:
 
 ```sh
-st agents rename agent/worker 'Build worker'
-st agents rename agent/worker --clear
+fractal agents rename agent/worker 'Build worker'
+fractal agents rename agent/worker --clear
 ```
 
 In free mode any person or agent can rename a seat; a bound harness acts as itself.
@@ -180,7 +180,7 @@ Fractal ends a subagent that has not reported for five minutes; see
 ## Authored resume, transcripts and delivery
 
 An authored `args "--resume" "/absolute/path/<time>_<uuid>.jsonl"` (or `--resume=…`) keeps its
-original argv and transcript. On a fresh native omp/pi driver start, st links an absent or empty
+original argv and transcript. On a fresh native omp/pi driver start, Fractal links an absent or empty
 managed `provider-sessions` directory to the transcript's parent after checking the filename UUID
 against the session header in the first two lines. It never copies the transcript: omp continues
 appending to the authored path, and the channel must see those same bytes to publish its native
@@ -208,7 +208,7 @@ The matching ask result (including cancellation or timeout), approval resolution
 run cancellation releases the hold. Mail reaches OMP at the next safe tool-batch boundary, in
 arrival order as one steering message. Session restart clears the old modal; the successor
 channel re-sends unacknowledged mail. A channel reconnect alone does not clear a live modal.
-Read the exact graph message with `st conversations read` before acting on it, and archive it
+Read the exact graph message with `fractal conversations read` before acting on it, and archive it
 after the related action completes.
 
 The channel reports idle only after `ctx.isIdle()` proves that the native turn has settled.

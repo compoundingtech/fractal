@@ -4,8 +4,8 @@ set -euo pipefail
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 : "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
-requester_inbox="$(st3 conversations ls person/eval-requester --json)"
-requester_archive="$(st3 conversations ls person/eval-requester --archive --json)"
+requester_inbox="$(fractal conversations ls person/eval-requester --json)"
+requester_archive="$(fractal conversations ls person/eval-requester --archive --json)"
 requester_messages="$(jq -s 'add | unique_by(.subject)' \
   <(printf '%s' "$requester_inbox") \
   <(printf '%s' "$requester_archive"))"

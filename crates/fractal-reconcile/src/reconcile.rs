@@ -12524,6 +12524,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("loop-metric".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         self.perform_start(
             &DesiredSubject {
@@ -18208,6 +18211,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("mechanical-gate".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -18760,6 +18766,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             driver: Some("llm-gate".into()),
             terminal_size: None,
             capacity: None,
+            declared_priority: None,
+            declared_lane: None,
+            declared_budgets: None,
         };
         let desired = DesiredSubject {
             accountable: None,

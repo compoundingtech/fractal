@@ -585,7 +585,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.keyboard_enhanced = _guard.enhanced;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
-    if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
+    if std::env::var_os("FRACTAL_TUI_TEST_PANIC_AFTER_ENTER").is_some() {
         panic!("terminal restoration probe");
     }
     // How images are drawn: asked of the terminal itself, once, inside the alternate screen and
@@ -2506,7 +2506,7 @@ fn mark_unanswered(pending: &mut [Pending]) -> bool {
 /// The followed agents whose conversation shows a session they have since left: st resolves an
 /// agent to its session when a subscription starts, so after a restart that subscription keeps
 /// the old one (Nathan's message to a restarted seat sat at "sending…" because it landed in the
-/// new session, which his stui was not showing). Each is named once per new session.
+/// new session, which his terminal UI was not showing). Each is named once per new session.
 fn moved_sessions(
     conversing: &[String],
     model: &Model,
