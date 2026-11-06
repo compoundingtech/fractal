@@ -1589,7 +1589,7 @@ impl SeatsStore for Store {
         // Match the public status reducer's exclusions, including exact-owner reads.
         names.retain(|name| !name.starts_with("glass/") && !name.starts_with("arrangement/"));
         drop(connection);
-        self.agent_card_status_at(Some(&names), index, history)
+        self.agent_card_status_for_generic_reads_at(Some(&names), index, history)
     }
 
     fn agent_declaration(

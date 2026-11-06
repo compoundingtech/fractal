@@ -318,6 +318,20 @@ mod tests {
         for claim in &hidden {
             assert!(state.store.claim_by_id(&claim.id).unwrap().is_some());
         }
+        for claim in &hidden {
+            for suffix in ["", "&history=true", "&harness_only=true"] {
+                let path = format!("/v1/status?subject={}{suffix}", urlencoding::encode(&claim.subject));
+                let response = app.clone().oneshot(axum::http::Request::builder()
+                    .uri(path).header("authorization", format!("Bearer {credential}"))
+                    .body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let error: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(error["details"]["reason"], "notices-unavailable");
+                assert!(!error.to_string().contains(&claim.id));
+                assert!(!error.to_string().contains("notice-secret"));
+            }
+        }
         for (method, path) in [
             ("GET", "/v1/backup"),
             ("POST", "/v1/agents/rename-id/proof/export"),
@@ -460,6 +474,50 @@ mod tests {
             cursor = page.page.next_cursor;
             assert_eq!(cursor.is_some(), page_index == 0);
         }
+    }
+
+    #[tokio::test]
+    async fn notice_status_excludes_reserved_fields_and_claim_ids_before_reduction() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let hidden = [
+            legacy_claim(&state, "custom/attention/source/status-secret", "custom.example.created"),
+            legacy_claim(&state, "custom/example/status-alternate", "custom.attention.notice-created"),
+        ];
+        let ordinary = state.store.connection.batched(|tx| crate::store::append_claim_tx(
+            tx, state.store.origin(), "custom/example/status-visible", "custom.example.created", None,
+            &json!({"fields":{"title":"Visible"}}), &[], None,
+        )).unwrap().unwrap();
+        state.store.committed_index.fetch_max(ordinary.store_index, std::sync::atomic::Ordering::Release);
+        let cut = state.store.index().unwrap();
+        let raw = state.store.status_history(None, None, Some(cut)).unwrap();
+        assert!(serde_json::to_string(&raw).unwrap().contains("notice-secret"));
+        let app = router(state.clone());
+        for path in ["/v1/status".into(), "/v1/status?history=true".into(),
+            format!("/v1/status?at_index={cut}"), format!("/v1/status?history=true&at_index={cut}")] {
+            let (status, value) = client_json(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+            let shown = value.to_string();
+            assert!(!shown.contains("notice-secret"), "{shown}");
+            for claim in &hidden {
+                assert!(!shown.contains(&claim.id), "{shown}");
+                assert!(!shown.contains(&claim.subject), "{shown}");
+            }
+        }
+        for claim in &hidden {
+            for suffix in ["".into(), "&history=true".into(), "&harness_only=true".into(),
+                format!("&at_index={cut}"), "&harness_only=true&at_index=0".into()] {
+                let (status, error) = client_json(app.clone(), &format!(
+                    "/v1/status?subject={}{suffix}", urlencoding::encode(&claim.subject),
+                )).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+                assert_eq!(error["details"]["reason"], "notices-unavailable");
+                assert!(!error.to_string().contains(&claim.id));
+                assert!(state.store.claim_by_id(&claim.id).unwrap().is_some());
+            }
+        }
+        let (_, visible) = client_json(app, &format!("/v1/status?subject={}", ordinary.subject)).await;
+        assert!(visible.to_string().contains(&ordinary.id));
     }
 
 }

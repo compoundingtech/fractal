@@ -20,6 +20,18 @@ impl Store {
         index: u64,
         history: bool,
     ) -> Result<StatusResponse> {
+        self.agent_card_status_view(names, index, history, false)
+    }
+
+    pub fn agent_card_status_for_generic_reads_at(
+        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool,
+    ) -> Result<StatusResponse> {
+        self.agent_card_status_view(names, index, history, true)
+    }
+
+    fn agent_card_status_view(
+        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool, generic: bool,
+    ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let index = selected_index(current_index(&connection)?, Some(index)).map_err(anyhow::Error::new)?;
         let names = match names {
@@ -28,6 +40,7 @@ impl Store {
                 .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
+        let names = if generic { self.generic_status_subject_names_at(names, index)? } else { names };
         // The view and status passes share what they read of each subject.
         let mut reads = card_fold::CardReads::new(index);
         let names = if history { names } else {

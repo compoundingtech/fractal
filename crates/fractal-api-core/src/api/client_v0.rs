@@ -1140,14 +1140,14 @@ pub fn runtime_resources_for_owner(
     // index is not necessarily the causally current runtime observation.
     // Exact owner reads reduce just that subject at this snapshot.
     let status = if let Some(owner) = owner {
-        state.store.status_for_subject_names_at(
+        state.store.status_for_subject_names_for_generic_reads_at(
             BTreeSet::from([owner.to_owned()]),
             snapshot.store_index,
             history,
             crate::store::ClaimsReduction::Runtime,
         )?
     } else {
-        state.store.status_for_claim_kind_at(
+        state.store.status_for_claim_kind_for_generic_reads_at(
             "runtime.observed",
             Some(snapshot.store_index),
             history,
@@ -1440,7 +1440,7 @@ fn machine_resources_and_hosts(
         .collect::<BTreeSet<_>>();
     host_ids.extend(configured_hosts.iter().cloned());
     host_ids.extend(host_runtime_ids.keys().cloned());
-    let status = state.store.status_for_subject_prefix_at(
+    let status = state.store.status_for_subject_prefix_for_generic_reads_at(
         "host/",
         Some(snapshot.store_index),
         history,

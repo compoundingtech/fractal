@@ -4929,6 +4929,18 @@ impl Store {
         include_history: bool,
         claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
+        self.status_for_subject_prefix_view(prefix, at_index, include_history, claims, false)
+    }
+
+    pub fn status_for_subject_prefix_for_generic_reads_at(
+        &self, prefix: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        self.status_for_subject_prefix_view(prefix, at_index, include_history, claims, true)
+    }
+
+    fn status_for_subject_prefix_view(
+        &self, prefix: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
+    ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
         let store_index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
@@ -4955,7 +4967,11 @@ impl Store {
                 .collect::<Result<BTreeSet<_>, _>>()?,
         }};
         drop(connection);
-        self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        if generic {
+            self.status_for_subject_names_for_generic_reads_at(subjects, store_index, include_history, claims)
+        } else {
+            self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        }
     }
 
     /// Reduce only subjects that have emitted one claim kind at the selected snapshot.
@@ -4965,6 +4981,18 @@ impl Store {
         at_index: Option<u64>,
         include_history: bool,
         claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        self.status_for_claim_kind_view(kind, at_index, include_history, claims, false)
+    }
+
+    pub fn status_for_claim_kind_for_generic_reads_at(
+        &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        self.status_for_claim_kind_view(kind, at_index, include_history, claims, true)
+    }
+
+    fn status_for_claim_kind_view(
+        &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
     ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
@@ -4988,7 +5016,11 @@ impl Store {
                 .collect::<Result<BTreeSet<_>, _>>()?
         };
         drop(connection);
-        self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        if generic {
+            self.status_for_subject_names_for_generic_reads_at(subjects, store_index, include_history, claims)
+        } else {
+            self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        }
     }
 
     /// Of `subjects`, those a current view can show at `store_index`. A runtime that nothing
@@ -5251,6 +5283,25 @@ impl Store {
         transaction.rollback().unwrap();
     }
 
+    pub fn status_for_subject_names_for_generic_reads_at(
+        &self, subjects: BTreeSet<String>, index: u64, history: bool, claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        let subjects = self.generic_status_subject_names_at(subjects, index)?;
+        self.status_for_subject_names_at(subjects, index, history, claims)
+    }
+
+    pub fn generic_status_subject_names_at(
+        &self, subjects: BTreeSet<String>, index: u64,
+    ) -> Result<BTreeSet<String>> {
+        subjects.into_iter().filter_map(|subject| {
+            match self.generic_status_subject_visible_at(&subject, index) {
+                Ok(true) => Some(Ok(subject)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        }).collect()
+    }
+
     pub fn status_for_subject_names_at(
         &self,
         subjects: BTreeSet<String>,
@@ -5328,6 +5379,55 @@ impl Store {
         })?
     }
 
+    /// A serving reduction must omit the whole subject if reserved facts contributed to it.
+    /// This does not change internal reductions or authoritative claim availability.
+    pub fn generic_status_subject_visible_at(&self, subject: &str, cut: u64) -> Result<bool> {
+        if fractal_schema::notice::is_reserved_subject(subject) {
+            return Ok(false);
+        }
+        let connection = self.readers.get();
+        let mut query = connection.prepare(
+            "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND store_index<=?2",
+        )?;
+        for kind in query.query_map(params![subject,cut], |row| row.get::<_,String>(0))? {
+            if fractal_schema::notice::is_reserved_kind(&kind?) { return Ok(false); }
+        }
+        Ok(true)
+    }
+
+    /// Generic serving status must not reduce reserved facts into fields or claim identities.
+    /// Keep internal status and authoritative replication readers unchanged.
+    pub fn status_for_generic_reads(
+        &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
+        history: bool,
+    ) -> Result<StatusResponse> {
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let cut = selected_index(current_index(&connection)?, at).map_err(anyhow::Error::new)?;
+            let mut excluded = BTreeSet::new();
+            let status_query = if selected.is_some() {
+                "SELECT DISTINCT subject,kind FROM claims WHERE subject=?2 AND store_index<=?1"
+            } else {
+                "SELECT DISTINCT subject,kind FROM claims WHERE store_index<=?1 AND ?2 IS NULL"
+            };
+            let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hdacaab2c061c owner=fractal_store::store TODO=trace-statement-and-value-representation */ status_query)?;
+            for row in query.query_map(params![cut,selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+                let (subject,kind) = row?;
+                if fractal_schema::notice::is_reserved_subject(&subject) || fractal_schema::notice::is_reserved_kind(&kind) {
+                    excluded.insert(subject);
+                }
+            }
+            if selected.is_some_and(|s| fractal_schema::notice::is_reserved_subject(s) || excluded.contains(s)) {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
+                ).with_detail("reason", "notices-unavailable")));
+            }
+            self.status_at_view_for_names_in_snapshot(
+                selected, owner, at, history, None, ClaimsReduction::Full, Some(&excluded),
+            )
+        })
+    }
+
     fn status_at_view(
         &self,
         selected: Option<&str>,
@@ -5365,6 +5465,7 @@ impl Store {
                 include_history,
                 selected_names,
                 claims,
+                None,
             )
         })
     }
@@ -5377,6 +5478,7 @@ impl Store {
         include_history: bool,
         selected_names: Option<BTreeSet<String>>,
         claims: ClaimsReduction,
+        excluded: Option<&BTreeSet<String>>,
     ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
@@ -5392,6 +5494,10 @@ impl Store {
             let rows = statement.query_map([store_index], |row| row.get::<_, String>(0))?;
             subject_names.extend(rows.collect::<Result<Vec<_>, _>>()?);
             drop(statement);
+            if let Some(excluded) = excluded {
+                subject_names.retain(|subject| !excluded.contains(subject)
+                    && !fractal_schema::notice::is_reserved_subject(subject));
+            }
             if !include_history {
                 // Without a snapshot the reduction reads owners from the run tables, so only
                 // what a runtime's own claims decide leaves it out.
@@ -5413,6 +5519,10 @@ impl Store {
         let mut subjects = Vec::new();
         let mut pending_actions = Vec::new();
         for subject in subject_names {
+            if excluded.is_some_and(|excluded| excluded.contains(&subject))
+                || (excluded.is_some() && fractal_schema::notice::is_reserved_subject(&subject)) {
+                continue;
+            }
             if subject.starts_with("glass/") || subject.starts_with("arrangement/") {
                 continue;
             }
