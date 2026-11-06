@@ -19,14 +19,17 @@ fn notice_legacy_cached_attention_does_not_hide_unrelated_items() {
     let store = Store::open_memory("example").unwrap();
     let ordinary = "custom/garden/review/v1/ordinary";
     custom(&store, ordinary, "person/example");
-    let views = Views::new(definitions()).unwrap();
-    install(&store, &views);
+    let reserved = "custom/attention/source";
     store.connection.batched(|tx| -> Result<()> {
-        let reserved = "custom/attention/source";
         tx.execute("INSERT INTO custom_sources SELECT ?1,registration,kind,revision,state,
             json_set(body,'$.id',?1),person,episode,active,requested_at FROM custom_sources WHERE subject=?2",
             params![reserved, ordinary])?;
         assert!(custom_row(tx, reserved)?.is_none());
+        Ok(())
+    }).unwrap().unwrap();
+    let views = Views::new(definitions()).unwrap();
+    install(&store, &views);
+    store.connection.batched(|tx| -> Result<()> {
         tx.execute("INSERT INTO local_attention_open SELECT family,?1,'attention/legacy',person,
             priority,requested,eligible,episode,item,json_set(body,'$.id','attention/legacy') FROM local_attention_open WHERE source=?2",
             params![reserved, ordinary])?;
