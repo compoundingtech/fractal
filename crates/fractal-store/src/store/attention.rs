@@ -1037,7 +1037,7 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
 }
 
-fn current_attention_item_tx(
+pub(super) fn current_attention_item_tx(
     connection: &Connection,
     mut item: AttentionItemView,
     as_of: u128,

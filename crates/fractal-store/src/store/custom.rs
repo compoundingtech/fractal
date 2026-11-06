@@ -929,6 +929,16 @@ pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
     })
 }
 
+/// The active source and its original requested time at the caller's writer/read cut.
+pub fn attention_item_at(connection: &Connection, subject: &str) -> Result<Option<AttentionItemView>> {
+    let source: Option<(String, String)> = connection.query_row(
+        "SELECT body,requested_at FROM custom_sources WHERE subject=?1 AND active=1",
+        [subject], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    source.map(|(body, at)| attention_item(&serde_json::from_str(&body)?, at.parse().unwrap_or(0)))
+        .transpose()
+}
+
 pub fn source(connection: &Connection, subject: &str) -> Result<Option<Value>> {
     let text: Option<String> = connection
         .query_row(

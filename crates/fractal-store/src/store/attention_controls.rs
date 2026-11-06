@@ -71,7 +71,46 @@ pub fn current(connection: &Connection, person: &str, attention: &str, source_re
     })
 }
 
+pub struct AttentionControlSource<'a> {
+    pub source_id: &'a str,
+    pub kind: &'a str,
+    pub episode: &'a str,
+}
+
 impl Store {
+    /// Rebuild the exact native source under writer admission, never through a pooled reader.
+    pub fn validate_attention_control_source(
+        &self, connection: &Connection, source: &AttentionControlSource<'_>,
+        person: &str, attention_id: &str, revision: &str, now: u128,
+    ) -> Result<(), St3Error> {
+        let derive = || -> Result<Option<AttentionItemView>> {
+            let item = match source.kind {
+                "person-step" => attention_snapshot::person_attention_item(connection, source.source_id, now)?,
+                "human-gate" | "launch-approval" | "revision-approval" =>
+                    attention::mission_run_attention_item_tx(connection, source.kind, source.source_id, person, source.episode, now)?,
+                "harness-prompt" => self.harness_prompt_attention_item_at(connection, source.source_id, person, source.episode, now)?,
+                "harness-login" => self.harness_login_attention_item_at(connection, source.source_id, person, source.episode)?,
+                "fault" => self.broken_gate_attention_item_at(connection, source.source_id, person, source.episode, now)?,
+                kind if kind.starts_with("custom.") => custom::attention_item_at(connection, source.source_id)?,
+                _ => None,
+            };
+            match item {
+                Some(item) => attention::current_attention_item_tx(connection, item, now),
+                None => Ok(None),
+            }
+        };
+        let Some(item) = derive().map_err(internal)? else {
+            return Err(St3Error::new("stale-fence", "attention source is no longer current"));
+        };
+        if item.person != person || item.kind != source.kind || item.episode != source.episode
+            || crate::client_values::client_attention_id(&item.subject, &item.person, &item.episode).map_err(internal)? != attention_id
+            || crate::client_values::client_attention_control_source(&item).map_err(internal)? != revision
+        {
+            return Err(St3Error::new("stale-fence", "attention source changed since it was read"));
+        }
+        Ok(())
+    }
+
     pub fn attention_controls(&self, person: &str, attention: &str, source_revision: &str) -> Result<AttentionControlState> {
         current(&self.readers.get(), person, attention, source_revision)
     }

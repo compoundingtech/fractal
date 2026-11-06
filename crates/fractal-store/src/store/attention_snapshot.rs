@@ -3257,6 +3257,11 @@ mod native_prompt_tests {
         let first = append_harness_history();
         let listed = store.harness_prompt_attention_items(Some("person/operator"), u128::MAX)
             .unwrap().into_iter().find(|item| item.episode == first.id).unwrap();
+        let source = attention_controls::AttentionControlSource {
+            source_id: seat, kind: "harness-prompt", episode: &first.id,
+        };
+        let id = crate::client_values::client_attention_id(seat, &listed.person, &first.id).unwrap();
+        let revision = crate::client_values::client_attention_control_source(&listed).unwrap();
         store.connection.batched(|connection| -> Result<()> {
             let point = store.harness_prompt_attention_item_at(
                 connection, seat, "person/operator", &first.id, u128::MAX,
@@ -3266,6 +3271,15 @@ mod native_prompt_tests {
             assert!(store.harness_prompt_attention_item_at(
                 connection, seat, "person/other", &first.id, u128::MAX,
             )?.is_none());
+            assert!(store.validate_attention_control_source(
+                connection, &source, &listed.person, &id, &revision, u128::MAX,
+            ).is_ok());
+            assert!(store.validate_attention_control_source(
+                connection, &source, &listed.person, &id, "changed-source", u128::MAX,
+            ).is_err());
+            assert!(store.validate_attention_control_source(
+                connection, &source, "person/other", &id, &revision, u128::MAX,
+            ).is_err());
             Ok(())
         }).unwrap().unwrap();
         let choice = r#"{"0":[1],"1":[0,2]}"#;
@@ -3278,6 +3292,9 @@ mod native_prompt_tests {
             assert!(store.harness_prompt_attention_item_at(
                 connection, seat, "person/operator", &first.id, u128::MAX,
             )?.is_none());
+            assert!(store.validate_attention_control_source(
+                connection, &source, &listed.person, &id, &revision, u128::MAX,
+            ).is_err());
             Ok(())
         }).unwrap().unwrap();
         let mut restated = append_harness_history();

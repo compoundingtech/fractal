@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Validate native attention presentation controls against their authoritative source",
+  "replay": { "status": "none", "detail": "Existing idempotent control receipts remain replayable." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "Source qualification checks the original native identity, recipient, episode, semantic revision and current run on the admitting connection. Hidden presentation rows remain valid sources for restoration; stale or resolved sources do not." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No public mutation is advertised by this internal admission change." },
+  "recovery": { "status": "none", "detail": "Stored work and approvals are unchanged." }
+}
