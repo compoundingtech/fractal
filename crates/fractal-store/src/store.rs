@@ -150,7 +150,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus, UsageSummary, WorkSelector, WorkWakeView};
+use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus, UsageSummary, WorkSelector, WorkWakeView};
 #[cfg(any(test, feature = "test-support"))]
 use crate::model::WorkRequest;
 #[cfg(test)]
@@ -2731,7 +2731,7 @@ impl Store {
         &self,
         input: &ClaimInput,
         now: u128,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         append_latest_observation(&self.graph, input, now)
     }
 
@@ -3119,7 +3119,7 @@ impl Store {
 
     /// Every reference in the ready missions, current declarations and active runs of the graph
     /// that no longer resolves, for `st doctor`.
-    pub fn unresolved_graph_references(&self) -> Result<Vec<String>, St3Error> {
+    pub fn unresolved_graph_references(&self) -> Result<Vec<String>, FractalError> {
         unresolved_graph_references(&self.readers.get(), &self.origin)
     }
 
@@ -3128,7 +3128,7 @@ impl Store {
         intent: &NormalizedIntent,
         expected: &BTreeMap<String, Vec<String>>,
         idempotency_key: &str,
-    ) -> Result<ApplyResponse, St3Error> {
+    ) -> Result<ApplyResponse, FractalError> {
         self.apply_as(intent, expected, idempotency_key, None)
     }
 
@@ -3138,7 +3138,7 @@ impl Store {
         expected: &BTreeMap<String, Vec<String>>,
         idempotency_key: &str,
         actor: Option<&str>,
-    ) -> Result<ApplyResponse, St3Error> {
+    ) -> Result<ApplyResponse, FractalError> {
         self.apply_as_impl(
             intent,
             expected,
@@ -3158,7 +3158,7 @@ impl Store {
         key: &str,
         actor: Option<&str>,
         guard: &publication::Guard,
-    ) -> Result<ApplyResponse, St3Error> {
+    ) -> Result<ApplyResponse, FractalError> {
         self.apply_as_impl(
             intent,
             expected,
@@ -3181,7 +3181,7 @@ impl Store {
         key: &str,
         response_key: &str,
         response: &T,
-    ) -> Result<ApplyResponse, St3Error> {
+    ) -> Result<ApplyResponse, FractalError> {
         let value = serde_json::to_value(response).map_err(internal)?;
         self.apply_as_impl(
             intent,
@@ -3201,10 +3201,10 @@ impl Store {
         actor: Option<&str>,
         local_receipt: Option<(&str, &Value)>,
         checks: publication::CommitChecks<'_>,
-    ) -> Result<ApplyResponse, St3Error> {
+    ) -> Result<ApplyResponse, FractalError> {
         let publication::CommitChecks { owned, guard } = checks;
         self.connection
-            .batched(|transaction| -> Result<ApplyResponse, St3Error> {
+            .batched(|transaction| -> Result<ApplyResponse, FractalError> {
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
                 let intent = normalized_intent.as_ref();
                 let mut normalized_expected = std::borrow::Cow::Borrowed(expected);
@@ -3212,7 +3212,7 @@ impl Store {
                     let identity = identities::resolve_reference_conn(transaction, subject)?;
                     if identity != *subject {
                         if expected.get(&identity).is_some_and(|other| other != tokens) {
-                            return Err(St3Error::new("stale-subject", "declaration fences disagree across identity spellings"));
+                            return Err(FractalError::new("stale-subject", "declaration fences disagree across identity spellings"));
                         }
                         normalized_expected.to_mut().remove(subject);
                         normalized_expected.to_mut().insert(identity, tokens.clone());
@@ -3228,7 +3228,7 @@ impl Store {
                     let cache_key = opaque_cache_key(&format!("owned-set-request:{idempotency_key}"));
                     let prior: Option<String> = transaction.query_row("SELECT response FROM idempotency WHERE operation_id=?1", [&cache_key], |row|row.get(0)).optional().map_err(internal)?;
                     if prior.as_deref().is_some_and(|prior|prior != digest) {
-                        return Err(St3Error::new("idempotency-mismatch", "owned-set request key was used with different input"));
+                        return Err(FractalError::new("idempotency-mismatch", "owned-set request key was used with different input"));
                     }
                     transaction.execute(/* sqlite-large-value: allow-for-now lv-hc9a6b4257722 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO idempotency(operation_id,response) VALUES (?1,?2)", params![cache_key,digest]).map_err(internal)?;
                 }
@@ -3271,16 +3271,16 @@ impl Store {
                     crate::terminal_binding::validate_declaration(desired, actor)?;
                     fractal_schema::accountable::validate_claim(&desired.subject, "intent.desired",
                         &serde_json::to_value(desired).map_err(internal)?, actor)
-                        .map_err(|e| St3Error::new(e.code, e.message))?;
+                        .map_err(|e| FractalError::new(e.code, e.message))?;
                     if let Some(binding) = desired.member.as_ref().and_then(|m| m.terminal_binding.as_ref()) {
                         let terminal = current_desired_row_tx(transaction, &binding.subject).map_err(internal)?
                             .filter(|row| row.kind == "pty")
                             .and_then(|row| row.member)
                             .and_then(|member| serde_json::from_str::<crate::model::MemberSpec>(&member).ok())
-                            .ok_or_else(|| St3Error::new("invalid-terminal-binding", "the terminal must already be declared"))?;
+                            .ok_or_else(|| FractalError::new("invalid-terminal-binding", "the terminal must already be declared"))?;
                         let member = desired.member.as_ref().expect("binding member");
                         if terminal.host != member.host || terminal.runtime_id != member.runtime_id {
-                            return Err(St3Error::new("invalid-terminal-binding", "the bound seat must use its terminal's host and runtime"));
+                            return Err(FractalError::new("invalid-terminal-binding", "the bound seat must use its terminal's host and runtime"));
                         }
                     }
                 }
@@ -3321,7 +3321,7 @@ impl Store {
                         .cloned()
                         .or(local);
                     let Some(mission) = published else {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "missing-mission",
                             format!(
                                 "subscription `{}` references unpublished mission/{}@{revision}",
@@ -3334,7 +3334,7 @@ impl Store {
                         .get(input)
                         .is_none_or(|declaration| declaration.kind != MissionInputKind::Resource)
                     {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "invalid-subscription-resource-input",
                             format!(
                                 "subscription `{}` uses undeclared resource input `{input}` in mission/{}@{revision}",
@@ -3346,7 +3346,7 @@ impl Store {
                 for subject in intent.subjects.keys() {
                     let actual = intent_leaves_tx(transaction, subject).map_err(internal)?;
                     let expected = expected.get(subject).ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "missing-subject-token",
                             format!("apply omitted the subject token for `{subject}`"),
                         )
@@ -3354,7 +3354,7 @@ impl Store {
                         .with_detail("current_heads", json!(actual.clone()))
                     })?;
                     if actual != *expected {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-subject",
                             format!("the desired state for `{subject}` changed after planning"),
                         )
@@ -3367,7 +3367,7 @@ impl Store {
                     let actual =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
                     let expected = expected.get(&mission.subject).ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "missing-subject-token",
                             format!("apply omitted the subject token for `{}`", mission.subject),
                         )
@@ -3375,7 +3375,7 @@ impl Store {
                         .with_detail("current_heads", json!(actual.clone()))
                     })?;
                     if actual != *expected {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-subject",
                             format!(
                                 "the published mission for `{}` changed after planning",
@@ -3393,7 +3393,7 @@ impl Store {
                         .into_iter()
                         .collect::<Vec<_>>();
                     let expected = expected.get(&declaration.subject).ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "missing-subject-token",
                             format!(
                                 "apply omitted the subject token for `{}`",
@@ -3402,7 +3402,7 @@ impl Store {
                         )
                     })?;
                     if actual != *expected {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-subject",
                             format!(
                                 "mission run `{}` changed after planning",
@@ -3417,7 +3417,7 @@ impl Store {
                         .into_iter()
                         .collect::<Vec<_>>();
                     let expected = expected.get(&declaration.subject).ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "missing-subject-token",
                             format!(
                                 "apply omitted the subject token for `{}`",
@@ -3426,7 +3426,7 @@ impl Store {
                         )
                     })?;
                     if actual != *expected {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-subject",
                             format!("launch `{}` changed after planning", declaration.subject),
                         ));
@@ -3442,13 +3442,13 @@ impl Store {
                     );
                     let actual = claim_ids_at(transaction, &subject, None).map_err(internal)?;
                     let expected = expected.get(&subject).ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "missing-subject-token",
                             format!("apply omitted the subject token for `{subject}`"),
                         )
                     })?;
                     if &actual != expected {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "stale-subject",
                             format!("repair `{subject}` changed after planning"),
                         ));
@@ -4106,10 +4106,10 @@ impl Store {
                     .map_err(internal)?;
                 cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key)
             })
-            .map_err(|error| St3Error::new("internal", error))?
+            .map_err(|error| FractalError::new("internal", error))?
     }
 
-    pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, St3Error> {
+    pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
         self.append_claim_outcome(input).map(|(claim, _)| claim)
     }
 
@@ -4119,7 +4119,7 @@ impl Store {
         input: &ClaimInput,
         desired_revision: &str,
         current: &(dyn Fn() -> bool + Sync),
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         append_claim_with_subject_fences(
             &self.graph, input, None, None, None,
             Some((&input.subject, desired_revision, current)),
@@ -4129,7 +4129,7 @@ impl Store {
     pub fn append_claim_outcome(
         &self,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         self.graph.append_claim_outcome(input)
     }
 
@@ -4179,11 +4179,11 @@ impl Store {
         })
     }
 
-    pub fn validate_claim_input(&self, input: &ClaimInput) -> Result<(), St3Error> {
+    pub fn validate_claim_input(&self, input: &ClaimInput) -> Result<(), FractalError> {
         validate_claim_input(input)
     }
 
-    pub fn append_client_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, St3Error> {
+    pub fn append_client_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
         self.append_client_claim_outcome(input)
             .map(|(claim, _)| claim)
     }
@@ -4191,7 +4191,7 @@ impl Store {
     pub fn append_client_claim_outcome(
         &self,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         fractal_schema::registry()
             .validate_public_claim(
                 &input.subject,
@@ -4199,7 +4199,7 @@ impl Store {
                 &input.fields,
                 input.actor.as_deref(),
             )
-            .map_err(|error| St3Error::new(error.code, error.message))?;
+            .map_err(|error| FractalError::new(error.code, error.message))?;
         self.append_claim_outcome(input)
     }
 
@@ -4210,7 +4210,7 @@ impl Store {
         device: &str,
         inputs: &[ClaimInput],
         accepted_at: u64,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         for input in inputs {
             validate_local_observation(input)?;
         }
@@ -4225,7 +4225,7 @@ impl Store {
             let mut seen = BTreeSet::new();
             for input in inputs {
                 let id = input.fields["event_id"].as_str()
-                    .ok_or_else(|| St3Error::new("internal", "a diagnostic has no event ID"))?;
+                    .ok_or_else(|| FractalError::new("internal", "a diagnostic has no event ID"))?;
                 if !seen.insert(id) {
                     continue;
                 }
@@ -4245,7 +4245,7 @@ impl Store {
                 |row| row.get(0),
             ).map_err(internal)?;
             if recent + new.len() as u64 > 256 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "client-diagnostics-rate-limit",
                     "a device may ingest at most 256 new diagnostics per minute",
                 ));
@@ -4260,7 +4260,7 @@ impl Store {
                 ).map_err(internal)?;
             }
             Ok(())
-        }).map_err(|error| St3Error::new("internal", error))?
+        }).map_err(|error| FractalError::new("internal", error))?
     }
 
     /// Local observations written after `after`, oldest first. The records carry the
@@ -4607,7 +4607,7 @@ impl Store {
     }
 
     /// Filters are carried inside the approval token; apply never guesses a wider plan.
-    pub fn operational_repair_token_filters(token: &str) -> Result<(Vec<String>, Vec<String>), St3Error> {
+    pub fn operational_repair_token_filters(token: &str) -> Result<(Vec<String>, Vec<String>), FractalError> {
         let (_, filter) = decode_repair_token(token)?;
         Ok((filter.subjects, filter.classes))
     }
@@ -4615,7 +4615,7 @@ impl Store {
     pub fn apply_operational_repair(
         &self,
         token: &str,
-    ) -> Result<OperationalRepairResult, St3Error> {
+    ) -> Result<OperationalRepairResult, FractalError> {
         self.apply_operational_repair_with_legacy_starts(token, &[], None)
     }
 
@@ -4625,7 +4625,7 @@ impl Store {
         token: &str,
         native_evidence: &[Value],
         bound_actor: Option<&str>,
-    ) -> Result<OperationalRepairResult, St3Error> {
+    ) -> Result<OperationalRepairResult, FractalError> {
         let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
         let mut connection = self.connection.write();
@@ -4671,7 +4671,7 @@ impl Store {
             &transaction, now_ms(), &self.origin, native_evidence,
         ).map_err(internal)?, &filter).map_err(internal)?;
         if plan.token != token {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "stale-repair-plan",
                 format!(
                     "the operational repair plan changed; requested `{token}`, current `{}`",
@@ -4702,7 +4702,7 @@ impl Store {
             match item.class.as_str() {
                 "revoked-legacy-runtime-start" => {
                     let operation_id = item.details["operation"]["id"].as_str()
-                        .ok_or_else(|| St3Error::new("invalid-repair-plan", "missing runtime operation"))?;
+                        .ok_or_else(|| FractalError::new("invalid-repair-plan", "missing runtime operation"))?;
                     runtime_starts::retain_runtime_start_producer_closed_tx(
                         &transaction,
                         &self.origin,
@@ -4716,7 +4716,7 @@ impl Store {
                         .get("generation")
                         .and_then(Value::as_str)
                         .ok_or_else(|| {
-                            St3Error::new(
+                            FractalError::new(
                                 "invalid-repair-plan",
                                 format!("repair item `{}` has no generation", item.id),
                             )
@@ -4815,7 +4815,7 @@ impl Store {
                         .get("step_runs")
                         .and_then(Value::as_array)
                         .ok_or_else(|| {
-                            St3Error::new(
+                            FractalError::new(
                                 "invalid-repair-plan",
                                 format!("repair item `{}` has no safe root steps", item.id),
                             )
@@ -4834,7 +4834,7 @@ impl Store {
                     }
                 }
                 class => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-repair-plan",
                         format!("repair class `{class}` is not registered"),
                     ));
@@ -6143,17 +6143,17 @@ impl Store {
     pub fn dismiss_fault_as(
         &self,
         request: &crate::model::FaultDismissRequest,
-    ) -> Result<crate::model::FaultDismissal, St3Error> {
+    ) -> Result<crate::model::FaultDismissal, FractalError> {
         let actor = smallclaims::store::normalize_actor(&request.actor, "person");
         let fault_agent = self.fleet_fault_agent().map_err(internal)?;
         if !(actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str())) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "fault-dismiss-forbidden",
                 format!("`{actor}` cannot dismiss a fault; a person, or the fleet's fault agent, can"),
             ));
         }
         if request.reason.trim().is_empty() {
-            return Err(St3Error::new("fault-dismiss-reason", "a fault dismissal needs a reason"));
+            return Err(FractalError::new("fault-dismiss-reason", "a fault dismissal needs a reason"));
         }
         let source = request.source.as_str();
         let matching = self
@@ -6167,13 +6167,13 @@ impl Store {
         let item = match matching.as_slice() {
             [item] => item,
             [] => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "missing-fault",
                     format!("`{source}` has no current fault{}", request.episode.as_deref().map(|episode| format!(" with episode `{episode}`")).unwrap_or_default()),
                 ));
             }
             several => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "ambiguous-fault",
                     format!(
                         "`{source}` has {} current faults; name one with --episode: {}",
@@ -6195,7 +6195,7 @@ impl Store {
             None => false,
         };
         if !ended {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "fault-source-open",
                 format!("the fault on `{}` belongs to a run that has not ended; it closes at its source", item.subject),
             ));
@@ -6227,12 +6227,12 @@ impl Store {
         &self,
         actor: &str,
         reason: &str,
-    ) -> Result<smallclaims::store::principals::SignatureResume, St3Error> {
+    ) -> Result<smallclaims::store::principals::SignatureResume, FractalError> {
         let actor = smallclaims::store::normalize_actor(actor, "person");
         let fault_agent = self.fleet_fault_agent().map_err(internal)?;
         let allowed = actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str());
         if !allowed || reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-signature-resume",
                 "a person, or the fleet's fault agent, resumes the signature migration, with a reason",
             ));
@@ -6925,7 +6925,7 @@ impl Store {
         Ok((secret, expires))
     }
 
-    pub fn capability(&self, secret: &str, expected_kind: &str) -> Result<Capability, St3Error> {
+    pub fn capability(&self, secret: &str, expected_kind: &str) -> Result<Capability, FractalError> {
         let hash = hex::encode(Sha256::digest(secret.as_bytes()));
         let connection = self.readers.get();
         let capability = connection
@@ -6945,15 +6945,15 @@ impl Store {
             )
             .optional()
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("invalid-capability", "the operation capability is not valid"))?;
+            .ok_or_else(|| FractalError::new("invalid-capability", "the operation capability is not valid"))?;
         if capability.kind != expected_kind {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-capability",
                 "the operation capability has the wrong kind",
             ));
         }
         if capability.expires_at_unix_ms < now_ms() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "expired-capability",
                 "the operation capability expired",
             ));
@@ -6965,7 +6965,7 @@ impl Store {
         &self,
         secret: &str,
         expected_kind: &str,
-    ) -> Result<Capability, St3Error> {
+    ) -> Result<Capability, FractalError> {
         let capability = self.capability(secret, expected_kind)?;
         if capability.used {
             return Ok(capability);
@@ -6979,7 +6979,7 @@ impl Store {
             )
             .map_err(internal)?;
         if changed != 1 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "used-capability",
                 "the operation capability was already consumed",
             ));
@@ -7098,7 +7098,7 @@ fn create_declared_mission_run_tx(
     origin: &str,
     declaration: &MissionRunDeclaration,
     batch_id: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let Some(creation) = &declaration.creation else {
         return Ok(Vec::new());
     };
@@ -7129,13 +7129,13 @@ fn create_declared_mission_run_tx(
         .transpose()
         .map_err(internal)?;
     let Some(mission) = mission else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-mission",
             missing_mission_revision(transaction, &creation.mission, &creation.revision)?,
         ));
     };
     if mission.state != MissionState::Ready {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "mission-not-ready",
             format!("mission `mission/{}` is not ready", creation.mission),
         ));
@@ -7324,7 +7324,7 @@ fn ensure_awaited_mission_run_tx(
     connection: &Connection,
     run: &str,
     after: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let after_id = after.strip_prefix("mission-run/").unwrap_or(after);
     let exists = connection
         .query_row("SELECT 1 FROM mission_runs WHERE id=?1", [after_id], |_| {
@@ -7334,7 +7334,7 @@ fn ensure_awaited_mission_run_tx(
         .map_err(internal)?
         .is_some();
     if !exists {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unknown-mission-run",
             format!("mission run `{run}` waits for `{after}`, which does not exist"),
         ));
@@ -7349,9 +7349,9 @@ fn adopt_declared_mission_revision_tx(
     operation: &MissionRevisionOperation,
     batch_id: &str,
     actor: Option<&str>,
-) -> Result<(Vec<String>, bool), St3Error> {
+) -> Result<(Vec<String>, bool), FractalError> {
     let actor = actor.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-publication-actor",
             "a mission-run revision needs an explicit actor",
         )
@@ -7365,7 +7365,7 @@ fn adopt_declared_mission_revision_tx(
     if generation_id_from_subject(&current.generation)
         != generation_id_from_subject(&operation.from_generation)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-run-generation",
             format!("revision `{}` names a stale run generation", operation.id),
         ));
@@ -7373,7 +7373,7 @@ fn adopt_declared_mission_revision_tx(
     if !matches!(current.status.as_str(), "running" | "standing" | "blocked")
         || current.phase != "normal"
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "mission-run-not-revisable",
             format!(
                 "mission run `{}` is {} in its {} phase",
@@ -7386,7 +7386,7 @@ fn adopt_declared_mission_revision_tx(
         .strip_prefix("mission/")
         .unwrap_or(&current.mission);
     if operation.mission != current_mission_id {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-mission-revision",
             format!(
                 "revision `{}` targets mission `{}` instead of `{current_mission_id}`",
@@ -7411,7 +7411,7 @@ fn adopt_declared_mission_revision_tx(
         .optional()
         .map_err(internal)?
     else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-mission-revision",
             format!(
                 "revision `{}` names a mission that is not stored: {}",
@@ -7422,13 +7422,13 @@ fn adopt_declared_mission_revision_tx(
     };
     let next: MissionSpec = serde_json::from_str(&next).map_err(internal)?;
     if next.state != MissionState::Ready {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "mission-revision-not-ready",
             "a running mission can adopt only a ready revision",
         ));
     }
     if old.inputs != next.inputs {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "run-input-mutation",
             "a run revision cannot change its input declarations",
         ));
@@ -7440,7 +7440,7 @@ fn adopt_declared_mission_revision_tx(
     let compatible = carried_revision_step_paths(&old, &next, &current.steps, compatible);
     if !reviewers.is_empty() || matches!(old.revision_cutover, RevisionCutover::WhenIdle) {
         if operation.cancellation.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "revision-cancellation-needs-immediate-cutover",
                 "a revision with a deferred or reviewed cutover cannot contain cancellation",
             ));
@@ -7455,7 +7455,7 @@ fn adopt_declared_mission_revision_tx(
             .map_err(internal)?
             .is_some()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "revision-proposal-already-pending",
                 "the mission run already has one pending revision proposal",
             ));
@@ -7713,7 +7713,7 @@ fn reset_declared_runtime_tx(
     operation: &RuntimeResetOperation,
     runtime: &str,
     batch_id: &str,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     let current_generation = transaction
         .query_row(
             "SELECT current_generation_id FROM mission_runs WHERE id=?1",
@@ -7725,7 +7725,7 @@ fn reset_declared_runtime_tx(
         )
         .map_err(internal)?;
     if generation_id_from_subject(&operation.from_generation) != current_generation {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-run-generation",
             format!("reset `{}` names a stale run generation", operation.id),
         ));
@@ -7733,13 +7733,13 @@ fn reset_declared_runtime_tx(
     let desired = current_desired_row_tx(transaction, runtime)
         .map_err(internal)?
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "runtime-not-desired",
                 format!("runtime `{runtime}` has no selected desired state"),
             )
         })?;
     if !matches!(desired.kind.as_str(), "agent" | "exec" | "pty") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "not-a-runtime",
             format!("subject `{runtime}` is not an agent, exec, or PTY runtime"),
         ));
@@ -7747,7 +7747,7 @@ fn reset_declared_runtime_tx(
     let actual = latest_actual(transaction, runtime)
         .map_err(internal)?
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "runtime-not-incarnated",
                 format!("runtime `{runtime}` has no current incarnation"),
             )
@@ -7758,7 +7758,7 @@ fn reset_declared_runtime_tx(
         .get("incarnation_id")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "runtime-not-incarnated",
                 format!("runtime `{runtime}` has no current incarnation"),
             )
@@ -7788,7 +7788,7 @@ fn request_declared_resource_refresh_tx(
     origin: &str,
     operation: &ResourceRefreshOperation,
     batch_id: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let desired = {
         let mut statement = transaction
             .prepare("SELECT subject, body, revision FROM desired WHERE kind='observer'")
@@ -7816,7 +7816,7 @@ fn request_declared_resource_refresh_tx(
         })
         .collect::<Vec<_>>();
     if observers.is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "resource-not-observed",
             format!("resource `{}` has no active observer", operation.resource),
         ));
@@ -7853,7 +7853,7 @@ fn apply_planning_session_declaration_tx(
     batch_id: &str,
     actor: Option<&str>,
     receipts: &mut Vec<PlannedAction>,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let id = declaration
         .subject
         .strip_prefix("planning-session/")
@@ -7962,7 +7962,7 @@ fn apply_planning_session_declaration_tx(
         exists = Some((creation.requester.clone(), "planning".into()));
     }
     let Some((requester, mut status)) = exists else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-launch",
             format!("launch `{}` does not exist", declaration.subject),
         ));
@@ -7971,7 +7971,7 @@ fn apply_planning_session_declaration_tx(
     if (!declaration.feedback.is_empty() || !declaration.cancellations.is_empty())
         && actor.as_deref() != Some(requester.as_str())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "launch-review-not-authorized",
             format!(
                 "the publication actor cannot change launch `{}`",
@@ -7990,7 +7990,7 @@ fn apply_planning_session_declaration_tx(
             continue;
         }
         if !matches!(status.as_str(), "review" | "revision-requested") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-launch-transition",
                 format!(
                     "launch `{}` cannot accept feedback while {status}",
@@ -8161,13 +8161,13 @@ fn resolve_mission_run_inputs(
     transaction: &Connection,
     mission: &MissionSpec,
     supplied: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, MissionRunInput>, St3Error> {
+) -> Result<BTreeMap<String, MissionRunInput>, FractalError> {
     let declared = mission.inputs.keys().cloned().collect::<BTreeSet<_>>();
     let provided = supplied.keys().cloned().collect::<BTreeSet<_>>();
     if declared != provided {
         let missing = declared.difference(&provided).cloned().collect::<Vec<_>>();
         let extra = provided.difference(&declared).cloned().collect::<Vec<_>>();
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-inputs",
             format!(
                 "the mission inputs do not match; missing [{}]; extra [{}]",
@@ -8193,7 +8193,7 @@ fn resolve_mission_run_inputs(
                         (subject, Some(claim))
                     });
                 if !subject.starts_with("resource/") {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-resource-input",
                         format!("mission input `{name}` needs a resource subject"),
                     ));
@@ -8211,7 +8211,7 @@ fn resolve_mission_run_inputs(
                     // A claim this member trimmed is never admitted again, so its pin cannot wait
                     // for replication as an unarrived claim does.
                     if !exists && smallclaims::store::retired::claim_refused(transaction, claim_id).map_err(internal)? {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "trimmed-resource-input-version",
                             format!(
                                 "mission input `{name}`: {subject}@{claim_id} was trimmed on this member; pin a kept observation or the subject"
@@ -8219,7 +8219,7 @@ fn resolve_mission_run_inputs(
                         ));
                     }
                     if !exists {
-                        return Err(St3Error::new(
+                        return Err(FractalError::new(
                             "missing-resource-input-version",
                             format!("mission input `{name}` references an unavailable claim"),
                         ));
@@ -8244,7 +8244,7 @@ fn resolve_mission_run_inputs(
                         (observed, _) => observed.map(|(id, _)| id),
                     }
                         .ok_or_else(|| {
-                            St3Error::new(
+                            FractalError::new(
                                 "missing-resource-input",
                                 format!(
                                     "mission input `{name}` references a resource without an observation"
@@ -8268,7 +8268,7 @@ fn resolve_mission_run_inputs(
 pub fn enforce_mission_run_capacity(
     transaction: &Connection,
     requested: &MissionSpec,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mut statement = transaction
         .prepare(
             "SELECT mission_runs.id, run_generations.revision
@@ -8304,7 +8304,7 @@ pub fn enforce_mission_run_capacity(
         };
     }
     if limit.is_some_and(|limit| active.len() >= limit as usize) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "mission-run-capacity",
             format!(
                 "mission `{}` reached its active run limit; active runs: {}",
@@ -8518,14 +8518,14 @@ fn desired_matches(
     current: Option<&DesiredRow>,
     desired: &DesiredSubject,
     revision: &str,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     if desired.kind == "resource"
         && crate::graph::declared_uri(&desired.desired).is_some()
         && (desired.owner_run.is_some()
             || desired.owner_generation.is_some()
             || desired.owner_step.is_some())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "run-owned-uri-resource",
             format!("shared URI resource `{}` cannot be run-owned", desired.subject),
         ));
@@ -8540,7 +8540,7 @@ fn desired_matches(
         {
             return Ok(true);
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "immutable-uri-resource",
             format!("shared URI resource `{}` cannot be changed", desired.subject),
         ));
@@ -8559,7 +8559,7 @@ pub fn desired_revision(desired: &DesiredSubject) -> String {
 fn unresolved_graph_references(
     connection: &Connection,
     origin: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let missions = {
         let mut statement = connection
             .prepare(
@@ -8637,7 +8637,7 @@ pub struct ReferenceGraph<'a> {
 }
 
 impl crate::references::Graph for ReferenceGraph<'_> {
-    fn declared(&self, subject: &str) -> Result<bool, St3Error> {
+    fn declared(&self, subject: &str) -> Result<bool, FractalError> {
         self.connection
             .query_row("SELECT 1 FROM desired WHERE subject=?1", [subject], |_| {
                 Ok(())
@@ -8647,7 +8647,7 @@ impl crate::references::Graph for ReferenceGraph<'_> {
             .map_err(internal)
     }
 
-    fn mission_published(&self, mission: &str) -> Result<bool, St3Error> {
+    fn mission_published(&self, mission: &str) -> Result<bool, FractalError> {
         self.connection
             .query_row(
                 "SELECT 1 FROM mission_revisions WHERE mission_id=?1 LIMIT 1",
@@ -8663,7 +8663,7 @@ impl crate::references::Graph for ReferenceGraph<'_> {
         &self,
         mission: &str,
         revision: &str,
-    ) -> Result<Option<MissionSpec>, St3Error> {
+    ) -> Result<Option<MissionSpec>, FractalError> {
         self.connection
             .query_row(
                 "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
@@ -8676,7 +8676,7 @@ impl crate::references::Graph for ReferenceGraph<'_> {
             .transpose()
     }
 
-    fn missing_revision(&self, mission: &str, revision: &str) -> Result<String, St3Error> {
+    fn missing_revision(&self, mission: &str, revision: &str) -> Result<String, FractalError> {
         missing_mission_revision(self.connection, mission, revision)
     }
 }
@@ -8688,7 +8688,7 @@ fn missing_mission_revision(
     connection: &Connection,
     mission: &str,
     revision: &str,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     let pin = format!("mission/{mission}@{revision}");
     let published = connection
         .query_row(
@@ -8720,7 +8720,7 @@ fn missing_mission_revision(
 fn validate_documents(
     transaction: &Transaction<'_>,
     references: &BTreeSet<String>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for reference in references {
         let (name, hash) = split_document_ref(reference)?;
         let bytes: Option<Vec<u8>> = transaction
@@ -8732,13 +8732,13 @@ fn validate_documents(
             .optional()
             .map_err(internal)?;
         let Some(bytes) = bytes else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-document",
                 format!("document `{reference}` is not stored"),
             ));
         };
         if hex::encode(Sha256::digest(&bytes)) != hash {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "document-hash-mismatch",
                 format!("stored bytes for `{reference}` do not match the reference"),
             ));
@@ -8747,40 +8747,40 @@ fn validate_documents(
     Ok(())
 }
 
-fn validate_claim_kind(kind: &str) -> Result<(), St3Error> {
+fn validate_claim_kind(kind: &str) -> Result<(), FractalError> {
     if fractal_schema::is_known_claim(kind) {
         Ok(())
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "unknown-claim-kind",
             format!("claim kind `{kind}` is not registered in st3.v1"),
         ))
     }
 }
 
-fn validate_claim_subject(subject: &str) -> Result<(), St3Error> {
+fn validate_claim_subject(subject: &str) -> Result<(), FractalError> {
     fractal_schema::registry()
         .validate_subject(subject)
         .map(|_| ())
-        .map_err(|error| St3Error::new(error.code, error.message))
+        .map_err(|error| FractalError::new(error.code, error.message))
 }
 
-pub fn validate_actor(actor: &str) -> Result<(), St3Error> {
+pub fn validate_actor(actor: &str) -> Result<(), FractalError> {
     if actor == "requester" {
         return Ok(());
     }
     validate_claim_subject(actor).map_err(|_| {
-        St3Error::new(
+        FractalError::new(
             "invalid-claim-actor",
             "a claim actor must be `requester` or a full subject",
         )
     })
 }
 
-fn validate_claim_fields(input: &ClaimInput) -> Result<&'static fractal_schema::ClaimSpec, St3Error> {
+fn validate_claim_fields(input: &ClaimInput) -> Result<&'static fractal_schema::ClaimSpec, FractalError> {
     fractal_schema::registry()
         .validate_claim(&input.subject, &input.kind, &input.fields)
-        .map_err(|error| St3Error::new(error.code, error.message))
+        .map_err(|error| FractalError::new(error.code, error.message))
 }
 
 fn validate_claim_cardinality(
@@ -8790,7 +8790,7 @@ fn validate_claim_cardinality(
     actor: Option<&str>,
     fields: &BTreeMap<String, Value>,
     cardinality: &fractal_schema::Cardinality,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let duplicate = match cardinality {
         fractal_schema::Cardinality::Append | fractal_schema::Cardinality::StateTransition => false,
         fractal_schema::Cardinality::Once => transaction
@@ -8828,7 +8828,7 @@ fn validate_claim_cardinality(
         }
     };
     if duplicate {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "claim-cardinality",
             format!(
                 "claim kind `{}` already exists at its allowed cardinality for `{}`",
@@ -8842,7 +8842,7 @@ fn validate_claim_cardinality(
 pub fn normalize_resource_observation(
     transaction: &Connection,
     input: &ClaimInput,
-) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
+) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if input.kind != "resource.observed" {
         return Ok(None);
     }
@@ -8860,7 +8860,7 @@ pub fn normalize_resource_observation_with_actuals(
     input: &ClaimInput,
     prior_kind: Option<String>,
     previous: impl FnOnce() -> Result<Option<Value>>,
-) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
+) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if input.kind != "resource.observed" {
         return Ok(None);
     }
@@ -8875,13 +8875,13 @@ pub fn normalize_resource_observation_with_actuals(
         .or_else(|| prior_kind.clone())
         .or(desired_kind)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-resource-kind",
                 "the first resource observation needs a registered resource kind",
             )
         })?;
     if prior_kind.as_deref().is_some_and(|prior| prior != kind) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "immutable-resource-kind",
             format!(
                 "resource `{}` already has kind `{}`",
@@ -8893,7 +8893,7 @@ pub fn normalize_resource_observation_with_actuals(
     let mut facts = resource_facts(&input.fields)?;
     let spec = fractal_schema::registry()
         .validate_resource_facts(&kind, &facts)
-        .map_err(|error| St3Error::new(error.code, error.message))?;
+        .map_err(|error| FractalError::new(error.code, error.message))?;
     if let Some(previous) = previous().map_err(internal)? {
         let empty = serde_json::Map::new();
         let previous = previous
@@ -8916,7 +8916,7 @@ pub fn normalize_resource_observation_with_actuals(
                 && let Some(value) = facts.get(name)
                 && previous.get(name).is_some_and(|prior| prior != value)
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "immutable-resource-field",
                     format!(
                         "resource field `{name}` cannot change for `{}`",
@@ -8946,7 +8946,7 @@ fn carries_opener(kind: &str) -> bool {
     RESOURCE_OPENER_KINDS.contains(&kind)
 }
 
-fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, St3Error> {
+fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, FractalError> {
     if let Some(value) = fields.get("facts") {
         return value
             .as_object()
@@ -8957,7 +8957,7 @@ fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, V
                     .collect()
             })
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-resource-observation",
                     "resource observation facts must be an object",
                 )
@@ -8981,7 +8981,7 @@ fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, V
 fn latest_resource_kind(
     transaction: &Connection,
     subject: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let bodies = {
         let mut statement = transaction
             .prepare(
@@ -9105,7 +9105,7 @@ pub fn flush_held_usage_tx(
     origin: &str,
     subject: &str,
     now: u128,
-) -> Result<Vec<ClaimRecord>, St3Error> {
+) -> Result<Vec<ClaimRecord>, FractalError> {
     publish_pending_usage_tx(transaction, origin, subject, "", now, Some(0), true)
 }
 
@@ -9174,24 +9174,24 @@ pub fn pending_usage(
     rows.collect()
 }
 
-pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
+pub fn validate_local_observation(input: &ClaimInput) -> Result<(), FractalError> {
     let action_receipt_cas = input.kind == "client.action-result"
         && input.actor.is_none()
         && input.expected_subject == Some(None);
     if input.expected_subject.is_some() && !action_receipt_cas {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "local-observation-head",
             "a local observation does not take part in the subject's claim head",
         ));
     }
     fractal_schema::registry()
         .validate_claim(&input.subject, &input.kind, &input.fields)
-        .map_err(|error| St3Error::new(error.code, error.message))?;
+        .map_err(|error| FractalError::new(error.code, error.message))?;
     // A timeline entry keeps the sequence its driver gave it. A replicated claim could
     // fall back to its unique store index, but local observations share the index of the
     // claim they follow, so they could not order themselves.
     if input.kind == "harness.timeline" && !input.fields.contains_key("sequence") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-claim-field",
             "a local timeline observation needs the sequence its driver assigned",
         ));
@@ -9206,7 +9206,7 @@ pub fn insert_local_observation_tx(
     origin: &str,
     input: &ClaimInput,
     observed_at: u128,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     let mut body = json!({
         "fields": &input.fields,
         "evidence": input.evidence,
@@ -9234,7 +9234,7 @@ pub fn insert_local_observation_tx(
     {
         // A retry must repeat the original request exactly, as for a claim.
         if stored_digest != request_digest {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "idempotency-mismatch",
                 "the idempotency key already identifies a different request",
             )
@@ -9266,7 +9266,7 @@ pub fn insert_local_observation_tx(
             }
         };
         if !exists {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-evidence",
                 format!("evidence claim `{evidence}` is not stored"),
             ));
@@ -9551,7 +9551,7 @@ pub fn latest_claim_of_kind_tx(
     transaction: &Transaction<'_>,
     subject: &str,
     kind: &str,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     transaction
         .query_row(
             // The same statement `Store::latest_claim` runs. Without the index hint SQLite picks
@@ -9572,7 +9572,7 @@ fn publish_latest_claim_tx(
     kind: &str,
     actor: Option<&str>,
     fields: &Value,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     let predecessors = latest_claim_id_tx(transaction, subject)
         .map_err(internal)?
         .into_iter()
@@ -9594,7 +9594,7 @@ fn latest_harness_of_incarnation_tx(
     connection: &Transaction<'_>,
     subject: &str,
     incarnation: Option<&str>,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     let latest = latest_claim_of_kind_tx(connection, subject, "harness.observed")?;
     if latest.as_ref().is_none_or(|claim| {
         claim.body.pointer("/fields/incarnation_id").and_then(Value::as_str) == incarnation
@@ -9630,7 +9630,7 @@ fn harness_view_rests_on_tx(
     subject: &str,
     incarnation: &str,
     latest: &ClaimRecord,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     if latest_claim_of_kind_tx(transaction, subject, "harness.observed")?
         .is_none_or(|claim| claim.id != latest.id)
     {
@@ -9682,7 +9682,7 @@ fn publish_changed_harness_state_tx(
     now: u128,
     heartbeat: bool,
     fleet_hears: bool,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
         &input.subject,
@@ -9902,7 +9902,7 @@ fn publish_due_usage_tx(
     input: &ClaimInput,
     local: &ClaimRecord,
     now: u128,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     let slot = usage_slot(&input.fields);
     let last = transaction
         .query_row(
@@ -10013,7 +10013,7 @@ fn publish_due_usage_tx(
     };
     if !due {
         let local_id = local_observation_position(local)
-            .ok_or_else(|| St3Error::new("internal", "a local observation has no position"))?;
+            .ok_or_else(|| FractalError::new("internal", "a local observation has no position"))?;
         // A repeat supersedes an older pending reading: the replicated claim is current again.
         let pending = (!repeat).then_some(local_id as i64);
         transaction
@@ -10065,7 +10065,7 @@ fn publish_usage_slot_tx(
     actor: Option<&str>,
     fields: &BTreeMap<String, Value>,
     now: u128,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     let mut fields = fields.clone();
     // Native binding can arrive after the response was captured. Enrich at the scheduled
     // publication (including stop), without adding a publication or changing the slot.
@@ -10115,7 +10115,7 @@ fn publish_pending_usage_tx(
     now: u128,
     published_by: Option<u128>,
     ended: bool,
-) -> Result<Vec<ClaimRecord>, St3Error> {
+) -> Result<Vec<ClaimRecord>, FractalError> {
     let mut pending = {
         let mut statement = transaction
             .prepare(/* sqlite-large-value: allow-for-now lv-h0385a1228a70 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
@@ -10192,7 +10192,7 @@ fn publish_pending_usage_tx(
                 now,
             )
         })
-        .collect::<Result<Vec<_>, St3Error>>()?;
+        .collect::<Result<Vec<_>, FractalError>>()?;
     if published_by.is_some() {
         return Ok(published);
     }
@@ -10294,7 +10294,7 @@ fn publication_operation_digest<T: Serialize>(
     subject: &str,
     action: &str,
     value: &T,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     canonical_hash(&("st3.publish-operation.v1", subject, action, value)).map_err(internal)
 }
 
@@ -10304,17 +10304,17 @@ fn publication_operation_is_new<T: Serialize>(
     action: &str,
     id: &str,
     value: &T,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let operation_id = publication_operation_key(subject, action, id);
     let digest = publication_operation_digest(subject, action, value)?;
     match operation_tx(connection, &operation_id).map_err(internal)? {
         None => Ok(true),
         Some((stored, _, state)) if state == "active" && stored == digest => Ok(false),
-        Some((_, _, state)) if state == "conflict" => Err(St3Error::new(
+        Some((_, _, state)) if state == "conflict" => Err(FractalError::new(
             "idempotency-conflict",
             format!("operation `{id}` has conflicting replicated claims"),
         )),
-        Some(_) => Err(St3Error::new(
+        Some(_) => Err(FractalError::new(
             "immutable-operation-id",
             format!("operation `{id}` repeats with different content"),
         )),
@@ -10331,7 +10331,7 @@ fn append_publication_operation_tx<T: Serialize>(
     value: &T,
     actor: Option<&str>,
     batch_id: &str,
-) -> Result<ClaimRecord, St3Error> {
+) -> Result<ClaimRecord, FractalError> {
     let operation_id = publication_operation_key(subject, action, id);
     let request_digest = publication_operation_digest(subject, action, value)?;
     let body = json!({
@@ -10582,7 +10582,7 @@ fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<Stri
         // or older producer, is quarantined alone instead of failing the whole graph.
         project_claim_isolated_tx(transaction, "projection:planning", &claim, || {
             project_planning_claim_tx(transaction, &claim).map_err(|error| {
-                St3Error::new("unprojectable-planning-claim", format!("{error:#}"))
+                FractalError::new("unprojectable-planning-claim", format!("{error:#}"))
             })
         })?;
     }
@@ -10845,7 +10845,7 @@ fn message_recipient_tx(connection: &Connection, subject: &str) -> Result<Option
 fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let requested = match input.kind.as_str() {
         "message.sent" => "sent",
         "message.staged" => "staged",
@@ -10855,19 +10855,19 @@ fn validate_message_transition(
         _ => return Ok(false),
     };
     if !input.subject.starts_with("message/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-message-subject",
             "a message lifecycle claim needs a `message/` subject",
         ));
     }
     if input.fields.get("status").and_then(Value::as_str) != Some(requested) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-message-status",
             format!("`{}` needs status `{requested}`", input.kind),
         ));
     }
     if matches!(requested, "read" | "closed") && input.actor.is_none() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "missing-message-actor",
             format!("`{}` needs an actor", input.kind),
         ));
@@ -10915,7 +10915,7 @@ fn validate_message_transition(
     if requested != "sent" && current == Some(requested)
         && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "delegation-refused",
                 "this message is already closed; only an identical operation may replay",
             ));
@@ -10965,7 +10965,7 @@ fn validate_message_transition(
             |row| row.get(0),
         ).map_err(internal)?;
         if prior {
-            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+            return Err(FractalError::new("invalid-message-transition", "custody read is already recorded"));
         }
     }
     // A person's displayed message has no native harness handoff. Its explicit read receipt
@@ -11003,7 +11003,7 @@ fn validate_message_transition(
         && input.actor.as_deref() == Some("daemon/runtime");
     let delegated_close = requested == "closed" && input.fields.contains_key("delegation");
     if !valid && !custody_read && !person_read && !daemon_withdrawal && !delegated_close {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-message-transition",
             format!(
                 "message `{}` cannot move from `{}` to `{requested}`",
@@ -11363,7 +11363,7 @@ fn cache_local_apply_receipt_tx(
     response: ApplyResponse,
     local_receipt: Option<(&str, &Value)>,
     primary_key: &str,
-) -> Result<ApplyResponse, St3Error> {
+) -> Result<ApplyResponse, FractalError> {
     if let Some((key, template)) = local_receipt {
         let mut receipt = template.clone();
         receipt["event_cursor"] = json!(response.store_index);
@@ -12014,7 +12014,7 @@ pub fn newest_claims_of_kind_query(columns: &str, kind: &str) -> String {
 pub fn check_mailbox_incarnation(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let identity = identities::resolve_reference_conn(connection, &fence.subject)?;
     let normalized;
     let fence = if identity != fence.subject {
@@ -12074,7 +12074,7 @@ pub fn check_mailbox_incarnation(
                 // and its hooks can advance before reconciliation publishes runtime.running.
                 // Retry without allocating ownership or authorizing any mailbox reads/receipts.
                 // Ended and indeterminate observations remain terminal.
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "mailbox-session-starting",
                     "waiting for the seat's running incarnation",
                 ));
@@ -12085,7 +12085,7 @@ pub fn check_mailbox_incarnation(
         || mailbox_harness_ended(connection, &fence.subject, &fence.incarnation, &runtime_claim)
             .map_err(internal)?
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-mailbox-session",
             "this is not the seat's live incarnation",
         ));
@@ -12344,7 +12344,7 @@ pub fn check_mailbox_fence(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
     host: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let identity = identities::resolve_reference_conn(connection, &fence.subject)?;
     let normalized;
     let fence = if identity != fence.subject {
@@ -12371,7 +12371,7 @@ pub fn check_mailbox_fence(
         .optional()
         .map_err(internal)?;
     if owner != Some((fence.incarnation.clone(), fence.epoch)) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-mailbox-session",
             "a newer channel owns this seat",
         ));
@@ -14342,8 +14342,8 @@ impl OperationalRepairFilter {
     }
 }
 
-fn decode_repair_token(token: &str) -> Result<(String, OperationalRepairFilter), St3Error> {
-    let invalid = || St3Error::new("invalid-repair-token", "expected an orpv0 digest and optional canonical filter");
+fn decode_repair_token(token: &str) -> Result<(String, OperationalRepairFilter), FractalError> {
+    let invalid = || FractalError::new("invalid-repair-token", "expected an orpv0 digest and optional canonical filter");
     let body = token.strip_prefix("orpv0:").ok_or_else(invalid)?;
     let (digest, encoded) = body.split_once(':').map_or((body, None), |(digest, filter)| (digest, Some(filter)));
     if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
@@ -14483,7 +14483,7 @@ fn repair_step_state_tx(
     status: &str,
     reason: &str,
     now: u128,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let current = transaction
         .query_row(
             "SELECT status, readiness_epoch FROM step_runs WHERE subject=?1",
@@ -14533,7 +14533,7 @@ fn repair_impossible_run_tx(
     subject: &str,
     reason: &str,
     now: u128,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let run_id = subject.strip_prefix("mission-run/").unwrap_or(subject);
     let current = transaction
         .query_row(
@@ -14815,7 +14815,7 @@ fn insert_mission_deadline_tx(
     run_id: &str,
     timeout_ms: Option<u64>,
     started_at_unix_ms: Option<u128>,
-) -> Result<Option<u128>, St3Error> {
+) -> Result<Option<u128>, FractalError> {
     let Some(timeout_ms) = timeout_ms else {
         return Ok(None);
     };
@@ -14842,7 +14842,7 @@ pub fn arm_waiting_mission_deadline_tx(
     step: &str,
     admitted_at_unix_ms: u128,
     previously_completed: bool,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if step.rsplit('/').next() != Some(crate::mission::AFTER_RUN_STEP) || previously_completed {
         return Ok(());
     }
@@ -14889,18 +14889,18 @@ pub fn arm_waiting_mission_deadline_tx(
     Ok(())
 }
 
-fn validate_mission_run_timeout(mission: &MissionSpec, mode: &str) -> Result<(), St3Error> {
+fn validate_mission_run_timeout(mission: &MissionSpec, mode: &str) -> Result<(), FractalError> {
     if mode != "eval" {
         return Ok(());
     }
     let timeout_ms = mission.timeout_ms.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-eval-timeout",
             format!("eval entry mission `{}` needs a timeout", mission.id),
         )
     })?;
     if timeout_ms > MAX_EVAL_TIMEOUT_MS {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "eval-timeout-too-large",
             format!(
                 "eval entry mission `{}` timeout exceeds the 20 minute limit",
@@ -14911,8 +14911,8 @@ fn validate_mission_run_timeout(mission: &MissionSpec, mode: &str) -> Result<(),
     Ok(())
 }
 
-pub fn claim_append_error(error: anyhow::Error) -> St3Error {
-    match error.downcast::<St3Error>() {
+pub fn claim_append_error(error: anyhow::Error) -> FractalError {
+    match error.downcast::<FractalError>() {
         Ok(error) => error,
         Err(error) => internal(error),
     }
@@ -14921,7 +14921,7 @@ pub fn claim_append_error(error: anyhow::Error) -> St3Error {
 fn validate_replica_repair(
     connection: &Connection,
     repair: &ReplicaRepairDeclaration,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let state = connection
         .query_row(
             "SELECT state FROM replica_records WHERE record_ref=?1",
@@ -14931,13 +14931,13 @@ fn validate_replica_repair(
         .optional()
         .map_err(internal)?
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "unknown-replica-record",
                 format!("replica record `{}` does not exist", repair.record_ref),
             )
         })?;
     if !matches!(state.as_str(), "invalid" | "unknown" | "repaired") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "record-does-not-need-repair",
             format!("replica record `{}` is {state}", repair.record_ref),
         ));
@@ -14952,7 +14952,7 @@ fn validate_replica_repair(
         .map_err(internal)?
         .is_some();
     if !replacement_exists {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unknown-replacement-claim",
             format!(
                 "replacement claim `{}` does not exist or is not valid",
@@ -14985,7 +14985,7 @@ fn validate_replica_repair(
         if same {
             return Ok(false);
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "conflicting-repair",
             format!(
                 "replica record `{}` already has another repair",
@@ -15572,7 +15572,7 @@ pub fn validate_replicated_claim(
     transaction: &Connection,
     batch: &ReplicaBatch,
     claim: &ClaimRecord,
-) -> Result<ReplicatedClaimAdmission, St3Error> {
+) -> Result<ReplicatedClaimAdmission, FractalError> {
     smallclaims::store::validate_replicated_claim(
         transaction,
         batch,
@@ -15586,9 +15586,9 @@ pub fn validate_replicated_claim(
 pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
-) -> Result<ReplicatedClaimAdmission, St3Error> {
+) -> Result<ReplicatedClaimAdmission, FractalError> {
     if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched" | "client.action-result") {
-        return Err(St3Error::new("invalid-replicated-claim",
+        return Err(FractalError::new("invalid-replicated-claim",
             "helper launcher authority, launch history, and client action receipts cannot be admitted from peers"));
     }
     if !registry.claims.contains_key(&claim.kind) && !fractal_schema::is_custom_claim_kind(&claim.kind)
@@ -15596,7 +15596,7 @@ pub fn classify_replicated_claim_with_registry(
         return Ok(ReplicatedClaimAdmission::UnknownKind);
     }
     let fields = schema_fields_for_body(&claim.kind, &claim.body).map_err(|error| {
-        St3Error::new(
+        FractalError::new(
             "invalid-replicated-claim",
             format!(
                 "replicated claim `{}` has an invalid body: {error}",
@@ -15611,7 +15611,7 @@ pub fn classify_replicated_claim_with_registry(
         if error.code == "unknown-claim-field" {
             return Ok(ReplicatedClaimAdmission::UnknownField);
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-replicated-claim",
             format!(
                 "replicated claim `{}` violates {}: {}",
@@ -15624,34 +15624,34 @@ pub fn classify_replicated_claim_with_registry(
         && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
             || fields.get("retired_by").and_then(Value::as_str) != claim.actor.as_deref())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-replicated-claim",
             "terminal retirement must name its writing owner and actor",
         ));
     }
     assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), claim.body.get("fields").unwrap_or(&claim.body))?;
     fractal_schema::slo_breaches::validate_claim(&claim.subject, &claim.kind, &claim.body,
-        &claim.origin, claim.actor.as_deref()).map_err(|message| St3Error::new("invalid-replicated-claim", message))?;
+        &claim.origin, claim.actor.as_deref()).map_err(|message| FractalError::new("invalid-replicated-claim", message))?;
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     fractal_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     if claim.kind == "owned-set.revised" { owned_sets::validate_receipt(&claim.subject, &claim.body)?; }
     fractal_schema::owned_terminals::validate_declaration_owner(
         &claim.subject,
         &claim.kind,
         claim.actor.as_deref(),
     )
-    .map_err(|e| St3Error::new(e.code, e.message))?;
+    .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::glasses::validate_owner(&claim.subject, claim.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-replicated-claim",
             "glass claims must record base_revision and replaced_revision",
         ));
@@ -15703,7 +15703,7 @@ pub fn terminal_binding_replica_admission_rejects_a_foreign_actor() {
 
 /// Reapply this host's lease renewals that have not replicated yet after a projection replay,
 /// and forget each one whose lease has ended.
-pub fn reapply_local_work_lease_renewals_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn reapply_local_work_lease_renewals_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     let mut statement = transaction
         .prepare(
             "SELECT subject, attempt, lease_owner, lease_incarnation,
@@ -15820,7 +15820,7 @@ fn run_tree_kind(kind: &str) -> bool {
 fn aggregate_of_tx(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
-) -> Result<Option<Aggregate>, St3Error> {
+) -> Result<Option<Aggregate>, FractalError> {
     Ok(match claim.kind.as_str() {
         "intent.desired" | "agent.retired" => Some(Aggregate::Desired(claim.subject.clone())),
         "doc.bound" => Some(Aggregate::Document(claim.subject.clone())),
@@ -15834,7 +15834,7 @@ fn aggregate_of_tx(
 fn generation_run_tx(
     transaction: &Transaction<'_>,
     generation: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     if let Some(run) = transaction
         .query_row(
             "SELECT run_id FROM run_generations WHERE id=?1",
@@ -15895,7 +15895,7 @@ fn generation_run_tx(
 pub fn run_tree_of_tx(
     transaction: &Transaction<'_>,
     subject: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     match run_of_subject_tx(transaction, subject)? {
         Some(run) => run_root_tx(transaction, &run).map(Some),
         None => Ok(None),
@@ -15907,7 +15907,7 @@ pub fn run_tree_of_tx(
 fn run_of_subject_tx(
     transaction: &Transaction<'_>,
     subject: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     Ok(if let Some(run) = subject.strip_prefix("mission-run/") {
         Some(run.to_owned())
     } else if let Some(generation) = subject.strip_prefix("run-generation/") {
@@ -15946,7 +15946,7 @@ fn run_of_subject_tx(
 }
 
 /// The root a run names, or the owner of an ask run, or the run itself.
-fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, St3Error> {
+fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, FractalError> {
     if let Some(root) = transaction
         .query_row(
             "SELECT root_run_id FROM mission_runs WHERE id=?1",
@@ -15992,7 +15992,7 @@ fn string_column_tx(
     transaction: &Connection,
     sql: &str,
     value: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc96730cc68a9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql).map_err(internal)?;
     let values = statement
         .query_map([value], |row| row.get::<_, Option<String>>(0))
@@ -16008,7 +16008,7 @@ fn string_column_tx(
 fn parent_step_of_run_tx(
     transaction: &Transaction<'_>,
     run: &str,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     if let Some(parent) = transaction
         .query_row(
             "SELECT parent_step_run FROM mission_runs WHERE id=?1",
@@ -16041,7 +16041,7 @@ fn step_generation(parent: &str) -> Option<&str> {
 }
 
 /// Whether a root run has ended, or any claim ends it: projected so, or claimed so in any order.
-fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, St3Error> {
+fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, FractalError> {
     transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1
@@ -16073,7 +16073,7 @@ fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, S
 pub fn run_part_of_tx(
     transaction: &Transaction<'_>,
     subject: &str,
-) -> Result<Option<Aggregate>, St3Error> {
+) -> Result<Option<Aggregate>, FractalError> {
     let Some(tree) = run_tree_of_tx(transaction, subject)? else {
         return Ok(None);
     };
@@ -16122,7 +16122,7 @@ pub fn run_part_of_tx(
 /// Rebuild one part of a run tree whose root never ended (see `run_part_of_tx`): the root with
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
-pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), St3Error> {
+pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -16162,7 +16162,7 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(internal)?;
     created.sort();
-    let asks_of = |run: &str| -> Result<Vec<String>, St3Error> {
+    let asks_of = |run: &str| -> Result<Vec<String>, FractalError> {
         let mut asks = string_column_tx(
             transaction,
             "SELECT id FROM mission_runs WHERE root_run_id=?1 AND id<>?1 AND parent_step_run IS NULL",
@@ -16250,7 +16250,7 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
 pub fn run_generation_ids_tx(
     transaction: &Connection,
     run: &str,
-) -> Result<BTreeSet<String>, St3Error> {
+) -> Result<BTreeSet<String>, FractalError> {
     let subject = format!("mission-run/{run}");
     let mut generations = string_column_tx(
         transaction,
@@ -16290,7 +16290,7 @@ fn claims_in_replay_order_tx(
     subjects: &BTreeSet<String>,
     generations: &BTreeSet<String>,
     kinds: Option<&[&str]>,
-) -> Result<Vec<ClaimRecord>, St3Error> {
+) -> Result<Vec<ClaimRecord>, FractalError> {
     let kind_filter = kinds
         .map(|kinds| {
             format!(
@@ -16351,7 +16351,7 @@ fn claims_in_replay_order_tx(
 /// Rebuild one mission run tree from nothing, as a full replay would, but from the tree's own
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
-pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), St3Error> {
+pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -16385,7 +16385,7 @@ pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<
 
 /// Forget `runs` and their generations, steps and proposals, then project their claims again in
 /// the replay's order and passes.
-fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Result<(), St3Error> {
+fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Result<(), FractalError> {
     let strings = |sql: &str, value: &str| string_column_tx(transaction, sql, value);
     let mut generations = BTreeSet::new();
     let mut proposals = BTreeSet::new();
@@ -16486,7 +16486,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
 fn rebuild_base_aggregate_tx(
     transaction: &Transaction<'_>,
     aggregate: &Aggregate,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let (subject, kind) = match aggregate {
         Aggregate::Desired(subject) => (subject, "intent.desired"),
         Aggregate::Document(subject) => (subject, "doc.bound"),
@@ -16539,7 +16539,7 @@ fn rebuild_base_aggregate_tx(
 }
 
 /// Identify the claim being processed, without copying its fields, payload or authority data.
-fn incremental_claim_error(error: St3Error, claim: &ClaimRecord, stage: &'static str) -> St3Error {
+fn incremental_claim_error(error: FractalError, claim: &ClaimRecord, stage: &'static str) -> FractalError {
     let operation = operation_parts(&claim.body).map(|(operation, _)| operation);
     let truncated = [&claim.id, &claim.subject, &claim.kind]
         .into_iter()
@@ -16568,7 +16568,7 @@ fn replay_needed(reason: &'static str) -> IncrementalProjection {
 pub fn try_project_all_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     try_project_simple_replication_tx(
         transaction,
         origin,
@@ -16581,7 +16581,7 @@ pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     through: u64,
-) -> Result<IncrementalProjection, St3Error> {
+) -> Result<IncrementalProjection, FractalError> {
     let health: Option<(String, u64)> = transaction
         .query_row(
             "SELECT status, last_good_store_index FROM projection_health WHERE aggregate='graph'",
@@ -16632,7 +16632,7 @@ pub fn try_project_simple_replication_tx(
                 })?,
             ))
         })
-        .collect::<Result<BTreeMap<_, _>, St3Error>>()?;
+        .collect::<Result<BTreeMap<_, _>, FractalError>>()?;
     work_claims.sort_by_key(|claim| &order_keys[&claim.id]);
     // The full replay orders claims by accepted time, then by batch writer and sequence. A
     // structural claim extends the projection only when it sorts after everything projected
@@ -16764,7 +16764,7 @@ pub fn try_project_simple_replication_tx(
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason,
                 details: incremental_claim_error(
-                    St3Error::new(reason, "claim requires canonical replay"),
+                    FractalError::new(reason, "claim requires canonical replay"),
                     claim,
                     "incremental-guard",
                 ).details,
@@ -16981,7 +16981,7 @@ pub fn try_project_simple_replication_tx(
             crate::profile::note("replay: operation-conflict");
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason: "operation-conflict",
-                details: incremental_claim_error(St3Error::new("operation-conflict",
+                details: incremental_claim_error(FractalError::new("operation-conflict",
                     "operation digest differs or registry state is not active"), claim,
                     "operation-registry").with_detail("projection_error", format!(
                         "operation registry refuses incoming claim: digest_matches={}; stored state {}", stored_digest == request_digest, state.chars().take(32).collect::<String>()
@@ -17043,7 +17043,7 @@ pub fn try_project_simple_replication_tx(
     let mut aggregates = BTreeMap::<String, Option<Aggregate>>::new();
     // A claim is left to its aggregate's rebuild when that aggregate is dirty, and left waiting
     // when it is about a run tree that nothing has created yet.
-    let mut in_dirty = |claim: &ClaimRecord| -> Result<bool, St3Error> {
+    let mut in_dirty = |claim: &ClaimRecord| -> Result<bool, FractalError> {
         if Store::simple_replication_kind(&claim.kind) && !claim.kind.starts_with("work.") {
             return Ok(false);
         }
@@ -17204,14 +17204,14 @@ const REPLAYED_GRAPH_TABLES: [&str; 10] = [
 /// over the rows an earlier projection left behind depends on how that projection ran: it
 /// skipped a generation it had already projected, so it re-applied a terminal state that the
 /// generation had reopened. Two nodes holding the same claims then showed different graphs.
-pub fn replay_graph_from_nothing_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn replay_graph_from_nothing_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     replay_graph_from_nothing_with_progress_tx(transaction, &mut |_| {})
 }
 
 fn replay_graph_from_nothing_with_progress_tx(
     transaction: &Transaction<'_>,
     progress: &mut dyn FnMut(ReplayProgress),
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mut stage = |phase| {
         progress(ReplayProgress {
             phase,
@@ -17246,14 +17246,14 @@ fn replay_graph_from_nothing_with_progress_tx(
     Ok(())
 }
 
-pub fn project_replicated_base_claims(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_replicated_base_claims(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     project_replicated_base_claims_with_progress(transaction, &mut |_| {})
 }
 
 fn project_replicated_base_claims_with_progress(
     transaction: &Transaction<'_>,
     progress: &mut dyn FnMut(ReplayProgress),
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     const BATCH: usize = 256;
     // Event positions do not consume bodies or canonical fold order. Preserve the same
     // admitted/repaired and case-sensitive glass exclusions without decoding unrelated
@@ -17374,8 +17374,8 @@ pub fn project_claim_isolated_tx(
     transaction: &Transaction<'_>,
     aggregate: &str,
     claim: &ClaimRecord,
-    project: impl FnOnce() -> Result<(), St3Error>,
-) -> Result<(), St3Error> {
+    project: impl FnOnce() -> Result<(), FractalError>,
+) -> Result<(), FractalError> {
     transaction
         .execute_batch(/* sqlite-large-value: allow-for-now lv-h2d897e2887b5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SAVEPOINT project_claim")
         .map_err(internal)?;
@@ -17410,7 +17410,7 @@ pub fn project_claim_isolated_tx(
 fn clear_quarantined_claims_tx(
     transaction: &Transaction<'_>,
     aggregate: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     transaction
         .execute(
             /* sqlite-large-value: allow-for-now lv-hda04e7d0a440 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate LIKE ?1",
@@ -17426,7 +17426,7 @@ fn clear_quarantined_claims_tx(
 fn validate_standing_observer_stop(
     intent: &NormalizedIntent,
     actor: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(actor) = actor.filter(|actor| !actor.starts_with("person/")) else {
         return Ok(());
     };
@@ -17440,7 +17440,7 @@ fn validate_standing_observer_stop(
                 && crate::graph::observer_spec(&desired.desired).is_some_and(|spec| spec.stopped)
         })
     {
-        Some(observer) => Err(St3Error::new(
+        Some(observer) => Err(FractalError::new(
             "observer-stop-person-only",
             format!("only a person stops `{}`; `{actor}` cannot", observer.subject),
         )),
@@ -17452,7 +17452,7 @@ pub fn select_replicated_desired(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     desired: &DesiredSubject,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     // Replication projects the signed storage subject, never a receiver-local public alias.
     // Only newly authored declarations are normalized at admission.
     if claim.body.get("owned_set").is_some() || owned_sets::owner(transaction, &desired.subject, None)?.is_some() {
@@ -17569,7 +17569,7 @@ fn select_desired_repair_tx(
     Ok(())
 }
 
-pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     clear_quarantined_claims_tx(transaction, "projection:runs")?;
     for pass in 0..3 {
         let filter = match pass {
@@ -17611,7 +17611,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
 fn reconcile_carried_step_tx(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     // A replay may be repairing an existing projection. A later step claim
     // owns its state; otherwise the carried claim is the last direct state
     // observation for this successor step.
@@ -17673,10 +17673,10 @@ fn reconcile_carried_step_tx(
 pub fn project_mission_run_created(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     let run_id = claim.subject.strip_prefix("mission-run/").ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-mission-run-claim",
             format!("claim `{}` has an invalid mission run subject", claim.id),
         )
@@ -17700,7 +17700,7 @@ pub fn project_mission_run_created(
         .get("mission")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-mission-run-claim",
                 format!("claim `{}` has no mission", claim.id),
             )
@@ -17712,7 +17712,7 @@ pub fn project_mission_run_created(
         .get("revision")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-mission-run-claim",
                 format!("claim `{}` has no mission revision", claim.id),
             )
@@ -17768,7 +17768,7 @@ pub fn project_mission_run_created(
         .get("current_generation")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-mission-run-claim",
                 format!("claim `{}` has no initial generation", claim.id),
             )
@@ -17871,7 +17871,7 @@ pub fn project_mission_run_created(
 pub fn project_mission_run_update(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     // Nudges are retained events, never work-state transitions. This also matches
     // full replay for historical bodies that bypassed today's field admission.
     if claim.kind == WORK_NUDGED_KIND {
@@ -18108,7 +18108,7 @@ pub fn project_revision_proposal(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     fields: &Value,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(proposal_id) = claim.subject.strip_prefix("revision-proposal/") else {
         return Ok(());
     };
@@ -18287,7 +18287,7 @@ pub fn project_revision_proposal(
 fn project_run_generation_created(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(generation_id) = claim.subject.strip_prefix("run-generation/") else {
         return Ok(());
     };
@@ -18504,9 +18504,9 @@ pub fn select_replicated_mission(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
     created_index: u64,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mission = serde_json::from_value::<MissionSpec>(claim.body.clone()).map_err(|error| {
-        St3Error::new(
+        FractalError::new(
             "invalid-mission-claim",
             format!(
                 "replicated mission claim `{}` is invalid: {error}",
@@ -18515,7 +18515,7 @@ pub fn select_replicated_mission(
         )
     })?;
     if claim.subject != mission.subject || claim.subject != format!("mission/{}", mission.id) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-claim",
             format!(
                 "replicated mission claim `{}` has mismatched identity",
@@ -18529,7 +18529,7 @@ pub fn select_replicated_mission(
         serde_json::to_vec(&unhashed).map_err(internal)?,
     ));
     if revision != expected {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-mission-claim",
             format!(
                 "replicated mission claim `{}` has an invalid revision",
@@ -19042,7 +19042,7 @@ pub fn flatten_mission_step_specs(mission: &MissionSpec) -> Vec<&crate::model::S
 pub fn interpolate_selector(
     selector: &WorkSelector,
     variables: &BTreeMap<String, String>,
-) -> Result<(Option<String>, Vec<String>, bool), St3Error> {
+) -> Result<(Option<String>, Vec<String>, bool), FractalError> {
     match selector {
         WorkSelector::Assigned { agent } => Ok((
             Some(crate::mission::interpolate(agent, variables)?),
@@ -19139,7 +19139,7 @@ fn extend_loop_variables(
 pub fn interpolate_goals(
     goals: &[String],
     variables: &BTreeMap<String, String>,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     let goals = goals
         .iter()
         .map(|goal| crate::mission::interpolate(goal, variables))
@@ -19151,7 +19151,7 @@ pub fn analyze_mission_revision(
     old: &MissionSpec,
     new: &MissionSpec,
     requester: &str,
-) -> Result<(BTreeSet<String>, BTreeSet<String>), St3Error> {
+) -> Result<(BTreeSet<String>, BTreeSet<String>), FractalError> {
     let old_hashes = step_hashes(old);
     let new_hashes = step_hashes(new);
     let mut changed = old_hashes
@@ -19164,7 +19164,7 @@ pub fn analyze_mission_revision(
         changed.insert(String::new());
     }
     if changed.is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unchanged-mission-revision",
             "the proposed mission revision does not change the mission",
         ));
@@ -19259,7 +19259,7 @@ fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
+fn mission_header_hash(mission: &MissionSpec) -> Result<String, FractalError> {
     let mut value = json!({
         "id": mission.id,
         "state": mission.state,
@@ -21014,7 +21014,7 @@ pub fn terminalize_generation_steps_tx(
     actor: Option<&str>,
     batch_id: Option<&str>,
     now: u128,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut statement = transaction
         .prepare(
             "SELECT subject FROM step_runs
@@ -21066,7 +21066,7 @@ pub fn terminalize_run_steps_tx(
     actor: Option<&str>,
     batch_id: Option<&str>,
     now: u128,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut statement = transaction
         .prepare("SELECT id FROM run_generations WHERE run_id=?1 ORDER BY created_at_unix_ms, id")
         .map_err(internal)?;
@@ -21096,7 +21096,7 @@ pub fn terminalize_projected_generation_steps_tx(
     generation_id: &str,
     reason: &str,
     updated_at_unix_ms: u128,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     transaction
         .execute(
             /* sqlite-large-value: allow-for-now lv-h3a753a5db0a5 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
@@ -21122,7 +21122,7 @@ fn terminalize_projected_run_steps_tx(
     run_id: &str,
     reason: &str,
     updated_at_unix_ms: u128,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     transaction
         .execute(
             /* sqlite-large-value: allow-for-now lv-he3a8a7eb7ea8 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
@@ -21148,7 +21148,7 @@ fn terminalize_projected_run_tree_tx(
     run_id: &str,
     reason: &str,
     updated_at_unix_ms: u128,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     terminalize_projected_run_steps_tx(transaction, run_id, reason, updated_at_unix_ms)?;
     let generation = transaction
         .query_row(
@@ -21215,7 +21215,7 @@ fn terminalize_projected_run_tree_tx(
 pub fn step_owner_is_terminal_tx(
     transaction: &Connection,
     subject: &str,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let owner = transaction
         .query_row(
             "SELECT mission_runs.status, mission_runs.phase,
@@ -21268,7 +21268,7 @@ pub fn cancel_mission_run_tx(
     reason: &str,
     forced_batch: Option<&str>,
     now: u128,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let run_id = run_subject
         .strip_prefix("mission-run/")
         .unwrap_or(run_subject);
@@ -21289,7 +21289,7 @@ pub fn cancel_mission_run_tx(
         .optional()
         .map_err(internal)?
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-mission-run",
                 format!("mission run `mission-run/{run_id}` does not exist"),
             )
@@ -21469,7 +21469,7 @@ pub fn cancel_descendant_mission_runs_tx(
     actor: &str,
     reason: &str,
     now: u128,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut claim_ids = Vec::new();
     for run_id in descendant_mission_run_ids_tx(transaction, generation_id).map_err(internal)? {
         let (status, child_generation): (String, String) = transaction
@@ -22128,11 +22128,11 @@ pub const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 
 ];
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), St3Error> {
+pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), FractalError> {
     verify_replica_batch_header(batch)?;
     for claim in &batch.claims {
         if claim.batch_id != batch.id || claim.origin != batch.origin {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "claim-batch-mismatch",
                 format!(
                     "replicated claim `{}` names another batch or origin",
@@ -22141,14 +22141,14 @@ pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), St3Error> {
             ));
         }
         if !claim_id_is_content_hash(claim).map_err(internal)? {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "claim-hash-mismatch",
                 format!("replicated claim `{}` failed verification", claim.id),
             ));
         }
         if known_replicated_claim_kind(&claim.kind) {
             let fields = schema_fields_for_body(&claim.kind, &claim.body).map_err(|error| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-replicated-claim",
                     format!(
                         "replicated claim `{}` has an invalid body: {error}",
@@ -22159,7 +22159,7 @@ pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), St3Error> {
             fractal_schema::registry()
                 .validate_claim(&claim.subject, &claim.kind, &fields)
                 .map_err(|error| {
-                    St3Error::new(
+                    FractalError::new(
                         "invalid-replicated-claim",
                         format!(
                             "replicated claim `{}` violates {}: {}",
@@ -22177,16 +22177,16 @@ pub fn check_observer_completion(
     observer: &str,
     desired_revision: &str,
     current: Option<&(dyn Fn() -> bool + Sync)>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if current.is_some_and(|current| !current()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "observer-operation-retired",
             format!("observer `{observer}` operation retired before its completion was recorded"),
         ));
     }
     let selected = current_desired_row_tx(transaction, observer).map_err(internal)?;
     if selected.as_ref().map(|desired| desired.revision.as_str()) != Some(desired_revision) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-observer-revision",
             format!("observer `{observer}` changed before its observation completed"),
         ));
@@ -22198,7 +22198,7 @@ pub fn append_claim_fenced_outcome(
     graph: &GraphStore,
     input: &ClaimInput,
     fence: Option<&crate::mailbox::Fence>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     append_claim_with_fences(graph, input, fence, None)
 }
 
@@ -22207,7 +22207,7 @@ pub fn append_claim_with_fences(
     input: &ClaimInput,
     fence: Option<&crate::mailbox::Fence>,
     event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     append_claim_with_subject_fences(graph, input, fence, event_runtime, None, None)
 }
 
@@ -22218,11 +22218,11 @@ pub fn append_claim_with_subject_fences(
     event_runtime: Option<&str>,
     expected_subjects: Option<&BTreeMap<String, String>>,
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     append_claim_with_commit_context(graph, input, fence, event_runtime, expected_subjects, observer_completion, Default::default())
 }
 
-pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + 'a;
+pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22248,7 +22248,7 @@ pub fn append_claim_with_commit_context(
     expected_subjects: Option<&BTreeMap<String, String>>,
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());
@@ -22311,7 +22311,7 @@ pub fn append_claim_with_commit_context(
     // One claim in a savepoint of the writer's next batch; its caller hears back once that
     // batch commits.
     graph.connection
-        .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
+        .batched(|transaction| -> Result<(ClaimRecord, bool), FractalError> {
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -22346,7 +22346,7 @@ pub fn append_claim_with_commit_context(
                     input.fields.get("incarnation_id").and_then(Value::as_str),
                 )?;
             }
-            let normalized_fence = fence.map(|fence| -> Result<_,St3Error> {
+            let normalized_fence = fence.map(|fence| -> Result<_,FractalError> {
                 let identity = identities::resolve_reference_conn(transaction, &fence.subject)?;
                 Ok(if identity == fence.subject { std::borrow::Cow::Borrowed(fence) }
                     else { std::borrow::Cow::Owned(crate::mailbox::Fence { subject:identity, ..fence.clone() }) })
@@ -22357,14 +22357,14 @@ pub fn append_claim_with_commit_context(
                 let index = transaction.query_row(
                     "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
                     [&input.subject], |row| row.get::<_, Option<u64>>(0),
-                ).map_err(internal)?.ok_or_else(|| St3Error::new("missing-message", "message does not exist"))?;
+                ).map_err(internal)?.ok_or_else(|| FractalError::new("missing-message", "message does not exist"))?;
                 let message = message_view_tx(transaction, &input.subject, index).map_err(internal)?;
                 let actor = input.actor.as_deref().map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
                 if message.to != fence.subject || actor.as_deref() != Some(fence.subject.as_str()) {
-                    return Err(St3Error::new("wrong-message-recipient", "receipt belongs to another seat"));
+                    return Err(FractalError::new("wrong-message-recipient", "receipt belongs to another seat"));
                 }
                 if input.kind == "message.staged" && !rollouts::message_allowed(transaction, &message)? {
-                    return Err(St3Error::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
+                    return Err(FractalError::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
                 }
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
@@ -22374,14 +22374,14 @@ pub fn append_claim_with_commit_context(
                     operation_tx(transaction, operation_id).map_err(internal)?
             {
                 if state == "conflict" {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "idempotency-conflict",
                         "the replicated operation has conflicting requests",
                     )
                     .with_detail("operation_id", operation_id.clone()));
                 }
                 if stored_digest != *request_digest {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "idempotency-mismatch",
                         "the idempotency key already identifies a different request",
                     )
@@ -22390,7 +22390,7 @@ pub fn append_claim_with_commit_context(
                     .with_detail("request_digest", request_digest.clone()));
                 }
                 let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
-                    .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))?;
+                    .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
                 identities::check_receipt(transaction, &claim)?;
                 return Ok((claim,false));
             }
@@ -22426,7 +22426,7 @@ pub fn append_claim_with_commit_context(
                         latest_claim_id_tx(transaction, subject).map_err(internal)?
                     };
                     if actual.as_deref() != Some(expected.as_str()) {
-                        return Err(St3Error::new("stale-subject", format!("subject `{subject}` changed"))
+                        return Err(FractalError::new("stale-subject", format!("subject `{subject}` changed"))
                             .with_detail("subject", subject.clone())
                             .with_detail("expected_head", json!(expected))
                             .with_detail("current_head", json!(actual)));
@@ -22449,7 +22449,7 @@ pub fn append_claim_with_commit_context(
                 let exists = checkpoint::claim_or_tombstone_exists(transaction, evidence)
                     .map_err(internal)?;
                 if !exists {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "missing-evidence",
                         format!("evidence claim `{evidence}` is not stored"),
                     ));
@@ -22462,7 +22462,7 @@ pub fn append_claim_with_commit_context(
                     latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
                 };
                 if &actual != expected {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "stale-subject",
                         format!("subject `{}` changed", input.subject),
                     )
@@ -22493,7 +22493,7 @@ pub fn append_claim_with_commit_context(
                     [&input.subject], |row| row.get(0),
                 ).optional().map_err(internal)?;
                 if current.as_deref() != input.fields.get("desired_token").and_then(Value::as_str) {
-                    return Err(St3Error::new("stale-placement",
+                    return Err(FractalError::new("stale-placement",
                         "placement changed; read the current handoff before overriding its sources"));
                 }
             }
@@ -22542,7 +22542,7 @@ pub fn append_claim_with_commit_context(
                 let latest_id = latest_claim_id_tx(transaction, &input.subject)
                     .map_err(internal)?
                     .ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "internal",
                             "an idempotent message transition has no head",
                         )
@@ -22550,7 +22550,7 @@ pub fn append_claim_with_commit_context(
                 let latest = claim_by_id_tx(transaction, &latest_id)
                     .map_err(internal)?
                     .ok_or_else(|| {
-                        St3Error::new(
+                        FractalError::new(
                             "internal",
                             "an idempotent message transition head is missing",
                         )
@@ -22659,10 +22659,10 @@ pub fn append_claim_with_commit_context(
             }
             Ok(outcome)
         })
-        .map_err(|error| St3Error::new("internal", error))?
+        .map_err(|error| FractalError::new("internal", error))?
 }
 
-pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
+pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     validate_claim_kind(&input.kind)?;
     validate_claim_subject(&input.subject)?;
     if let Some(actor) = &input.actor {
@@ -22674,13 +22674,13 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
         &input.kind,
         input.actor.as_deref(),
     )
-    .map_err(|e| St3Error::new(e.code, e.message))?;
+    .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::glasses::validate_owner(&input.subject, input.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
-        .map_err(|e| St3Error::new(e.code, e.message))?;
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     identities::claim_operation(input)?;
     Ok(())
 }
@@ -22692,7 +22692,7 @@ fn check_harness_event_runtime(
     connection: &Connection,
     subject: &str,
     runtime: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(runtime) = runtime else {
         return Ok(());
     };
@@ -22708,7 +22708,7 @@ fn check_harness_event_runtime(
     let body: Value = serde_json::from_str(body.as_deref().unwrap_or("null")).map_err(internal)?;
     let fields = body.get("fields").unwrap_or(&body);
     if fields["status"] != "running" || fields["incarnation_id"].as_str() != Some(runtime) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-harness-event-session",
             "the publishing driver is not this seat's running incarnation",
         ));
@@ -22720,7 +22720,7 @@ fn append_local_observation_fenced(
     graph: &GraphStore,
     input: &ClaimInput,
     event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     validate_local_observation(input)?;
     graph
         .connection
@@ -22734,7 +22734,7 @@ fn append_local_observation_fenced(
                     params![input.subject, input.kind], |row| row.get(0),
                 ).map_err(internal)?;
                 if occupied {
-                    return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
+                    return Err(FractalError::new("stale-subject", "the local action receipt slot is occupied"));
                 }
             }
             // A key an older build recorded as a replicated claim, before the kind became local,
@@ -22744,7 +22744,7 @@ fn append_local_observation_fenced(
             }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
-        .map_err(|error| St3Error::new("internal", error))?
+        .map_err(|error| FractalError::new("internal", error))?
 }
 
 /// The outcome of `input`'s idempotency key in the replicated operation registry, as a claim
@@ -22753,7 +22753,7 @@ fn append_local_observation_fenced(
 fn replicated_operation_outcome_tx(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     let Some((operation_id, request_digest)) = claim_operation(input)? else {
         return Ok(None);
     };
@@ -22761,18 +22761,18 @@ fn replicated_operation_outcome_tx(
         operation_tx(transaction, &operation_id).map_err(internal)?
     {
         if state == "conflict" {
-            return Err(St3Error::new("idempotency-conflict", "the replicated operation has conflicting requests")
+            return Err(FractalError::new("idempotency-conflict", "the replicated operation has conflicting requests")
                 .with_detail("operation_id", operation_id));
         }
         if stored_digest != request_digest {
-            return Err(St3Error::new("idempotency-mismatch", "the idempotency key already identifies a different request")
+            return Err(FractalError::new("idempotency-mismatch", "the idempotency key already identifies a different request")
                 .with_detail("operation_id", operation_id)
                 .with_detail("stored_digest", stored_digest)
                 .with_detail("request_digest", request_digest));
         }
         return claim_by_id_tx(transaction, &canonical_claim)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))
+            .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))
             .map(Some);
     }
     checkpointed_operation_outcome(transaction, &operation_id, &request_digest)?;
@@ -22787,7 +22787,7 @@ pub fn append_latest_observation(
     graph: &GraphStore,
     input: &ClaimInput,
     now: u128,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     append_latest_observation_fenced(graph, input, now, None)
 }
 
@@ -22796,7 +22796,7 @@ fn append_latest_observation_fenced(
     input: &ClaimInput,
     now: u128,
     event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     append_latest_observation_publication(graph, input, now, event_runtime)
         .map(|(record, appended, _)| (record, appended))
 }
@@ -22806,7 +22806,7 @@ pub fn append_latest_observation_publication(
     input: &ClaimInput,
     now: u128,
     event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool, bool), St3Error> {
+) -> Result<(ClaimRecord, bool, bool), FractalError> {
     validate_local_observation(input)?;
     graph
         .connection
@@ -22867,7 +22867,7 @@ pub fn append_latest_observation_publication(
             }
             Ok((published.unwrap_or(local), true, status_transition))
         })
-        .map_err(|error| St3Error::new("internal", error))?
+        .map_err(|error| FractalError::new("internal", error))?
 }
 
 /// Record a native limits report in the local observation log, and replicate it as a claim
@@ -22878,7 +22878,7 @@ pub fn append_limits_publication(
     input: &ClaimInput,
     now: u128,
     event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool), St3Error> {
+) -> Result<(ClaimRecord, bool), FractalError> {
     validate_local_observation(input)?;
     graph
         .connection
@@ -22910,7 +22910,7 @@ pub fn append_limits_publication(
             )
             .map(|claim| (claim, true))
         })
-        .map_err(|error| St3Error::new("internal", error))?
+        .map_err(|error| FractalError::new("internal", error))?
 }
 
 /// Shared tables the projection digest covers, with the columns each leaves out.
@@ -23374,7 +23374,7 @@ pub const RESTAMP_FALLBACK_MS: u128 = 5 * 60_000;
 /// `seat_freshness`, so none reads re-stamp ages from the replicated log. The daemon's seat
 /// freshness poll keeps it in this node's `meta`, which never replicates; until it has, it is
 /// false and re-stamps keep their fallback.
-fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, St3Error> {
+fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, FractalError> {
     Ok(transaction
         .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get::<_, String>(0))
         .optional()

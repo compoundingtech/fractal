@@ -44,7 +44,7 @@ static CURSOR_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
 });
 
 fn cursor_error() -> ApiError {
-    ApiError::bad(St3Error::new("cursor-expired", "the schedule page cursor is invalid or expired; restart the listing"))
+    ApiError::bad(FractalError::new("cursor-expired", "the schedule page cursor is invalid or expired; restart the listing"))
 }
 fn instance(state: &AppState) -> String {
     hex::encode(Sha256::digest(serde_json::to_vec(&(
@@ -61,7 +61,7 @@ fn encode(position: Position) -> Result<String, ApiError> {
     let bytes = serde_json::to_vec(&SignedPosition { position, mac: signature }).map_err(ApiError::internal)?;
     let cursor = format!("{CURSOR_PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes));
     if cursor.len() > 4096 {
-        return Err(ApiError::bad(St3Error::new("validation-failed", "a schedule page boundary exceeds the cursor size limit")));
+        return Err(ApiError::bad(FractalError::new("validation-failed", "a schedule page boundary exceeds the cursor size limit")));
     }
     Ok(cursor)
 }

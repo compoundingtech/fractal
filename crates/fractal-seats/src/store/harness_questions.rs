@@ -58,24 +58,24 @@ pub trait HarnessQuestionsStore {
     /// Whether an owner-authored compact receipt reserves this actor/key for other parameters.
     fn harness_question_receipt_conflicts(&self, actor_key: &str, request_digest: &str) -> Result<bool>;
     /// The question `subject` as long as st holds its claims.
-    fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, St3Error>;
+    fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, FractalError>;
     /// Record what the harness shows of a question. The same content again changes nothing, so
     /// its revision holds; new content is a new revision. A resolved question takes no new
     /// observation.
     fn observe_harness_question(
             &self,
             observation: &QuestionObservation,
-        ) -> Result<HarnessQuestion, St3Error>;
+        ) -> Result<HarnessQuestion, FractalError>;
     /// Ingest an already-hashed native identity from the text-free native outbox.
     fn observe_harness_question_digest(
             &self,
             observation: &QuestionObservation,
-        ) -> Result<HarnessQuestion, St3Error>;
+        ) -> Result<HarnessQuestion, FractalError>;
     fn observe_harness_question_after_read(
             &self,
             observation: &QuestionObservation,
             after_read: impl FnOnce(),
-        ) -> Result<HarnessQuestion, St3Error>;
+        ) -> Result<HarnessQuestion, FractalError>;
     /// Record how a question ended, once. The resolution must settle the question's current
     /// revision and answer only its questions with their positions; each answer carries the
     /// harness's own `timed_out`. A question that already ended returns its first resolution
@@ -87,16 +87,16 @@ pub trait HarnessQuestionsStore {
             revision: &str,
             answers: &BTreeMap<String, Answer>,
             receipt: Option<&Receipt>,
-        ) -> Result<(HarnessQuestion, bool), St3Error>;
+        ) -> Result<(HarnessQuestion, bool), FractalError>;
     /// Register before appending an open, so a crash cannot strand an unwitnessed open.
-    fn retain_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<(), St3Error>;
+    fn retain_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<(), FractalError>;
     fn harness_question_generation(&self, question: &str) -> Result<Option<QuestionGeneration>>;
     fn harness_question_generations(&self, after: &str, limit: usize) -> Result<Vec<QuestionGeneration>>;
     fn forget_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<()>;
 }
 
 impl HarnessQuestionsStore for Store {
-    fn retain_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<(), St3Error> {
+    fn retain_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<(), FractalError> {
         let raw = serde_json::to_string(generation).map_err(internal)?;
         let connection = self.connection.write();
         connection.execute(
@@ -108,7 +108,7 @@ impl HarnessQuestionsStore for Store {
             [&generation.question], |row| row.get(0),
         ).map_err(internal)?;
         if held != raw {
-            return Err(St3Error::new("foreign-harness-question", "question generation was already bound"));
+            return Err(FractalError::new("foreign-harness-question", "question generation was already bound"));
         }
         Ok(())
     }
@@ -168,14 +168,14 @@ impl HarnessQuestionsStore for Store {
         Ok(false)
     }
 
-    fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, St3Error> {
+    fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, FractalError> {
         question_at(&self.readers.get(), subject, None).map_err(internal)
     }
 
     fn observe_harness_question(
             &self,
             observation: &QuestionObservation,
-        ) -> Result<HarnessQuestion, St3Error> {
+        ) -> Result<HarnessQuestion, FractalError> {
         self.observe_harness_question_after_read(observation, || {})
     }
 
@@ -183,7 +183,7 @@ impl HarnessQuestionsStore for Store {
             &self,
             observation: &QuestionObservation,
             after_read: impl FnOnce(),
-        ) -> Result<HarnessQuestion, St3Error> {
+        ) -> Result<HarnessQuestion, FractalError> {
         let native_id = fractal_schema::harness_questions::native_id_digest(&observation.native_id);
         observe_identity(self, observation, &native_id, after_read)
     }
@@ -191,7 +191,7 @@ impl HarnessQuestionsStore for Store {
     fn observe_harness_question_digest(
             &self,
             observation: &QuestionObservation,
-        ) -> Result<HarnessQuestion, St3Error> {
+        ) -> Result<HarnessQuestion, FractalError> {
         observe_identity(self, observation, &observation.native_id, || {})
     }
 
@@ -202,18 +202,18 @@ impl HarnessQuestionsStore for Store {
             revision: &str,
             answers: &BTreeMap<String, Answer>,
             receipt: Option<&Receipt>,
-        ) -> Result<(HarnessQuestion, bool), St3Error> {
+        ) -> Result<(HarnessQuestion, bool), FractalError> {
         let current = self
             .harness_question_held(subject)?
             .ok_or_else(|| {
-                St3Error::new("unknown-harness-question", "st holds no such question")
+                FractalError::new("unknown-harness-question", "st holds no such question")
                     .with_detail("question", subject)
             })?;
         if current.resolution.is_some() {
             return Ok((current, false));
         }
         if current.revision != revision {
-            return Err(St3Error::new("stale-subject", "the question changed")
+            return Err(FractalError::new("stale-subject", "the question changed")
                 .with_detail("question", subject)
                 .with_detail("revision", current.revision));
         }
@@ -222,7 +222,7 @@ impl HarnessQuestionsStore for Store {
             if question.is_none_or(|question| {
                 answer.positions.iter().any(|position| *position >= question.options)
             }) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-harness-question",
                     "a resolution answers only the question's own options",
                 )
@@ -257,7 +257,7 @@ impl HarnessQuestionsStore for Store {
         }
         let resolved = self
             .harness_question_held(subject)?
-            .ok_or_else(|| St3Error::new("internal", "the resolved question did not fold"))?;
+            .ok_or_else(|| FractalError::new("internal", "the resolved question did not fold"))?;
         Ok((resolved, true))
     }
 }
@@ -267,14 +267,14 @@ fn observe_identity(
     observation: &QuestionObservation,
     native_id: &str,
     after_read: impl FnOnce(),
-) -> Result<HarnessQuestion, St3Error> {
+) -> Result<HarnessQuestion, FractalError> {
     let subject = subject(&observation.agent, &observation.session, native_id);
     let current = store.harness_question_held(&subject)?;
     let expected = current.as_ref().map(|question| question.revision.clone());
     after_read();
     if let Some(current) = current {
         if current.resolution.is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "harness-question-resolved", "a resolved question takes no new observation",
             ).with_detail("question", subject));
         }
@@ -297,7 +297,7 @@ fn observe_identity(
         idempotency_key: None,
     })?;
     store.harness_question_held(&subject)?
-        .ok_or_else(|| St3Error::new("internal", "the observed question did not fold"))
+        .ok_or_else(|| FractalError::new("internal", "the observed question did not fold"))
 }
 
 
