@@ -2082,7 +2082,7 @@ fn rewrite_nested_paths(mission: &mut MissionSpec, parent: &str) -> Result<(), F
     Ok(())
 }
 
-fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), St3Error> {
+fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), FractalError> {
     // Generations are 32 hex bytes; outcome is the longest ordinary round document.
     let suffix = spec.candidates.as_ref().map_or_else(
         || "/outcome".to_string(),
@@ -2096,7 +2096,7 @@ fn validate_nested_loop_path(spec: &LoopSpec) -> Result<(), St3Error> {
         u32::MAX
     );
     let invalid = |reason: String| {
-        St3Error::new(
+        FractalError::new(
             "invalid-nested-loop-path",
             format!(
                 "nested loop `{}` owning path `{}`: {reason}",
