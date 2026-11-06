@@ -162,6 +162,7 @@ mod tests {
             "it is not a security boundary",
             "work in a subfolder of the install's work root: `~/st` by default",
             "avoid listing or searching `$HOME`",
+            "after `cd`, remove files by literal absolute path, never by a relative glob",
             "`\"$ST3_BIN\" agents handoff write --as \"$ST_AGENT\"`",
             "only this seat writes its own",
             "Prepare for restart",
