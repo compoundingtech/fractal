@@ -11,16 +11,16 @@ pub struct Token { pub scope: Scope, pub generation: u64, pub attempt: u64 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frontier { pub epoch: String, pub changed_index: u64, pub live_count: u64 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Snapshot { pub id: String, pub host_id: String, pub store_index: u64, pub projection_version: String, pub created_at: String, pub expires_at: String }
+pub struct Snapshot { pub id: String, pub host_id: String, pub store_index: u64, pub projection_version: String, pub created_at: String, pub published_at: Option<String> }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Complete { pub scope: Scope, pub frontier: Frontier, pub snapshots: Vec<Snapshot>, pub members: Vec<MembershipInput> }
 #[derive(Debug)]
 pub struct Page { pub frontier: Frontier, pub snapshot: Snapshot, pub members: Vec<MembershipInput>, pub has_more: bool, pub next: Option<String> }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status { Unloaded, Paging, Ready, Disconnected, Refused, Exhausted }
+pub enum Status { Unloaded, Paging, Ready, Disconnected, Refused, Unsupported, InvalidCursor, FrontierInconsistent, Exhausted }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect { SubscribeAndRead(Token), Read(Token, String), PersistBase }
-pub enum Event { Refresh(Scope, u64), Page(Token, Page), Metadata(Token, Frontier), Expired(Token), Refused(Token), Disconnect }
+pub enum Event { Refresh(Scope, u64), Page(Token, Page), Metadata(Token, Frontier), Expired(Token), Refused(Token), Unsupported(Token), InvalidCursor(Token), FrontierInconsistent(Token), Disconnect }
 #[derive(Default)]
 struct Staged { frontier: Option<Frontier>, rows: BTreeMap<String, MembershipInput>, cursors: BTreeSet<String>, snapshots: Vec<Snapshot> }
 pub struct Paging {
@@ -64,6 +64,9 @@ impl Paging {
             Event::Refused(token) => {
                 return if self.token.as_ref() == Some(&token) { self.stop(Status::Refused) } else { Vec::new() };
             }
+            Event::Unsupported(token) => return if self.token.as_ref() == Some(&token) { self.stop(Status::Unsupported) } else { Vec::new() },
+            Event::InvalidCursor(token) => return if self.token.as_ref() == Some(&token) { self.stop(Status::InvalidCursor) } else { Vec::new() },
+            Event::FrontierInconsistent(token) => return if self.token.as_ref() == Some(&token) { self.stop(Status::FrontierInconsistent) } else { Vec::new() },
         };
         if self.token.as_ref() != Some(&token) { return Vec::new(); }
         let page = match event {
@@ -73,7 +76,7 @@ impl Paging {
                 if let Some(held) = held {
                     if held.epoch == frontier.epoch && held.changed_index == frontier.changed_index && held.live_count != frontier.live_count { return self.stop(Status::Refused); }
                     if held.epoch == frontier.epoch && frontier.changed_index < held.changed_index { return Vec::new(); }
-                    if held == &frontier { return Vec::new(); }
+                    if held == &frontier { self.newest = Some(frontier); return Vec::new(); }
                 }
                 let restart = self.status == Status::Ready || self.staged.frontier.as_ref().is_some_and(|held| held != &frontier);
                 if self.status == Status::Ready { self.attempts = 0; }
@@ -116,7 +119,7 @@ mod tests {
     fn scope() -> Scope { Scope { owner: "owner-a".into(), container: "container-a".into(), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
     fn frontier(index: u64, count: u64) -> Frontier { Frontier { epoch: "epoch-a".into(), changed_index: index, live_count: count } }
     fn page(index: u64, count: u64, ids: &[&str], next: Option<&str>) -> Page {
-        Page { frontier: frontier(index, count), snapshot: Snapshot { id: format!("snapshot-{index}"), host_id: "host-a".into(), store_index: index, projection_version: "1".into(), created_at: "created".into(), expires_at: "expires".into() }, members: ids.iter().map(|id| MembershipInput { container: "container-a".into(), member: (*id).into(), revision: "revision".into(), position: fractal_schema::ordered_membership::Position { bucket: None, key: "a0".into() } }).collect(), has_more: next.is_some(), next: next.map(str::to_owned) }
+        Page { frontier: frontier(index, count), snapshot: Snapshot { id: format!("snapshot-{index}"), host_id: "host-a".into(), store_index: index, projection_version: "1".into(), created_at: "created".into(), published_at: None }, members: ids.iter().map(|id| MembershipInput { container: "container-a".into(), member: (*id).into(), revision: "revision".into(), position: fractal_schema::ordered_membership::Position { bucket: None, key: "a0".into() } }).collect(), has_more: next.is_some(), next: next.map(str::to_owned) }
     }
     fn refresh(state: &mut Paging) -> Token {
         let effects = state.reduce(Event::Refresh(scope(), 1));
@@ -125,6 +128,18 @@ mod tests {
     fn ready() -> (Paging, Token) {
         let mut state = Paging::new(None); let token = refresh(&mut state);
         assert_eq!(state.reduce(Event::Page(token.clone(), page(1, 1, &["a"], None))), vec![Effect::PersistBase]); (state, token)
+    }
+    #[test]
+    fn matching_refresh_metadata_guards_against_regressed_index_and_count() {
+        for (index, count, status) in [(4, 1, Status::Paging), (5, 0, Status::Refused)] {
+            let mut state = Paging::new(None); let token = refresh(&mut state);
+            assert_eq!(state.reduce(Event::Page(token, page(5, 1, &["a"], None))), vec![Effect::PersistBase]);
+            let base = state.complete().unwrap().clone(); let token = refresh(&mut state);
+            assert!(state.reduce(Event::Metadata(token.clone(), frontier(5, 1))).is_empty());
+            let effects = state.reduce(Event::Page(token, page(index, count, if count == 0 { &[] } else { &["b"] }, None)));
+            if status == Status::Paging { assert!(matches!(effects.as_slice(), [Effect::SubscribeAndRead(_)])); } else { assert!(effects.is_empty()); }
+            assert_eq!(state.status, status); assert_eq!(state.complete(), Some(&base));
+        }
     }
     #[test]
     fn every_partition_publishes_only_complete_pages_despite_unrelated_writes() {

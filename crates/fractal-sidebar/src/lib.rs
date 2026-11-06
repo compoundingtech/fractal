@@ -3,6 +3,8 @@
 
 pub mod edits;
 pub mod keys;
+#[cfg(feature = "client")]
+pub mod client;
 pub mod model;
 mod overlay;
 pub mod paging;
