@@ -324,14 +324,15 @@ const TRIMMED_LEAVES_PROJECTION: &str = "SELECT json_type(body, '$.fields.facts'
 /// A trim's step deletes `claims` (`Runtime::delete_trimmed_claims_tx`). The delete trigger queues
 /// the subject of each resource observation it deletes, and the next write that projects would
 /// refresh every one of them while it holds the writer. A subject whose deleted observations
-/// leave its projection as it was leaves the queue; the step refreshes the others itself, at most
+/// leave its projection as it was leaves the queue: none is the observation it projects from, and
+/// each passes `TRIMMED_LEAVES_PROJECTION`. The step refreshes the others itself, at most
 /// `TRIM_STEP_REFRESHES` of them. A subject queued before the step stays queued.
 pub(super) fn delete_trimmed_tx(
     transaction: &Transaction<'_>,
     claims: &[ClaimTombstone],
     delete: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
-    let mut subjects = BTreeMap::<&str, bool>::new();
+    let mut subjects = BTreeMap::<&str, (bool, Vec<&str>)>::new();
     for claim in claims {
         let unchanged = match claim.kind.as_str() {
             "resource.observed" => transaction
@@ -343,7 +344,9 @@ pub(super) fn delete_trimmed_tx(
             fractal_schema::github_plugin::ITEM_STATE => false,
             _ => continue,
         };
-        *subjects.entry(claim.subject.as_str()).or_insert(true) &= unchanged;
+        let subject = subjects.entry(claim.subject.as_str()).or_insert((true, Vec::new()));
+        subject.0 &= unchanged;
+        subject.1.push(claim.id.as_str());
     }
     if subjects.is_empty() {
         return delete();
@@ -351,10 +354,17 @@ pub(super) fn delete_trimmed_tx(
     let mut fresh = Vec::new();
     {
         let mut queued = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM local_resource_projection_pending WHERE subject=?1)")?;
-        for (subject, unchanged) in subjects {
-            if !queued.query_row(/* sqlite-large-value: allow-for-now lv-h7c39eb662d6b owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [subject], |row| row.get::<_, bool>(0))? {
-                fresh.push((subject, unchanged));
+        let mut projected = transaction.prepare_cached("SELECT claim_id FROM resource_observations WHERE subject=?1")?;
+        for (subject, (unchanged, deleted)) in subjects {
+            if queued.query_row(/* sqlite-large-value: allow-for-now lv-h7c39eb662d6b owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [subject], |row| row.get::<_, bool>(0))? {
+                continue;
             }
+            let unchanged = unchanged
+                && projected
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hdc89a1f149f2 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [subject], |row| row.get::<_, String>(0))
+                    .optional()?
+                    .is_some_and(|id| !deleted.contains(&id.as_str()));
+            fresh.push((subject, unchanged));
         }
     }
     delete()?;
