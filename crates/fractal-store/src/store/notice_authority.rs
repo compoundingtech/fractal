@@ -56,13 +56,20 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
                 columns.iter().map(|column| format!("OLD.{column} IS NOT NEW.{column}"))
                     .collect::<Vec<_>>().join(" OR ")
             } else { "1".into() };
-            connection.execute_batch(&format!(
-                "DROP TRIGGER IF EXISTS notice_authority_{table}_{action};
-                 CREATE TRIGGER notice_authority_{table}_{action} BEFORE {action} ON {table}
+            let name = format!("notice_authority_{table}_{action}");
+            let sql = format!(
+                "CREATE TRIGGER {name} BEFORE {action} ON {table}
                  WHEN ({relevant}) AND ({changed}) BEGIN
                  INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
-                 WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING; END;"
-            ))?;
+                 WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING; END"
+            );
+            let installed: Option<String> = connection.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [&name], |row| row.get(0),
+            ).optional()?;
+            if installed.as_deref() != Some(sql.as_str()) {
+                connection.execute_batch(&format!("DROP TRIGGER IF EXISTS {name}; {sql};"))?;
+            }
         }
     }
     Ok(())

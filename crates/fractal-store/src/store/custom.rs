@@ -32,8 +32,7 @@ CREATE TABLE IF NOT EXISTS local_custom_dirty (subject TEXT PRIMARY KEY);
 -- must reach their consumers even when the changed claim is not custom/.
 -- Every use names the claim IDs, so each branch must look its claims up by ID. The unary
 -- plus keeps the planner from walking every doc.bound claim through claims_kind_index.
-DROP VIEW IF EXISTS custom_claim_invalidations;
-CREATE VIEW custom_claim_invalidations AS
+CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
  SELECT id,subject FROM claims
  WHERE (subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%')
  OR EXISTS(SELECT 1 FROM custom_dependencies WHERE source=claims.subject)
