@@ -66,10 +66,11 @@ impl Edits {
                 if matches!(row.node, NodeRef::Subject { .. }) { row.parent = parent.clone(); }
             }
         }
-        // Missing final-batch ancestors resolve to root, as in server live_ancestors.
+        // Only genuinely missing positions imply root; old tombstone ancestry is absent.
         let missing: std::collections::BTreeSet<_> = tree.nodes.values().filter_map(|row| match &row.shown_under {
             Parent::Folder { id } if !tree.nodes.contains_key(&node_key(&NodeRef::Folder { id: id.clone() })) => Some(row.shown_under.clone()), _ => None,
         }).collect();
+        if missing.iter().any(|parent| matches!(parent, Parent::Folder { id } if observed.deleted_folders.binary_search(id).is_ok())) { return Ok(Cow::Borrowed(observed)); }
         for row in tree.nodes.values_mut().filter(|row| missing.contains(&row.shown_under)) {
             row.shown_under = Parent::Root {};
             if matches!(row.node, NodeRef::Subject { .. }) { row.parent = Parent::Root {}; }

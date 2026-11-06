@@ -47,8 +47,7 @@ fn member_move_is_visible_next_frame_without_mutating_observation() {
 }
 #[test]
 fn folder_move_and_folder_first_row_order_use_real_planner() {
-    let (arrangement, members) = inputs();
-    let observed = build_v2(&arrangement, &members).unwrap();
+    let (arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
     let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
     let edits = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
     let visible = edits.project(&observed).unwrap();
@@ -58,8 +57,7 @@ fn folder_move_and_folder_first_row_order_use_real_planner() {
 }
 #[test]
 fn compound_plan_displays_only_staged_folder_step_until_fresh_membership_plan() {
-    let (mut arrangement, members) = inputs();
-    let observed = build_v2(&arrangement, &members).unwrap();
+    let (mut arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
     let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-a"), before: None };
     let member_plan = plan_v2(&arrangement, &members, &intent).unwrap().memberships;
     let mut edits = staged(intent, V2Plan { folders: vec![Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-a".into()), key: "a0".into() }], memberships: member_plan.clone() });
@@ -174,19 +172,22 @@ fn atomic_delete_move_lifts_from_final_positions_in_every_operation_order() {
 }
 #[test]
 fn create_delete_preserves_tombstone_and_missing_ancestor_rules_in_both_orders() {
-    let (arrangement, members) = inputs();
-    let observed = build_v2(&arrangement, &members).unwrap();
-    let create = Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("missing".into()), key: "a0".into() };
-    let delete = Folder::FolderDelete { id: "folder-c".into() };
+    let (arrangement, members) = inputs(); let observed = build_v2(&arrangement, &members).unwrap();
+    let create = Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("missing".into()), key: "a0".into() }; let delete = Folder::FolderDelete { id: "folder-c".into() };
     for folders in [vec![delete.clone(), create.clone()], vec![create, delete]] {
-        let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-c"), before: None };
-        let mut folders = folders;
+        let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-c"), before: None }; let mut folders = folders;
         folders.push(Folder::FolderMove { id: "folder-b".into(), parent: Some("folder-c".into()), key: "a0".into() });
         let visible = staged(intent.clone(), V2Plan { folders, memberships: vec![] }).project(&observed).unwrap().into_owned();
-        assert!(!visible.nodes.contains_key("folder:folder-c"));
-        assert_eq!(visible.deleted_folders, vec!["folder-c"]);
-        assert_eq!(visible.nodes["folder:folder-b"].shown_under, Parent::Root {});
-        assert_eq!(visible.nodes["folder:folder-b"].parent, parent("folder-c"));
+        assert!(!visible.nodes.contains_key("folder:folder-c")); assert_eq!(visible.deleted_folders, vec!["folder-c"]);
+        assert_eq!(visible.nodes["folder:folder-b"].shown_under, Parent::Root {}); assert_eq!(visible.nodes["folder:folder-b"].parent, parent("folder-c"));
         assert!(matches!(crate::plan::plan_move(&visible, &intent), Err(crate::plan::MoveRefusal::ParentMissing { cause: crate::plan::ParentMissingCause::FolderDeleted, .. })));
     }
+    // C was tombstoned under live A, itself nested in B; SidebarTree omits C's position.
+    let mut retained = arrangement.clone(); let arrangements::VersionedBody::V2(body) = &mut retained.body else { unreachable!() };
+    let mut dead = body.folders["folder-a"].clone(); dead.position.value.parent = Some("folder-a".into()); dead.tombstone = Some(Register { value: true, revision: "r2".into() }); body.folders.insert("folder-c".into(), dead);
+    body.folders.get_mut("folder-a").unwrap().position.value.parent = Some("folder-b".into());
+    retained.resolved.as_mut().unwrap().parents.insert("folder-a".into(), Some("folder-b".into()));
+    let observed = build_v2(&retained, &members).unwrap(); let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-c"), before: None };
+    let edits = staged(intent, V2Plan { folders: vec![], memberships: vec![Member::Place { member: "member-a".into(), bucket: Some("folder-c".into()), key: "a0".into() }] });
+    assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
 }
