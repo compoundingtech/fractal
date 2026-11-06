@@ -135,7 +135,7 @@ fn v2_folder_cycles_noops_and_exact_folder_operations() {
     intent.node = fractal_sidebar::model::NodeRef::Folder { id: inner.into() };
     intent.parent = fractal_sidebar::model::Parent::Root {};
     intent.before = Some(fractal_sidebar::model::NodeRef::Folder { id: outer.into() });
-    assert_eq!(serde_json::to_value(plan_v2(&a, &members, &intent).unwrap()).unwrap(), json!({"folders":[{"op":"folder.move","id":inner,"parent":null,"key":"ZU"}],"memberships":[]}));
+    assert_eq!(serde_json::to_value(plan_v2(&a, &members, &intent).unwrap()).unwrap(), json!({"folders":[{"op":"folder.move","id":inner,"parent":null,"key":"ZV"}],"memberships":[]}));
     intent.parent = fractal_sidebar::model::Parent::Folder { id: inner.into() };
     assert!(matches!(plan_v2(&a, &members, &intent), Err(V2Refusal::Move { refusal: MoveRefusal::SelfMove { .. } })));
 }
@@ -187,4 +187,18 @@ fn bounded_max_length_gap_rekeys_only_the_six_required_siblings() {
         assert!(key.len() <= fractal_schema::ordered_membership::MAX_KEY_BYTES && fractal_schema::arrangements::valid_key(&key));
         assert!(lower < key && key < upper);
     }
+}
+
+#[test]
+fn prefix_boundary_capacity_rekeys_one_sibling_without_touching_the_upper_bound() {
+    let (a, _) = input(&fixture()["cases"][1]);
+    let max = fractal_schema::ordered_membership::MAX_KEY_BYTES;
+    let lower = format!("a0V{}", "z".repeat(max - 3));
+    let upper = format!("a0W{}2", "0".repeat(max - 4));
+    let members = root_members(&a, &[&lower, &lower, &lower, &upper, "b00"]);
+    let edit = plan_v2(&a, &members, &drop_member(&members[4].member, None, Some(&members[2].member))).unwrap();
+    assert_eq!(serde_json::to_value(edit).unwrap(), json!({"folders":[],"memberships":[
+        {"op":"place","member":members[4].member,"bucket":null,"key":"a0W"},
+        {"op":"place","member":members[2].member,"bucket":null,"key":format!("a0W{}1", "0".repeat(max - 4))}
+    ]}));
 }
