@@ -69,6 +69,7 @@ static TASK_ORIGINS: &[&str] = &[
     "maintenance.client_message_selectors", "maintenance.completion_health",
     "replication.inventory_full", "replication.sealing_recovery", "operations.audit",
     "operations.doctor_report", "maintenance.claim_ranges", "maintenance.operation_claim_digests",
+    "maintenance.gate_runner_history",
 ];
 
 #[derive(Clone, PartialEq, Eq, Hash)]
