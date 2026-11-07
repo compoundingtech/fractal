@@ -36,7 +36,7 @@ const matches = (row: Row, needle: string) => `${row.title} ${row.host} ${row.re
 export function MilestoneSidebar(props: MilestoneSidebarProps) {
   const { state, folders, query } = props
   const frozen = state === 'stale' && props.observedAt !== undefined
-  const clock = frozen ? props.observedAt! : props.now
+  const clock = frozen ? props.observedAt ?? props.now : props.now
   const needle = query.trim().toLowerCase()
   // Filtering keeps a parent when a subagent matches, so a hit never loses its context.
   const visible = needle === '' ? folders : folders.map(folder => ({ ...folder, rows: folder.rows.flatMap(row => {

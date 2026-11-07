@@ -1,13 +1,9 @@
-import { unifiedDiff } from '@fractal/scenarios'
 import { useScenarioNow, useScenarioSlice, type WireSlice } from '@fractal/scenarios/react'
 import { statuses, type AgentStatus, type SidebarAgentRow } from '../../assistant-ui/sidebar/model'
 import { scenarioSections } from '../../scenario-transcript.story-harness.ts'
 import { RedesignMilestone, type MilestoneConversation, type MilestoneLoad, type MilestoneRoster, type RedesignMilestoneProps } from './RedesignMilestone'
 
 type Agent = WireSlice<'roster'>['state']['agents'][number]
-const path = 'packages/api/src/users.ts'
-const diff = unifiedDiff(path, 'export const fetchUser = () => user\n', 'export const loadUser = () => user\n').split('\n')
-const changedFiles = [{ path, diff, added: diff.filter(line => line.startsWith('+') && !line.startsWith('+++')).length, removed: diff.filter(line => line.startsWith('-') && !line.startsWith('---')).length }]
 const statusFor = (state: Agent['state']): AgentStatus => {
   switch (state) {
     case 'running': return 'working'
@@ -75,6 +71,6 @@ export function ScenarioMilestone({ scheme, state, persistKey = 'rm1-scenario' }
   const navigationRow = rows.find(row => row.ref !== primaryRef) ?? rows[0]
   return <div data-scenario-navigation-title={navigationRow?.title} data-scenario-primary-title={rows.find(row => row.ref === primaryRef)?.title}>
     <RedesignMilestone key={`${rows.map(row => row.ref).join(',')}:${rosterSlice.variant}:${conversationSlice.variant}:${sync.variant}:${state}:${scheme}`} scheme={scheme} now={now} roster={roster} conversation={conversation}
-      changedFiles={changedFiles} branchFiles={changedFiles} proseResources={{}} reviewerCard={{ path: '', summary: '' }} defaultOpenRefs={openRefs} defaultChangesOpen={state === 'slice' || state === 'navigation'} defaultPaletteOpen={state === 'navigation'} persistKey={persistKey} />
+      changedFiles={[]} branchFiles={[]} proseResources={{}} reviewerCard={{ path: '', summary: '' }} defaultOpenRefs={openRefs} defaultChangesOpen={state === 'slice' || state === 'navigation'} defaultPaletteOpen={state === 'navigation'} persistKey={persistKey} />
   </div>
 }

@@ -79,7 +79,9 @@ function manualReload() {
 }
 const rosterReload = manualReload()
 const threadReload = manualReload()
-const recoveryUpdates = React.createRef<{ failRoster: () => void; removeAgent: () => void; emptyRoster: () => void }>()
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
+const chord = (key: string) => isMac ? `{Meta>}${key}{/Meta}` : `{Control>}${key}{/Control}`
+const recoveryUpdates = React.createRef<{ failRoster: () => void; removeAgent: () => void; emptyRoster: () => void; clearChangedFiles: () => void }>()
 /** Keep the same mounted composition while its parent replaces data projections. */
 function RecoveryUpdates({ args, persistKey }: { readonly args: Args; readonly persistKey: string }) {
   const [props, setProps] = React.useState(() => fixtureProps(args))
@@ -87,6 +89,7 @@ function RecoveryUpdates({ args, persistKey }: { readonly args: Args; readonly p
     failRoster: () => setProps(current => ({ ...current, roster: { _tag: 'failed', value: current.roster.value, reason: 'Roster unavailable again', detail: 'A later request failed.' } })),
     removeAgent: () => setProps(current => ({ ...current, roster: { _tag: 'ready', value: { ...current.roster.value, folders: rosterFolders.map(folder => ({ ...folder, rows: folder.rows.filter(row => row.ref !== mainAgentRef).map(row => ({ ...row, children: row.children.filter(child => child.ref !== mainAgentRef) })) })) } } })),
     emptyRoster: () => setProps(current => ({ ...current, roster: { _tag: 'ready', value: { ...current.roster.value, folders: [], inboxCount: 0 } } })),
+    clearChangedFiles: () => setProps(current => ({ ...current, changedFiles: [] })),
   }), [])
   return <RedesignMilestone {...props} persistKey={persistKey} reload={rosterReload.reload} />
 }
@@ -121,6 +124,19 @@ export const ErrorRecovery: Story = {
     await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'empty'))
     await expect(canvasElement.querySelector(`[data-pane="${mainAgentRef}"]`)).toHaveAttribute('aria-label', mainAgentRef)
     await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
+    // Keep Changes mounted while the parent clears the current-turn file projection.
+    if (canvasElement.querySelector('[data-narrow]') !== null) await userEvent.keyboard('{Escape}')
+    await userEvent.keyboard(chord('k'))
+    const page = within(canvasElement.ownerDocument.body)
+    const palette = await page.findByRole('dialog', { name: 'Command palette' })
+    await userEvent.keyboard('show changes')
+    await userEvent.click(await within(palette).findByRole('menuitem', { name: /Show changes/ }))
+    if (canvasElement.querySelector('[data-narrow]') !== null) await userEvent.click(await canvas.findByRole('tab', { name: 'Changes' }))
+    const changes = within(await canvas.findByRole('complementary', { name: 'feat/metric-track' }))
+    await userEvent.click(changes.getByRole('button', { name: /Change scope$/ }))
+    await userEvent.click(await page.findByRole('option', { name: 'Current turn' }))
+    recoveryUpdates.current?.clearChangedFiles()
+    await expect(await changes.findByText('No changed files in this scope.')).toBeVisible()
   },
 }
 
