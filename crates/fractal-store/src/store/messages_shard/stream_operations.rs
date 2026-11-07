@@ -29,7 +29,7 @@ pub(crate) fn replay_tx(
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let stored: Option<(String, String)> = transaction
         .query_row(
-            STREAM_OPERATION,
+            /* sqlite-large-value: allow-for-now lv-h5a7d3874506e owner=fractal_store::store::messages_shard::stream_operations TODO=trace-statement-and-value-representation */ STREAM_OPERATION,
             [operation_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

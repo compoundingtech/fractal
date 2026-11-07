@@ -527,7 +527,7 @@ fn hosts_advertising(
     {
         return Ok(answer.clone());
     }
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbe3ddc31e72e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical_sql(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcb9f5eaf2461 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical_sql(
         "SELECT json_extract(claims.body,'$.fields.features.' || ?4)=1
          FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
@@ -536,7 +536,7 @@ fn hosts_advertising(
     let mut advertising = BTreeSet::new();
     for (host, start) in hosts {
         let holds: Option<Option<bool>> = statement
-            .query_row(/* sqlite-large-value: allow-for-now lv-h516c5fb23a80 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ rusqlite::params![format!("daemon/{host}"), host, start, feature], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hf6cfc7e120e3 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ rusqlite::params![format!("daemon/{host}"), host, start, feature], |row| row.get(0))
             .optional()?;
         if holds.flatten() == Some(true) {
             advertising.insert(host);

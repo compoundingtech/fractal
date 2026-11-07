@@ -38,15 +38,15 @@ impl Store {
         Ok(shard
             .readers
             .get()
-            .prepare_cached(SENT_IN_STREAM)?
-            .query_row([subject], |row| row.get(0))?)
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7a15ce6aed05 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ SENT_IN_STREAM)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hed39aca830cc owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?)
     }
 }
 
 /// [`Store::message_sent`] on a graph connection, such as a sender's own transaction: the
 /// shard's items as the graph has mirrored them.
 pub fn message_sent_tx(connection: &Connection, subject: &str) -> Result<bool> {
-    Ok(connection.prepare_cached(SENT_IN_GRAPH_FILE)?.query_row([subject], |row| row.get(0))?)
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h287e13415dd4 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ SENT_IN_GRAPH_FILE)?.query_row(/* sqlite-large-value: allow-for-now lv-hb9533a9d1605 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?)
 }
 
 /// The shard's item under a subject, by `stream_messages`' primary key.
@@ -114,12 +114,12 @@ pub fn sent_to_stream(graph: &Store, input: &ClaimInput) -> Result<Option<ClaimR
         return Ok(Some(claim));
     }
     let index: Option<i64> = connection
-        .prepare_cached(STREAM_ITEM)
-        .and_then(|mut statement| statement.query_row([&input.subject], |row| row.get(0)).optional())
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb8663de1499d owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ STREAM_ITEM)
+        .and_then(|mut statement| statement.query_row(/* sqlite-large-value: allow-for-now lv-h524975e1c242 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ [&input.subject], |row| row.get(0)).optional())
         .map_err(internal)?;
     match index {
         Some(index) => connection
-            .query_row(&format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE store_index=?1"), [index], claim_from_row)
+            .query_row(/* sqlite-large-value: allow-for-now lv-ha5d32086bf04 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ &format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE store_index=?1"), [index], claim_from_row)
             .optional()
             .map_err(internal),
         None => Ok(None),
@@ -135,7 +135,7 @@ pub fn sent_to_graph(graph: &Store, input: &ClaimInput) -> Result<Option<ClaimRe
     if let Some((operation_id, request_digest)) = smallclaims::store::claim_operation(input)? {
         let stored: Option<(String, String)> = connection
             .query_row(
-                GRAPH_OPERATION,
+                /* sqlite-large-value: allow-for-now lv-hfeb9391f4c21 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ GRAPH_OPERATION,
                 [&operation_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -156,7 +156,7 @@ pub fn sent_to_graph(graph: &Store, input: &ClaimInput) -> Result<Option<ClaimRe
     }
     connection
         .query_row(
-            &graph_sent_claim(),
+            /* sqlite-large-value: allow-for-now lv-hf0d3cfe78aeb owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ &graph_sent_claim(),
             [&input.subject],
             claim_from_row,
         )
@@ -171,7 +171,7 @@ pub fn listed_index(graph: &Store, claim: &ClaimRecord) -> Result<(u64, bool)> {
         .readers
         .get()
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
-        .query_row([&claim.id], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h013343aee563 owner=fractal_store::store::message_sent TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get(0))?;
     Ok(if in_graph {
         (claim.store_index, false)
     } else {

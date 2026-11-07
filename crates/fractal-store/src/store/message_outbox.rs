@@ -97,7 +97,7 @@ pub fn queued(connection: &Connection, limit: i64) -> Result<(Vec<String>, i64)>
         .collect::<rusqlite::Result<Vec<String>>>()?;
     let count = connection
         .prepare_cached("SELECT COUNT(*) FROM local_message_outbox")?
-        .query_row([], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h99f662904dfd owner=fractal_store::store::message_outbox TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
     Ok((subjects, count))
 }
 

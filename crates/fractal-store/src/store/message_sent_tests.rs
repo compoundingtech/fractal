@@ -154,7 +154,7 @@ fn each_check_of_the_other_store_is_one_indexed_lookup() {
     let shard = messages_shard::shard(&graph).unwrap();
     let plan = |connection: &Connection, sql: &str| -> String {
         connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-hb11b7cb6c531 owner=fractal_store::store::message_sent_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap()
             .query_map(["x"], |row| row.get::<_, String>(3))
             .unwrap()
