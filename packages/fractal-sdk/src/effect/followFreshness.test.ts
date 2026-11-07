@@ -666,6 +666,30 @@ describe('follow freshness', () => {
     }))
   })
 
+  it('follows an ask, Recently closed, and a thread beside the ordinary conversation with shared slots full', () =>
+    run({ maxFollows: 8, conversationSlots: 'advertised' }, (gateway) =>
+      Effect.gen(function* () {
+        const fractal = yield* Fractal
+        for (const collection of ['agents', 'missions', 'attention', 'work'] as const) {
+          yield* mountWindow(collection)
+        }
+        const conversation = yield* mountConversation('agent/reviewer')
+        const ask = { _tag: 'ThreadSummary', context: {
+          origin_ask: 'step-run/review', origin_ask_episode: 'claim/episode',
+        }, limit: 40 } as const
+        const recent = { _tag: 'ThreadSummary', context: { recently_closed: true }, limit: 10 } as const
+        const timeline = { _tag: 'ThreadTimeline', thread: 'thread/review', limit: 40 } as const
+        yield* watchFollow(fractal, followKey(ask), fractal.followThreadSummaries(ask))
+        yield* watchFollow(fractal, followKey(recent), fractal.followThreadSummaries(recent))
+        yield* watchFollow(fractal, followKey(timeline), fractal.followThreadTimeline(timeline))
+
+        expect(gateway.commands.filter(command => command.kind === 'subscribe').map(command => command.collection))
+          .toEqual(['agents', 'missions', 'attention', 'work', 'conversation', 'threads', 'threads', 'thread-timeline'])
+        expect(gateway.unsubscribed()).toEqual([])
+        expect(conversation.ended()).toBe(false)
+      }),
+    ))
+
   it('preserves admitted keys and LRU visibility across a successful reconnect probe', () =>
     run({ maxFollows: 8, conversationSlots: 'advertised' }, (gateway) =>
       Effect.gen(function* () {

@@ -358,8 +358,8 @@ export interface FractalOptions {
   /** Socket slots: the daemon's subscription cap (8 on current daemons). */
   readonly maxFollows: number
   /**
-   * Conversation follows' dedicated subscription slots; window and terminal follows own
-   * the remaining slots, so neither side
+   * Agent conversations and topic thread follows share a dedicated lane. Other windows and
+   * terminal follows own the remaining slots, so neither side
    * can starve the other. Undefined shares one pool across every follow; `'advertised'`
    * derives the whole budget from the daemon's advertised collections capability once the
    * connect probe answers (v1 raises the cap to 16), before the first follow can open.
@@ -744,7 +744,9 @@ const make = (options: FractalOptions) =>
               publishSync()
             }
           }))
-          const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
+          const lane = spec._tag === 'Conversation' || spec._tag === 'ThreadSummary' || spec._tag === 'ThreadTimeline'
+            ? 'conversation'
+            : 'shared'
           // Under `'advertised'`, no follow admits before the connect probe fixes the budget:
           // a subscribe cannot send before that probe opens the socket anyway.
           if (options.conversationSlots === 'advertised') yield* Deferred.await(budgetKnown)
@@ -1223,7 +1225,9 @@ const make = (options: FractalOptions) =>
       followTerminal,
       setVisible: (spec, visible) =>
         Effect.sync(() => {
-          const lane = spec._tag === 'Conversation' ? 'conversation' : 'shared'
+          const lane = spec._tag === 'Conversation' || spec._tag === 'ThreadSummary' || spec._tag === 'ThreadTimeline'
+            ? 'conversation'
+            : 'shared'
           admission.setVisible({ key: followKey(spec), visible })
           for (const key of admission.resizeLane(lane, admission.laneCap(lane)))
             open.get(key)?.evict()
