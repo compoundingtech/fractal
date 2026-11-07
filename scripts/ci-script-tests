@@ -33,4 +33,4 @@ parallel_tests \
   ci-nextest-flaky-test ci-parallel-tests-test nix-typescript-client-test ci-nix-fixed-outputs-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test \
   ci-rust-test-notes-test lane-definition-closure-test review-risk-test review-validate-test dep-info-check-test \
   classify-risk-test mcp-name-readers-test \
-  check-pty-boot-identities-test review-test release-fractal-daily-test release-fractal-edge-test
+  check-pty-boot-identities-test review-test release-fractal-daily-test release-fractal-edge-test release-fractal-publish-test
