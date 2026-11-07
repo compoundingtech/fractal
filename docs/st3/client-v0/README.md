@@ -79,6 +79,8 @@ immutable fleet admission claim in `incarnation`, and `always-on=true`. The name
 does not confer authority: the binding must resolve exactly one admitted member
 incarnation, never an agent process or inferred uptime. Syntax alone is not an
 owner acknowledgement and cannot establish historical receipt authorization.
+`stop "notice-owner/NAME"` explicitly withdraws the desired role at the root; it
+does not substitute for the owner's authenticated acknowledgement fence.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
