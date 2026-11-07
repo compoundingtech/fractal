@@ -142,10 +142,10 @@ impl HostEnvelope {
     /// Version is inspected before decoding version-specific fields: never adopt an unknown schema.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let value: Value = serde_json::from_slice(bytes).map_err(Error::Json)?;
-        if let Some(version) = value.get("schema_version").and_then(Value::as_u64) {
-            if version != 1 {
-                return Err(Error::UnsupportedVersion(version));
-            }
+        if let Some(version) = value.get("schema_version").and_then(Value::as_u64)
+            && version != 1
+        {
+            return Err(Error::UnsupportedVersion(version));
         }
         let envelope: Self = serde_json::from_value(value).map_err(Error::Json)?;
         envelope.validate()?;
@@ -215,17 +215,16 @@ impl HostEnvelope {
             if let Coverage::Enforced {
                 value: Cpu::Weight(weight),
             } = &slice.cpu
+                && weight.get() > 10_000
             {
-                if weight.get() > 10_000 {
-                    return Err(invalid("CPU weight must be 1..10000"));
-                }
+                return Err(invalid("CPU weight must be 1..10000"));
             }
             if let Some(io) = &slice.io {
                 check(io.enforced(), io.reason())?;
-                if let Coverage::Enforced { value } = io {
-                    if value.weight.get() > 10_000 {
-                        return Err(invalid("IO weight must be 1..10000"));
-                    }
+                if let Coverage::Enforced { value } = io
+                    && value.weight.get() > 10_000
+                {
+                    return Err(invalid("IO weight must be 1..10000"));
                 }
             }
         }

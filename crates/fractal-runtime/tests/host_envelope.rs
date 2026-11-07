@@ -6,7 +6,7 @@ const CAPPED: &[u8] = include_bytes!("host-envelope/capped.json");
 #[test]
 fn measured_host_shapes_are_readable_and_roundtrip() {
     for bytes in [
-        CAPPED.as_ref(),
+        CAPPED,
         include_bytes!("host-envelope/nvme.json").as_ref(),
         include_bytes!("host-envelope/small.json").as_ref(),
     ] {
