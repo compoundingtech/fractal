@@ -146,9 +146,6 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
         if let Some(previous) = previous {
             let previous = fields(previous)?;
             Profile::stored(&value)?.compatible(Profile::stored(previous)?)?;
-            if principal(&value)? != principal(previous)? {
-                return Err(forbidden("external grant principal cannot change"));
-            }
         }
         if kind == GRANTED {
             admit_profile(state, &value)?;
