@@ -95,8 +95,13 @@ PID reuse window. A surviving socket and reused PID are not a permanently pinned
 
 Local harness attribution on macOS walks ancestry using `proc_pidinfo` and reads
 `KERN_PROCARGS2` environment entries with nearest-process masking. Each process birth
-is checked before and after inspection; unreadable, exited or changed processes fail
-closed. Successful inspection without any identity variable is a person, not an inspection failure.
+is checked before and after inspection. A positively observed effective-UID transition
+ends the cooperative walk as a person, preserving ordinary login-shell and SSH access.
+Linux reads effective UID from `/proc/PID/status`; macOS uses `PROC_PIDTBSDINFO`.
+If full BSD metadata is refused, `PROC_PIDT_SHORTBSDINFO` may establish ownership only;
+it supplies no generation witness and cannot authorize a same-UID process.
+Unreadable same-UID processes, unknown ownership, exited or changed processes fail closed.
+A completed same-UID walk without any identity variable is a person.
 On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
 Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
 sessions and actor/requester body impersonation; it does not deny every public request.
