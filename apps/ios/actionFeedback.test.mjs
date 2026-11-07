@@ -87,7 +87,7 @@ const pairingHarness = (gateway = 'https://gateway.example', fabric = {}) => {
   const requests = [];
   const dependencies = {
     proof: undefined, validatePairingTrust: () => 'trusted fingerprint', canVerifyPairing: () => true,
-    PROFILE_KEY: 'profile',
+    PROFILE_KEY: 'profile', pairDraft: null,
     SecureStore: {
       getItemAsync: async key => profiles.get(key),
       setItemAsync: async (key, value) => { events.push('commit'); profiles.set(key, value); },
@@ -139,4 +139,18 @@ test('re-pairing own member A refuses connected member B before submitting a cod
     assert.equal(matching.profiles.get('profile'), matching.oldProfile);
   }
   console.log('PASS re-pairing own member A refuses connected member B before submitting a code');
+});
+
+test('scanned pairing stays pinned to its gateway despite a different ready Fabric member', async () => {
+  const gateway = 'https://scanned.example/base';
+  const attempt = pairingHarness(gateway, {
+    pairDraft: { gateway, id: 'pair/1', code: 'code', scanned: true },
+    fabricBuilt: true, fabricNode: 'phone-node', carrierChoice: 'fabric',
+    fabricSnapshot: { phase: 'ready', member: 'B', bridgeUrl: 'http://127.0.0.1:1234' },
+    fabricMember: { node: 'b'.repeat(64), service: 'paired', name: 'B' },
+  });
+  await assert.rejects(attempt.complete(), /proof verification failed/i);
+  assert.deepEqual(attempt.requests, [`${gateway}/v1/client/capabilities?accepts=fabric-gateway-grant`, gateway]);
+  assert.equal(attempt.profiles.get('profile'), attempt.oldProfile);
+  console.log('PASS scanned pairing stays pinned to its gateway despite a different ready Fabric member');
 });

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the unused residency inventory projection",
+  "replay": {
+    "status": "none",
+    "detail": "Residency events, transitions, generation fences and native resume behavior are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "The ledger and runtime residency serialization, validation and stored schema are unchanged. No caller serializes the removed projection in this repository."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Only the uncalled InventoryProjection, Ledger::inventory_projection and its sole RuntimeResidency::as_str helper are removed. All retained production code and tests remain byte-identical."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes one unused workspace Rust type and two methods. Unknown external source consumers are not claimed absent and must remove any use. No published client, wire, CLI or stored-format contract changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart required for removal of uncalled code."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or ledger cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the projection without changing stored state."
+  }
+}
