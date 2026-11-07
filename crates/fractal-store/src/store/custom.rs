@@ -159,7 +159,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         }
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3f6849b90a68 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ SCHEMA)?;
-    Ok(())
+    notice_authority::create_invalidation_triggers(connection)
 }
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
     if tx
@@ -187,12 +187,12 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    notice_authority::refresh_binding(tx)?;
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| {
         r.get::<_, bool>(0)
     })? {
         return Ok(());
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h234719a19887 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (SELECT subject FROM local_custom_dirty)", [])?;
     let registry_dirty: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject LIKE 'custom/st3-kinds/%')",
         [],
@@ -212,6 +212,9 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
             tx.execute(/* sqlite-large-value: allow-for-now lv-h75147b2df5b4 owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject>=?1 AND subject<?2",params![prefix,prefix_end(&prefix)])?;
         }
     }
+    // Registry refresh can add source subjects to the dirty set. Follow their mandatory
+    // consumers only after prefix expansion, including on registration/document removal.
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h234719a19887 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (SELECT subject FROM local_custom_dirty)", [])?;
     let dirty=tx.prepare("SELECT subject FROM local_custom_dirty WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%' AND subject NOT LIKE 'custom/st3-kinds/%' ORDER BY subject")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     // Build dependency edges before checking cycles, so arrival order cannot choose health.
     for _ in 0..2 {
@@ -338,8 +341,8 @@ pub fn prepare(
     }
     let reserved = fractal_schema::notice::is_reserved_subject(&input.subject)
         || fractal_schema::notice::is_reserved_kind(&input.kind);
-    if reserved {
-        return Err(fail("notices unavailable: native graph authority admission is not enabled"));
+    if reserved && !fractal_schema::notice::is_reserved_subject(&input.subject) {
+        return Err(fail("notices unavailable: reserved claim kind outside notice prefix"));
     }
     if !input.subject.starts_with("custom/") {
         return Ok(None);
@@ -397,10 +400,7 @@ fn validate_fact(
         actor.starts_with("agent/") || actor.starts_with("person/"),
         "typed actor must be a person or agent"
     );
-    anyhow::ensure!(
-        !fractal_schema::notice::is_reserved_subject(subject) && !fractal_schema::notice::is_reserved_kind(kind),
-        "notices unavailable: native graph authority admission is not enabled"
-    );
+    notice_authority::validate(connection, subject, m, kind, actor, f, creation)?;
     match spec.authority {
         Authority::Creator => {
             if let Some(c) = creation {
@@ -553,6 +553,9 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
     Ok(false)
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
+    let history = claims(tx, subject)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
+    notice_authority::record_dependencies(tx, subject, &history)?;
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
         if fractal_schema::notice::is_reserved_subject(subject) {
             let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});
@@ -560,7 +563,6 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
                 params![subject, canonical_json_text(&body)?])?;
             return Ok(());
         }
-        let history = claims(tx, subject)?;
         if let Some(c) = history
             .iter()
             .find(|c| fields(c).contains_key("_registration"))
@@ -576,17 +578,21 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
             return Ok(());
         }
         tx.execute(/* sqlite-large-value: allow-for-now lv-hb864ed6dba28 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_sources WHERE subject=?1", [subject])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
         return Ok(());
     };
-    let history = claims(tx, subject)?;
     let pinned = history
         .iter()
         .filter(|c| fields(c).get("_registration") == Some(&json!(hash)))
         .cloned()
         .collect::<Vec<_>>();
     let creation = pinned.iter().find(|c| c.kind == m.creation_kind);
-    let mut error = None;
+    let reserved = fractal_schema::notice::is_reserved_subject(subject);
+    let mut error = if reserved && pinned.len() != history.len() {
+        Some("notices unavailable: fact registration pin is missing or mismatched".to_owned())
+    } else if subject.starts_with(fractal_schema::notice::SOURCE_PREFIX)
+        && pinned.iter().filter(|claim| claim.kind == m.creation_kind).count() != 1 {
+        Some("notices unavailable: missing or duplicate source creation".to_owned())
+    } else { None };
     let mut valid = Vec::new();
     for c in &pinned {
         match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
@@ -622,7 +628,6 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
             basis.extend(b);
         }
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hddc3e119ea62 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
     if basis.len() > 256 {
         state = "invalid";
         error = Some("selected slots exceed 256 basis dependencies".into());

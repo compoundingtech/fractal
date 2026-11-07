@@ -26,6 +26,7 @@ pub mod trace_principal;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
+mod notice_authority;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
@@ -3323,6 +3324,7 @@ impl Store {
                 }
                 validate_documents(transaction, &intent.document_refs)?;
                 attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
+                notice_authority::refuse_second_holder(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
