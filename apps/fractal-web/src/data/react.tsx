@@ -268,6 +268,9 @@ const noRosterDecode = Atom.make<RosterDecode>(decodedRoster)
 /** SDK decode evidence for the roster; a source without it decodes every row. */
 export const useRosterDecode = (): RosterDecode =>
   useAtomValue(useDataSource().rosterDecode ?? noRosterDecode)
+/** SDK decode evidence for missions; a source without it decodes every row. */
+export const useMissionsDecode = (): RosterDecode =>
+  useAtomValue(useDataSource().missionsDecode ?? noRosterDecode)
 /** Select only fleet fields that affect a collection's membership/order, not row presentation. */
 export const useFleetSelection = <T,>({
   select,

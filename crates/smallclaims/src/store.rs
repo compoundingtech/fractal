@@ -7068,8 +7068,14 @@ impl Store {
         let mut snapshot;
         let mut attempts = 0;
         loop {
-            self.seal_local_batches_after_frontier()?;
-            snapshot = self.sealed_replication_snapshot()?;
+            {
+                let _span = crate::profile::span("replication.seal");
+                self.seal_local_batches_after_frontier()?;
+            }
+            snapshot = {
+                let _span = crate::profile::span("replication.snapshot");
+                self.sealed_replication_snapshot()?
+            };
             attempts += 1;
             if !snapshot.unsealed || attempts == 8 {
                 break;
@@ -7077,7 +7083,10 @@ impl Store {
         }
         // Judge the claims just sealed only after the snapshot is taken: a verdict pass takes the
         // writer, and writes queued behind it must not land between sealing and the snapshot.
-        self.judge_claims_slice(false)?;
+        {
+            let _span = crate::profile::span("replication.judge");
+            self.judge_claims_slice(false)?;
+        }
         Ok(snapshot)
     }
 
@@ -7236,11 +7245,16 @@ impl Store {
             return Ok(snapshot);
         }
         let waiting = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotBuildWait);
+        // A trim's patch holds this lock while it marks, and copies the snapshot first when an
+        // exchange still holds it; this span shows what an exchange waited for that.
+        let wait_span = crate::profile::span("replication.snapshot_build_wait");
         let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
+        drop(wait_span);
         drop(waiting);
         if let Some(snapshot) = current(self)? {
             return Ok(snapshot);
         }
+        let _span = crate::profile::span("replication.snapshot_build");
         let _timing = time_stage(&self.replication_timers.snapshot);
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -7523,9 +7537,15 @@ impl Store {
                 .collect();
             exchange.envelopes.extend(self.replica_envelopes(wanted)?);
         }
-        exchange.signatures = self.replication_signatures_for(signature_requests)?;
-        exchange.signature_requests = self.replication_signature_requests()?;
-        fit_exchange_body(&mut exchange, budget)?;
+        {
+            let _span = crate::profile::span("replication.signatures");
+            exchange.signatures = self.replication_signatures_for(signature_requests)?;
+            exchange.signature_requests = self.replication_signature_requests()?;
+        }
+        {
+            let _span = crate::profile::span("replication.fit_body");
+            fit_exchange_body(&mut exchange, budget)?;
+        }
         Ok(exchange)
     }
 
@@ -7535,19 +7555,29 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
-        let digests = self.exported_digests(&snapshot)?;
+        let digests = {
+            let _span = crate::profile::span("replication.digests");
+            self.exported_digests(&snapshot)?
+        };
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
             // The peer sent range digests, so only differing ranges need identities. Each
             // answer lists from the next differing range, so every one is listed in turn.
-            let (missing, listed) = compact_replication_difference_turn(
-                &snapshot.inventory,
-                &snapshot.buckets,
-                remote,
-                REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
-                self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
-            );
+            let (missing, listed) = {
+                let _span = crate::profile::span("replication.difference");
+                compact_replication_difference_turn(
+                    &snapshot.inventory,
+                    &snapshot.buckets,
+                    remote,
+                    REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
+                    self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
+                )
+            };
+            let envelopes = {
+                let _span = crate::profile::span("replication.envelopes");
+                self.replica_envelopes(missing)?
+            };
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
                 fleet_id: fleet_id.to_owned(),
@@ -7566,7 +7596,7 @@ impl Store {
                     checkpoint: self.trimmed_checkpoint()?,
                     claim_range_query: None,
                 },
-                envelopes: self.replica_envelopes(missing)?,
+                envelopes,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),

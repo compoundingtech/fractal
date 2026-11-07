@@ -13,6 +13,7 @@ import { readSidebarMemberships, sidebarMembershipFrame, sidebarMembershipFailur
 import { planSidebarV2 } from './sidebarEdits.ts';
 import { createWriteState, writeReducer } from './sidebarWriteState.ts';
 import { sidebarWriteRequest } from './sidebarDispatch.ts';
+import { SidebarProjectionCache } from './sidebarProjectionCache.ts';
 
 const fixtures = loadSidebarBehavior();
 const nested = 'nested-and-dormant-non-agent-placements';
@@ -182,7 +183,7 @@ for (const count of [1001, 4096]) test(`native real feed/projection/planning at 
   const tree = buildTree(f.arrangement, state.complete.members, f.catalog);
   assert.equal(Object.keys(tree.nodes).length, count + 1);
   assert.deepEqual(tree.roots.filter(node => node._tag === 'Subject').map(node => node.subject), f.catalog);
-  const edit = planSidebarV2(f.arrangement, state.complete.members, f.intent);
+  const edit = planSidebarV2(tree, f.intent);
   assert.equal(edit.memberships.length, 1);
   const write = createWriteState(scaleScope, f.intent);
   assert.deepEqual(writeReducer.reduce(write, { type: 'Plan', base: { scope: scaleScope, snapshot, revision: f.arrangement.revision, ready: true }, plan: edit, folder: { actor: 'actor/scale', action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: { actor: 'actor/scale', action_id: 'action/member', idempotency_key: 'key/member' } }), ['PersistPending']);
@@ -199,7 +200,7 @@ test('native admitted 1,024-folder chain projects and plans without recursive tr
   let node = tree.roots.find(node => node._tag === 'Folder'), depth = 0;
   while (node) { depth++; node = tree.nodes[`folder:${node.id}`].children.find(node => node._tag === 'Folder'); }
   assert.equal(depth, 1024);
-  assert.equal(planSidebarV2(f.arrangement, f.memberships, f.intent).memberships.length, 1);
+  assert.equal(planSidebarV2(tree, f.intent).memberships.length, 1);
 });
 
 test('atomic 1,025-operation rekey and >1 MiB operations never reach dispatch', () => {
@@ -209,11 +210,11 @@ test('atomic 1,025-operation rekey and >1 MiB operations never reach dispatch', 
   let dispatches = 0;
   const dispatchIfPlanned = result => { if (!('error' in result)) { dispatches++; return sidebarWriteRequest(result); } return result.error; };
   const before = structuredClone(f.memberships);
-  assert.deepEqual(dispatchIfPlanned(planSidebarV2(f.arrangement, f.memberships, intent)), { _tag: 'TooManyOperations', count: 1025 });
+  assert.deepEqual(dispatchIfPlanned(planSidebarV2(buildTree(f.arrangement, f.memberships), intent)), { _tag: 'TooManyOperations', count: 1025 });
   assert.deepEqual(f.memberships, before, 'no partial rekey or truncation');
   const huge = scaleFixture(1), id = 'agent/' + 'x'.repeat(1048576);
   huge.memberships[0].member = id; huge.intent.node = subject(id);
-  const refused = dispatchIfPlanned(planSidebarV2(huge.arrangement, huge.memberships, huge.intent));
+  const refused = dispatchIfPlanned(planSidebarV2(buildTree(huge.arrangement, huge.memberships), huge.intent));
   assert.equal(refused._tag, 'TooManyBytes'); assert.ok(refused.bytes > 1048576);
   assert.equal(dispatches, 0);
 });
@@ -238,31 +239,116 @@ test('scale refresh faults retain stale complete rows and isolate obsolete attem
   assert.notEqual(new SidebarMemberships().status, empty.status);
 });
 
-const p95 = values => values.sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
-test('opt-in native CPU latency and equivalent v1 baseline', { skip: process.env.SIDEBAR_IOS_PERF !== '1' && 'Set SIDEBAR_IOS_PERF=1; timing gates are not default CI assertions' }, async t => {
+const projectionInput = f => ({ arrangement: f.arrangement, complete: { scope: scaleScope, frontier: cutFor(f.memberships.length), snapshots: [snapshot], members: f.memberships }, modelRevision: 'model/1', catalogRevision: 'catalog/1', presentationRevision: 'presentation/1' });
+test('projection cache reuses revisions, invalidates every relevant identity and scope', () => {
+  const f = scaleFixture(1001), input = projectionInput(f), cache = new SidebarProjectionCache(), tree = cache.get(input);
+  const equivalent = structuredClone(input);
+  equivalent.complete.snapshots = [{ ...snapshot, id: 'snapshot/unrelated', store_index: 99999 }];
+  assert.equal(cache.get(equivalent), tree, 'new object and unrelated global writes reuse projection');
+  for (const mutate of [
+    x => { x.arrangement.revision += '/next'; }, x => { x.arrangement.deleted = true; },
+    x => { x.modelRevision += '/resolved'; }, x => { x.catalogRevision += '/next'; },
+    x => { x.presentationRevision += '/next'; },
+    ...['epoch', 'changed_index', 'live_count'].map(key => x => { x.complete.frontier[key] = typeof x.complete.frontier[key] === 'number' ? x.complete.frontier[key] + 1 : 'next-epoch'; }),
+    ...['endpoint', 'host', 'projection'].map(key => x => { x.complete.scope[key] += '/other'; }),
+    x => { x.complete.scope.owner = x.arrangement.owner = 'person/other'; },
+    x => { x.complete.scope.container = x.arrangement.id = 'arrangement/other'; x.complete.members = x.complete.members.map(row => ({ ...row, container: x.arrangement.id })); },
+  ]) {
+    const changed = structuredClone(input); mutate(changed);
+    assert.notEqual(cache.get(changed), tree);
+    assert.notEqual(cache.get(input), tree, 'single entry never reuses an evicted scope/revision');
+  }
+  const fresh = cache.get(input); cache.clear(); assert.notEqual(cache.get(input), fresh);
+  const mismatch = structuredClone(input); mismatch.complete.scope.container = 'arrangement/other';
+  assert.deepEqual(cache.get(mismatch), { error: { _tag: 'InvalidResolution' } });
+  const changed = structuredClone(input); changed.complete.frontier.changed_index++;
+  changed.complete.members[0].position.bucket = f.intent.parent.id;
+  assert.equal(cache.get(changed).nodes[`subject:${f.catalog[0]}`].shownUnder.id, f.intent.parent.id);
+  assert.deepEqual(planSidebarV2({ error: { _tag: 'NotReady' } }, f.intent), { error: { _tag: 'Projection', error: { _tag: 'NotReady' } } });
+});
+test('same-revision resolution recovery never caches failures or scans members on warm hits', () => {
+  const f = scaleFixture(4096, 2), input = projectionInput(f), cache = new SidebarProjectionCache();
+  const [root, child] = Object.keys(f.arrangement.body.folders), parents = f.arrangement.resolved.parents;
+  delete parents[child];
+  assert.deepEqual(cache.get(input), { error: { _tag: 'NotReady' } });
+  parents[child] = root;
+  const complete = cache.get(input); assert.ok(!('error' in complete));
+  delete parents[root];
+  assert.deepEqual(cache.get(input), { error: { _tag: 'NotReady' } });
+  parents[root] = null;
+  const recovered = cache.get(input); assert.ok(!('error' in recovered)); assert.notEqual(recovered, complete);
+  input.complete.members = new Proxy(f.memberships, { get() { assert.fail('warm cache must not inspect members'); } });
+  assert.equal(cache.get(input), recovered);
+  input.complete.members = f.memberships;
+  parents[root] = child;
+  assert.deepEqual(cache.get(input), { error: { _tag: 'InvalidResolution' } }, 'same-revision parent change creates a cycle');
+  parents[root] = null;
+  const valid = cache.get(input); assert.ok(!('error' in valid)); assert.notEqual(valid, recovered);
+  parents[child] = null;
+  assert.equal(cache.get(input).nodes[`folder:${child}`].shownUnder._tag, 'Root');
+  const invalid = projectionInput(scaleFixture(1)), badCache = new SidebarProjectionCache();
+  invalid.complete.members[0].container = 'arrangement/other';
+  assert.deepEqual(badCache.get(invalid), { error: { _tag: 'InvalidResolution' } });
+  invalid.complete.members[0].container = invalid.arrangement.id;
+  assert.ok(!('error' in badCache.get(invalid)), 'non-readiness errors are not cached either');
+});
+test('cache invalidation preserves authoritative projection error precedence', () => {
+  const f = scaleFixture(2), input = projectionInput(f), cache = new SidebarProjectionCache();
+  cache.get(input);
+  const legacy = { ...input, arrangement: { ...f.v1, resolved: undefined } };
+  assert.deepEqual(cache.get(legacy), { error: { _tag: 'Unsupported', required: 2, advertised: 1 } });
+  for (const corrupt of [
+    members => { members.push(structuredClone(members[0])); },
+    members => { members[0].container = 'arrangement/other'; },
+  ]) {
+    cache.get(input);
+    const invalid = structuredClone(input);
+    delete invalid.arrangement.resolved.parents[f.intent.parent.id];
+    corrupt(invalid.complete.members);
+    assert.deepEqual(cache.get(invalid), { error: { _tag: 'InvalidResolution' } });
+    assert.deepEqual(cache.get(invalid), buildTree(invalid.arrangement, invalid.complete.members));
+  }
+});
+const pendingEdit = (f, edit) => {
+  const state = createWriteState(scaleScope, f.intent);
+  writeReducer.reduce(state, { type: 'Plan', base: { scope: scaleScope, snapshot, revision: f.arrangement.revision, ready: true }, plan: edit, folder: { actor: 'actor/test', action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: { actor: 'actor/test', action_id: 'action/member', idempotency_key: 'key/member' } });
+  return state;
+};
+const summary = values => { const sorted = values.sort((a, b) => a - b); return { p50: sorted[Math.ceil(sorted.length * .5) - 1], p95: sorted[Math.ceil(sorted.length * .95) - 1] }; };
+test('opt-in native cached keystroke CPU latency and equivalent v1 baseline', { skip: process.env.SIDEBAR_IOS_PERF !== '1' && 'Set SIDEBAR_IOS_PERF=1; timing gates are not default CI assertions' }, async t => {
   const results = [];
   for (const count of [1001, 4096]) {
-    const f = scaleFixture(count), times = { v2: [], v1: [], v1View: [], inMemoryInitialLoad: [] };
+    const f = scaleFixture(count), input = projectionInput(f), cache = new SidebarProjectionCache(), coldCache = new SidebarProjectionCache();
+    const tree = cache.get(input), v1Tree = buildTree(f.v1, undefined, f.catalog);
+    const times = { v2: [], v1: [], coldProjection: [], v1View: [], inMemoryInitialLoad: [] };
     for (let i = 0; i < 120; i++) {
       let started = performance.now();
-      const tree = buildTree(f.arrangement, f.memberships, f.catalog);
-      const edit = planSidebarV2(f.arrangement, f.memberships, f.intent);
+      const current = cache.get(input), edit = planSidebarV2(current, f.intent);
+      const pending = pendingEdit(f, edit);
       const v2 = performance.now() - started;
-      assert.equal(tree.roots.length, count + 1); assert.equal(edit.memberships.length, 1);
+      assert.equal(current, tree); assert.equal(pending.status, 'AwaitingPersistence');
+      assert.deepEqual(pending.request.operations, { Memberships: edit.memberships });
       started = performance.now();
-      buildTree(f.v1, undefined, f.catalog); placeResource(f.v1, f.catalog[0], f.intent.parent.id);
+      // Same revision: reuse the v1 projection too. Normalize legacy Place payload
+      // solely to charge both baselines the same real pending-reducer transition.
+      const operations = placeResource(f.v1, f.catalog[0], f.intent.parent.id);
+      const v1Pending = pendingEdit(f, { folders: [], memberships: operations.map(op => ({ op: 'place', member: op.subject, bucket: op.folder, key: op.key })) });
       const v1 = performance.now() - started;
+      assert.equal(v1Tree.roots.length, count + 1); assert.equal(v1Pending.status, pending.status);
       started = performance.now(); sidebarGroups([f.v1], f.resources, {}, 'agent');
       const view = performance.now() - started;
-      if (i >= 20) { times.v2.push(v2); times.v1.push(v1); times.v1View.push(view); }
+      coldCache.clear(); started = performance.now(); const cold = coldCache.get(input);
+      const coldProjection = performance.now() - started;
+      assert.equal(cold.roots.length, count + 1);
+      if (i >= 20) { times.v2.push(v2); times.v1.push(v1); times.v1View.push(view); times.coldProjection.push(coldProjection); }
     }
     for (let i = 0; i < 20; i++) { const started = performance.now(); await scaleRead(f.memberships); times.inMemoryInitialLoad.push(performance.now() - started); }
-    results.push({ count, p95_ms: Object.fromEntries(Object.entries(times).map(([key, values]) => [key, p95(values)])) });
+    results.push({ count, ms: Object.fromEntries(Object.entries(times).map(([key, values]) => [key, summary(values)])) });
   }
-  console.log(JSON.stringify({ runner: { host: hostname(), platform: platform(), arch: arch(), node: process.version }, samples: 100, warmup: 20, results, limitations: 'Node CPU only; v1View is not native render. In-memory load is not local-socket load. PR25 native release and D evidence remain required.' }));
-  for (const { count, p95_ms } of results) await t.test(`${count} planning <=4ms and <=2x v1`, () => {
-    assert.ok(p95_ms.v2 <= 4, `v2 p95 ${p95_ms.v2}ms >4ms`);
-    assert.ok(p95_ms.v2 <= 2 * p95_ms.v1, `v2/v1 ${p95_ms.v2 / p95_ms.v1} >2`);
+  console.log(JSON.stringify({ runner: { host: hostname(), platform: platform(), arch: arch(), node: process.version }, samples: 100, warmup: 20, results, limitations: 'Cached CPU projection+planning+pending only, not native overlay painting. Cold projection reported separately, ungated. v1 uses equivalent pending normalization, not an activated legacy journal. D socket and PR25 native release frame evidence remain required.' }));
+  for (const { count, ms } of results) await t.test(`${count} cached keystroke <=4ms and <=2x v1`, () => {
+    assert.ok(ms.v2.p95 <= 4, `v2 p95 ${ms.v2.p95}ms >4ms`);
+    assert.ok(ms.v2.p95 <= 2 * ms.v1.p95, `v2/v1 ${ms.v2.p95 / ms.v1.p95} >2`);
   });
 });
 

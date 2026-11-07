@@ -107,7 +107,6 @@ pub use agent_spec::spec::{
 };
 pub use catalog_lock::CatalogLock;
 pub use expand::{expand_env, expand_vars};
-pub use host_lock::HostLock;
 pub use reconcile::{
     Launch, PtyPresentation, ReconcilePlan, Session, TaskLaunch, TaskTarget, Teardown, reconcile,
 };
