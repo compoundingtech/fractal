@@ -23,13 +23,16 @@ const scenario = (value: Scenario): { readonly state: ChangelogLoad; readonly ba
   state: value === 'loading' ? { _tag: 'Loading' } : value === 'failure' ? { _tag: 'Failed' } : { _tag: 'Ready', manifest: value === 'empty' ? { ...fixture, entries: [] } : fixture },
   baseline: value === 'first' ? initialSeen : { visited: true, entryIds: value === 'seen' ? fixture.entries.map((entry) => entry.id) : ['2026-10-10-reconnect'] },
 })
-const ChangelogStoryHarness = ({ mode = 'unseen', dark = true, width = 1440, initiallyOpen = true }: { readonly mode?: Scenario; readonly dark?: boolean; readonly width?: number; readonly initiallyOpen?: boolean }) => {
+type Scheme = 'dark' | 'light'
+/** Fills the window, so the Viewport toolbar (and the gate's 440 and 1440 windows) set the width. */
+const ChangelogStoryHarness = ({ mode = 'unseen', scheme = 'dark', initiallyOpen = true }: { readonly mode?: Scenario; readonly scheme?: Scheme; readonly initiallyOpen?: boolean }) => {
+  const dark = scheme === 'dark'
   const current = scenario(mode)
   const [open, setOpen] = React.useState(initiallyOpen)
   const [cursor, setCursor] = React.useState(() => initiallyOpen && current.state._tag === 'Ready' ? acknowledgeEntryIds(current.state.manifest.entries.map((entry) => entry.id), current.baseline) : current.baseline)
   const [baseline, setBaseline] = React.useState(current.baseline)
   const [state, setState] = React.useState(current.state)
-  return <main data-changelog-story="" data-scheme={dark ? 'dark' : 'light'} {...stylex.props(styles.canvas, width === 440 ? styles.narrow : styles.wide, dark ? assistantDarkTheme : assistantLightTheme)}>
+  return <main data-changelog-story="" data-scheme={dark ? 'dark' : 'light'} {...stylex.props(styles.canvas, styles.fill, dark ? assistantDarkTheme : assistantLightTheme)}>
     <p {...stylex.props(styles.caption)}>Fractal · {mode}</p>
     <footer data-changelog-anchor="" {...stylex.props(styles.bar)}><span>{fixture.build.machineVersion}</span><ChangelogPopover dark={dark} isOpen={open} onOpenChange={(next) => {
       if (next && state._tag === 'Ready') { setBaseline(cursor); setCursor(acknowledgeEntryIds(state.manifest.entries.map((entry) => entry.id), cursor)) }
@@ -40,7 +43,8 @@ const ChangelogStoryHarness = ({ mode = 'unseen', dark = true, width = 1440, ini
   </main>
 }
 /** Matches the live zero-height theme holder around its fixed visible status bar. */
-const ChangelogDesktopAnchorStoryHarness = ({ dark = true }: { readonly dark?: boolean }) => {
+const ChangelogDesktopAnchorStoryHarness = ({ scheme = 'dark' }: { readonly scheme?: Scheme }) => {
+  const dark = scheme === 'dark'
   const [open, setOpen] = React.useState(false)
   return <main data-changelog-desktop-story="" {...stylex.props(styles.canvas, styles.fullCanvas, dark ? assistantDarkTheme : assistantLightTheme)}>
     <div data-testid="wf-devbar">
@@ -74,12 +78,13 @@ const desktopAnchorPlay = async ({ canvasElement }: { readonly canvasElement: HT
   canvasElement.dataset.changelogDesktopAnchorProof = 'passed'
 }
 /** Native overflow lifetime matches the kit: closing +N unmounts its disclosure trigger. */
-const ChangelogOverflowStoryHarness = ({ dark = true, width = 440 }: { readonly dark?: boolean; readonly width?: number }) => {
+const ChangelogOverflowStoryHarness = ({ scheme = 'dark' }: { readonly scheme?: Scheme }) => {
+  const dark = scheme === 'dark'
   const id = React.useId()
   const overflow = React.useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = React.useState(false)
   const [open, setOpen] = React.useState(false)
-  return <main data-changelog-overflow-story="" {...stylex.props(styles.canvas, width === 440 ? styles.narrow : styles.wide, dark ? assistantDarkTheme : assistantLightTheme)}>
+  return <main data-changelog-overflow-story="" {...stylex.props(styles.canvas, styles.fill, dark ? assistantDarkTheme : assistantLightTheme)}>
     <div data-testid="light-dismiss-target" {...stylex.props(styles.dismissTarget)}>Click this workspace area to dismiss both popovers.</div>
     <footer {...stylex.props(styles.bar)}>
       <Aria.Button aria-label="+N more status items" aria-haspopup="dialog" aria-controls={id} aria-expanded={expanded} onPress={() => {
@@ -129,61 +134,31 @@ const overflowLightDismissPlay = async ({ canvasElement }: { readonly canvasElem
 }
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal/App/Changelog', component: ChangelogStoryHarness,
+  // Pinned so story ids, and the gate policies that name them, survive the retitle.
+  id: 'fractal-app-changelog',
+  title: 'Surfaces/Changelog', component: ChangelogStoryHarness,
   render: (args) => <ChangelogStoryHarness key={args.mode} {...args} />,
   parameters: { scenario: { _tag: 'contract-fixture', reason: "The catalog has no changelog slice; local release entries exercise seen, loading and failure contracts." },
     layout: 'fullscreen',
-    viewport: { options: {
-      changelog1440: { name: 'Changelog desktop', styles: { width: '1440px', height: '900px' }, type: 'desktop' },
-      changelog440: { name: 'Changelog narrow', styles: { width: '440px', height: '900px' }, type: 'mobile' },
-    } },
-    docs: { description: { component: 'Synthetic changelog entries demonstrate both themes, 440/1440 widths, loading, retry, acknowledgement, desktop anchoring and native overflow focus restoration. Links and build identity are examples, not release provenance.' } },
+    docs: { description: { component: 'Synthetic changelog entries demonstrate loading, retry, acknowledgement, desktop anchoring and native overflow focus restoration. Links and build identity are examples, not release provenance.' } },
   },
-  globals: { viewport: { value: 'changelog1440', isRotated: false } },
-  args: { mode: 'unseen', dark: true, width: 1440 },
-  argTypes: { mode: { control: 'select', options: ['unseen', 'seen', 'first', 'loading', 'empty', 'failure'] }, dark: { control: 'boolean' }, width: { control: 'select', options: [1440, 440] } },
+  args: { mode: 'unseen', scheme: 'dark' },
+  argTypes: { mode: { control: 'select', options: ['unseen', 'seen', 'first', 'loading', 'empty', 'failure'] }, scheme: { control: 'inline-radio', options: ['dark', 'light'] } },
 } satisfies Meta<typeof ChangelogStoryHarness>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'Acknowledgement1440Dark:contract-fixture',
-  'Acknowledgement1440Light:contract-fixture',
-  'Acknowledgement440Dark:contract-fixture',
-  'Acknowledgement440Light:contract-fixture',
   'AllStates:contract-fixture',
   'DesktopAnchor1440Dark:contract-fixture',
-  'DesktopAnchor1440Light:contract-fixture',
-  'DesktopAnchor440Dark:contract-fixture',
-  'DesktopAnchor440Light:contract-fixture',
   'Empty1440Dark:contract-fixture',
-  'Empty1440Light:contract-fixture',
-  'Empty440Dark:contract-fixture',
-  'Empty440Light:contract-fixture',
   'FirstVisit1440Dark:contract-fixture',
-  'FirstVisit1440Light:contract-fixture',
-  'FirstVisit440Dark:contract-fixture',
-  'FirstVisit440Light:contract-fixture',
   'LoadFailure1440Dark:contract-fixture',
-  'LoadFailure1440Light:contract-fixture',
-  'LoadFailure440Dark:contract-fixture',
-  'LoadFailure440Light:contract-fixture',
   'Loading1440Dark:contract-fixture',
-  'Loading1440Light:contract-fixture',
-  'Loading440Dark:contract-fixture',
-  'Loading440Light:contract-fixture',
   'OverflowLightDismiss1440Dark:contract-fixture',
-  'OverflowLightDismiss1440Light:contract-fixture',
-  'OverflowLightDismiss440Dark:contract-fixture',
-  'OverflowLightDismiss440Light:contract-fixture',
   'Seen1440Dark:contract-fixture',
-  'Seen1440Light:contract-fixture',
-  'Seen440Dark:contract-fixture',
-  'Seen440Light:contract-fixture',
   'Unseen1440Dark:contract-fixture',
-  'Unseen1440Light:contract-fixture',
-  'Unseen440Dark:contract-fixture',
-  'Unseen440Light:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 const visibleStatePlay: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
@@ -229,42 +204,15 @@ const acknowledgementPlay: NonNullable<Story['play']> = async ({ canvasElement }
   await waitFor(() => expect(body.queryByRole('dialog', { name: 'Recent changes' })).toBeNull())
   await waitFor(() => expect(trigger).toHaveFocus())
 }
-export const Unseen1440Dark: Story = { play: visibleStatePlay }
-export const Unseen1440Light: Story = { args: { dark: false }, play: visibleStatePlay }
-export const Unseen440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Unseen440Light: Story = { args: { width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Seen1440Dark: Story = { args: { mode: 'seen' }, play: visibleStatePlay }
-export const Seen1440Light: Story = { args: { mode: 'seen', dark: false }, play: visibleStatePlay }
-export const Seen440Dark: Story = { args: { mode: 'seen', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Seen440Light: Story = { args: { mode: 'seen', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Empty1440Dark: Story = { args: { mode: 'empty' }, play: visibleStatePlay }
-export const Empty1440Light: Story = { args: { mode: 'empty', dark: false }, play: visibleStatePlay }
-export const Empty440Dark: Story = { args: { mode: 'empty', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Empty440Light: Story = { args: { mode: 'empty', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const LoadFailure1440Dark: Story = { args: { mode: 'failure' }, play: visibleStatePlay }
-export const LoadFailure1440Light: Story = { args: { mode: 'failure', dark: false }, play: visibleStatePlay }
-export const LoadFailure440Dark: Story = { args: { mode: 'failure', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const LoadFailure440Light: Story = { args: { mode: 'failure', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Loading1440Dark: Story = { args: { mode: 'loading' }, play: visibleStatePlay }
-export const Loading1440Light: Story = { args: { mode: 'loading', dark: false }, play: visibleStatePlay }
-export const Loading440Dark: Story = { args: { mode: 'loading', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Loading440Light: Story = { args: { mode: 'loading', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const FirstVisit1440Dark: Story = { args: { mode: 'first' }, play: visibleStatePlay }
-export const FirstVisit1440Light: Story = { args: { mode: 'first', dark: false }, play: visibleStatePlay }
-export const FirstVisit440Dark: Story = { args: { mode: 'first', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const FirstVisit440Light: Story = { args: { mode: 'first', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Acknowledgement1440Dark: Story = { args: { initiallyOpen: false }, play: acknowledgementPlay }
-export const Acknowledgement1440Light: Story = { args: { initiallyOpen: false, dark: false }, play: acknowledgementPlay }
-export const Acknowledgement440Dark: Story = { args: { initiallyOpen: false, width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: acknowledgementPlay }
-export const Acknowledgement440Light: Story = { args: { initiallyOpen: false, width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: acknowledgementPlay }
-export const OverflowLightDismiss1440Dark: Story = { render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
-export const OverflowLightDismiss1440Light: Story = { args: { dark: false }, render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
-export const OverflowLightDismiss440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
-export const OverflowLightDismiss440Light: Story = { args: { width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
-export const DesktopAnchor1440Dark: Story = { render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
-export const DesktopAnchor1440Light: Story = { args: { dark: false }, render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
-export const DesktopAnchor440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
-export const DesktopAnchor440Light: Story = { args: { width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
+export const Unseen1440Dark: Story = { name: 'Unseen', play: visibleStatePlay }
+export const Seen1440Dark: Story = { name: 'Seen', args: { mode: 'seen' }, play: visibleStatePlay }
+export const Empty1440Dark: Story = { name: 'Empty', args: { mode: 'empty' }, play: visibleStatePlay }
+export const LoadFailure1440Dark: Story = { name: 'Load failure', args: { mode: 'failure' }, play: visibleStatePlay }
+export const Loading1440Dark: Story = { name: 'Loading', args: { mode: 'loading' }, play: visibleStatePlay }
+export const FirstVisit1440Dark: Story = { name: 'First visit', args: { mode: 'first' }, play: visibleStatePlay }
+export const Acknowledgement1440Dark: Story = { name: 'Acknowledgement', args: { initiallyOpen: false }, play: acknowledgementPlay }
+export const OverflowLightDismiss1440Dark: Story = { name: 'Overflow light dismiss', render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
+export const DesktopAnchor1440Dark: Story = { name: 'Desktop anchor', render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
 const ChangelogStateCard = ({ mode, dark }: { readonly mode: Scenario; readonly dark: boolean }) => {
   const current = scenario(mode)
   const [state, setState] = React.useState(current.state)
@@ -283,7 +231,7 @@ export const AllStates: Story = {
 }
 const styles = stylex.create({
   canvas: { position: 'relative', maxWidth: '100vw', minHeight: '100vh', backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans },
-  narrow: { width: geometry.polishNarrow }, wide: { width: geometry.polishWide },
+  fill: { width: '100%' },
   fullCanvas: { width: '100vw', height: '100vh' },
   caption: { padding: space.section, margin: 0, color: ink.fgMuted, fontSize: type.codeSize },
   bar: { position: 'absolute', bottom: 0, left: 0, right: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: space.md, padding: space.lg, backgroundColor: surface.raised, fontSize: type.metaSize },
