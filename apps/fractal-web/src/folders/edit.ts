@@ -454,10 +454,10 @@ export class MembershipEditor {
     return ['PersistPending']
   }
   /** Persistence acknowledgements come only from this journal executor, never transport. */
-  execute(effect: SidebarJournalEffect): SidebarJournalResult {
+  execute(effect: SidebarJournalEffect): SidebarJournalResult & { readonly effects?: readonly SidebarJournalEffect[] } {
     const result = this.journal.run(effect, this.state)
     if (result._tag === 'Applied' && result.event) return { ...result, effects: this.reduce(result.event) }
-    if (result._tag === 'StorageFailed') this.reduce({ _tag: 'StorageFailed' })
+    if (result._tag === 'StorageFailed') return { ...result, effects: this.reduce({ _tag: 'StorageFailed' }) }
     return result
   }
   reduce(event: MembershipEditEvent): SidebarJournalEffect[] {
