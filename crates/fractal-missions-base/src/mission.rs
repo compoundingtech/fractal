@@ -368,10 +368,10 @@ fn parse_mission(
                         format!("mission `{id}` repeats `assigned-to`"),
                     ));
                 }
-                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host)?);
+                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host));
             }
             "available-to" => {
-                let agent = normalize_assignee(&first_string(child)?, default_host)?;
+                let agent = normalize_assignee(&first_string(child)?, default_host);
                 if available_to.contains(&agent) {
                     return Err(FractalError::new(
                         "duplicate-work-agent",
@@ -1378,10 +1378,10 @@ fn parse_step(
                     baselines.push(baseline);
                 }
                 "assigned-to" => {
-                    assigned_to = Some(normalize_assignee(&first_string(child)?, default_host)?)
+                    assigned_to = Some(normalize_assignee(&first_string(child)?, default_host))
                 }
                 "available-to" => {
-                    let agent = normalize_assignee(&first_string(child)?, default_host)?;
+                    let agent = normalize_assignee(&first_string(child)?, default_host);
                     if available_to.contains(&agent) {
                         return Err(FractalError::new(
                             "duplicate-work-agent",
@@ -1569,10 +1569,10 @@ fn parse_queue(
                         format!("queue `{id}` repeats `assigned-to`"),
                     ));
                 }
-                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host)?);
+                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host));
             }
             "available-to" => {
-                let agent = normalize_assignee(&first_string(child)?, default_host)?;
+                let agent = normalize_assignee(&first_string(child)?, default_host);
                 if available_to.contains(&agent) {
                     return Err(FractalError::new(
                         "duplicate-work-agent",
@@ -2684,17 +2684,23 @@ fn normalize_subject(value: &str, kind: &str) -> String {
     }
 }
 
-fn normalize_assignee(value: &str, default_host: &str) -> Result<String, FractalError> {
-    let qualified = if value.contains('/') {
-        std::borrow::Cow::Borrowed(value)
-    } else if value.contains('.') || value.contains("${") {
-        std::borrow::Cow::Owned(format!("agent/{value}"))
+fn normalize_assignee(value: &str, default_host: &str) -> String {
+    if let Some(canonical) = fractal_schema::canonical_agent_actor(value) {
+        return canonical.into_owned();
+    }
+    // Stored declarations are parsed again during reconciliation. Preserve their historical
+    // normalization when an actor cannot be canonicalized; writers validate new work actors.
+    if value.starts_with("person/") {
+        return value.to_owned();
+    }
+    let identity = value.strip_prefix("agent/").unwrap_or(value);
+    if identity.contains('.') || identity.contains("${") {
+        format!("agent/{identity}")
+    } else if identity.contains('/') {
+        value.to_owned()
     } else {
-        std::borrow::Cow::Owned(format!("agent/{default_host}.{value}"))
-    };
-    fractal_schema::canonical_agent_actor(&qualified)
-        .map(std::borrow::Cow::into_owned)
-        .ok_or_else(|| FractalError::new("invalid-assignee", format!("invalid agent actor `{value}`")))
+        format!("agent/{default_host}.{identity}")
+    }
 }
 
 fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
@@ -3137,9 +3143,24 @@ mod tests {
             ("daemon/scheduler", "daemon/scheduler"),
             ("worker", "agent/host.worker"),
         ] {
-            assert_eq!(super::normalize_assignee(input, "host").unwrap(), expected);
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
         }
-        assert!(super::normalize_assignee("example/worker name", "host").is_err());
+    }
+
+    #[test]
+    fn stored_assignees_preserve_historical_malformed_normalization() {
+        for (input, expected) in [
+            ("agent/", "agent/host."),
+            ("", "agent/host."),
+            ("worker name", "agent/host.worker name"),
+            ("example/worker name", "example/worker name"),
+            ("agent/example/worker name", "agent/example/worker name"),
+            ("example/worker.name ", "agent/example/worker.name "),
+            ("person/reviewer name", "person/reviewer name"),
+            ("person/", "person/"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
     }
 
     #[test]

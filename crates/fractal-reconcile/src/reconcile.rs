@@ -24608,6 +24608,76 @@ version 2
     }
 
     #[test]
+    fn stored_mission_declarations_preserve_legacy_invalid_assignee_normalization() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"version 2
+mission "legacy-declarations" state="ready" {
+  goal "Materialize declarations stored before canonical agent IDs."
+  step "wait" { agentless }
+}
+"#;
+        let declarations = r#"version 2
+mission "legacy-child" state="ready" {
+  goal "Preserve historical assignee normalization."
+  step "empty-agent-name" { assigned-to "agent/" }
+  step "whitespace" { assigned-to "example/worker name" }
+}
+"#;
+        // Persist the historical declaration source without admitting it through today's parser.
+        let mut intent = parse_intent(source, "node").unwrap();
+        intent.missions.get_mut("legacy-declarations").unwrap().declarations_kdl =
+            Some(declarations.into());
+        let planned = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply(&intent, &planned.subject_tokens, "publish-legacy-declarations")
+            .unwrap();
+        let mission = store
+            .mission_spec("legacy-declarations", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mission.declarations_kdl.as_deref(), Some(declarations));
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "legacy-declarations".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-legacy-declarations".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        assert!(
+            reconciler
+                .materialize_mission_declarations(&run, &mission, None)
+                .unwrap()
+        );
+        let nested = store.mission_spec("legacy-child", None).unwrap().unwrap();
+        assert_eq!(
+            nested.steps["empty-agent-name"].assigned_to.as_deref(),
+            Some("agent/node.")
+        );
+        assert_eq!(
+            nested.steps["whitespace"].assigned_to.as_deref(),
+            Some("example/worker name")
+        );
+    }
+
+    #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let bootstrap = r#"
