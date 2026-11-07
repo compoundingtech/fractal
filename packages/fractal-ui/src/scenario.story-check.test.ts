@@ -218,6 +218,31 @@ test('story-local play tags preserve the main play sets, including unlisted spre
   expect(Object.keys(entries).filter(id => entries[id].includes('both-widths')).sort()).toEqual([...baseline.BOTH_WIDTHS].sort())
 })
 
+test('policy lane membership cannot shrink when a tagged story is removed or renamed', () => {
+  const baseline: { MERGE_ONLY: string[], BOTH_WIDTHS: string[] } = JSON.parse(readFileSync(nodePath.resolve(uiSource, '../scripts/kit-play-main-baseline.json'), 'utf8'))
+  // Reuse the reviewed ID lists: counts alone cannot identify lost coverage or detect a replacement.
+  const expected = {
+    'merge-only': baseline.MERGE_ONLY,
+    'both-widths': [...baseline.BOTH_WIDTHS,
+      'fractal-ui-sidebar-tabs--all-states', 'fractal-ui-sidebar-tabs--keyboard',
+      'fractal-app-sidebar-alerts-tab--served', 'fractal-app-sidebar-alerts-tab--bounded-scroll',
+      'fractal-app-usagepane--all-states', 'fractal-app-usagepane--populated',
+      'fractal-ui-sidebar-pins-section--all-states', 'fractal-ui-sidebar-pins-section--many-pins',
+    ],
+  }
+  const entries = Object.values(storyModules).flatMap(module => Object.entries(module).flatMap(([name, story]) => {
+    if (!isExportStory(name, module.default) || !isStory(story)) return []
+    const composed = composeStory(story, module.default, {}, name)
+    return [{ id: composed.id, tags: composed.tags }]
+  }))
+  for (const [tag, ids] of Object.entries(expected)) {
+    const actual = entries.filter(entry => entry.tags.includes(tag)).map(entry => entry.id).sort()
+    const missing = ids.filter(id => !actual.includes(id))
+    expect(missing, `${tag}: missing story ids: ${missing.join(', ')}`).toEqual([])
+    expect(actual, `${tag}: update the reviewed membership list when coverage changes`).toEqual([...ids].sort())
+  }
+})
+
 test('sidebar tab contracts retain both widths through story-local policy tags', () => {
   const module = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
   expect(module).toBeDefined()

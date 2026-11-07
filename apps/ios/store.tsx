@@ -527,7 +527,7 @@ function useAppStore(proof?: FabricProfile) {
         if (state !== 'live') { connection++; capsClient.current = null; setCaps(null); }
         if (state === 'live') {
           const epoch = connection;
-          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          void loadCapabilities(() => current() && epoch === connection);
           carrier.feedLive(); feedMisses.current = 0;
         }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
@@ -689,16 +689,21 @@ function useAppStore(proof?: FabricProfile) {
     const pin = validatePairingTrust(fingerprint, unpinned);
     if (!canVerifyPairing()) throw new Error('This build cannot verify pairing proofs; update the phone app.');
     const profileKey = member ? memberProfileKey(member) : PROFILE_KEY;
-    if (member && !(fabricSnapshot.phase === 'ready' && fabricSnapshot.member === member.name)) throw new Error(`Fabric is not connected to ${member.name} yet. Wait a moment and try again, or check ${member.name}'s fabric grant for this phone.`);
+    if (member && !(fabricSnapshot.phase === 'ready' && sameFabricTarget(fabricMember, member))) throw new Error(`Fabric is not connected to ${member.name} yet. Wait a moment and try again, or check ${member.name}'s fabric grant for this phone.`);
     const oldRaw = await SecureStore.getItemAsync(profileKey);
     const old: PhoneProfile | undefined = oldRaw ? JSON.parse(oldRaw) : undefined;
     // Anonymous discovery reveals no key material and never receives an old bearer.
     const requestFetch = gatewayFetch();
-    // With fabric chosen and its bridge open, the pairing requests go over fabric to the same member: the
-    // gateway typed (or saved) stays this device's identity and its fallback route.
-    // QR pairing always goes to its explicit gateway, never a different currently connected Fabric member.
-    const requestUrl = member ? fabricSnapshot.bridgeUrl : pairDraft?.scanned ? gateway : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
-    if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
+    // Both manual replacement and QR pairing bind URL requests to the explicit gateway, never an
+    // unrelated Fabric bridge. A scan authenticates no Fabric target and commits its own routing.
+    const overFabric = isFabricGatewayId(gateway);
+    if (!member && old && !pairDraft?.scanned && !overFabric && fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' && !fabricMember?.device) {
+      throw new Error('Another Fabric member is selected. Select this device’s paired member in Fleet, or switch to the saved gateway carrier before re-pairing. The code was not submitted; the previous profile was retained.');
+    }
+    if (overFabric && !(fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' && fabricMember && fabricGatewayId(fabricMember) === gateway)) {
+      throw new Error('Fabric is not connected to this pairing’s member and service. Select the matching member in Fleet and try again. The code was not submitted; the previous profile was retained.');
+    }
+    const requestUrl = overFabric ? fabricSnapshot.bridgeUrl : gateway;
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');
@@ -831,6 +836,12 @@ function useAppStore(proof?: FabricProfile) {
       setPairDraft({ gateway, id, code, scanned: true });
       setPairingIssue('Enter the fingerprint copied separately from the trusted machine before completing this pairing.');
     },
+    /** Re-pair in Release without discarding the current profile or changing its gateway. */
+    repairDevice() {
+      if (!credential || !url || proof) return;
+      setPairDraft({ gateway: url, id: '', code: '' });
+      setPairingIssue('The current pairing stays in use until the new pairing is verified and saved. Enter the fingerprint copied separately from the trusted machine.');
+    },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
       const gateway = normalizeGatewayUrl(gatewayRaw);
@@ -874,7 +885,7 @@ function useAppStore(proof?: FabricProfile) {
     startMemberPairing(index: number) {
       const member = fabricMemberList[index];
       if (!member || member.device) return;
-      setPairingMember(member); setError('');
+      setPairingMember(member);
       carrier.pick(member);
     },
     cancelMemberPairing() { setPairingMember(null); carrier.retry(); },
@@ -1065,14 +1076,15 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {
-      if (!client) return null;
+      if (!client) { setError('Could not create terminal: still connecting; try again in a moment.'); return null; }
       let created: string | null = null;
       const done = await runAction(async () => {
         const id = actionId();
         const result = await client.terminalCreate({ id, idempotency_key: id, fence: await fence(), parameters: { name } });
         created = result.value.affected_ids?.find(affected => affected.startsWith('terminal/')) ?? null;
       });
-      if (!done || !created) return null;
+      if (!done) { setError(issue => `Could not create terminal: ${issue}`); return null; }
+      if (!created) { setError('Could not create terminal: Fractal returned no terminal ID.'); return null; }
       // The shell starts a moment after Fractal declares it: open it once Fractal can show its screen.
       for (let tries = 0; tries < 30; tries++) {
         try { await client.terminalScreen(created); return created; } catch { await new Promise(resolve => setTimeout(resolve, 500)); }
@@ -1089,7 +1101,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     async variants(launchId: string): Promise<LaunchVariant[]> {
       if (!client || status !== 'online') return [];
-      try { const result = await client.launchVariantsList(launchId, { limit: Math.min(caps?.limits.max_page_items ?? 30, 30) }); setError(''); return items(result.value, 'launch-variant'); } catch (e) { setError(errorText(e)); return []; }
+      try { const result = await client.launchVariantsList(launchId, { limit: Math.min(caps?.limits.max_page_items ?? 30, 30) }); return items(result.value, 'launch-variant'); } catch (e) { setError(errorText(e)); return []; }
     },
     async preview(launch: Launch, variant: LaunchVariant) {
       if (!client) return false;
@@ -1162,7 +1174,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     async history() {
       if (!client || !caps) return;
-      try { setHistoricalSessions((await listSessionPages(options => client.sessionsList(options), Math.min(caps.limits.max_page_items, 30), true)).filter(s => ['completed', 'failed', 'cancelled'].includes(s.state))); setError(''); } catch (e) { if (!isSnapshotChurn(e)) setError(errorText(e)); }
+      try { setHistoricalSessions((await listSessionPages(options => client.sessionsList(options), Math.min(caps.limits.max_page_items, 30), true)).filter(s => ['completed', 'failed', 'cancelled'].includes(s.state))); } catch (e) { if (!isSnapshotChurn(e)) setError(errorText(e)); }
     },
     moveTab(tab: Tab, direction: -1 | 1) {
       const index = order.indexOf(tab), next = index + direction;

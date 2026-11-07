@@ -32,8 +32,9 @@ export const hiddenRoster = ({ decode, shown }: {
 }
 
 /** What a feed lists; picks the sentence noun, the test marker and the details label. */
-export type DecodeNoun = 'agent' | 'mission'
-const MARKER = { agent: 'data-wf-roster-decode', mission: 'data-wf-missions-decode' } as const satisfies Record<DecodeNoun, string>
+export type DecodeNoun = 'agent' | 'mission' | 'alert'
+const MARKER = { agent: 'data-wf-roster-decode', mission: 'data-wf-missions-decode', alert: 'data-wf-attention-decode' } as const satisfies Record<DecodeNoun, string>
+const LABEL = { agent: 'Agents', mission: 'Missions', alert: 'Alerts' } as const satisfies Record<DecodeNoun, string>
 
 export const decodeNotice = (count: number, noun: DecodeNoun) =>
   `${count} ${count === 1 ? noun : `${noun}s`} could not be shown · their data does not match the expected format`
@@ -55,7 +56,7 @@ export function DecodeNotice({ noun, decode, shown, xstyle }: {
       <Aria.Disclosure>
         <Aria.Button slot="trigger" {...stylex.props(styles.disclosure)}>Details</Aria.Button>
         <Aria.DisclosurePanel>
-          <ul tabIndex={0} aria-label={`${noun === 'agent' ? 'Agents' : 'Missions'} that could not be shown`} {...stylex.props(styles.failures)}>
+          <ul tabIndex={0} aria-label={`${LABEL[noun]} that could not be shown`} {...stylex.props(styles.failures)}>
             {hidden.failures.map((failure, index) => (
               <li key={`${failure.id ?? ''}:${failure.path}:${index}`} data-wf-decode-path={failure.path}>
                 <span {...stylex.props(styles.identity)}>{failure.id ?? 'Row without a readable id'}</span>

@@ -818,7 +818,7 @@ mod tests {
                 None,
                 app,
                 None,
-                |_| None,
+                |_, _| super::super::HarnessAncestry::Person,
                 || {
                     let _ = ready.send(());
                 },
