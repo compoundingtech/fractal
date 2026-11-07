@@ -9,8 +9,8 @@
 //! ([`messages_shard::inbox_hosts`]). Anything else stays a graph claim: no shard, a member
 //! leaving its fleet (a send then lands as a claim and is never fenced), a message the stream
 //! may not carry (a person's or an assistant's), one with attachments (a long message's text or
-//! an image), a recipient without a host (a person, an undeclared or retired seat), or a host
-//! that does not advertise the inbox.
+//! an image), a delivery probe's, a recipient without a host (a person, an undeclared or retired
+//! seat), or a host that does not advertise the inbox.
 //!
 //! Work wakes, replies that settle a parent, and senders whose evidence or predecessors cite
 //! other claims stay on the graph until 4c-3; they call the graph append, not [`send_message`].
@@ -35,6 +35,12 @@ pub fn legacy_reason(store: &Store, input: &ClaimInput) -> Result<Option<&'stati
     // they stay on the graph until that path is proven for stream items.
     if input.fields.contains_key("attachments") {
         return Ok(Some("attached"));
+    }
+    // A delivery probe proves its mail, its alerts and their clears by their graph claims and the
+    // recipient's replicated read claim (docs/st3/delivery-probes.md), as marks leave them too.
+    let tags = input.fields.get("tags").and_then(Value::as_array);
+    if tags.is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(|tag| tag.starts_with("delivery-probe"))) {
+        return Ok(Some("probe"));
     }
     let Some(to) = input.fields.get("to").and_then(Value::as_str) else {
         return Ok(Some("no-recipient"));

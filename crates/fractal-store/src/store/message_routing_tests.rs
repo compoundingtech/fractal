@@ -128,6 +128,15 @@ fn a_message_goes_to_the_stream_only_where_its_recipients_host_reads_it() {
     let mut attached = message("message/route-attached", &here);
     attached.fields.insert("attachments".into(), json!([{"name": "body.txt"}]));
     assert_eq!(reason(&attached), Some("attached"));
+    // A delivery probe's mail and alerts, which it proves by their graph claims.
+    for tag in ["delivery-probe", "delivery-probe-alert", "delivery-probe-recovery"] {
+        let mut probe = message("message/route-probe", &here);
+        probe.fields.insert("tags".into(), json!([tag]));
+        assert_eq!(reason(&probe), Some("probe"), "{tag}");
+    }
+    let mut tagged = message("message/route-tagged", &here);
+    tagged.fields.insert("tags".into(), json!(["ordinary"]));
+    assert_eq!(reason(&tagged), None);
     // A member leaving its fleet writes claims, which its leave does not fence.
     alder.graph.set_fleet_leaving(true).unwrap();
     assert_eq!(reason(&message("message/route-leaving", &here)), Some("leaving"));
