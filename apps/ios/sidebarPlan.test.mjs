@@ -10,7 +10,7 @@ for (const fixture of fixtures.cases) test(`native v2 exact operations: ${fixtur
   const { arrangement, memberships } = fixture.initial;
   for (const [index, intent] of fixture.events[0].moves.entries()) {
     const actual = planSidebarV2(arrangement, memberships, intent);
-    assert.deepEqual(actual, fixture.checkpoints[0].moves[index].plan);
+    assert.deepEqual(actual, fixture.checkpoints[0].moves[index].edit);
     assert.ok(actual.memberships.every(operation => operation.op === 'place'));
   }
 });
