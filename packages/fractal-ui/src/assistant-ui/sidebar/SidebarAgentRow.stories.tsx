@@ -249,6 +249,7 @@ export const scenarioExemptions: readonly string[] = [
   'FrozenWorkingVersusIdle:contract-fixture',
   'HoverCardKnown:contract-fixture',
   'HoverCardMissions:contract-fixture',
+  'HoverCardRetainedMissions:contract-fixture',
   'HoverCardUnknown:contract-fixture',
   'PhoneFocusNoHover:contract-fixture',
   'PhoneTouchTargets:contract-fixture',
