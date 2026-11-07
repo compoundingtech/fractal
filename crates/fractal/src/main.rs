@@ -7535,7 +7535,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
-    spawn_stream_mirror(store.clone(), event_notify.clone());
+    fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
+    spawn_stream_mirror(store.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -21002,7 +21003,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 /// start, which catches up on what a crash left unmirrored, then after each shard commit. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
-fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
+fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, state_dir: PathBuf) {
     const RETRY: Duration = Duration::from_secs(30);
     let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
         return;
@@ -21015,6 +21016,10 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
         let _observer = observer;
         loop {
             receiver.borrow_and_update();
+            // The shard's dialers wake on the replication file, as the graph's do: a stream item
+            // this member wrote goes out to its recipient's host at once, not at the worker's
+            // next timer. An item a peer pushed wakes them too, which finds nothing new to send.
+            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
             let mirror_store = store.clone();
             let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {
