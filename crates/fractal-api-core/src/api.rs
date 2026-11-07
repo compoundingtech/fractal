@@ -6924,7 +6924,7 @@ pub async fn serve_unix_with_ancestor(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32) -> HarnessAncestry,
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
@@ -6934,7 +6934,7 @@ async fn serve_unix_with_ancestor_ready(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
@@ -7032,7 +7032,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let ReservedUnixSocket {
@@ -7091,29 +7091,29 @@ async fn serve_reserved_unix_with_ancestor_ready(
             if let Some(connection) = &mut diagnostic_connection {
                 connection.queued();
             }
-            let (bound_agent, caller, delivery_peer, diagnostic_connection) = match peer_pid {
+            let (ancestry, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.started();
                     }
-                    let bound_agent = bind_ancestry.then(|| ancestor(pid)).flatten();
+                    let ancestry = if bind_ancestry { ancestor(pid) } else { HarnessAncestry::Person };
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
-                        bound_agent.as_deref(),
+                        ancestry.agent(),
                     ));
                     let delivery_peer = bind_harness.then(|| native_delivery_peer(pid)).flatten();
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.finished();
                     }
-                    (bound_agent, caller, delivery_peer, diagnostic_connection)
+                    (ancestry, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
                 .unwrap_or_default(),
-                None => (None, None, None, diagnostic_connection),
+                None => (if bind_ancestry { HarnessAncestry::Unavailable } else { HarnessAncestry::Person }, None, None, diagnostic_connection),
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
-                let bound_agent = bound_agent.clone();
+                let ancestry = ancestry.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
                 let peer_process = peer_process.clone();
@@ -7126,7 +7126,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                         request.extensions_mut().insert(LocalPeer {
                             pid,
                             peer_process,
-                            ancestor: bound_agent.clone(),
+                            ancestor: ancestry.agent().map(str::to_owned),
                         });
                     }
                     if let Some(peer) = delivery_peer {
@@ -7135,8 +7135,11 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(caller) = caller {
                         request.extensions_mut().insert(caller);
                     }
-                    if let Some(agent) = &bound_agent {
-                        request.extensions_mut().insert(BoundAgent(agent.clone()));
+                    if let Some(agent) = ancestry.agent() {
+                        request.extensions_mut().insert(BoundAgent(agent.to_owned()));
+                    }
+                    if matches!(ancestry, HarnessAncestry::Unavailable) {
+                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
                     app.oneshot(request).await
                 }
@@ -7174,38 +7177,129 @@ fn publish_state_socket(socket: &Path, state_socket: &Path) -> anyhow::Result<()
 #[cfg(test)]
 mod gateway_listener_tests;
 
-#[cfg(target_os = "linux")]
-fn harness_ancestor(mut pid: u32) -> Option<String> {
-    use std::collections::BTreeSet;
-    let mut seen = BTreeSet::new();
-    while pid > 1 && pid != std::process::id() && seen.insert(pid) {
-        let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
-            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        });
-        // A masked/conflicting child identity must not inherit an ancestor's authority.
-        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            return fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
-                .filter(|value| value.starts_with("agent/"));
-        }
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        pid = stat
-            .rsplit_once(") ")?
-            .1
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-    }
-    None
+/// A completed walk without a harness is different from an unverifiable caller.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HarnessAncestry {
+    Bound(String),
+    Person,
+    #[default]
+    Unavailable,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn harness_ancestor(_pid: u32) -> Option<String> {
-    None
+impl HarnessAncestry {
+    fn agent(&self) -> Option<&str> {
+        match self { Self::Bound(agent) => Some(agent), _ => None }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
+        let primary = lookup("ST_AGENT");
+        let legacy = lookup("FRACTAL_AGENT");
+        if primary.is_none() && legacy.is_none() {
+            return Self::Person;
+        }
+        if primary.is_some_and(str::is_empty)
+            || legacy.is_some_and(str::is_empty)
+        {
+            return Self::Unavailable;
+        }
+        fractal_drivers::contracts::env_with("ST_AGENT", &|name| lookup(name).map(str::to_owned))
+            .filter(|value| value.starts_with("agent/") && fractal_schema::registry().validate_subject(value).is_ok())
+            .map_or(Self::Unavailable, Self::Bound)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct HarnessProcess {
+    uid: u32,
+    generation: Option<(u32, u64)>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn walk_harness_ancestry(
+    mut pid: u32,
+    mut inspect: impl FnMut(u32) -> Option<HarnessProcess>,
+    identity: impl Fn(u32) -> Option<HarnessAncestry>,
+) -> HarnessAncestry {
+    let Some(first) = inspect(pid) else { return HarnessAncestry::Unavailable; };
+    let uid = first.uid;
+    let mut first = Some(first);
+    let mut observed = std::collections::BTreeMap::new();
+    let mut binding = HarnessAncestry::Person;
+    while pid > 1 && pid != std::process::id() {
+        let Some(process) = first.take().or_else(|| inspect(pid)) else {
+            return HarnessAncestry::Unavailable;
+        };
+        // An observed ownership transition ends this caller's cooperative ancestry.
+        if process.uid != uid { break; }
+        let Some((parent, birth)) = process.generation else { return HarnessAncestry::Unavailable; };
+        if observed.insert(pid, birth).is_some() { return HarnessAncestry::Unavailable; }
+        match identity(pid) {
+            Some(HarnessAncestry::Person) => {}
+            Some(ancestry) => { binding = ancestry; break; }
+            None => return HarnessAncestry::Unavailable,
+        }
+        pid = parent;
+    }
+    if observed.into_iter().any(|(pid, birth)| {
+        !inspect(pid).is_some_and(|current| current.uid == uid && current.generation.is_some_and(|(_, token)| token == birth))
+    }) {
+        return HarnessAncestry::Unavailable;
+    }
+    binding
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace().nth(1)?.parse().ok()?;
+    let generation = (|| {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
+        if matches!(fields.next()?, "Z" | "X" | "x") { return None; }
+        let parent = fields.next()?.parse().ok()?;
+        let birth = fields.nth(17)?.parse().ok()?;
+        Some((parent, birth))
+    })();
+    Some(HarnessProcess { uid, generation })
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+    match fractal_runtime::macos_process_identity(pid) {
+        Ok((parent, birth, uid)) => Some(HarnessProcess { uid, generation: Some((parent, birth)) }),
+        Err(_) => Some(HarnessProcess { uid: fractal_runtime::macos_process_owner(pid).ok()?, generation: None }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
+    let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(HarnessAncestry::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
+        let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+        (key == name).then_some(value)
+    })))
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
+    let (_, environment) = local_process_arguments(pid)?;
+    Some(HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        (key == name).then_some(value)
+    })))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn harness_ancestor(pid: u32) -> HarnessAncestry {
+    walk_harness_ancestry(pid, local_harness_process, local_harness_identity)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn harness_ancestor(_pid: u32) -> HarnessAncestry {
+    HarnessAncestry::Unavailable
 }
 
 #[derive(Clone)]
@@ -7475,7 +7569,11 @@ pub async fn guard_bound_request(
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
     let Some(bound_agent) = bound_agent else {
-        return Ok(request);
+        return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
+            guard_unverifiable_request(request).await
+        } else {
+            Ok(request)
+        };
     };
     if request.uri().path() == "/v1/backup"
         || matches!(request.uri().path(),
@@ -7591,6 +7689,30 @@ pub async fn guard_bound_request(
                 )));
             }
         }
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
+}
+
+async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
+    let refuse = || ApiError::bad(FractalError::new(
+        "foreign-agent-actor", "local caller ancestry could not be verified",
+    ));
+    let path = request.uri().path();
+    if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
+    {
+        return Err(refuse());
+    }
+    if matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return Ok(request);
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.map_err(ApiError::internal)?;
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(refuse());
     }
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
