@@ -1031,7 +1031,7 @@ and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
-for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
+for example `fractal-tui 0.1.0+a0c135e3`, `fractal-ios 1.0 (42)` or `fractal 0.1.0+a0c135e3`. The Rust
 crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
 its options, and Swift `client:` in its initializer. The header is optional, and Fractal shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
