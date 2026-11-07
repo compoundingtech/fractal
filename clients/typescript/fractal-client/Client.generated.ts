@@ -26,6 +26,16 @@ const acceptsApiVersion = (value: unknown): boolean => value === API_VERSION || 
 export type PageOptions = { cursor?: string; limit?: number };
 /** Transport options, never serialized into a query or action body. */
 export type RequestOptions = { signal?: AbortSignal };
+
+// Older native runtimes provide an AbortSignal without throwIfAborted.
+function checkAbort(signal?: AbortSignal): void {
+    if (!signal?.aborted) return;
+    if (typeof signal.throwIfAborted === 'function') signal.throwIfAborted();
+    if (signal.reason !== undefined) throw signal.reason;
+    const error = new Error('The operation was aborted.');
+    error.name = 'AbortError';
+    throw error;
+}
 /** Validate framing only, leaving resource rows and timeline entries raw for tolerant consumers.
  * Unknown kinds and additive fields retain the existing forward-compatible behavior. */
 function validateCollectionFrame(frame: unknown): void {
@@ -286,7 +296,7 @@ export class FractalClient {
     }
 
     async discover(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         return this.discoveryCache.value ?? this.capabilities(options);
     }
 
@@ -339,9 +349,9 @@ export class FractalClient {
     }
 
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }, options: RequestOptions = {}, readAuthorization?: { header: string; budget: number }): Promise<EnvelopeOf<T>> {
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         const credential = await this.credential?.();
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         const headers: Record<string, string> = { Accept: 'application/json', 'x-st3-features': this.features() };
         if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
@@ -365,15 +375,15 @@ export class FractalClient {
         try {
             if (readAuthorization) {
                 const bytes = new Uint8Array(await response.arrayBuffer());
-                options.signal?.throwIfAborted();
+                checkAbort(options.signal);
                 if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
                 payload = JSON.parse(new TextDecoder().decode(bytes));
             } else {
                 payload = await response.json();
-                options.signal?.throwIfAborted();
+                checkAbort(options.signal);
             }
         } catch (error) {
-            options.signal?.throwIfAborted();
+            checkAbort(options.signal);
             // HTTP middleware can reject a request before the client API writes a JSON envelope.
             if (response.ok || !(error instanceof SyntaxError)) throw error;
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
@@ -402,7 +412,7 @@ export class FractalClient {
             if (typeof value === 'number' && !(Number.isSafeInteger(value) && value >= 0)) throw new AssistantReadRejected('assistant parameters must be scalar strings or unsigned integers');
             parameters[name] = String(value);
         }
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         if (proof.payload.projection !== projection) throw new AssistantReadRejected('assistant proof names a different projection');
         const signed = Object.entries(proof.payload.parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
         const sent = Object.entries(parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -417,7 +427,7 @@ export class FractalClient {
 
     private async get<T>(path: string, kind?: 'events', options: RequestOptions = {}): Promise<EnvelopeOf<T>> {
         const capabilities = await this.discover(options);
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         const url = new URL(path, this.baseUrl + '/');
         const limit = url.searchParams.get('limit');
         if (limit !== null) bounded(Number(limit), kind === 'events' ? capabilities.value.limits.max_event_items : capabilities.value.limits.max_page_items, 'limit');
