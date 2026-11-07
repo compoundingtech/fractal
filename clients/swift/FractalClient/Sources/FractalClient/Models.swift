@@ -1206,6 +1206,8 @@ public struct ActionRequest: Codable, Sendable {
     public static func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadClose, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) throws -> Self { try .init(id: id, type: .threadRename, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadReopen, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadReply(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReplyParameters) throws -> Self { try .init(id: id, type: .threadReply, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadStart(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadStartParameters) throws -> Self { try .init(id: id, type: .threadStart, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonAskParameters) throws -> Self { try .init(id: id, type: .workAsk, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workCancelAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonStepParameters) throws -> Self { try .init(id: id, type: .workCancelAsk, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workClaim(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workClaim, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1278,7 +1280,9 @@ public enum ThreadState: String, Codable, Sendable { case open, closed }
 public struct ThreadSummary: Codable, Sendable {
     public let id, agentID, title, titleRevision, revision: String
     public let state: ThreadState
-    enum CodingKeys: String, CodingKey { case id, agentID = "agent_id", title, titleRevision = "title_revision", revision, state }
+    public let messageCount: UInt64?
+    public let unread: Bool?
+    enum CodingKeys: String, CodingKey { case id, agentID = "agent_id", title, titleRevision = "title_revision", revision, state, messageCount = "message_count", unread }
 }
 public struct ThreadSummaryPage: Codable, Sendable {
     public let items: [ThreadSummary]
@@ -1287,20 +1291,60 @@ public struct ThreadSummaryPage: Codable, Sendable {
 }
 public struct ThreadTimelineEvent: Codable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case renamed = "thread.renamed", closed = "thread.closed", reopened = "thread.reopened"
+        case message, renamed = "thread.renamed", closed = "thread.closed", reopened = "thread.reopened"
     }
     public let kind: Kind
     public let id, actorID: String
     public let acceptedAtUnixMS: UInt64
-    public let previousTitle, title: String?
+    public let previousTitle, title, content, threadQuoteID: String?
     enum CodingKeys: String, CodingKey {
-        case kind, id, actorID = "actor_id", acceptedAtUnixMS = "accepted_at_unix_ms", previousTitle = "previous_title", title
+        case kind, id, actorID = "actor_id", acceptedAtUnixMS = "accepted_at_unix_ms", previousTitle = "previous_title", title, content, threadQuoteID = "thread_quote_id"
     }
 }
 public struct ThreadTimelinePage: Codable, Sendable {
     public let items: [ThreadTimelineEvent]
     public let nextCursor: String?
     enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor" }
+}
+/// A bounded thread window. Snapshot rows replace the window and changes apply by canonical ID.
+public struct ThreadCollectionFrame<Row: Decodable & Sendable>: Decodable, Sendable {
+    public enum Kind: String, Decodable, Sendable { case snapshot, changes }
+    public let kind: Kind
+    public let id: String
+    public let snapshot: Snapshot
+    public let items, upserts: [Row]?
+    public let removes: [String]?
+    public let order: [String]
+    public let hasMore: Bool
+    enum CodingKeys: String, CodingKey { case kind, id, snapshot, items, upserts, removes, order, hasMore = "has_more" }
+}
+public struct ThreadCollectionStreamError: Decodable, Error, Sendable {
+    public let message: String
+    public let code: String?
+    public let retryable: Bool?
+}
+public enum ThreadListScope: Sendable {
+    case agent(String), ask(id: String, episode: String), mission(String), recentlyClosed
+}
+public struct ThreadStartParameters: Codable, Sendable {
+    public let targetID, agentID, originAsk, originAskEpisode, title, content: String
+    public let signature: DeviceSignature?
+    public init(targetID: String, agentID: String, originAsk: String, originAskEpisode: String, title: String, content: String, signature: DeviceSignature? = nil) {
+        self.targetID = targetID; self.agentID = agentID; self.originAsk = originAsk; self.originAskEpisode = originAskEpisode
+        self.title = title; self.content = content; self.signature = signature
+    }
+    enum CodingKeys: String, CodingKey {
+        case targetID = "target_id", agentID = "agent_id", originAsk = "origin_ask", originAskEpisode = "origin_ask_episode", title, content, signature
+    }
+}
+public struct ThreadReplyParameters: Codable, Sendable {
+    public let targetID, content: String
+    public let threadQuoteID: String?
+    public let signature: DeviceSignature?
+    public init(targetID: String, content: String, threadQuoteID: String? = nil, signature: DeviceSignature? = nil) {
+        self.targetID = targetID; self.content = content; self.threadQuoteID = threadQuoteID; self.signature = signature
+    }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", content, threadQuoteID = "thread_quote_id", signature }
 }
 public struct ThreadTargetParameters: Codable, Sendable {
     public let targetID: String

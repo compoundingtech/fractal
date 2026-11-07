@@ -1706,6 +1706,7 @@ mod tests {
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
         worker_ingress_generation_check: None,
+        thread_writes: false,
         seat_priority: None,
         unlaned_seat: None,
         seat_admission: None,

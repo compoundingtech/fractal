@@ -54,6 +54,8 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case threadClose = "thread.close"
     case threadRename = "thread.rename"
     case threadReopen = "thread.reopen"
+    case threadReply = "thread.reply"
+    case threadStart = "thread.start"
     case workAsk = "work.ask"
     case workCancelAsk = "work.cancel-ask"
     case workClaim = "work.claim"

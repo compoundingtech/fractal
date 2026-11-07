@@ -22,9 +22,10 @@ reference from other resources explicit. The cost is a durable thread projection
 rules for mutations and links.
 
 Every message still has its own message ID and ordinary sender attribution. Its thread
-reference is explicit. A reply to a specific message retains an `in_reply_to` edge whose parent is in the
-same thread. The reply can be shown in an agent conversation and in the thread while remaining
-one message. Clients use authoritative order, current conversation visibility and stable cursors.
+reference is explicit. A reply to a specific message records a thread quote whose parent belongs
+to the same thread. Ordinary `in_reply_to` retains its request settlement behavior. The reply can
+appear in the agent conversation and in the thread as one message. Clients use authoritative
+order, current conversation visibility and stable cursors.
 Subjects, titles, text similarity, and agent incarnation are presentation or context data.
 
 ## Links and lifecycle
@@ -163,3 +164,11 @@ Select exact operation names, claim schemas,
 subscription shapes, and cursor format only when the fixture runs through the existing
 client boundary. The [original topic projection discussion](https://github.com/compoundingtech/fractal/issues/49)
 and [normalized conversation contract](conversation-normalization-design.md) provide context.
+
+## Initial rollout
+
+Install the privacy reader release on all serving fleet members before enabling typed writes.
+The writer verifies the configured and active readers' privacy capability inside its transaction.
+A legacy member that receives a signed thread-bearing message retains the envelope in quarantine.
+After upgrade, normal startup retries admission and restores the original timeline entry once.
+The SQLite storage floor keeps pre-privacy binaries from reopening upgraded state.

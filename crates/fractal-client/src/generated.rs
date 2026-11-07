@@ -3387,6 +3387,10 @@ pub enum ActionType {
     ArrangementMembershipEdit,
     #[serde(rename = "thread.rename")]
     ThreadRename,
+    #[serde(rename = "thread.start")]
+    ThreadStart,
+    #[serde(rename = "thread.reply")]
+    ThreadReply,
     #[serde(rename = "thread.close")]
     ThreadClose,
     #[serde(rename = "thread.reopen")]
@@ -4245,6 +4249,34 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn thread_reply(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReplyParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadReply,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_start(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadStartParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadStart,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn work_ask(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4831,6 +4863,10 @@ pub struct ThreadSummary {
     pub title_revision: String,
     pub revision: String,
     pub state: ThreadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -4851,6 +4887,11 @@ pub struct ThreadTimelineEvent {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum ThreadTimelineChange {
+    #[serde(rename = "message")]
+    Message {
+        content: String,
+        thread_quote_id: Option<String>,
+    },
     #[serde(rename = "thread.renamed")]
     Renamed {
         previous_title: String,
@@ -4866,6 +4907,36 @@ pub enum ThreadTimelineChange {
 pub struct ThreadTimelinePage {
     pub items: Vec<ThreadTimelineEvent>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadListScope<'a> {
+    Agent(&'a str),
+    Ask { id: &'a str, episode: &'a str },
+    Mission(&'a str),
+    RecentlyClosed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ThreadStartParameters {
+    pub target_id: String,
+    pub agent_id: String,
+    pub origin_ask: String,
+    pub origin_ask_episode: String,
+    pub title: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ThreadReplyParameters {
+    pub target_id: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_quote_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

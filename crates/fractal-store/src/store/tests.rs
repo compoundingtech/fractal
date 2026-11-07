@@ -13321,6 +13321,7 @@ fn thread_pairing_revocation_precedes_receipt_recovery() {
     use thread_metadata::{Edit, PersonAuthority, apply, apply_as};
 
     let store = Store::open_memory("thread-paired").unwrap();
+        store.configure_thread_write_rollout([]);
     let person = "person/example";
     let actor = "client/paired/example";
     let thread = "thread/approval";
@@ -13389,5 +13390,22 @@ fn thread_list_paginates_only_the_exact_owner_and_agent_conversation() {
             list_conversation(&store, person, agent, cursor, 1).err().unwrap().code,
             "invalid-thread-cursor",
         );
+    }
+}
+
+#[test]
+fn thread_creation_conflict_does_not_disclose_an_unestablished_owner() {
+    use thread_metadata::{Edit, apply, summary};
+    let left = Store::open_memory("thread-conflict-left").unwrap();
+    let right = Store::open_memory("thread-conflict-right").unwrap();
+    let thread = "thread/conflicted";
+    for (store, person) in [(&left, "person/avery"), (&right, "person/robin")] {
+        apply(store, person, thread, "same-create", Edit::Create {
+            agent: "agent/reviewer", title: "Review",
+        }).unwrap();
+    }
+    left.import_replication("thread-conflict-right", &right.export_replication(0).unwrap()).unwrap();
+    for person in ["person/avery", "person/robin", "person/other"] {
+        assert_eq!(summary(&left, person, thread).err().unwrap().code, "thread-unavailable");
     }
 }
