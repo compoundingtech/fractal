@@ -95,7 +95,7 @@ it('does not add query context for invalid upgrade traceparents', () => {
 it('carries the client label on browser collection and PTY upgrades without sending credentials in URLs', () => {
   const urls: URL[] = []
   vi.stubGlobal('WebSocket', class {
-    constructor(url: URL) { urls.push(url) }
+    constructor(url: string | URL) { urls.push(new URL(url)) }
   })
   try {
     browserSocket('wss://gateway.test/collections?cursor=a%2Fb', [], { 'x-st3-client': 'fractal-web 0.1.0+build', Authorization: 'Bearer secret' })
