@@ -198,24 +198,27 @@ mod write_tests {
     use fractal_client::{ActionResult, ClientError, ErrorCode, ErrorEnvelope};
     use fractal_schema::{arrangements::Operation as Folder, ordered_membership::Operation as Member};
     use serde_json::{json, Value};
+    const FOLDER: &str = "01900000-0000-7000-8000-000000000001";
+    const OTHER_FOLDER: &str = "01900000-0000-7000-8000-000000000002";
+    const CONTAINER: &str = "arrangement/person/test/01900000-0000-7000-8000-000000000001";
     fn base(n: u64) -> Base {
-        Base { scope: Scope { owner: "person/test".into(), container: "arrangement/test".into(), endpoint: "endpoint/test".into(), host: "host/test".into(), projection: "1".into() },
+        Base { scope: Scope { owner: "person/test".into(), container: CONTAINER.into(), endpoint: "endpoint/test".into(), host: "host/test".into(), projection: "1".into() },
             snapshot: Snapshot { id: format!("snapshot/{n}"), host_id: "host/test".into(), store_index: n,
                 projection_version: "1".into(), created_at: "created".into(), published_at: None },
             revision: format!("revision/{n}"), ready: true }
     }
     fn id(n: u64) -> Identity {
-        Identity { actor: "actor/test".into(), action_id: format!("action/{n}"), idempotency_key: format!("key/{n}") }
+        Identity { actor: "person/test".into(), action_id: format!("action/{n}"), idempotency_key: format!("key/{n}") }
     }
     fn members() -> Vec<Member> {
-        vec![Member::Place { member: "agent/test".into(), bucket: None, key: "a0".into() },
-            Member::Place { member: "agent/other".into(), bucket: Some("folder/test".into()), key: "a1".into() }]
+        vec![Member::Place { member: "agent/fleet/fixture-sidebar/test".into(), bucket: None, key: "a0".into() },
+            Member::Place { member: "agent/fleet/fixture-sidebar/other".into(), bucket: Some(FOLDER.into()), key: "a1".into() }]
     }
     fn folders() -> Vec<Folder> {
-        vec![Folder::FolderCreate { id: "folder/test".into(), name: "Test".into(), parent: None, key: "a0".into() },
-            Folder::FolderRename { id: "folder/test".into(), name: "Renamed".into() },
-            Folder::FolderMove { id: "folder/test".into(), parent: Some("folder/other".into()), key: "a1".into() },
-            Folder::FolderDelete { id: "folder/other".into() }]
+        vec![Folder::FolderCreate { id: FOLDER.into(), name: "Test".into(), parent: None, key: "a0".into() },
+            Folder::FolderRename { id: FOLDER.into(), name: "Renamed".into() },
+            Folder::FolderMove { id: FOLDER.into(), parent: Some(OTHER_FOLDER.into()), key: "a1".into() },
+            Folder::FolderDelete { id: OTHER_FOLDER.into() }]
     }
     fn staged(compound: bool) -> Edits {
         let mut state = Edits::new(base(1).scope, MoveIntent { node: NodeRef::Subject { subject: "agent/test".into() },
@@ -243,8 +246,8 @@ mod write_tests {
             assert_eq!(request["id"], if compound { "action/1" } else { "action/2" });
             assert_eq!(request["idempotency_key"], if compound { "key/1" } else { "key/2" });
             assert_eq!(request["fence"]["snapshot_id"], "snapshot/1");
-            assert_eq!(request["fence"]["subject_revisions"], json!({"arrangement/test":"revision/1"}));
-            let expected = json!({"subject":"arrangement/test","owner":"person/test",
+            assert_eq!(request["fence"]["subject_revisions"], json!({(CONTAINER):"revision/1"}));
+            let expected = json!({"subject":CONTAINER,"owner":"person/test",
                 "operations": if compound { serde_json::to_value(folders()).unwrap() } else { serde_json::to_value(members()).unwrap() }});
             assert_eq!(request["parameters"], expected);
             assert_eq!(request["type"], if compound { "arrangement.edit" } else { "arrangement.membership.edit" });
@@ -294,7 +297,7 @@ mod write_tests {
         assert_eq!(state.reduce(crate::edits::Event::Fresh(base(2), Ok(members()))), vec![Effect::PersistPending]);
         let second = wire(&state); assert_eq!(second["type"], "arrangement.membership.edit");
         assert_eq!(second["id"], "action/2"); assert_eq!(second["fence"]["snapshot_id"], "snapshot/2");
-        assert_eq!(second["fence"]["subject_revisions"], json!({"arrangement/test":"revision/2"}));
+        assert_eq!(second["fence"]["subject_revisions"], json!({(CONTAINER):"revision/2"}));
         assert_eq!(state.reduce(crate::edits::Event::Persisted(id(2))), vec![Effect::Send]);
         let (restored, _) = Edits::restore(&state.journal().unwrap(), &base(1).scope).unwrap();
         assert_eq!(wire(&restored), second);
