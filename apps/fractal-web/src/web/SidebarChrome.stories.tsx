@@ -38,7 +38,9 @@ const assertChrome = (sidebar: HTMLElement): void => {
   const search = canvas.getByRole('textbox', { name: 'Search agents' })
   const bounds = sidebar.getBoundingClientRect()
   const field = search.getBoundingClientRect()
-  if (Math.abs(field.left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - field.right - 8) > 0.1) throw new Error('Search must have two 8px insets')
+  const lastControl = canvas.getByRole('button', { name: /^Sort agents/ }).getBoundingClientRect()
+  if (Math.abs(field.left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - lastControl.right - 8) > 0.1) throw new Error('Search row must have two 8px insets')
+  if (field.right > canvas.getByRole('button', { name: /^Filter/ }).getBoundingClientRect().left) throw new Error('Search must end before the Filter menu')
   if (getComputedStyle(search).borderRadius !== '6px') throw new Error('Search radius must be 6px')
   const wordmark = sidebar.querySelector('header strong')!
   if (getComputedStyle(wordmark).fontWeight !== '500') throw new Error('Wordmark weight must be 500')
@@ -67,7 +69,8 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   const wordmark = sidebar.querySelector<HTMLElement>('header strong')!
   // Inject the reported failures into the real rendered nodes; the same criterion must reject each.
   for (const control of [
-    { node: field, style: 'margin-left: -8px', error: 'Search must have two 8px insets' },
+    { node: field, style: 'margin-left: -8px', error: 'Search row must have two 8px insets' },
+    { node: field, style: 'width: 400px', error: 'Search must end before the Filter menu' },
     { node: field, style: 'border-radius: 2px', error: 'Search radius must be 6px' },
     { node: wordmark, style: 'font-weight: 700', error: 'Wordmark weight must be 500' },
   ]) {
@@ -94,7 +97,7 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull())
 }
 
-const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and chrome footer over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and chrome footer over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'The sidebar search row, field then Filter then Sort, uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
