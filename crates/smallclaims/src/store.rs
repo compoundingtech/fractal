@@ -85,6 +85,9 @@ mod binary_payloads;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
+pub mod saved_inventory;
+#[cfg(test)]
+mod saved_inventory_tests;
 mod checkpoint_capture_epoch;
 mod checkpoint_space;
 pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
@@ -1208,7 +1211,8 @@ impl Store {
         install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
-            inventory_generation::initialize(connection)
+            inventory_generation::initialize(connection)?;
+            saved_inventory::initialize(connection)
         })?;
         principals::initialize_schema(connection)?;
         principals::initialize_held_index(connection, fresh)?;
@@ -1413,6 +1417,9 @@ pub struct ReplicationSnapshot {
     pub envelope_rows: usize,
     /// Changes to an existing inventory prefix or its checkpoint tombstones.
     pub inventory_generation: i64,
+    /// The count of changes other than appends this inventory takes in (`saved_inventory`):
+    /// `None` once one landed that it does not, so a stop does not save it.
+    pub inventory_changes: Option<i64>,
     pub inventory: CompactReplicationInventory,
     pub buckets: Vec<ReplicationInventoryBucket>,
     /// The inventory digest state before each range in `buckets`, then its terminal state.
@@ -7239,6 +7246,16 @@ impl Store {
     ) -> Result<Arc<ReplicationSnapshot>> {
         let reading = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotInventory);
         let previous = crate::read_budget::lock_sync(&self.replication_snapshot)?.take();
+        let changes = saved_inventory::changes(connection)?;
+        // A full read takes in every change; an extension only appends, so it keeps the count
+        // only when no other change landed since the snapshot it extends.
+        let mut counted = Some(changes);
+        // A fresh process extends the inventory its last clean shutdown saved, when that still
+        // describes this store, instead of reading every envelope again.
+        let previous = match previous {
+            Some(previous) => Some(previous),
+            None => self.saved_replication_snapshot(connection, changes)?.map(Arc::new),
+        };
         // The six-table digest stays on the legacy peer wire format. Its generation lets us
         // retain compatibility without rescanning those tables for unrelated source changes.
         let graph_generation = graph_generation(connection)?;
@@ -7282,6 +7299,7 @@ impl Store {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             if inventory_generation == previous.inventory_generation {
+                counted = previous.inventory_changes.filter(|previous| *previous == changes);
                 let envelope_rows = previous.envelope_rows + additions.len();
                 let mut max_rowid = previous.max_envelope_rowid;
                 // Most snapshots are owned only by this cache. Move their inventory
@@ -7370,6 +7388,7 @@ impl Store {
             max_envelope_rowid,
             envelope_rows: envelope_count,
             inventory_generation,
+            inventory_changes: counted,
             inventory,
             buckets,
             digest_prefixes,
