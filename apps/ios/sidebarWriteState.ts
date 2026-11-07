@@ -98,7 +98,11 @@ const parse = (shape: Shape, value: unknown): unknown => {
 };
 export const writeReducer: JournalReducer<WriteState, WriteEvent> = {
   reduce,
-  encode: state => parse(stateShape, { scope: state.scope, intent: state.intent, status: state.status, refusal: state.refusal, request: state.request, dependent: state.dependent, folder_completed: state.folder_completed, used: state.used }),
+  encode: state => {
+    const record = parse(stateShape, { scope: state.scope, intent: state.intent, status: state.status, refusal: state.refusal, request: state.request, dependent: state.dependent, folder_completed: state.folder_completed, used: state.used });
+    if (record === undefined) throw new Error('Invalid sidebar write state');
+    return record;
+  },
   decode: value => parse(stateShape, value) as WriteState | undefined,
   persisted: (state, completion) => state.request ? { type: completion ? 'CompletionPersisted' : 'Persisted', identity: structuredClone(state.request.identity) } : { type: 'StoredRefusal' },
   storageFailed: () => ({ type: 'StorageFailed' }),

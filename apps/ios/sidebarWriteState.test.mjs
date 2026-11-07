@@ -103,3 +103,9 @@ test('initial empty or invalid plans durably refuse without a request or send', 
     assert.equal(restored.state.status, 'Refused'); assert.equal(restart.sent.length, 0);
   }
 });
+test('invalid runtime durable values fail the persistence barrier before send', async () => {
+  const state = createWriteState(scope, intent), env = setup(), invalid = base(1);
+  invalid.snapshot.store_index = Number.MAX_SAFE_INTEGER + 1;
+  await assert.rejects(env.host.dispatch(state, plan(memberPlan, invalid)), /Invalid sidebar write state/);
+  assert.equal(env.sent.length, 0); assert.equal(env.raw(), null); assert.equal(state.refusal, 'Storage');
+});
