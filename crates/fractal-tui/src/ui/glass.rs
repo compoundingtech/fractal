@@ -2614,23 +2614,13 @@ impl Ui {
     fn status_line(&self, buf: &mut Buffer, area: Rect, glass: &Glass) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
         let bar = |style: Style| style.bg(theme::CRUST);
+        let name = format!(" ▢ {} ▾ ", glass.name);
+        let selector_width = (text::width(&name) as u16).min(area.width);
+        let left_width = area.width.saturating_sub(selector_width);
+        let mut hits = [None, None, None, None, None];
+        let mut next_hit = hits.iter_mut();
+        let mut record_hit = |target| *next_hit.next().expect("five status actions") = Some(target);
         let mut spans = vec![Span::raw(" ")];
-        let sidebar_style = if self.glasses.sidebar.shown {
-            theme::strong(theme::ACCENT)
-        } else {
-            theme::dim()
-        };
-        let sidebar_text = "sidebar";
-        self.hit(
-            Rect {
-                x: area.x + 1,
-                width: sidebar_text.len() as u16,
-                ..area
-            },
-            Hit::SidebarToggle,
-        );
-        spans.push(Span::styled(sidebar_text, bar(sidebar_style)));
-        spans.push(Span::styled(" · ", bar(theme::dim())));
         let (glyph, word, color) = match &self.world.link {
             Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
             // Stale says which list: the word alone sent the person hunting for why.
@@ -2642,14 +2632,14 @@ impl Ui {
         };
         let link_text = format!("{glyph} {word}");
         // The connection opens what is known of it: this machine, or why it is not reached.
-        self.hit(
+        record_hit((
             Rect {
                 x: area.x + Line::from(spans.clone()).width() as u16,
                 width: text::width(&link_text) as u16,
                 ..area
             },
             Hit::Connection,
-        );
+        ));
         spans.push(Span::styled(link_text, bar(theme::fg(color))));
         // Now opens over the glass from its count of alerts (Nathan, 2026-10-04: one way in,
         // named as `st now` is). No alert prints nothing at all (Nathan, 2026-10-10).
@@ -2686,14 +2676,14 @@ impl Ui {
                     "◆ {alerts} alert{}",
                     if alerts == 1 { "" } else { "s" }
                 );
-                self.hit(
+                record_hit((
                     Rect {
                         x,
                         width: text::width(&alerts_text) as u16,
                         ..area
                     },
                     Hit::Home,
-                );
+                ));
                 spans.push(Span::styled(alerts_text, bar(theme::strong(theme::PERSON))));
             }
             let working = self
@@ -2706,14 +2696,14 @@ impl Ui {
             spans.push(Span::styled(" · ", bar(theme::dim())));
             x = area.x + Line::from(spans.clone()).width() as u16;
             let working_text = format!("{} {working} working", self.spinner());
-            self.hit(
+            record_hit((
                 Rect {
                     x,
                     width: text::width(&working_text) as u16,
                     ..area
                 },
                 Hit::PaletteSection(1),
-            );
+            ));
             spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
             // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
             // missions list keeps them.
@@ -2741,14 +2731,14 @@ impl Ui {
             }
             let end = area.x + Line::from(spans.clone()).width() as u16;
             if machines_shown {
-                self.hit(
+                record_hit((
                     Rect {
                         x,
                         width: end.saturating_sub(x),
                         ..area
                     },
                     Hit::PaletteSection(3),
-                );
+                ));
             }
         }
         // Usage beside the fleet, floating over the glass as Now does (Nathan, 2026-10-04).
@@ -2766,19 +2756,42 @@ impl Ui {
                 theme::fg(theme::YELLOW)
             }),
         ));
-        self.hit(
+        record_hit((
             Rect {
                 x,
                 width: text::width(usage_text) as u16,
                 ..area
             },
             Hit::Usage,
-        );
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        ));
+        // The optional shortcut must not displace an existing status action.
+        // Reserve the glass selector before deciding whether the prefix fits.
+        let sidebar_width = text::width("sidebar · ") as u16;
+        let show_sidebar = Line::from(spans.clone()).width() + usize::from(sidebar_width)
+            <= usize::from(left_width);
+        if show_sidebar {
+            let style = if self.glasses.sidebar.shown {
+                theme::strong(theme::ACCENT)
+            } else {
+                theme::dim()
+            };
+            spans.insert(1, Span::styled("sidebar", bar(style)));
+            spans.insert(2, Span::styled(" · ", bar(theme::dim())));
+            self.hit(Rect::new(area.x + 1, area.y, 7, area.height), Hit::SidebarToggle);
+        }
+        for (mut rect, hit) in hits.into_iter().flatten() {
+            if show_sidebar {
+                rect.x += sidebar_width;
+            }
+            // A truncated label is not an actionable pointer target.
+            if rect.right() <= area.x + left_width {
+                self.hit(rect, hit);
+            }
+        }
+        buf.set_line(area.x, area.y, &Line::from(spans), left_width);
         // ▢: one space.
-        let name = format!(" ▢ {} ▾ ", glass.name);
-        let width = text::width(&name) as u16;
-        let x = area.x + area.width.saturating_sub(width);
+        let width = selector_width;
+        let x = area.x + left_width;
         buf.set_stringn(
             x,
             area.y,
@@ -8388,6 +8401,59 @@ mod tests {
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!ui.home_open());
         assert_eq!(ui.inventories_wanted().usage_hours, None);
+    }
+
+    #[test]
+    fn the_top_bar_reserves_the_selector_before_showing_the_sidebar_shortcut() {
+        let mut ui = glass();
+        ui.world.link = Link::Live;
+        ui.world.settled = true;
+        ui.world.agents = Load::Ready(vec![]);
+        ui.world.machines = Load::Ready(vec![]);
+        ui.world.inbox_alerts = Some(1);
+        ui.refresh_tab_statuses();
+        let selector = format!(" ▢ {} ▾ ", ui.glasses.glass().name);
+        let baseline = " ● live · ◆ 1 alert · ◐ 0 working · $ usage";
+        let threshold = (text::width(baseline) + text::width("sidebar · ")
+            + text::width(&selector)) as u16;
+        for width in [20, 30, threshold - 1, threshold, 80] {
+            ui.frame.borrow_mut().hits.clear();
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            ui.status_line(&mut buffer, area, ui.glasses.glass());
+            let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+            let sidebar = width >= threshold;
+            assert_eq!(top.starts_with(" sidebar · "), sidebar, "{width}: {top}");
+            let offset = if sidebar { 10 } else { 0 };
+            assert!(top.contains("● live"), "{width}: {top}");
+            assert_eq!(top.contains("◆ 1 alert"), width >= 30, "{width}: {top}");
+            let frame = ui.frame.borrow();
+            let winning = |x| frame.hits.iter().rev()
+                .find(|(rect, _)| super::super::contains(*rect, x, 0))
+                .map(|(_, hit)| hit.clone());
+            for x in 1 + offset..7 + offset {
+                assert_eq!(winning(x), Some(Hit::Connection), "{width}: {x}");
+            }
+            if width >= 30 {
+                for x in 10 + offset..19 + offset {
+                    assert_eq!(winning(x), Some(Hit::Home), "{width}: {x}");
+                }
+            } else {
+                assert!(!frame.hits.iter().any(|(_, hit)| *hit == Hit::Home));
+            }
+            assert_eq!(frame.hits.iter().any(|(_, hit)| *hit == Hit::SidebarToggle), sidebar);
+            if sidebar {
+                for x in 1..8 {
+                    assert_eq!(winning(x), Some(Hit::SidebarToggle));
+                }
+            }
+            let selector_x = width - text::width(&selector) as u16;
+            for (rect, hit) in &frame.hits {
+                if *hit != Hit::GlassMenu {
+                    assert!(rect.right() <= selector_x, "{width}: {hit:?}");
+                }
+            }
+        }
     }
 
     #[test]
