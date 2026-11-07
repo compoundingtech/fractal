@@ -299,9 +299,10 @@ export const projectMemberships = (arrangement: Arrangement, memberships: readon
   if (!resolved) return refuse('NotReady')
   const nodes = new Map<string, PlanNode>()
   const id = membershipNodeId
+  let missingParent = false
   for (const [folder, value] of Object.entries(arrangement.body.folders)) {
     if (value.tombstone !== null) continue
-    if (!Object.hasOwn(resolved.parents, folder)) return refuse('NotReady')
+    if (!Object.hasOwn(resolved.parents, folder)) { missingParent = true; continue }
     nodes.set(`folder:${folder}`, { node: { kind: 'folder', id: folder }, parent: value.position.value.parent, shown: resolved.parents[folder]!, key: value.position.value.key })
   }
   for (const member of memberships) {
@@ -309,6 +310,8 @@ export const projectMemberships = (arrangement: Arrangement, memberships: readon
     if (member.container !== arrangement.id || nodes.has(id(node))) return refuse('InvalidResolution')
     nodes.set(id(node), { node, parent: member.position.bucket, shown: member.position.bucket, key: member.position.key })
   }
+  // Rust validates member identity/container before reporting an incomplete resolved-parent map.
+  if (missingParent) return refuse('NotReady')
   for (const row of nodes.values()) {
     const seen = new Set<string>([id(row.node)])
     let parent = row.shown
@@ -349,7 +352,7 @@ export class MembershipProjectionCache {
       if (arrangement.body.folders[folder]!.tombstone !== null) continue
       if (!Object.hasOwn(arrangement.resolved.parents, folder)) {
         this.#held = undefined
-        return { _tag: 'RefusedV2', refusal: 'NotReady' }
+        return projectMemberships(arrangement, complete.members)
       }
       if (held && held.model.nodes.get(`folder:${folder}`)?.shown !== arrangement.resolved.parents[folder]) resolutionChanged = true
     }

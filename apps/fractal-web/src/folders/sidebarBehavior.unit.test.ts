@@ -370,6 +370,22 @@ describe('unwired web v2 scale/fault acceptance', () => {
     parents[scaleFolder] = scaleFolder
     expect(cache.get(arrangement, complete, 'catalog/1', 'presentation/1')).toEqual({ _tag: 'RefusedV2', refusal: 'InvalidResolution' })
   })
+  for (const fault of ['duplicate', 'wrong-container'] as const) it(`validates ${fault} members before missing resolved parents, cold and after invalidation`, () => {
+    const cache = new MembershipProjectionCache()
+    const members = scaleRows(1001)
+    const complete: MembershipComplete = { scope: scaleScope, frontier: { epoch: 'epoch/1', changed_index: 1, live_count: members.length }, members, snapshots: [scaleSnapshot(1)] }
+    expect(cache.get(scaleArrangement, complete, 'catalog/1', 'presentation/1')._tag).toBe('ProjectedV2')
+    const parents = { ...scaleArrangement.resolved!.parents }
+    delete parents[scaleFolder]
+    const incomplete = { ...scaleArrangement, resolved: { ...scaleArrangement.resolved!, parents } }
+    const invalid = { ...complete, members: fault === 'duplicate' ? [...members, members[0]!] : [{ ...members[0]!, container: 'arrangement/other' }, ...members.slice(1)] }
+    const expected = { _tag: 'RefusedV2', refusal: 'InvalidResolution' }
+    expect(projectMemberships(incomplete, invalid.members)).toEqual(expected)
+    expect(cache.get(incomplete, invalid, 'catalog/1', 'presentation/1')).toEqual(expected)
+    expect(new MembershipProjectionCache().get(incomplete, invalid, 'catalog/1', 'presentation/1')).toEqual(expected)
+    expect(planMembershipMove(projectMemberships(incomplete, invalid.members), scaleIntent(members))).toEqual(expected)
+    expect(cache.get(incomplete, complete, 'catalog/1', 'presentation/1')).toEqual({ _tag: 'RefusedV2', refusal: 'NotReady' })
+  })
   it.skip('Daemon integration fixture required: reject the 4,097th live-member edit through the real server limit (not a paging-D dependency)', () => {})
   it.skip('D #4739: local-socket initial-load p95 <=1s with sustained unrelated daemon writes', () => {})
   it.skip('PR21 host activation: browser overlay visible next animation frame; render p95 <=8ms; v2 <=2x v1', () => {})
