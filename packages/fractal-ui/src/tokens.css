@@ -125,10 +125,8 @@
 .font-mono { font-family: var(--mono); }
 .tabular { font-variant-numeric: tabular-nums; }
 
-@keyframes fui-spin { to { transform: rotate(360deg); } }
 @keyframes fui-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.fui-spin { animation: fui-spin var(--motion-duration, 180ms) linear infinite; }
 .fui-pulse { animation: fui-pulse calc(var(--motion-duration, 180ms) * 3) ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .fui-spin, .fui-pulse { animation: none; }
+  .fui-pulse { animation: none; }
 }
