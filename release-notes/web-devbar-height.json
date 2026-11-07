@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "The page reserves the developer bar's height through a CSS variable with a 32px default, so the bar does not cover the bottom of the workspace",
+  "summary": "The developer bar leads with transport meters, and the page reserves its measured height so the taller bar does not cover the workspace",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Reverting restores the previous reserved height."
+    "detail": "Reverting restores the previous developer bar and reserved height."
   }
 }
