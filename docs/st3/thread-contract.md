@@ -49,6 +49,14 @@ Show rename, close and reopen as events in the thread timeline with their actor 
 Project each event from its accepted lifecycle claim and reuse the operation identity to
 deduplicate retries. These events do not add messages, notifications or unread replies.
 
+Rename shows the exact previous and new titles. The request identifies the title claim
+the editor saw and supplies the new title. The admitting daemon checks that the observed
+claim is still its effective title in the writer transaction. A stale title returns a
+conflict so the editor can refresh. The accepted rename retains the previous title from
+that claim, its identity
+and the new title together, so timeline rendering does not depend on retaining the older
+claim body or inferring the title from replica arrival order.
+
 An embedded panel's disclosure state is local to its client and placement. A compact row carries
 the title, message count, lifecycle status and any unread hint on one line where space permits.
 Expanding or opening a dedicated thread tab navigates to the same resource. Agent sessions and
@@ -140,7 +148,9 @@ thread stays closed until reopened, and a same-title thread and an unrelated tra
 message never appear in its history. Run with persisted state across daemon restart and verify
 incremental updates, bounded pagination, a revoked grant during a write, a forbidden
 cross-thread quote, and a duplicated request key. Verify that rename, close and reopen appear
-once with the correct actor and time, without affecting message or unread counts. Across two
+once with the correct actor and time, without affecting message or unread counts. Verify the
+previous title against the observed claim on rename, reject a stale title revision,
+and retain both titles when rendering after replication and restart. Across two
 members, verify the same-key retry after exchange and
 show that local acceptance, peer observation and agent delivery are distinct. Verify that an
 agent moved using the existing placement mechanism can continue the thread when the prior
