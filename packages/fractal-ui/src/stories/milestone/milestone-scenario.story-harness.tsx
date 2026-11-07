@@ -44,6 +44,8 @@ const load = <TValue,>(value: TValue, loading: boolean, status: WireSlice<'sync'
 export interface MilestoneScenarioArgs {
   readonly scheme: RedesignMilestoneProps['scheme']
   readonly state: 'slice' | 'empty-thread' | 'no-match' | 'navigation'
+  readonly conversation?: string
+  readonly roster?: string
 }
 
 export function ScenarioMilestone({ scheme, state, persistKey = 'rm1-scenario' }: MilestoneScenarioArgs & { readonly persistKey?: string }) {
@@ -56,17 +58,18 @@ export function ScenarioMilestone({ scheme, state, persistKey = 'rm1-scenario' }
   // Whole threads cross the seam; Transcript owns the mounted window, not this adapter.
   const sections = scenarioSections(conversationSlice, 'whole-thread').sections
   const threads = Object.fromEntries(rows.map(row => {
-    const turns = sections.find(section => section.id === `${row.ref}/0`)?.turns ?? []
-    return [row.ref, { turns, running: turns.some(turn => turn.work.running) }]
+    const section = sections.find(section => section.id === `${row.ref}/0`)
+    const turns = section?.turns ?? []
+    return [row.ref, { turns, history: section?.history, running: turns.some(turn => turn.work.running) }]
   }))
-  const primaryRef = rows.find(row => threads[row.ref]!.turns.length > 0)?.ref ?? rows[0]?.ref ?? ''
+  const primaryRef = rows.find(row => (threads[row.ref]?.turns.length ?? 0) > 0)?.ref ?? rows[0]?.ref ?? ''
   const reviewerRef = rows.find(row => row.ref !== primaryRef)?.ref ?? primaryRef
   const conversationStatus = sync.status[`conversation:${primaryRef}`]
   const observedAt = conversationStatus?._tag === 'Stale' ? conversationStatus.lastLiveAt ?? now : now
-  const conversationValue: MilestoneConversation = { primaryRef, reviewerRef, threads, lastSeen: { at: observedAt, activity: rows.find(row => row.ref === primaryRef)?.statusLabel ?? 'Unobserved', detail: threads[primaryRef]?.turns.at(-1)?.work.calls.at(-1)?.argsSummary ?? '' } }
+  const conversationValue: MilestoneConversation = { primaryRef, reviewerRef, threads, sync: conversationStatus, lastSeen: { at: observedAt, activity: rows.find(row => row.ref === primaryRef)?.statusLabel ?? 'Unobserved', detail: threads[primaryRef]?.turns.at(-1)?.work.calls.at(-1)?.argsSummary ?? '' } }
   const roster = load(rosterValue, rosterSlice.loading, sync.status.agents, now)
   const conversation = load(conversationValue, conversationSlice.loading, conversationStatus, now)
-  const emptyRef = rows.find(row => threads[row.ref]!.turns.length === 0)?.ref
+  const emptyRef = rows.find(row => threads[row.ref]?.turns.length === 0)?.ref
   const openRefs = rows.length === 0 ? [] : state === 'empty-thread' && emptyRef !== undefined ? [emptyRef] : [primaryRef, reviewerRef].filter((ref, index, refs) => refs.indexOf(ref) === index)
   const navigationRow = rows.find(row => row.ref !== primaryRef) ?? rows[0]
   return <div data-scenario-navigation-title={navigationRow?.title} data-scenario-primary-title={rows.find(row => row.ref === primaryRef)?.title}>

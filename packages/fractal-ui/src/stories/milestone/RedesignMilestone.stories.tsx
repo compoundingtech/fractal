@@ -2,6 +2,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { scenarioArgTypes } from '@fractal/scenarios/storybook'
+import { loadWorld } from '@fractal/scenarios'
+import { scenarioSections } from '../../scenario-transcript.story-harness.ts'
 import { ScenarioMilestone, type MilestoneScenarioArgs as Args } from './milestone-scenario.story-harness.tsx'
 const selectedConversation = { conversation: 'The shell mounts only the selected conversation; inactive and closed threads are intentionally not rendered. Navigation plays assert selecting another slice-derived thread.' }
 
@@ -131,3 +133,34 @@ export const NavigationKeyboard: Story = {
 }
 
 
+/** Preserve the world's actual transport issue and retry attempt, not the authored stale fallback. */
+export const ReconnectingSync: Story = {
+  parameters: world('failed-sync-open-fail'),
+  play: async ({ canvasElement }) => {
+    const expected = loadWorld('failed-sync-open-fail').slices.sync.state.expected.find(entry => entry.surface.startsWith('conversation:'))?.status
+    if (expected?._tag !== 'Stale' || expected.reason._tag !== 'Reconnecting') throw new Error('Open-fail world must retain a reconnecting conversation status')
+    const banner = await waitFor(() => {
+      const element = canvasElement.querySelector<HTMLElement>('[data-connection-state="reconnecting"]')
+      expect(element).not.toBeNull()
+      if (element === null) throw new Error('Missing reconnecting connection banner')
+      return element
+    })
+    await expect(banner).toHaveTextContent(expected.reason.issue)
+    await expect(banner).toHaveTextContent(`attempt ${expected.reason.attempt}`)
+    await expect(canvasElement).not.toHaveTextContent('Gateway connection interrupted')
+  },
+}
+
+/** Mounting committed messages must not relabel an incomplete server history as Complete. */
+export const HugeHistory: Story = {
+  args: { conversation: 'huge', roster: 'one-agent' },
+  parameters: { scenario: { _tag: 'slices', slices: ['roster', 'conversation', 'sync'], invariant: { ...selectedConversation, roster: 'This history-boundary regression pins a one-agent roster so only the selected huge conversation is under test; normal shell stories cover roster contrasts.', sync: 'Incomplete committed history is independent of transport state; ReconnectingSync and the normal shell stories cover transport contrasts.' } } },
+  play: async ({ canvasElement }) => {
+    const sections = scenarioSections(loadWorld('fleet-mid-refactor').with({ conversation: 'huge' }).slices.conversation, 'whole-thread').sections
+    await expect(sections[0]?.history?._tag).toBe('HasOlder')
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
+    // Revealing 1,600 committed rows uses four-row animation-frame batches, including under the gate's concurrent cases.
+    await waitFor(() => expect(canvas.getByTestId('history-boundary-note')).toHaveTextContent('Earlier messages not loaded'), { timeout: 90_000 })
+  },
+}
