@@ -62,6 +62,35 @@ fn older_build_store(path: &std::path::Path) {
     assert!(store.checkpoint_idle_wal(&rusqlite::Connection::open(path).unwrap()).unwrap(), "the seed leaves an empty WAL");
 }
 
+struct PinnedReader {
+    release: std::sync::mpsc::SyncSender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl PinnedReader {
+    fn finish(self) {
+        self.release.send(()).unwrap();
+        self.thread.join().unwrap();
+    }
+}
+
+/// Return only after a real read snapshot is pinned. Releasing joins the reader, so the next
+/// checkpoint cannot race its COMMIT. The SQLite transaction owns rollback/commit normally.
+fn pin_reader(path: &std::path::Path) -> PinnedReader {
+    let reader = rusqlite::Connection::open(path).unwrap();
+    let (ready, pinned) = std::sync::mpsc::sync_channel(0);
+    let (release, finish) = std::sync::mpsc::sync_channel(0);
+    let thread = std::thread::spawn(move || {
+        let read = reader.unchecked_transaction().unwrap();
+        read.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap();
+        ready.send(()).unwrap();
+        finish.recv().unwrap();
+        read.commit().unwrap();
+    });
+    pinned.recv().unwrap();
+    PinnedReader { release, thread }
+}
+
 /// Step the same conversion pages and recycle attempts as startup, with a reader pinned before
 /// every page. Wall-clock offsets do not guarantee overlapping readers on a loaded host: a
 /// checkpoint in a reader gap can truncate the control WAL or reset the escalation's growth.
@@ -69,14 +98,14 @@ fn start(path: &std::path::Path, limits: smallclaims::store::wal_escalation::Wal
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     let store = Store::open(path, "alder").unwrap();
     store.set_wal_escalation(limits);
-    let reader = Arc::new(std::sync::Mutex::new(rusqlite::Connection::open(path).unwrap()));
+    let reader = Arc::new(std::sync::Mutex::new(None::<PinnedReader>));
     let checkpoint = rusqlite::Connection::open(path).unwrap();
     // Let the pinned fold finish only once RESTART has been selected under the writer. This
     // exercises the real restart, without betting that a sleeping reader runs within `busy`.
     let finishing = Arc::clone(&reader);
     checkpoint.authorizer(Some(move |context: AuthContext<'_>| {
         if let AuthAction::Pragma { pragma_name: "wal_checkpoint", pragma_value: Some("RESTART") } = context.action {
-            finishing.lock().unwrap().execute_batch("COMMIT").unwrap();
+            finishing.lock().unwrap().take().unwrap().finish();
         }
         Authorization::Allow
     }));
@@ -85,7 +114,7 @@ fn start(path: &std::path::Path, limits: smallclaims::store::wal_escalation::Wal
     let mut escalated = 0;
     loop {
         // Establish the snapshot, not just BEGIN (which is deferred), before the writer runs.
-        reader.lock().unwrap().execute_batch("BEGIN; SELECT COUNT(*) FROM claims").unwrap();
+        *reader.lock().unwrap() = Some(pin_reader(path));
         let page = store.convert_envelope_payloads().unwrap();
         // Sample every committed page before the checkpoint can reset mxFrame.
         largest = largest.max(wal_frames(path));
@@ -94,9 +123,8 @@ fn start(path: &std::path::Path, limits: smallclaims::store::wal_escalation::Wal
             assert!(restart.recycled, "the selected restart must recycle the WAL");
             escalated += 1;
         }
-        let reader = reader.lock().unwrap();
-        if !reader.is_autocommit() {
-            reader.execute_batch("COMMIT").unwrap();
+        if let Some(reader) = reader.lock().unwrap().take() {
+            reader.finish();
         }
         if page.done {
             return (largest, escalated);
@@ -130,16 +158,15 @@ fn a_starting_daemon_s_wal_recycle_restarts_a_wal_its_startup_work_keeps_growing
         let path = run("reader-gap.sqlite3");
         let store = Store::open(&path, "alder").unwrap();
         store.set_wal_escalation(limits);
-        let reader = rusqlite::Connection::open(&path).unwrap();
+        let reader = pin_reader(&path);
         let checkpoint = rusqlite::Connection::open(&path).unwrap();
-        reader.execute_batch("BEGIN; SELECT COUNT(*) FROM claims").unwrap();
         while wal_frames(&path) <= bound {
             assert!(!store.convert_envelope_payloads().unwrap().done);
         }
         let mut growth = smallclaims::store::wal_escalation::WalGrowth::default();
         let (pinned, restart) = store.recycle_wal(&checkpoint, &mut growth).unwrap();
         assert!(!pinned.recycled && restart.is_none());
-        reader.execute_batch("COMMIT").unwrap();
+        reader.finish();
         let (gap, restart) = store.recycle_wal(&checkpoint, &mut growth).unwrap();
         assert!(gap.recycled && restart.is_none(), "a reader gap recycles before escalation");
         assert_eq!(wal_frames(&path), 0, "the gap destroys the control's accumulated growth");
