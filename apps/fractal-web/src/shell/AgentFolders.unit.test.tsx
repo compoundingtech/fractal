@@ -248,8 +248,8 @@ describe('AgentFolders remembered machines', () => {
       expect(tree.filters()).toEqual({ ...settings, query: 'machine:build-host-b' })
       await vi.waitFor(() => expect(agentRefs(tree.container).length).toBeGreaterThan(0))
       expect(agentRefs(tree.container).every((ref) => ref.startsWith('agent/build-host-b/'))).toBe(true)
-      const trigger = [...tree.container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('Show'))
-      expect(trigger?.textContent).toContain(', 1 active')
+      const trigger = [...tree.container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('Filter'))
+      expect(trigger?.textContent).toContain(', 2 active')
     } finally {
       tree.unmount()
       remember(null)

@@ -25,7 +25,7 @@ const matchRows = ({ agents, needsYou, asking, stale }: {
 const childDriverMap = (agents: readonly Agent[]): ReadonlyMap<string, string> =>
   new Map(agents.flatMap(agent => (agent.subagents ?? []).map((child): [string, string] => [subagentRowId({ parent: agent.ref, id: child.id }), child.driver])))
 
-/** Show menu counts: each row passes every filter outside the Show menu (`is:asking` and machines). */
+/** Filter menu counts: `others` is what lies outside the menu, free text and typed facets; the rest are reported facts. */
 export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
   readonly agents: readonly Agent[]
   readonly needsYou: ReadonlySet<string>
@@ -34,8 +34,15 @@ export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
   readonly stale: boolean
 }): readonly ShowRow[] => {
   const others = { ...parseSidebarQuery(filters.query), asking: false, machines: [] }
+  const outsideMenu = { ...filters, hideEnded: false, hideRetired: false, statuses: [] }
   const rows = matchRows({ agents, needsYou, asking, stale })
-  return agents.map(agent => ({ host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row: rows.get(agent.ref)!, filters, query: others }) }))
+  return agents.map(agent => {
+    const row = rows.get(agent.ref)!
+    return {
+      host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row, filters: outsideMenu, query: others }),
+      status: row.status, ended: row.status === 'ended' || agent.state === 'done', retired: row.status === 'retired',
+    }
+  })
 }
 
 /** View-only filtering keeps the canonical arrangement and its move fences untouched. */
