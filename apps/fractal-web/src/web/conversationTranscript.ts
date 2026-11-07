@@ -124,6 +124,41 @@ const workFactsFor = (promptAt: string, items: readonly KitConversationItem[]) =
   }
 }
 
+/** Driver errors the agent recovers from by itself; repeats fold into one quiet row. */
+const recoverableErrorCodes: ReadonlySet<string> = new Set(['transcript-not-bound', 'claude-channel-unattached'])
+const recoverableCode = (item: KitConversationItem): string | undefined => {
+  if (item._tag !== 'Notice' || item.kind !== 'error') return undefined
+  const code = /^Code: (\S+)$/.exec(item.detail ?? '')?.[1]
+  return code !== undefined && recoverableErrorCodes.has(code) ? code : undefined
+}
+
+/**
+ * Machine rows read as one quiet line each. Run status (queued, running, waiting, …) keeps only the episode's
+ * latest; repeats of a recoverable driver error fold into its latest occurrence, which keeps its own reason and
+ * counts the rest. Any other error, and so any explanation of why an agent is stuck, stays as it is. Work facts
+ * are taken from every item before this runs; "Show all system events" skips it.
+ */
+const quietMachineRows = (items: readonly KitConversationItem[]): KitConversationItem[] => {
+  const lastStatus = items.findLast(item => item._tag === 'Status')
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    const code = recoverableCode(item)
+    if (code !== undefined) counts.set(code, (counts.get(code) ?? 0) + 1)
+  }
+  if (counts.size === 0 && items.filter(item => item._tag === 'Status').length <= 1) return [...items]
+  const seen = new Map<string, number>()
+  return items.flatMap((item): KitConversationItem[] => {
+    if (item._tag === 'Status') return item === lastStatus ? [item] : []
+    const code = recoverableCode(item)
+    if (code === undefined || item._tag !== 'Notice') return [item]
+    const count = counts.get(code)!
+    const index = (seen.get(code) ?? 0) + 1
+    seen.set(code, index)
+    if (index < count) return []
+    return [count === 1 ? item : { ...item, detail: `Code: ${code} · ${count} times` }]
+  })
+}
+
 /** A participant as the transcript names it: the roster name, else the ref's last segment; `ref` is the full path for hover. */
 export interface ParticipantName { readonly label: string; readonly ref?: string }
 export const participantName = (ref: string | undefined, names: TranscriptTurnOptions['names']): ParticipantName | undefined => {
@@ -205,7 +240,7 @@ export const prepareTranscriptTurns = (
       id: first.id,
       ...(prompt === undefined ? {} : { prompt }),
       ...(trigger === undefined ? {} : { triggerId: trigger.id }),
-      items: turnItems,
+      items: options.showSystemEvents === true ? turnItems : quietMachineRows(turnItems),
       work: { ...work, calls: work.calls.map(call => {
         const item = tools.get(call.id)
         return { ...call, title: item === undefined ? 'Working' : toolSummary(item), summary: item === undefined ? 'Working' : toolSummary(item), argsSummary: undefined }
@@ -240,7 +275,23 @@ export const prepareTranscriptTurns = (
     turnItems.push(item)
   }
   flush()
-  return turns
+  return liveAtTheTail(turns)
+}
+
+/**
+ * Only the latest episode shows live work. An earlier episode whose calls are still unanswered (the agent kept
+ * working while new input arrived) settles in place, and the latest episode, unless its own status settled it,
+ * carries the Working row instead, so the live row never sits mid-thread above later turns.
+ */
+const liveAtTheTail = (turns: PreparedTranscriptTurn[]): readonly PreparedTranscriptTurn[] => {
+  const last = turns.length - 1
+  const earlier = turns.slice(0, Math.max(0, last)).some(turn => turn.work.running)
+  if (!earlier) return turns
+  return turns.map((turn, index) => {
+    if (index < last) return turn.work.running ? { ...turn, work: { ...turn.work, running: false } } : turn
+    if (turn.work.running || lastStatusOf(turn.items) !== undefined) return turn
+    return { ...turn, work: { ...turn.work, running: true } }
+  })
 }
 
 /** Prompt-less native tails are supported by the kit without a synthetic user bubble. */
