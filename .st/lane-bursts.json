@@ -1,5 +1,0 @@
-{
-  "version": 1,
-  "about": "What scripts/fractal-test asks its seat's lane to be raised to for one run (docs/st3/seat-lanes.md, Bursts), by what the run builds. Set from measurements: a full run's Rust checks reached 24G in an 8-core lane (2026-11-02, on a build host); the per-seat sampler (2026-11-03) refines it.",
-  "build": {"cores": 8, "memory": "24G"}
-}
