@@ -12,6 +12,12 @@ automatic pairing/renewal. Provision it with an `assistant/mcp` bearer, never a
 person or `assistant/chatgpt` credential. The existing `st-chatgpt` entrypoint and its
 ChatGPT-specific deployment remain separate and compatible.
 
+Inbound stdio frames are limited to 2 MiB per line, excluding the terminating LF
+(a CR counts toward the limit). Overflow ends the adapter session without
+processing the oversized frame or subsequent requests, even if no LF arrives.
+This also bounds the shared ChatGPT adapter's stdio mode; its HTTP profile is
+unchanged.
+
 The complete ChatGPT `tools/list` result is pinned as identical JSON (tool order,
 names, descriptions, schemas, annotations) by
 `crates/fractal-chatgpt/src/testdata/chatgpt-tools-list.json`, captured from main commit
