@@ -4149,6 +4149,68 @@ export const ScgReadAuthorization = /*#__PURE__*/ (() => Schema.Struct({
 export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
 export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
 
+export const ThreadClosedEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "id": Id,
+  "kind": Schema.Literal("thread.closed")
+}).annotate({ identifier: "ThreadClosedEvent" }))()
+export type ThreadClosedEvent = typeof ThreadClosedEvent.Type
+export type ThreadClosedEventEncoded = typeof ThreadClosedEvent.Encoded
+
+export const ThreadRenamedEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "id": Id,
+  "kind": Schema.Literal("thread.renamed"),
+  "previous_title": Schema.String,
+  "title": Schema.String
+}).annotate({ identifier: "ThreadRenamedEvent" }))()
+export type ThreadRenamedEvent = typeof ThreadRenamedEvent.Type
+export type ThreadRenamedEventEncoded = typeof ThreadRenamedEvent.Encoded
+
+export const ThreadReopenedEvent = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "actor_id": Id,
+  "id": Id,
+  "kind": Schema.Literal("thread.reopened")
+}).annotate({ identifier: "ThreadReopenedEvent" }))()
+export type ThreadReopenedEvent = typeof ThreadReopenedEvent.Type
+export type ThreadReopenedEventEncoded = typeof ThreadReopenedEvent.Encoded
+
+export const ThreadSummary = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": Id,
+  "id": Id,
+  "revision": Revision,
+  "state": Schema.Literals(["open","closed"]),
+  "title": Schema.String,
+  "title_revision": Revision
+}).annotate({ identifier: "ThreadSummary" }))()
+export type ThreadSummary = typeof ThreadSummary.Type
+export type ThreadSummaryEncoded = typeof ThreadSummary.Encoded
+
+export const ThreadSummaryPage = /*#__PURE__*/ (() => Schema.Struct({
+  "items": Schema.Array(ThreadSummary),
+  "next_cursor": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "ThreadSummaryPage" }))()
+export type ThreadSummaryPage = typeof ThreadSummaryPage.Type
+export type ThreadSummaryPageEncoded = typeof ThreadSummaryPage.Encoded
+
+export const ThreadTimelineEvent = /*#__PURE__*/ (() => Schema.Union([
+  ThreadRenamedEvent,
+  Schema.Struct({ "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "actor_id": Id, "id": Id, "kind": Schema.Literal("thread.closed"), "previous_title": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "accepted_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "actor_id": Id, "id": Id, "kind": Schema.Literal("thread.reopened"), "previous_title": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "ThreadTimelineEvent" }))()
+export type ThreadTimelineEvent = typeof ThreadTimelineEvent.Type
+export type ThreadTimelineEventEncoded = typeof ThreadTimelineEvent.Encoded
+
+export const ThreadTimelinePage = /*#__PURE__*/ (() => Schema.Struct({
+  "items": Schema.Array(ThreadTimelineEvent),
+  "next_cursor": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "ThreadTimelinePage" }))()
+export type ThreadTimelinePage = typeof ThreadTimelinePage.Type
+export type ThreadTimelinePageEncoded = typeof ThreadTimelinePage.Encoded
+
 /** Bounded assistant conversation projection; the daemon allowlists the disclosed fields. */
 export const Value = /*#__PURE__*/ (() => Schema.Unknown.annotate({ identifier: "Value", description: "Bounded assistant conversation projection; the daemon allowlists the disclosed fields." }))()
 export type Value = typeof Value.Type

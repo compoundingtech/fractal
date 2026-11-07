@@ -2462,6 +2462,15 @@
         "reason": { "type": ["string", "null"] }
       }
     },
+    "ThreadSummary": {"type": "object", "additionalProperties": false, "required": ["id", "agent_id", "title", "title_revision", "revision", "state"], "properties": {"id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string"}, "title_revision": {"$ref": "#/$defs/Revision"}, "revision": {"$ref": "#/$defs/Revision"}, "state": {"enum": ["open", "closed"]}}},
+    "ThreadSummaryPage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadRenamedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "previous_title", "title"], "properties": {"kind": {"const": "thread.renamed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "previous_title": {"type": "string"}, "title": {"type": "string"}}},
+    "ThreadClosedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.closed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadReopenedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.reopened"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadTimelineEvent": {"oneOf": [{"$ref": "#/$defs/ThreadRenamedEvent"}, {"$ref": "#/$defs/ThreadClosedEvent"}, {"$ref": "#/$defs/ThreadReopenedEvent"}]},
+    "ThreadTimelinePage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadTargetParameters": {"type": "object", "additionalProperties": false, "required": ["target_id"], "properties": {"target_id": {"$ref": "#/$defs/Id"}}},
+    "ThreadRenameParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "title", "title_revision"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "title_revision": {"$ref": "#/$defs/Revision"}}},
     "AgentDeclaration": {
       "type": "object",
       "additionalProperties": false,
@@ -3344,6 +3353,9 @@
             "harness.answer",
             "arrangement.edit",
             "arrangement.membership.edit",
+            "thread.rename",
+            "thread.close",
+            "thread.reopen",
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
@@ -3544,6 +3556,9 @@
         {"properties": {"type": {"const": "harness.answer"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}, "id": {"allOf": [{"$ref": "#/$defs/Id"}, {"maxLength": 256, "description": "At most 256 UTF-8 bytes; runtime enforces byte length before settlement."}]}}},
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
+        {"properties": {"type": {"const": "thread.rename"},"parameters": {"$ref": "#/$defs/ThreadRenameParameters"}}},
+        {"properties": {"type": {"const": "thread.close"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
+        {"properties": {"type": {"const": "thread.reopen"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
@@ -3799,7 +3814,8 @@
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
-        "membership_revision": { "$ref": "#/$defs/Revision" }
+        "membership_revision": { "$ref": "#/$defs/Revision" },
+        "metadata_revision": { "$ref": "#/$defs/Revision" }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt"] },

@@ -244,6 +244,18 @@ fn rust_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
+        if id == "thread.list" {
+            writeln!(out, r#"    pub async fn thread_list(&self, agent_id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{ let mut path = format!("/v1/client/threads?agent_id={{}}", percent_encode(agent_id)); if let Some(cursor) = cursor {{ path.push_str(&format!("&cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }} self.get(&path).await }}"#)?;
+            continue;
+        }
+        if id == "thread.get" {
+            writeln!(out, r#"    pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {{ self.get(&format!("/v1/client/threads/{{}}", thread_path_segment(id)?)).await }}"#)?;
+            continue;
+        }
+        if id == "thread.timeline" {
+            writeln!(out, r#"    pub async fn thread_timeline(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    pub async fn arrangements_memberships(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements/{{}}/{{}}/memberships?person={{}}\", percent_encode(person_name), percent_encode(uuid), percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
@@ -455,6 +467,18 @@ fn swift_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
+        if id == "thread.list" {
+            writeln!(out, r#"    public func threadList(agentID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {{ var query: [URLQueryItem] = [.init(name: "agent_id", value: agentID)]; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads", query: query) }}"#)?;
+            continue;
+        }
+        if id == "thread.get" {
+            writeln!(out, r#"    public func threadGet(id: String) async throws -> Envelope<ThreadSummary> {{ try await get("v1/client/threads/\(try Self.routedThreadID(id))") }}"#)?;
+            continue;
+        }
+        if id == "thread.timeline" {
+            writeln!(out, r#"    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadTimelinePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }}"#)?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    public func arrangementsMemberships(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))/memberships\", query: query) }}")?;
             continue;
@@ -836,6 +860,11 @@ fn validate_surfaces(
         "DocumentReferences",
         "MessageBody",
         "AgentDeclaration",
+        "ThreadSummary",
+        "ThreadSummaryPage",
+        "ThreadTimelinePage",
+        "ThreadTargetParameters",
+        "ThreadRenameParameters",
         "AgentWorkspace",
         "StatusHistory",
         "StatusTransition",
@@ -1652,6 +1681,18 @@ fn typescript_operation_methods(
         } else {
             path.to_owned()
         };
+        if id == "thread.list" {
+            writeln!(out, "    async threadList(options: {{ agent_id: string; cursor?: string; limit?: number }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummaryPage>> {{ return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.get" {
+            writeln!(out, "    async threadGet(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummary>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}`, undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.timeline" {
+            writeln!(out, "    async threadTimeline(id: string, options: {{ cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadTimelinePage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/timeline` + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    async arrangementsMemberships(personName: string, uuid: string, person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<OrderedMembershipPage>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}/memberships` + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;

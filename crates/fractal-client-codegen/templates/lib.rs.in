@@ -3430,6 +3430,17 @@ where
     }
 }
 
+fn thread_path_segment(value: &str) -> Result<&str, ClientError> {
+    let segment = value.strip_prefix("thread/").unwrap_or(value);
+    if segment.is_empty()
+        || segment.len() > 128
+        || !segment.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ClientError::Protocol("invalid thread identifier".into()));
+    }
+    Ok(segment)
+}
+
 fn percent_encode(value: &str) -> String {
     value
         .bytes()

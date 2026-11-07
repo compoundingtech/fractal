@@ -4,7 +4,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
-    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    ThreadSummary, ThreadSummaryPage, ThreadTimelinePage, PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
@@ -219,6 +219,14 @@ function base64UrlJson(value: unknown): string {
 function routedId(id: string): string {
     if (id.startsWith('glass/')) return id.split('/').pop()!;
     return id.replace(/^(launch|session|pairing)\//, '');
+}
+
+function threadPathSegment(id: string): string {
+    const segment = id.replace(/^thread\//, '');
+    if (segment.length === 0 || segment.length > 128 || /[^a-zA-Z0-9_-]/.test(segment)) {
+        throw new TypeError('Invalid thread identifier');
+    }
+    return segment;
 }
 
 function query(options: Record<string, string | number | boolean | undefined>): string {

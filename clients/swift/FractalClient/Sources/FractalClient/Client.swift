@@ -280,6 +280,9 @@ public actor FractalClient {
             if UInt64(whole.count) >= chunk.size { return whole }
         }
     }
+    public func threadList(agentID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> { var query: [URLQueryItem] = [.init(name: "agent_id", value: agentID)]; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/threads", query: query) }
+    public func threadGet(id: String) async throws -> Envelope<ThreadSummary> { try await get("v1/client/threads/\(try Self.routedThreadID(id))") }
+    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadTimelinePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }
     public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/harness-questions", query: query) }
     public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> { try await get("v1/client/harness-questions/\(Self.routedSessionID(id))") }
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
@@ -408,6 +411,9 @@ public actor FractalClient {
     public func terminalEnd(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalEnd(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalInput(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalResize(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadClose(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRename(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadReopen(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonAskParameters) async throws -> Envelope<ActionResult> { try await submit(try .workAsk(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workCancelAsk(id: String, idempotencyKey: String, fence: Fence, parameters: PersonStepParameters) async throws -> Envelope<ActionResult> { try await submit(try .workCancelAsk(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workClaim(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workClaim(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -555,6 +561,14 @@ public actor FractalClient {
 
     static func pathSegment(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"))!
+    }
+
+    static func routedThreadID(_ value: String) throws -> String {
+        let opaque = value.hasPrefix("thread/") ? String(value.dropFirst("thread/".count)) : value
+        guard (1...128).contains(opaque.utf8.count),
+            opaque.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 })
+        else { throw URLError(.badURL) }
+        return opaque
     }
 
     static func routedSessionID(_ value: String) -> String {

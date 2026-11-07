@@ -4,7 +4,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
-    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    ThreadSummary, ThreadSummaryPage, ThreadTimelinePage, PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
@@ -219,6 +219,14 @@ function base64UrlJson(value: unknown): string {
 function routedId(id: string): string {
     if (id.startsWith('glass/')) return id.split('/').pop()!;
     return id.replace(/^(launch|session|pairing)\//, '');
+}
+
+function threadPathSegment(id: string): string {
+    const segment = id.replace(/^thread\//, '');
+    if (segment.length === 0 || segment.length > 128 || /[^a-zA-Z0-9_-]/.test(segment)) {
+        throw new TypeError('Invalid thread identifier');
+    }
+    return segment;
 }
 
 function query(options: Record<string, string | number | boolean | undefined>): string {
@@ -673,6 +681,9 @@ export class FractalClient {
         return response;
     }
 
+    async threadList(options: { agent_id: string; cursor?: string; limit?: number }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummaryPage>> { return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }
+    async threadGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummary>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}`, undefined, requestOptions); }
+    async threadTimeline(id: string, options: { cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadTimelinePage>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}/timeline` + query(options), undefined, requestOptions); }
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
@@ -806,6 +817,9 @@ export class FractalClient {
     async terminalEnd(input: Omit<ActionOf<'terminal.end'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.end' } as ActionOf<'terminal.end'>, requestOptions); }
     async terminalInput(input: Omit<ActionOf<'terminal.input'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.input' } as ActionOf<'terminal.input'>, requestOptions); }
     async terminalResize(input: Omit<ActionOf<'terminal.resize'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.resize' } as ActionOf<'terminal.resize'>, requestOptions); }
+    async threadClose(input: Omit<ActionOf<'thread.close'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.close' } as ActionOf<'thread.close'>, requestOptions); }
+    async threadRename(input: Omit<ActionOf<'thread.rename'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.rename' } as ActionOf<'thread.rename'>, requestOptions); }
+    async threadReopen(input: Omit<ActionOf<'thread.reopen'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.reopen' } as ActionOf<'thread.reopen'>, requestOptions); }
     async workAsk(input: Omit<ActionOf<'work.ask'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.ask' } as ActionOf<'work.ask'>, requestOptions); }
     async workCancelAsk(input: Omit<ActionOf<'work.cancel-ask'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.cancel-ask' } as ActionOf<'work.cancel-ask'>, requestOptions); }
     async workClaim(input: Omit<ActionOf<'work.claim'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.claim' } as ActionOf<'work.claim'>, requestOptions); }

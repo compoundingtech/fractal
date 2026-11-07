@@ -2163,6 +2163,45 @@ impl Client {
         .await
     }
 
+    pub async fn thread_list(
+        &self,
+        agent_id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ThreadSummaryPage>, ClientError> {
+        let mut path = format!("/v1/client/threads?agent_id={}", percent_encode(agent_id));
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
+    pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {
+        self.get(&format!("/v1/client/threads/{}", thread_path_segment(id)?))
+            .await
+    }
+    pub async fn thread_timeline(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ThreadTimelinePage>, ClientError> {
+        let mut path = format!("/v1/client/threads/{}/timeline", thread_path_segment(id)?);
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        self.get(&path).await
+    }
     pub async fn harness_questions(
         &self,
         cursor: Option<&str>,
@@ -3486,6 +3525,39 @@ impl Client {
         parameters: TerminalResizeParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::terminal_resize(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_close(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_close(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_rename(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadRenameParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_rename(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_reopen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_reopen(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -5261,6 +5333,19 @@ where
         }
         return Ok(Some(bytes));
     }
+}
+
+fn thread_path_segment(value: &str) -> Result<&str, ClientError> {
+    let segment = value.strip_prefix("thread/").unwrap_or(value);
+    if segment.is_empty()
+        || segment.len() > 128
+        || !segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ClientError::Protocol("invalid thread identifier".into()));
+    }
+    Ok(segment)
 }
 
 fn percent_encode(value: &str) -> String {

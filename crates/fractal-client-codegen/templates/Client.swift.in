@@ -419,6 +419,14 @@ public actor FractalClient {
         value.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"))!
     }
 
+    static func routedThreadID(_ value: String) throws -> String {
+        let opaque = value.hasPrefix("thread/") ? String(value.dropFirst("thread/".count)) : value
+        guard (1...128).contains(opaque.utf8.count),
+            opaque.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 })
+        else { throw URLError(.badURL) }
+        return opaque
+    }
+
     static func routedSessionID(_ value: String) -> String {
         let innerID = value.hasPrefix("session/") ? String(value.dropFirst("session/".count)) : value
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.~"))

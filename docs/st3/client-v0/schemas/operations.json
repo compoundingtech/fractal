@@ -38,6 +38,9 @@
     { "id": "collections.stream", "method": "GET", "path": "/v1/client/collections/stream", "websocket_protocol": "fractal.client.collections.v0", "command": "CollectionCommand", "frame": "CollectionFrame", "max_subscriptions": 16 }
   ],
   "reads": [
+    {"id": "thread.list", "method": "GET", "path": "/v1/client/threads", "response": "ThreadSummaryPage", "scope": "read.projections", "query": {"agent_id": "required exact agent id", "cursor": "optional opaque cursor", "limit": "optional page size"}},
+    {"id": "thread.get", "method": "GET", "path": "/v1/client/threads/{id}", "response": "ThreadSummary", "scope": "read.projections"},
+    {"id": "thread.timeline", "method": "GET", "path": "/v1/client/threads/{id}/timeline", "response": "ThreadTimelinePage", "scope": "read.projections", "query": {"cursor": "optional opaque cursor", "limit": "optional page size"}},
     {"id": "harness-questions.list", "method": "GET", "path": "/v1/client/harness-questions", "response": "Page", "scope": "read.projections"},
     {"id": "harness-questions.get", "method": "GET", "path": "/v1/client/harness-questions/{id}", "response": "HarnessQuestion", "scope": "read.projections"},
     {"id": "notes.list", "method": "GET", "path": "/v1/client/notes", "response": "DirectiveNotes", "scope": "read.projections", "query": {"actor": "optional exact authenticated person or agent; cannot select another actor"}},
@@ -145,6 +148,9 @@
     {"id": "glasses.delete", "method": "DELETE", "path": "/v1/client/glasses/{id}", "request": "GlassDelete", "response": "Glass", "scope": "control.glasses", "idempotency_header": "Idempotency-Key"}
   ],
   "actions": {
+    "thread.rename": {"capability": "control.messages", "parameters": "ThreadRenameParameters"},
+    "thread.close": {"capability": "control.messages", "parameters": "ThreadTargetParameters"},
+    "thread.reopen": {"capability": "control.messages", "parameters": "ThreadTargetParameters"},
     "harness.answer": {"capability": "terminal.control", "parameters": "HarnessAnswerParameters"},
     "arrangement.edit": { "capability": "control.arrangements", "parameters": "ArrangementEditParameters", "max_response_bytes": 1048576 },
     "arrangement.membership.edit": { "capability": "control.arrangements", "parameters": "ArrangementMembershipEditParameters", "max_response_bytes": 1048576 },

@@ -22,6 +22,9 @@ export type ActionCommon = {
   "harness.answer"
   | "arrangement.edit"
   | "arrangement.membership.edit"
+  | "thread.rename"
+  | "thread.close"
+  | "thread.reopen"
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
@@ -88,6 +91,7 @@ export type ActionResult = {
   harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   membership_revision?: Revision;
+  metadata_revision?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
   snapshot_id: Id;
@@ -3735,6 +3739,60 @@ export type TerminalScreen = {
   truncated: boolean;
 };
 
+export type ThreadClosedEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  id: Id;
+  kind: "thread.closed";
+};
+
+export type ThreadRenameParameters = {
+  target_id: Id;
+  title: string;
+  title_revision: Revision;
+};
+
+export type ThreadRenamedEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  id: Id;
+  kind: "thread.renamed";
+  previous_title: string;
+  title: string;
+};
+
+export type ThreadReopenedEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  id: Id;
+  kind: "thread.reopened";
+};
+
+export type ThreadSummary = {
+  agent_id: Id;
+  id: Id;
+  revision: Revision;
+  state: "open" | "closed";
+  title: string;
+  title_revision: Revision;
+};
+
+export type ThreadSummaryPage = {
+  items: Array<ThreadSummary>;
+  next_cursor: (string | null);
+};
+
+export type ThreadTargetParameters = {
+  target_id: Id;
+};
+
+export type ThreadTimelineEvent = (ThreadRenamedEvent | ThreadClosedEvent | ThreadReopenedEvent);
+
+export type ThreadTimelinePage = {
+  items: Array<ThreadTimelineEvent>;
+  next_cursor: (string | null);
+};
+
 export type TimelineAskAnswer = {
   custom?: string;
   note?: string;
@@ -4607,6 +4665,9 @@ export type ActionRequest =
   rows: number;
   terminal_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'terminal_sequence'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.close'; parameters: ThreadTargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.rename'; parameters: ThreadRenameParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.reopen'; parameters: ThreadTargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.ask'; parameters: PersonAskParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.cancel-ask'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.claim'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
