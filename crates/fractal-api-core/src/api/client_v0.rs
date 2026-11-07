@@ -1031,7 +1031,9 @@ pub fn mission_list_cards_with(
                 else if steps.iter().any(|s| s.status=="blocked") {"blocked"} else {"system"};
             let shown=steps.iter().map(|step| json!({
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
-                "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
+                "attempt":step.attempt,
+                "assignee":step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                "claimant":step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
                 "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
                 "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),

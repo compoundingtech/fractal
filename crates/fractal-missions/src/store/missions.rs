@@ -3,6 +3,7 @@
 use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
+use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
 
 mod run_review;
 #[doc(hidden)]
@@ -80,8 +81,23 @@ impl ObservationBatches {
 }
 
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
-    let actor = normalize_actor(actor, "agent");
-    resolve_reference_conn(connection, &actor)
+    let actor = canonical_work_actor(actor)?;
+    let resolved = resolve_reference_conn(connection, &actor)?;
+    canonical_work_actor(&resolved)
+}
+
+/// Read filters historically accept bare seat names as well as qualified actors.
+/// Work-action admission deliberately uses `physical_actor` directly instead.
+fn physical_read_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
+    physical_actor(connection, &normalize_actor(actor, "agent"))
+}
+
+fn canonical_work_actor(actor: &str) -> Result<String, FractalError> {
+    fractal_schema::canonical_agent_actor(actor)
+        .map(std::borrow::Cow::into_owned)
+        .ok_or_else(|| {
+            FractalError::new("invalid-work-actor", format!("invalid agent actor `{actor}`"))
+        })
 }
 
 // One query preserves the native collection's indexed latest/live probes and shallow
@@ -593,19 +609,19 @@ fn renew_nested_ancestor_leases_tx(
     let expiry = now.saturating_add(600_000);
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hdaafb8e69f1c owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
+            /* sqlite-large-value: allow-for-now lv-heca706b36312 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
              SET lease_expires_at_unix_ms=?1, updated_at_unix_ms=?2
              WHERE generation_id=?3
                AND substr(?4, 1, length(step_path) + 1)=step_path || '/'
                AND status IN ('claimed','working','verifying')
-               AND lease_owner=?5
+               AND lease_owner IN (SELECT value FROM json_each(?5))
                AND lease_incarnation IS ?6",
             params![
                 expiry.to_string(),
                 now.to_string(),
                 generation,
                 step_path,
-                actor,
+                work_actor_spellings_json(actor),
                 incarnation
             ],
         )
@@ -982,9 +998,9 @@ fn carried_claim_successor_tx(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                     lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
              FROM step_runs
-             WHERE run_id=?1 AND step_path=?2 AND lease_owner=?3 AND generation_id<>?4
+             WHERE run_id=?1 AND step_path=?2 AND lease_owner IN (SELECT value FROM json_each(?3)) AND generation_id<>?4
                AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
-            params![run_id, step.step, actor, generation_id_from_subject(&step.generation)],
+            params![run_id, step.step, work_actor_spellings_json(actor), generation_id_from_subject(&step.generation)],
             step_run_from_row,
         )
         .optional()
@@ -1002,7 +1018,7 @@ fn mission_output_authority(
                          lease_incarnation: Option<&str>,
                          expiry: Option<u128>| {
         matches!(status, "claimed" | "working")
-            && owner == Some(actor)
+            && work_actor_matches(owner, actor)
             && expiry.is_some_and(|expiry| expiry > now)
             && lease_incarnation.is_none_or(|lease| Some(lease) == incarnation)
     };
@@ -5121,25 +5137,26 @@ impl MissionsStore for Store {
     }
 
     fn work_for_renewal(&self, actor: &str) -> Result<Vec<StepRunView>> {
-        let actor = normalize_actor(actor, "agent");
         let snapshot = now_ms();
         let connection = self.readers.get();
-        let actor = physical_actor(&connection, &actor)?;
+        let actor = physical_read_actor(&connection, actor)?;
         let views = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                         lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
                  FROM step_runs INDEXED BY step_runs_lease_index
-                 WHERE lease_owner=?1 AND agentless=0
+                 WHERE lease_owner IN (SELECT value FROM json_each(?1)) AND agentless=0
                    AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
                  ORDER BY subject",
             )?
-            .query_map([&actor], step_run_from_row)?
+            .query_map([work_actor_spellings_json(&actor)], step_run_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut held = Vec::with_capacity(views.len());
         for mut view in views {
             apply_effective_step_state(&connection, &mut view, snapshot)?;
-            if view.work_claim_is_held_by(&actor) {
+            if matches!(view.status.as_str(), "claimed" | "working" | "verifying" | "blocked")
+                && work_actor_matches(view.claimant.as_deref(), &actor)
+            {
                 held.push(view);
             }
         }
@@ -5351,7 +5368,8 @@ impl MissionsStore for Store {
             selected: Option<&BTreeSet<String>>,
         ) -> Result<Vec<StepRunView>> {
         let connection = self.readers.get();
-        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
+        let actor_spellings = actor.as_deref().map(work_actor_spellings_json);
         let views = match selected {
             None => {
                 let query = if actor.is_some() {
@@ -5361,7 +5379,7 @@ impl MissionsStore for Store {
                 };
                 let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc51ec5c7f089 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &query)?;
                 let rows = statement.query_map(
-                    params![actor.as_deref(), include_terminal, include_agentless],
+                    params![actor_spellings.as_deref(), include_terminal, include_agentless],
                     step_run_from_row,
                 )?;
                 rows.collect::<Result<Vec<_>, _>>()?
@@ -5372,7 +5390,7 @@ impl MissionsStore for Store {
                 let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfb225899064e owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &query)?;
                 let rows = statement.query_map(
                     params![
-                        actor.as_deref(),
+                        actor_spellings.as_deref(),
                         include_terminal,
                         include_agentless,
                         serde_json::to_string(selected)?
@@ -5431,10 +5449,10 @@ impl MissionsStore for Store {
                 continue;
             }
             let visible_to_actor = actor.as_ref().is_none_or(|actor| {
-                view.assigned_to.as_deref() == Some(actor.as_str())
-                    || view.claimant.as_deref() == Some(actor.as_str())
+                work_actor_matches(view.assigned_to.as_deref(), actor)
+                    || work_actor_matches(view.claimant.as_deref(), actor)
                     || (matches!(view.status.as_str(), "ready" | "blocked")
-                        && view.available_to.iter().any(|candidate| candidate == actor))
+                        && view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor)))
             });
             if visible_to_actor
                 && (include_terminal
@@ -5487,8 +5505,9 @@ impl MissionsStore for Store {
             limit: usize,
             after: Option<&(u128, String)>,
         ) -> Result<(Vec<StepRunView>, bool)> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
+        let actor_spellings = actor.as_deref().map(work_actor_spellings_json);
         // Enrichment can clear a step's claimant, through its effective state alone, but
         // never changes its assignee, its candidates or its update time. So this finds every
         // step the actor can see, in the order the history shows them, and a step it matches
@@ -5497,17 +5516,17 @@ impl MissionsStore for Store {
             let Some(actor) = actor.as_deref() else {
                 return Ok(true);
             };
-            if view.assigned_to.as_deref() == Some(actor)
-                || view.available_to.iter().any(|candidate| candidate == actor)
+            if work_actor_matches(view.assigned_to.as_deref(), actor)
+                || view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor))
             {
                 return Ok(true);
             }
-            if view.claimant.as_deref() != Some(actor) {
+            if !work_actor_matches(view.claimant.as_deref(), actor) {
                 return Ok(false);
             }
             let mut effective = view.clone();
             apply_effective_step_state(&connection, &mut effective, snapshot_unix_ms)?;
-            Ok(effective.claimant.as_deref() == Some(actor))
+            Ok(work_actor_matches(effective.claimant.as_deref(), actor))
         };
         let mut statement = connection.prepare_cached(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -5517,13 +5536,13 @@ impl MissionsStore for Store {
                     OR (length(updated_at_unix_ms)=length(?2) AND updated_at_unix_ms<?2)
                     OR (updated_at_unix_ms=?2 AND subject>?3))
                AND (agentless=0 OR ?1 IS NULL)
-               AND (?1 IS NULL OR assignee=?1 OR lease_owner=?1
-                    OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1))
+               AND (?1 IS NULL OR assignee IN (SELECT value FROM json_each(?1)) OR lease_owner IN (SELECT value FROM json_each(?1))
+                    OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1))))
              ORDER BY length(updated_at_unix_ms) DESC, updated_at_unix_ms DESC, subject",
         )?;
         let rows = statement.query_map(
             params![
-                actor.as_deref(),
+                actor_spellings.as_deref(),
                 after.map(|key| key.0.to_string()),
                 after.map(|key| key.1.as_str())
             ],
@@ -5555,8 +5574,8 @@ impl MissionsStore for Store {
             actor: Option<&str>,
             snapshot_unix_ms: u128,
         ) -> Result<Option<StepRunView>> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let view = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -5571,9 +5590,9 @@ impl MissionsStore for Store {
         };
         enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
         let visible_to_actor = actor.as_ref().is_none_or(|actor| {
-            view.assigned_to.as_deref() == Some(actor.as_str())
-                || view.claimant.as_deref() == Some(actor.as_str())
-                || view.available_to.iter().any(|candidate| candidate == actor)
+            work_actor_matches(view.assigned_to.as_deref(), actor)
+                || work_actor_matches(view.claimant.as_deref(), actor)
+                || view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor))
         });
         Ok(visible_to_actor.then_some(view))
     }
@@ -5584,8 +5603,8 @@ impl MissionsStore for Store {
             snapshot_unix_ms: u128,
             include_agentless: bool,
         ) -> Result<Vec<StepRunView>> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let mut statement = connection.prepare(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                     lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
@@ -5603,9 +5622,9 @@ impl MissionsStore for Store {
             let mut view = row?;
             enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             let visible_to_actor = actor.as_ref().is_none_or(|actor| {
-                view.assigned_to.as_deref() == Some(actor.as_str())
-                    || view.claimant.as_deref() == Some(actor.as_str())
-                    || view.available_to.iter().any(|candidate| candidate == actor)
+                work_actor_matches(view.assigned_to.as_deref(), actor)
+                    || work_actor_matches(view.claimant.as_deref(), actor)
+                    || view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor))
             });
             if visible_to_actor {
                 visible.push(view);
@@ -5889,12 +5908,11 @@ impl MissionsStore for Store {
             ));
         }
         let subject = normalize_step_run(subject);
-        let actor = normalize_actor(
+        let actor = canonical_work_actor(
             request.actor.as_deref().ok_or_else(|| {
                 FractalError::new("missing-work-actor", "a work action needs an actor")
             })?,
-            "agent",
-        );
+        )?;
         let requested_incarnation = request
             .incarnation
             .as_deref()
@@ -6033,11 +6051,8 @@ impl MissionsStore for Store {
                 if action == "claim" && adhoc_work::pending_handoff(transaction, &current)? {
                     return Err(FractalError::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
                 }
-                let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
-                    || current
-                        .available_to
-                        .iter()
-                        .any(|candidate| candidate == &actor);
+                let eligible = work_actor_matches(current.assigned_to.as_deref(), &actor)
+                    || current.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), &actor));
                 if current.agentless || !eligible {
                     return Err(FractalError::new(
                         "work-not-available",
@@ -6048,7 +6063,7 @@ impl MissionsStore for Store {
                     let mut statement = transaction
                         .prepare(
                             "SELECT subject, generation_id, step_path FROM step_runs
-                             WHERE lease_owner=?1
+                             WHERE lease_owner IN (SELECT value FROM json_each(?1))
                                AND subject<>?2
                                AND status IN ('claimed','working','verifying','blocked')
                                AND lease_expires_at_unix_ms IS NOT NULL
@@ -6057,7 +6072,7 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)?;
                     let active = statement
-                        .query_map(params![actor, subject, now.to_string()], |row| {
+                        .query_map(params![work_actor_spellings_json(&actor), subject, now.to_string()], |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
                                 row.get::<_, String>(1)?,
@@ -6126,14 +6141,14 @@ impl MissionsStore for Store {
                 let lease_valid = current
                     .claim_expires_at_unix_ms
                     .is_some_and(|expiry| expiry > now);
-                if lease_valid && current.claimant.as_deref() != Some(actor.as_str()) {
+                if lease_valid && !work_actor_matches(current.claimant.as_deref(), &actor) {
                     return Err(FractalError::new(
                         "work-already-claimed",
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
                 if action != "claim"
-                    && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
+                    && (!lease_valid || !work_actor_matches(current.claimant.as_deref(), &actor))
                 {
                     return Err(FractalError::new(
                         "work-not-claimed",
@@ -6141,7 +6156,7 @@ impl MissionsStore for Store {
                     ));
                 }
                 if lease_valid
-                    && current.claimant.as_deref() == Some(actor.as_str())
+                    && work_actor_matches(current.claimant.as_deref(), &actor)
                     && current.claim_incarnation.as_deref() != Some(requested_incarnation)
                 {
                     return Err(FractalError::new(
@@ -6175,6 +6190,21 @@ impl MissionsStore for Store {
                         ));
                     }
                 }
+                let mut lease_actor = actor.as_str();
+                // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+                // Old fleet members compare eligibility and ownership literally. Preserve a
+                // legacy assignment's spelling until every fleet member compares canonical
+                // identities; a later contraction PR migrates the rows and removes this arm.
+                if let Some(legacy) = current.assigned_to.as_deref().into_iter()
+                    .chain(current.available_to.iter().map(String::as_str))
+                    .find(|candidate| *candidate != actor.as_str()
+                        && work_actor_matches(Some(*candidate), &actor))
+                {
+                    lease_actor = legacy;
+                }
+                // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
+                let ownership_changed = current.claimant.as_deref()
+                    .is_some_and(|claimant| claimant != lease_actor);
                 let (status, worker_reported, claimant, claim_incarnation, claim_expiry) = match action {
                     "claim" => {
                         if current.status != "ready" && current.status != "claimed" {
@@ -6186,7 +6216,7 @@ impl MissionsStore for Store {
                         (
                             "claimed",
                             current.worker_reported,
-                            Some(actor.clone()),
+                            Some(lease_actor.to_owned()),
                             effective_incarnation.clone(),
                             Some(now + 600_000),
                         )
@@ -6194,21 +6224,21 @@ impl MissionsStore for Store {
                     "renew" => (
                         current.status.as_str(),
                         current.worker_reported,
-                        Some(actor.clone()),
+                        Some(lease_actor.to_owned()),
                         effective_incarnation.clone(),
                         Some(now + 600_000),
                     ),
                     "progress" => (
                         "working",
                         current.worker_reported,
-                        Some(actor.clone()),
+                        Some(lease_actor.to_owned()),
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
                     "extend" => (
                         current.status.as_str(),
                         current.worker_reported,
-                        Some(actor.clone()),
+                        Some(lease_actor.to_owned()),
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
@@ -6216,7 +6246,7 @@ impl MissionsStore for Store {
                     "wait" | "resume" => (
                         "working",
                         current.worker_reported,
-                        Some(actor.clone()),
+                        Some(lease_actor.to_owned()),
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
@@ -6252,7 +6282,7 @@ impl MissionsStore for Store {
                 } else {
                     None
                 };
-                let publish = !quiet_renewal
+                let publish = !quiet_renewal || ownership_changed
                     || last_replicated_expiry.is_none_or(|expiry| expiry <= now.saturating_add(300_000));
                 let readiness_epoch = current
                     .readiness_epoch
@@ -6361,7 +6391,7 @@ impl MissionsStore for Store {
                                lease_owner=excluded.lease_owner, lease_incarnation=excluded.lease_incarnation,
                                lease_expires_at_unix_ms=excluded.lease_expires_at_unix_ms,
                                updated_at_unix_ms=excluded.updated_at_unix_ms",
-                            params![subject, current.attempt, actor, requested_incarnation,
+                            params![subject, current.attempt, lease_actor, requested_incarnation,
                                     claim_expiry.expect("a renewal has a lease expiry").to_string(), now.to_string()],
                         )
                         .map_err(internal)?;

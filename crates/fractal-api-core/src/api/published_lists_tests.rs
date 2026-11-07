@@ -287,7 +287,52 @@ fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
             }
         }
     }
+    assert_eq!(
+        work_oracle(store, time, Some("garden/birch"), usize::MAX),
+        work_oracle(store, time, Some("agent/garden/birch"), usize::MAX),
+        "legacy and canonical actor filters preserve the same direct seat-queue order"
+    );
+    let (legacy, _) = publication.rows.actor_rows("garden/birch");
+    let (canonical, built) = publication.rows.actor_rows("agent/garden/birch");
+    assert!(!built, "a canonical actor reuses its legacy filter's order");
+    assert!(Arc::ptr_eq(&legacy, &canonical), "both spellings share one actor order");
     (publication, changed)
+}
+
+#[test]
+fn published_work_keeps_persisted_legacy_assignments_and_available_seats_visible() {
+    let _clock = Clock::at(start_time());
+    for available in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let store = Store::open(&path, "cedar").unwrap();
+        mission(&store, "garden/alpha");
+        let run = start(&store, "garden/alpha", "legacy-work-list");
+        let (subject, _) = step(&run, "plant");
+        store.set_step_state(&subject, "ready", None).unwrap();
+        // Retain an actual older member's projection spelling, rather than testing two empty
+        // actor filters against a row already canonicalized by the current writer.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        smallclaims::store::projection_digest::register(&connection).unwrap();
+        let assignee = (!available).then_some("garden/ash");
+        let candidates = if available { r#"["garden/ash"]"# } else { "[]" };
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h16928b5eb896 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, candidates],
+        ).unwrap();
+        drop(connection);
+        let (publication, _) = fold_work_checked(&store);
+        for actor in ["garden/ash", "agent/garden/ash"] {
+            let (indexes, _) = publication.rows.actor_rows(actor);
+            assert_eq!(indexes.len(), 1, "{actor}, available={available}");
+            assert_eq!(publication.rows.order[indexes[0] as usize], subject);
+            assert_eq!(
+                work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0.len(),
+                1,
+                "the persisted legacy row is visible in the direct read too"
+            );
+        }
+    }
 }
 
 #[test]

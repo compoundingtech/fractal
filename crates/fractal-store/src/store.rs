@@ -11345,6 +11345,97 @@ pub fn append_claim_tx_with_assistant_answer(
     )
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+fn legacy_work_claimant<'a>(kind: &str, fields: &'a BTreeMap<String, Value>) -> Option<&'a str> {
+    if !matches!(kind, "work.claimed" | "work.renewed" | "work.progress" | "work.extended") {
+        return None;
+    }
+    fields.get("claimant").and_then(Value::as_str).filter(|claimant| {
+        fractal_schema::canonical_agent_actor(claimant).is_some_and(|canonical| {
+            canonical.starts_with("agent/") && canonical.as_ref() != *claimant
+        })
+    })
+}
+
+/// Validate only a canonical copy; authenticated and persisted claim bytes remain unchanged.
+fn work_claim_validation_fields<'a>(
+    connection: &Connection,
+    subject: &str,
+    kind: &str,
+    fields: &'a BTreeMap<String, Value>,
+) -> rusqlite::Result<std::borrow::Cow<'a, BTreeMap<String, Value>>> {
+    let Some(claimant) = legacy_work_claimant(kind, fields) else {
+        return Ok(std::borrow::Cow::Borrowed(fields));
+    };
+    let eligible: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM step_runs WHERE subject=?1 AND agentless=0
+         AND (assignee=?2 OR EXISTS(SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?2)))",
+        params![subject, claimant], |row| row.get(0),
+    )?;
+    if !eligible {
+        return Ok(std::borrow::Cow::Borrowed(fields));
+    }
+    let mut validation = fields.clone();
+    validation.insert("claimant".into(), json!(fractal_schema::canonical_agent_actor(claimant)));
+    Ok(std::borrow::Cow::Owned(validation))
+}
+
+fn replicated_work_validation_fields<'a>(
+    kind: &str,
+    fields: &'a BTreeMap<String, Value>,
+) -> std::borrow::Cow<'a, BTreeMap<String, Value>> {
+    let Some(claimant) = legacy_work_claimant(kind, fields) else {
+        return std::borrow::Cow::Borrowed(fields);
+    };
+    let mut validation = fields.clone();
+    validation.insert("claimant".into(), json!(fractal_schema::canonical_agent_actor(claimant)));
+    std::borrow::Cow::Owned(validation)
+}
+#[test]
+fn legacy_work_claimant_validation_requires_exact_target_eligibility() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-ha92e9efed614 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE step_runs(subject TEXT, agentless INTEGER, assignee TEXT, available_to TEXT);
+         INSERT INTO step_runs VALUES('step-run/test/work',0,'node/worker','[]');
+         INSERT INTO step_runs VALUES('step-run/test/offered',0,NULL,'[\"node/worker\"]');
+         INSERT INTO step_runs VALUES('step-run/test/other',0,'agent/node/worker','[]');",
+    ).unwrap();
+    let fields = BTreeMap::from([
+        ("attempt".into(), json!(1)),
+        ("status".into(), json!("claimed")),
+        ("claimant".into(), json!("node/worker")),
+    ]);
+    assert!(fractal_schema::registry().validate_claim(
+        "step-run/test/work", "work.claimed", &fields,
+    ).is_err());
+    for subject in ["step-run/test/work", "step-run/test/offered"] {
+        let validation = work_claim_validation_fields(&connection, subject, "work.claimed", &fields).unwrap();
+        assert_eq!(validation["claimant"], json!("agent/node/worker"));
+        fractal_schema::registry().validate_claim(subject, "work.claimed", &validation).unwrap();
+        assert_eq!(fields["claimant"], json!("node/worker"));
+    }
+    for (subject, claimant, kind) in [
+        ("step-run/test/other", "node/worker", "work.claimed"),
+        ("step-run/test/missing", "node/worker", "work.claimed"),
+        ("step-run/test/work", "node/other", "work.claimed"),
+        ("step-run/test/work", "node/worker name", "work.claimed"),
+        ("step-run/test/work", "worker", "work.claimed"),
+        ("step-run/test/work", "node/worker", "step-run.state"),
+    ] {
+        let mut invalid = fields.clone();
+        invalid.insert("claimant".into(), json!(claimant));
+        let validation = work_claim_validation_fields(&connection, subject, kind, &invalid).unwrap();
+        assert_eq!(validation.as_ref(), &invalid);
+        assert!(fractal_schema::registry().validate_claim(subject, kind, &validation).is_err());
+        if claimant == "worker" || claimant.contains(' ') || kind == "step-run.state" {
+            let replicated = replicated_work_validation_fields(kind, &invalid);
+            assert!(fractal_schema::registry().validate_replicated_claim(subject, kind, &replicated).is_err());
+        }
+    }
+}
+
+// LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
+
 #[allow(clippy::too_many_arguments)]
 /* sqlite-large-value-flow: allow-for-now flow-h1f241b496964 owner=fractal_store::store TODO=prepare-body-and-predecessor-values */ fn append_admitted_claim_tx(
     transaction: &Transaction<'_>,
@@ -11386,8 +11477,9 @@ pub fn append_claim_tx_with_assistant_answer(
         delegation::validate_write(transaction, subject, kind, actor, &fields, &evidence)
             .map_err(anyhow::Error::new)?;
     }
+    let validation_fields = work_claim_validation_fields(transaction, subject, kind, &fields)?;
     let claim_spec = fractal_schema::registry()
-        .validate_claim(subject, kind, &fields)
+        .validate_claim(subject, kind, &validation_fields)
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     if kind == fractal_schema::directive_notes::KIND {
         directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
@@ -15879,6 +15971,9 @@ pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, FractalError> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+    // Signed legacy ownership can arrive before its row. Projection checks eligibility.
+    // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
     if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched" | "client.action-result") {
         return Err(FractalError::new("invalid-replicated-claim",
             "helper launcher authority, launch history, and client action receipts cannot be admitted from peers"));
@@ -15896,7 +15991,8 @@ pub fn classify_replicated_claim_with_registry(
             ),
         )
     })?;
-    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &fields) {
+    let validation_fields = replicated_work_validation_fields(&claim.kind, &fields);
+    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &validation_fields) {
         // A peer may already publish a field introduced by a newer schema. Keep
         // that authenticated record retryable so an upgrade can admit the
         // original claim without replacing or rewriting it.
@@ -18347,6 +18443,22 @@ pub fn project_mission_run_update(
         if current_attempt != Some(claim_attempt) {
             return Ok(());
         }
+        // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+        let validation_fields = schema_fields_for_body(&claim.kind, &claim.body).map_err(internal)?;
+        if let Some(claimant) = legacy_work_claimant(&claim.kind, &validation_fields) {
+            let (assignee, available, agentless): (Option<String>, String, bool) = transaction.query_row(
+                "SELECT assignee, available_to, agentless FROM step_runs WHERE subject=?1",
+                [&claim.subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(internal)?;
+            let available: Vec<String> = serde_json::from_str(&available).map_err(internal)?;
+            if agentless || !(work_actor_matches(assignee.as_deref(), claimant)
+                || available.iter().any(|candidate| work_actor_matches(Some(candidate), claimant)))
+            {
+                return Err(FractalError::new("invalid-work-claimant",
+                    "legacy work claimant is not eligible for the target step"));
+            }
+        }
+        // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
         if claim.kind == "work.handoff-returned" {
             transaction.execute(
                 /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
@@ -19050,8 +19162,32 @@ pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
      FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
      WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
 
-/// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
-/// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
+/// Compare work actors without changing persisted rows or conflating recognized actor kinds.
+pub fn work_actor_matches(candidate: Option<&str>, actor: &str) -> bool {
+    let Some(candidate) = candidate.and_then(fractal_schema::canonical_agent_actor) else {
+        return false;
+    };
+    fractal_schema::canonical_agent_actor(actor).as_deref() == Some(candidate.as_ref())
+}
+
+/// Exact persisted spellings of one logical work actor, as a JSON array for indexed SQL reads.
+/// Only a prefixless name that canonicalizes back to the same actor is an alias.
+pub fn work_actor_spellings_json(actor: &str) -> String {
+    let Some(canonical) = fractal_schema::canonical_agent_actor(actor) else {
+        return "[]".into();
+    };
+    let legacy = canonical.strip_prefix("agent/").filter(|legacy| {
+        fractal_schema::canonical_agent_actor(legacy).as_deref() == Some(canonical.as_ref())
+    });
+    match legacy {
+        Some(legacy) => json!([canonical, legacy]).to_string(),
+        None => json!([canonical]).to_string(),
+    }
+}
+
+/// [`work_at_snapshot_query`] for one actor's JSON spelling array `?1`.
+/// The reconciler reads each running seat's steps on every pass; the actor's steps are found
+/// through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
 /// step the store ever ran.
 pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
@@ -19065,10 +19201,10 @@ pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
                 lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
          FROM step_runs
          WHERE rowid IN (
-                 SELECT rowid FROM step_runs WHERE assignee=?1
-                 UNION SELECT rowid FROM step_runs WHERE lease_owner=?1
+                 SELECT rowid FROM step_runs WHERE assignee IN (SELECT value FROM json_each(?1))
+                 UNION SELECT rowid FROM step_runs WHERE lease_owner IN (SELECT value FROM json_each(?1))
                  UNION SELECT rowid FROM step_runs WHERE available_to!='[]'
-                   AND EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1)
+                   AND EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1)))
                )
            AND (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
@@ -22471,8 +22607,9 @@ pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), FractalError> {
                     ),
                 )
             })?;
+            let validation_fields = replicated_work_validation_fields(&claim.kind, &fields);
             fractal_schema::registry()
-                .validate_claim(&claim.subject, &claim.kind, &fields)
+                .validate_claim(&claim.subject, &claim.kind, &validation_fields)
                 .map_err(|error| {
                     FractalError::new(
                         "invalid-replicated-claim",
