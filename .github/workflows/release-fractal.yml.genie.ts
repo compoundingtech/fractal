@@ -8,11 +8,11 @@ import { readFileSync } from 'node:fs'
 
 const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-version', import.meta.url), 'utf8').trim()
 
-// Preserve release triggers and source verification; tag builds prepare draft candidates only.
+// Preserve release triggers and source verification; tag builds cannot draft or publish releases.
 // Every commit on main also builds and verifies both archives and keeps short-lived artifacts,
 // so release breakage fails on main instead of at tag time (daily candidates reuse those artifacts).
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
-// the tag trigger below. Stable publication requires the daily workflow's explicit product GO gate.
+// the tag trigger below. Only the daily workflow prepares untagged stable candidates and publishes with explicit product GO.
 export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Fractal tag release",
@@ -304,35 +304,6 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           "run": "scripts/release-fractal-edge --source \"$SOURCE_SHA\" --dist dist --run-url \"$RUN_URL\""
         }
       ]
-    },
-    "candidate": {
-      "name": "release-draft-candidate",
-      "if": "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
-      "needs": "assemble",
-      "runs-on": "ubuntu-latest",
-      "permissions": {
-        "contents": "write"
-      },
-      "env": {
-        "GH_TOKEN": "${{ github.token }}",
-        "GH_REPO": "${{ github.repository }}",
-        "TAG": "${{ github.ref_name }}",
-        "SOURCE_SHA": "${{ github.sha }}"
-      },
-      "steps": [
-        ...fullHistoryCheckoutSteps(),
-        {
-          "uses": "actions/download-artifact@v4",
-          "with": {
-            "name": "fractal-release",
-            "path": "dist"
-          }
-        },
-        {
-          "name": "Prepare the verified tag artifacts as a draft candidate",
-          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --target \"$SOURCE_SHA\" --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json RELEASE-NOTES.md\n"
-        }
-      ]
     }
   }
-}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "candidate": "Prepares verified assembled artifacts as a draft candidate without stable publication; builds nothing."}))))
+}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing."}))))

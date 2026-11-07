@@ -636,7 +636,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Downloads verified build artifacts; builds nothing.
+          CACHE_REASON: Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   publishEdge:
@@ -697,71 +697,4 @@ jobs:
         shell: bash
         env:
           CACHE_REASON: Moves the rolling edge pre-release to a verified main commit; builds nothing.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  candidate:
-    name: release-draft-candidate
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false) }}
-    needs: assemble
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
-      SOURCE_SHA: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-      - name: Fetch the whole history without evidence tags
-        env:
-          FETCH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
-            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
-            export GIT_CONFIG_VALUE_0
-          fi
-          head=$(git rev-parse HEAD)
-          shallow=$(git rev-parse --git-path shallow)
-          errors=$(mktemp)
-          fetch() {
-            status=0
-            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
-            cat "$errors" >&2
-            return "$status"
-          }
-          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
-          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
-          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
-            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
-            exit 1
-          fi
-          rm -f "$shallow.full-fetch"
-          git fsck --connectivity-only --no-dangling --no-progress
-      - uses: actions/download-artifact@v4
-        with:
-          name: fractal-release
-          path: dist
-      - name: Prepare the verified tag artifacts as a draft candidate
-        run: |
-          set -euo pipefail
-          git fetch origin "refs/tags/$TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
-          python3 scripts/compat-baseline-release check --source "$SOURCE_SHA" --require-latest
-          python3 scripts/release_notes.py --source "$SOURCE_SHA" --tag "$TAG" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json
-          cd dist
-          sha256sum --check SHA256SUMS
-          python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
-          # Refuse to replace any existing release or its assets. A partial draft stays private
-          # for inspection; delete that draft before retrying, never move the tag.
-          gh release create "$TAG" --verify-tag --target "$SOURCE_SHA" --draft --title "Fractal $TAG" \
-            --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json RELEASE-NOTES.md
-
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Prepares verified assembled artifacts as a draft candidate without stable publication; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

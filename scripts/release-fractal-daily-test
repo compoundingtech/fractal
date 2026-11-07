@@ -43,7 +43,7 @@ elif args[:2] == ['run', 'download']:
     for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
         shutil.copy(item, destination / item.name)
 elif args[:2] == ['release', 'create']:
-    assert '--draft' in args and '--verify-tag' in args, args
+    assert '--draft' in args and '--verify-tag' not in args, args
     body_path = pathlib.Path(args[args.index('--notes-file') + 1])
     assets = args[args.index('--notes-file') + 2:]
     pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
@@ -140,8 +140,6 @@ with tempfile.TemporaryDirectory() as temporary:
         shas.append(sh('git', 'rev-parse', 'HEAD', cwd=checkout))
         if index == 0:
             sh('git', 'tag', 'v0.3.17', cwd=checkout)
-    sh('git', 'init', '--bare', '-q', str(root / 'origin.git'), cwd=root)
-    sh('git', 'remote', 'add', 'origin', str(root / 'origin.git'), cwd=checkout)
     tools = root / 'tools'
     tools.mkdir()
     (tools / 'gh').write_text(FAKE_GH)
@@ -151,7 +149,7 @@ with tempfile.TemporaryDirectory() as temporary:
     receipt = root / 'receipt.json'
 
     def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None, artifact='fractal-release',
-              run_id=None, run_fields=None):
+              run_id=None, run_fields=None, summary=''):
         receipt.unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
         (root / 'impact.json').write_text(json.dumps(impact or {'fragments': [], 'change_links': {}}))
@@ -160,7 +158,7 @@ with tempfile.TemporaryDirectory() as temporary:
                    FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt),
                    FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact,
                    FAKE_RUN=json.dumps(run_fields or {}), RELEASE_GH_RETRY_DELAYS='0,0,0')
-        args = ['python3', 'scripts/release-fractal-daily']
+        args = ['python3', 'scripts/release-fractal-daily', '--summary', summary]
         if run_id is not None:
             args += ['--run', str(run_id)]
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
@@ -209,7 +207,13 @@ with tempfile.TemporaryDirectory() as temporary:
     done = daily(notes='notes\n')
     assert done.returncode == 0 and 'drafted v0.3.18' in done.stdout, done
     published = json.loads(receipt.read_text())
-    assert published == {'body': 'notes\n', 'assets': {'RELEASE-NOTES.md': 'notes\n'}}, published
+    assert published == {'body': 'notes\n\n\n<!-- fractal-daily-candidate -->\n',
+                         'assets': {'RELEASE-NOTES.md': 'notes\n'}}, published
+    done = daily(summary='Operator impact: no fleet rollout before GO.')
+    summarized = json.loads(receipt.read_text())
+    assert summarized['body'].startswith('## Operator impact summary\n\nOperator impact: no fleet rollout before GO.\n\nnotes\n')
+    assert summarized['assets']['RELEASE-NOTES.md'].startswith('## Operator impact summary\n\nOperator impact: no fleet rollout before GO.\n\n')
+    assert sh('git', 'tag', '--list', 'v0.3.18', cwd=checkout) == '', 'drafting must not create a tag'
     done = daily(dry_run=True)
     assert done.returncode == 0 and 'release body unchanged: 6 characters' in done.stdout, done
     assert 'including RELEASE-NOTES.md' in done.stdout, done
@@ -238,7 +242,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert len(large) > 125000
     done = daily(notes=large, impact=impact)
     published = json.loads(receipt.read_text())
-    body = published['body']
+    body = published['body'].removesuffix('\n\n<!-- fractal-daily-candidate -->\n')
     assert len(body) <= 120000, len(body)
     assert body.startswith('Fractal v0.3.18 headline\n'), body
     assert body.index('ACTION REQUIRED') < body.index('BREAKING CHANGE') < body.index('Change 0')
@@ -266,6 +270,20 @@ spec = spec_from_file_location(loader.name, loader.path, loader=loader)
 module = module_from_spec(spec)
 spec.loader.exec_module(module)
 assert module.run('printf', 'ok\n') == 'ok'
+
+# Draft tags participate in numbering without being created in Git.
+with mock.patch.object(module, 'run', return_value='v0.3.17'):
+    assert module.next_tag([{'tag_name': 'v0.3.20'}]) == 'v0.3.21'
+# Cleanup removes only older drafts owned by this daily workflow, never unmarked/newer/published.
+drafts = [{'tag_name': tag, 'body': body} for tag, body in (
+    ('v0.3.18', '<!-- fractal-daily-candidate -->'),
+    ('v0.3.19', '<!-- fractal-daily-candidate -->'),
+    ('v0.3.20', 'manually prepared candidate'),
+    ('v0.3.22', '<!-- fractal-daily-candidate -->'))]
+with mock.patch.object(module, 'release_state', side_effect=lambda tag: {'isDraft': tag != 'v0.3.19'}), \
+        mock.patch.object(module, 'gh') as github:
+    module.cleanup_superseded_drafts('v0.3.21', drafts)
+    github.assert_called_once_with('release', 'delete', 'v0.3.18', '--yes')
 
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.
 assert module.release_body('x' * module.RELEASE_BODY_LIMIT, {}) == 'x' * module.RELEASE_BODY_LIMIT

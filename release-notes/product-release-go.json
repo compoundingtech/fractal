@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Stable releases publish only after the product release GO. The daily schedule and tag builds prepare draft candidates; a separate manual publish dispatch requires the exact candidate source SHA and a recorded GO reference.",
+  "summary": "Stable releases publish only when the Compounding Manager acts after the Fractal Product Lead records GO for the exact full candidate source SHA. Daily candidates target that SHA without creating a tag; publication creates the tag and preserves the optional operator summary verbatim.",
   "replay": {"status": "none", "detail": "No replay changes."},
   "schema": {"status": "none", "detail": "No product schema changes."},
-  "rules": {"status": "none", "detail": "No checkpoint or retention changes."},
-  "compatibility": {"status": "none", "detail": "No binary or wire changes; stable consumers continue to use published releases only."},
+  "rules": {"status": "none", "detail": "No runtime checkpoint or retention changes. Daily release cleanup deletes older semantic-version unpublished drafts only after a newer complete candidate is successfully created; published releases and prereleases are untouched."},
+  "compatibility": {"status": "none", "detail": "No binary or wire changes; consumers must pin only published release tags, never draft candidate version names."},
   "downtime": {"status": "none", "detail": "No runtime deployment occurs when creating a candidate."},
-  "manual": {"status": "changed", "detail": "After the product release owner records GO for the full candidate SHA, dispatch release-daily.yml on main with mode=publish, tag, sha and go_ref. Candidate creation alone no longer publishes or advances compatibility baselines. See docs/st3/binary-releases.md."},
-  "recovery": {"status": "changed", "detail": "A rejected publish leaves the candidate unpublished. Correct the SHA or GO reference and dispatch again; never move a candidate or published tag."}
+  "manual": {"status": "changed", "detail": "Candidate creation accepts an optional summary input (default empty) that publication preserves verbatim. After the Fractal Product Lead records GO for the full candidate SHA, the Compounding Manager dispatches release-daily.yml on main with mode=publish, tag, sha and go_ref. Publication refuses a candidate when a newer semantic-version draft exists unless the optional allow_superseded input (default empty) exactly names the selected older tag. Candidate creation alone creates no tag, publishes nothing and never advances compatibility baselines. See docs/st3/binary-releases.md for the exact command and optional override."},
+  "recovery": {"status": "changed", "detail": "A rejected publish leaves the candidate unpublished. Correct the SHA or GO reference, select the newer candidate, or deliberately set allow_superseded to the selected older tag before dispatching again. Failed candidate creation does not delete older drafts. Never move an existing candidate or published tag."}
 }

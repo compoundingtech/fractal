@@ -1,8 +1,9 @@
 # Fractal binary releases
 
 Every pushed Git tag runs **Fractal tag release**. Both native builds must pass before a
-GitHub release is published. A release is also published once a day when `main` changed since the
-last one (see [Daily releases](#daily-releases)). A rolling `edge` pre-release follows every green
+draft candidate is prepared. A daily schedule also prepares a draft when `main` changed since the
+last release (see [Daily releases](#daily-releases)); stable publication requires an explicit
+product release GO. A rolling `edge` pre-release follows every green
 `main` commit (see [Edge releases](#edge-releases)). Each release contains:
 
 - `fractal-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, linked for glibc 2.35 or newer (Ubuntu 22.04+).
@@ -223,15 +224,24 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 **Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch
 with `mode=candidate` (the default). It takes the newest `main` commit whose release run
-succeeded, re-checks the checksums and sources of its `fractal-release` artifact, reserves the
-next patch tag, and uploads those same bytes as a **draft**. Nothing is rebuilt and the
-workflow token's tag does not start a second build. Dispatch with `tag` or `run` to select
-a tag or successful main build explicitly. `scripts/release-fractal-daily --dry-run`
+succeeded, re-checks the checksums and sources of its `fractal-release` artifact, selects the
+next patch version, and uploads those same bytes as a **draft** targeting the exact full
+source SHA, without creating a Git tag. The tag is created only when publishing.
+Nothing is rebuilt, and the workflow token's publication tag does not start a second build.
+Dispatch with `tag` or `run` to select a candidate version or successful main build explicitly.
+The optional `summary` input (`scripts/release-fractal-daily --summary "$SUMMARY"`) adds
+the operator's summary to the draft notes; it defaults to empty. Publication preserves
+that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
 prints the candidate notes without creating a tag or draft.
 
+Only after a newer candidate has been successfully created with its complete assets and
+notes does daily cleanup delete older semantic-version unpublished drafts. Published
+releases and prereleases are left untouched; a failed candidate creation does not remove
+older drafts.
+
 Publication waits for an explicit product release GO on that **exact full source SHA**.
-After the Fractal Product Lead records the GO in a PR, comment, or message, the release
-owner (including an agent) publishes with:
+After the Fractal Product Lead records the GO in a PR, comment, or message, the
+Compounding Manager publishes with:
 
 ```sh
 gh workflow run release-daily.yml --repo compoundingtech/fractal --ref main \
@@ -239,19 +249,25 @@ gh workflow run release-daily.yml --repo compoundingtech/fractal --ref main \
   -f go_ref='URL_OR_MESSAGE_ID_OF_PRODUCT_RELEASE_GO'
 ```
 
-The dispatch requires a nonempty GO reference; it records the reference, SHA, publisher,
-and workflow run in the published release notes. The reference is an auditable owner
-attestation, not an automated check of the referenced message's contents. No human-only
-environment review is required. The publisher refuses a non-draft or prerelease, a SHA
-that differs from the draft target, immutable tag, or `RELEASE.json`, incomplete notes,
-or invalid checksums/archive sources. It then publishes the existing bytes and proposes
-compatibility baselines. Candidate runs never advance baselines. Drafts are private and
-are not available through published-release download URLs; stable latest discovery
-excludes drafts and prereleases. Rolling `edge` and source-addressed `embed-*`
-prereleases remain independent development channels, not stable releases.
+The optional `allow_superseded` dispatch input defaults to empty. Publication refuses a
+selected candidate if a newer semantic-version draft exists. To deliberately publish an
+older candidate, append `-f allow_superseded=vX.Y.Z` to the command above, using the
+exact selected older tag, not the newer tag or a boolean. The corresponding script option
+is `--allow-superseded "$ALLOW_SUPERSEDED"`; it must equal the selected tag to override.
 
-If candidate creation fails after reserving a tag, inspect the draft and tag. Do not
-move the tag; a subsequent daily candidate uses the next unused patch tag.
+The dispatch requires a nonempty GO reference; it records the reference, SHA, publisher,
+and workflow run in the published release notes. The reference is an auditable
+Compounding Manager attestation of the Product Lead's exact-SHA GO, not an automated
+check of the referenced message's contents. No human-only environment review is required.
+The publisher refuses a non-draft or prerelease, a SHA that differs from the draft target,
+an existing immutable tag, or `RELEASE.json`, incomplete notes, or invalid
+checksums/archive sources. It creates the selected tag at the exact approved source SHA
+if absent, then publishes the existing bytes and notes and proposes compatibility baselines.
+Candidate runs never advance baselines. Consumers must pin only published release tags,
+not draft candidate version names. Drafts are private and are not available through
+published-release download URLs; stable latest discovery excludes drafts and prereleases.
+Rolling `edge` and source-addressed `embed-*` prereleases remain independent development
+channels, not stable releases.
 
 The downloader prefers `fractal-release` and also accepts `smalltalk-release` from older
 successful runs until those 7-day artifacts expire

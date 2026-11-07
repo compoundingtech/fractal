@@ -13,7 +13,7 @@ def run(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
 
 
-def publish(tag, sha, go_ref):
+def publish(tag, sha, go_ref, allow_superseded=''):
     if not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
         raise ValueError('candidate tag must be a stable vMAJOR.MINOR.PATCH tag')
     if not re.fullmatch(r'[0-9a-f]{40}', sha):
@@ -26,10 +26,22 @@ def publish(tag, sha, go_ref):
         raise ValueError('only an unpublished stable draft candidate can be published')
     if state['targetCommitish'] != sha:
         raise ValueError('GO SHA differs from the candidate target SHA')
+    repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                           f'repos/{repository}/releases?per_page=100'))
+    version = tuple(map(int, tag[1:].split('.')))
+    newer = [row['tag_name'] for page in pages for row in page
+             if row['draft'] and not row['prerelease']
+             and re.fullmatch(r'v\d+\.\d+\.\d+', row['tag_name'])
+             and tuple(map(int, row['tag_name'][1:].split('.'))) > version]
+    if allow_superseded and allow_superseded != tag:
+        raise ValueError('supersession override must name the selected candidate tag')
+    if newer and allow_superseded != tag:
+        raise ValueError(f'newer draft exists ({", ".join(newer)}); explicitly name {tag} with --allow-superseded')
     tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}').splitlines()
     refs = dict(line.split()[::-1] for line in tagged)
-    if refs.get(f'refs/tags/{tag}^{{}}', refs.get(f'refs/tags/{tag}')) != sha:
-        raise ValueError('GO SHA differs from the candidate tag SHA')
+    if refs and refs.get(f'refs/tags/{tag}^{{}}', refs.get(f'refs/tags/{tag}')) != sha:
+        raise ValueError('existing tag differs from the candidate SHA')
     with tempfile.TemporaryDirectory(prefix='fractal-publish-') as directory:
         dist = Path(directory)
         run('gh', 'release', 'download', tag, '--dir', directory)
@@ -41,11 +53,15 @@ def publish(tag, sha, go_ref):
         run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
         run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=dist)
         actor = os.environ.get('GITHUB_ACTOR', 'local operator')
-        audit_run = os.environ.get('GITHUB_RUN_ID', 'local invocation')
-        receipt = f'\n\n## Product release GO\n\n- Source: `{sha}`\n- GO reference: {go_ref}\n- Publisher: {actor}\n- Workflow run: {audit_run}\n'
+        run_url = (f'{os.environ.get("GITHUB_SERVER_URL", "https://github.com")}/{repository}'
+                   f'/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
+                   if 'GITHUB_RUN_ID' in os.environ else 'local invocation')
+        receipt = f'\n\n## Product release GO\n\n- Source: `{sha}`\n- GO reference: {go_ref}\n- Publisher: {actor}\n- Workflow run: {run_url}\n'
         notes = dist / 'PUBLISH-NOTES.md'
         notes.write_text(state['body'] + receipt)
-        run('gh', 'release', 'edit', tag, '--notes-file', str(notes), '--draft=false', '--latest')
+        # Publishing the draft creates its tag at the already-validated target SHA.
+        run('gh', 'release', 'edit', tag, '--target', sha, '--notes-file', str(notes),
+            '--draft=false', '--latest')
     print(f'Published {tag} at {sha}; product GO: {go_ref}')
 
 
@@ -54,9 +70,10 @@ def main():
     parser.add_argument('--tag', required=True)
     parser.add_argument('--sha', required=True)
     parser.add_argument('--go-ref', required=True)
+    parser.add_argument('--allow-superseded', default='', help='explicitly name this older tag to override newer-draft refusal')
     args = parser.parse_args()
     try:
-        publish(args.tag, args.sha, args.go_ref)
+        publish(args.tag, args.sha, args.go_ref, args.allow_superseded)
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'release-fractal-publish: {error}\n')
 

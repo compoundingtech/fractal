@@ -2,9 +2,9 @@ import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
-// Prepares a daily draft candidate only when main changed, reusing verified main archives.
-// Stable publication requires an explicit dispatch with the exact candidate tag, SHA and product GO.
-// Tags made with this workflow's token do not start the tag workflow, so there is no second build.
+// Prepares an untagged daily draft candidate only when main changed, reusing verified main archives.
+// Stable publication creates the tag after an explicit dispatch with the exact candidate tag, SHA and product GO.
+// Tags made at publication with this workflow's token do not start a second build.
 export default githubWorkflow(auditCaches({
   actionlint: linuxActionlintConfig,
   name: 'Fractal release candidates and publication',
@@ -29,6 +29,11 @@ export default githubWorkflow(auditCaches({
           required: false,
           type: 'string',
         },
+        summary: {
+          description: 'Optional operator summary for the draft candidate',
+          required: false,
+          type: 'string',
+        },
         sha: {
           description: 'Exact candidate source SHA approved for publication',
           required: false,
@@ -36,6 +41,11 @@ export default githubWorkflow(auditCaches({
         },
         go_ref: {
           description: 'Product GO evidence reference approving this exact SHA',
+          required: false,
+          type: 'string',
+        },
+        allow_superseded: {
+          description: 'To publish an older candidate, explicitly repeat its selected tag',
           required: false,
           type: 'string',
         },
@@ -56,12 +66,13 @@ export default githubWorkflow(auditCaches({
         GH_REPO: '${{ github.repository }}',
         TAG: '${{ inputs.tag }}',
         RUN: '${{ inputs.run }}',
+        SUMMARY: '${{ inputs.summary }}',
       },
       steps: [
         ...fullHistoryCheckoutSteps(),
         {
           name: 'Prepare a draft candidate from the verified archives of main',
-          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"}',
+          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY"',
         },
       ],
     },
@@ -77,12 +88,13 @@ export default githubWorkflow(auditCaches({
         TAG: '${{ inputs.tag }}',
         SOURCE_SHA: '${{ inputs.sha }}',
         GO_REF: '${{ inputs.go_ref }}',
+        ALLOW_SUPERSEDED: '${{ inputs.allow_superseded }}',
       },
       steps: [
         ...fullHistoryCheckoutSteps(),
         {
           name: 'Publish only the exact candidate approved by product GO',
-          run: 'python3 scripts/release-fractal-publish --tag "$TAG" --sha "$SOURCE_SHA" --go-ref "$GO_REF"',
+          run: 'python3 scripts/release-fractal-publish --tag "$TAG" --sha "$SOURCE_SHA" --go-ref "$GO_REF" --allow-superseded "$ALLOW_SUPERSEDED"',
         },
       ],
     },
@@ -106,4 +118,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, {"release": "Prepares draft candidates from verified main release artifacts; builds nothing.", "publish": "Publishes an exact draft candidate only with explicit product GO; builds nothing.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."}))
+}, {"release": "Prepares untagged draft candidates from verified main release artifacts with an optional operator summary; builds nothing.", "publish": "Creates the tag and publishes an exact draft candidate only with explicit product GO and, for an older candidate, an override naming its tag; builds nothing.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."}))
