@@ -2259,6 +2259,12 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
 
+Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
+`retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
+access. A valid credential missing a required scope still returns ordinary `forbidden` without
+that reason; it does not mean the credential was rejected. Clients must not infer credential
+expiry from status, code, or message text alone. Older daemons may omit the additive reason.
+
 Current runtime lists return HTTP 503 `runtime-list-not-ready` with `retryable: true`
 until their first complete publication. `runtime-list-ended` is HTTP 503 with
 `retryable: false` and requires daemon restart. Both codes are typed in the generated clients.
