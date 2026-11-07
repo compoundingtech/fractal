@@ -138,7 +138,8 @@ export const geometryVars = stylex.defineVars({
   sidebarMetric: '5ch',
   /** Work rows: disclosure slot · glyph slot · title · one right-aligned metadata column (status word, duration). */
   workRowColumns: '16px 16px minmax(0, 1fr) minmax(80px, auto)',
-  statusWordMax: '20ch',
+  /** Kept for the package's consumers; work rows size their metadata column through workRowColumns. */
+  durationColumn: '80px', statusWordMax: '20ch',
   /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
   textColumn: '22px', railInset: '7.5px',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',

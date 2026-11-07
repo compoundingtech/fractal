@@ -40,6 +40,13 @@ for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length
   }
 })
 
+test('the package keeps its transcript window exports and duration token', async () => {
+  const kit = await server.ssrLoadModule('/src/assistant-ui/index.ts')
+  assert.equal(kit.transcriptInitialSourceRowCount, transcriptInitialSourceRowCount)
+  assert.deepEqual(kit.transcriptMountedWindow, { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount })
+  assert.ok(kit.geometryVars.durationColumn)
+})
+
 test('live activity shares compact header durations and host-supplied waiting state', () => {
   for (const [elapsed, duration] of [[12000, '12s'], [60000, '1m'], [185000, '3m 05s'], [3720000, '1h 02m'], [14820000, '4h 07m'], [16027000, '4h 27m']]) {
     for (const tag of ['Working', 'WaitingForAnswer']) {
