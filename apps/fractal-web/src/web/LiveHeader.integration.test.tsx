@@ -78,6 +78,8 @@ describe('live header parity', () => {
     const header = host.querySelector('[data-testid="thread-header"]')!
     const names = [...header.querySelectorAll('button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
     expect(names).toEqual(['More actions', 'Show terminal', 'Toggle right panel'])
+    // A calm agent carries no status mark beside its title; only amber and red ones do.
+    expect(header.querySelector('[data-status]')).toBeNull()
     const setting = await openSettings()
     expect(setting.checked).toBe(false)
     // The conversation pane loads lazily; wait for its first transcript frame.
