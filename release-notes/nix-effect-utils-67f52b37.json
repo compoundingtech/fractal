@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Advance the effect-utils Nix and source-member pins to published revision 277dc6d9f7b226da58e526398ee450d877b6a4a1 (published from f193abdd21b1f2d55b8a046a947655ffb9a13941), including effect-utils #2377 and #2443 (native worktree-lease), and regenerate the frozen TypeScript dependency installation pin. The bundled pty revision is unchanged.",
+  "summary": "Advance the effect-utils Nix and source-member pins to 67f52b371bc5cb3e464a7c7901cb68e31fd8a8ee, including effect-utils #2377, and regenerate the frozen TypeScript dependency installation pin. The bundled pty revision is unchanged.",
   "replay": {"status": "none", "detail": "No claim or replay behavior change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "changed", "detail": "Generated CI workflows inherit effect-utils' bounded Nix download settings (10-second connection timeout, 60-second stalled-download timeout and three download attempts). No checkpoint or fleet coordination change."},
-  "compatibility": {"status": "changed", "detail": "Consumers overriding Fractal's effect-utils input must align it with published revision 277dc6d9f7b226da58e526398ee450d877b6a4a1 and its regenerated installation producer identity."},
+  "compatibility": {"status": "changed", "detail": "Consumers overriding Fractal's effect-utils input must align it with revision 67f52b371bc5cb3e464a7c7901cb68e31fd8a8ee and its regenerated installation producer identity."},
   "downtime": {"status": "none", "detail": "The dependency pin refresh does not itself require a daemon restart."},
-  "manual": {"status": "changed", "detail": "Repin consumer effect-utils inputs to published revision 277dc6d9f7b226da58e526398ee450d877b6a4a1; use scripts/nix-typescript-client-deps-hash when changing the producer."},
+  "manual": {"status": "changed", "detail": "Repin consumer effect-utils inputs to 67f52b371bc5cb3e464a7c7901cb68e31fd8a8ee; use scripts/nix-typescript-client-deps-hash when changing the producer."},
   "recovery": {"status": "none", "detail": "Revert the Nix input, source-member locks and dependency installation pin together to restore the f77b58a4 cohort."}
 }
