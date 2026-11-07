@@ -12,7 +12,7 @@ parallel_tests() {
     started=$SECONDS
     status=0
     python3 "scripts/$1" >"$2/$1.log" 2>&1 || status=$?
-    printf "scripts/%s completed in %ss (exit %s)\n" "$1" "$((SECONDS - started))" "$status"
+    printf "scripts/%s completed in %ss (exit %s)\n" "$1" "$((SECONDS - started))" "$status" >&2
     if [ "$status" -ne 0 ]; then echo "$1" >>"$2/failed"; fi
   ' _ {} "$logs"
   if [ -f "$logs/failed" ]; then
