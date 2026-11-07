@@ -28,9 +28,10 @@ pub(super) async fn document_get(
     Extension(session): Extension<ClientSession>,
     Query(query): Query<ClientDocumentQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    require_scope(&session, if client_v0::external_grants::is_service(&session) {
-        "read.documents"
-    } else { "read.projections" })?;
+    if client_v0::external_grants::is_service(&session) {
+        return Err(client_v0::external_grants::service_documents_forbidden());
+    }
+    require_scope(&session, "read.projections")?;
     let (name, hash) = match query.name.rsplit_once('@') {
         Some((name, hash)) if !name.is_empty() && !hash.is_empty() => {
             (name.to_owned(), Some(hash.to_owned()))
@@ -88,9 +89,10 @@ pub(super) async fn documents_list(
     Extension(session): Extension<ClientSession>,
     query: Query<DocumentQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    require_scope(&session, if client_v0::external_grants::is_service(&session) {
-        "read.documents"
-    } else { "read.projections" })?;
+    if client_v0::external_grants::is_service(&session) {
+        return Err(client_v0::external_grants::service_documents_forbidden());
+    }
+    require_scope(&session, "read.projections")?;
     let Json(page) = list_documents(State(state), query).await?;
     Ok(Json(json!({
         "items": page.items.iter().map(document_item).collect::<Vec<_>>(),

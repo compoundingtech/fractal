@@ -319,7 +319,15 @@ fn authorize_service(session: &ClientSession, request: &Request<Body>) -> Result
         || !scope.is_some_and(|scope| session.allows(scope)) {
         return Err(forbidden("service requires a registered pure GET and its exact read scope"));
     }
+    if scope == Some("read.documents") {
+        return Err(service_documents_forbidden());
+    }
     Ok(())
+}
+
+/// No consumer-owned document namespace is declared: the allowlist is deliberately empty.
+pub fn service_documents_forbidden() -> ApiError {
+    forbidden("service document namespace allowlist is empty")
 }
 
 /// The only graph mutation admitted on behalf of a service read. The daemon signs as itself.

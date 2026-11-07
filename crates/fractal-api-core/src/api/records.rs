@@ -288,11 +288,10 @@ pub async fn get_claim(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     session: Option<Extension<ClientSession>>,
-) -> Result<Json<ClaimRecord>, ApiError> {
-    if let Some(session) = &session {
-        require_scope(&session.0, if client_v0::external_grants::is_service(&session.0) {
-            "read.claims"
-        } else { "read.projections" })?;
+) -> Result<Json<Value>, ApiError> {
+    if let Some(session) = &session
+        && client_v0::external_grants::is_service(&session.0) {
+        require_scope(&session.0, "read.claims")?;
     }
     let store = state.store.clone();
     let id_for_read = id.clone();
@@ -300,13 +299,28 @@ pub async fn get_claim(
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
         .filter(generic_claim_visible)
-        .map(|mut claim| {
-            if session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0)) {
-                redact_service_claim(&mut claim.body);
-            }
-            Json(claim)
-        })
+        .map(|claim| Json(if session.as_ref().is_some_and(|session|
+            client_v0::external_grants::is_service(&session.0)) {
+            service_claim(&claim)
+        } else { json!(claim) }))
         .ok_or_else(|| ApiError::not_found(format!("claim `{id}` does not exist")))
+}
+
+/// These aliases are a service surface, not a new projection capability for devices.
+pub async fn client_get_claim(
+    state: State<AppState>,
+    id: AxumPath<String>,
+    session: Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_service_claims(&session.0)?;
+    get_claim(state, id, Some(session)).await
+}
+
+fn require_service_claims(session: &ClientSession) -> Result<(), ApiError> {
+    if !client_v0::external_grants::is_service(session) {
+        return Err(client_v0::forbidden("client claim reads require a service principal"));
+    }
+    require_scope(session, "read.claims")
 }
 
 #[derive(Deserialize)]
@@ -335,11 +349,10 @@ pub async fn list_claims(
     State(state): State<AppState>,
     Query(query): Query<ClaimsQuery>,
     session: Option<Extension<ClientSession>>,
-) -> Result<Json<ClaimsPage>, ApiError> {
-    if let Some(session) = &session {
-        require_scope(&session.0, if client_v0::external_grants::is_service(&session.0) {
-            "read.claims"
-        } else { "read.projections" })?;
+) -> Result<Json<Value>, ApiError> {
+    if let Some(session) = &session
+        && client_v0::external_grants::is_service(&session.0) {
+        require_scope(&session.0, "read.claims")?;
     }
     if query.limit == 0 || query.limit > 500 {
         return Err(ApiError::bad(FractalError::new(
@@ -349,7 +362,7 @@ pub async fn list_claims(
     }
     let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
     let store = state.store.clone();
-    let mut page = blocking_store(move || {
+    let page = blocking_store(move || {
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
@@ -364,30 +377,47 @@ pub async fn list_claims(
         )
     })
     .await?;
-    if service {
-        for claim in &mut page.claims {
-            redact_service_claim(&mut claim.body);
-        }
-    }
-    Ok(Json(page))
+    Ok(Json(if service {
+        json!({"claims":page.claims.iter().map(service_claim).collect::<Vec<_>>(),
+            "next_cursor":page.next_cursor})
+    } else { json!(page) }))
 }
 
-/// Generic records must not become a declaration or environment-value disclosure route.
-fn redact_service_claim(value: &mut Value) {
-    match value {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                if matches!(key.as_str(), "desired" | "declaration" | "kdl" | "tree"
-                    | "env" | "environment" | "env_values" | "credential" | "code") {
-                    *value = json!("<redacted>");
-                } else {
-                    redact_service_claim(value);
-                }
-            }
-        }
-        Value::Array(values) => values.iter_mut().for_each(redact_service_claim),
-        _ => {}
-    }
+pub async fn client_list_claims(
+    state: State<AppState>,
+    query: Query<ClaimsQuery>,
+    session: Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_service_claims(&session.0)?;
+    list_claims(state, query, Some(session)).await
+}
+
+/// Closed R29 receipt/state schema. No unknown kind or field acquires disclosure rights.
+/// In particular, declarations, challenges and grant verifiers are metadata-only.
+fn service_claim(claim: &ClaimRecord) -> Value {
+    let mut value = json!({
+        "id":claim.id, "kind":claim.kind, "subject":claim.subject, "origin":claim.origin,
+        "store_index":claim.store_index, "accepted_at_unix_ms":claim.accepted_at_unix_ms,
+        "body_digest":client_v0::credential_digest(&claim.body.to_string()),
+    });
+    let fields: &[&str] = match claim.kind.as_str() {
+        "gate.result" => &["verdict", "operation", "request", "gate", "baseline", "token_usage", "stage"],
+        "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
+            | "work.released" | "work.extended" => &[
+                "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
+                "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
+                "wait_until_unix_ms", "submitted_incarnation",
+            ],
+        _ => return value,
+    };
+    value["actor"] = json!(claim.actor);
+    let source = claim.body.get("fields").unwrap_or(&claim.body);
+    let projected = fields.iter().filter_map(|field| {
+        source.get(*field).filter(|value| value.is_string() || value.is_number() || value.is_boolean())
+            .map(|value| ((*field).to_owned(), value.clone()))
+    }).collect::<serde_json::Map<_, _>>();
+    value["body"] = json!({"fields":projected});
+    value
 }
 
 #[derive(Default, Deserialize)]

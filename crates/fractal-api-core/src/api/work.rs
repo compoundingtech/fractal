@@ -184,8 +184,9 @@ pub async fn get_work(
     session: Option<Extension<ClientSession>>,
 ) -> Result<Json<StepRunView>, ApiError> {
     let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
-    if let Some(session) = &session {
-        require_scope(&session.0, if service { "read.work" } else { "read.projections" })?;
+    if let Some(session) = &session
+        && service {
+        require_scope(&session.0, "read.work")?;
     }
     let subject = if subject.starts_with("step-run/") {
         subject
@@ -204,6 +205,17 @@ pub async fn get_work(
             .map_err(ApiError::internal)?;
     }
     Ok(Json(step))
+}
+
+pub async fn client_get_work(
+    state: State<AppState>,
+    subject: AxumPath<String>,
+    session: Extension<ClientSession>,
+) -> Result<Json<StepRunView>, ApiError> {
+    if !client_v0::external_grants::is_service(&session.0) {
+        return Err(client_v0::forbidden("client work reads require a service principal"));
+    }
+    get_work(state, subject, Some(session)).await
 }
 
 pub async fn wake_work(

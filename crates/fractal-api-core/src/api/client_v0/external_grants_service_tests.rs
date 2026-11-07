@@ -93,7 +93,9 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
         }
         let (status, value) = call(&app,"GET",&format!("/v1/client/claims/by-id/{}",grant.id),Value::Null,false).await;
         assert_eq!(status, StatusCode::OK, "{value}");
-        assert_eq!(value["body"]["fields"]["credential_hash"], credential_digest(TOKEN));
+        assert!(value.get("body").is_none());
+        assert_eq!(value["body_digest"].as_str().unwrap().len(),64);
+        assert!(!value.to_string().contains(&credential_digest(TOKEN)));
         assert!(!value.to_string().contains(TOKEN));
         assert!(!value.to_string().contains("\"credential\":"));
         if !gateway {
@@ -146,6 +148,7 @@ async fn service_r30_both_router_refusal_matrix_preserves_graph_documents_proces
     let documents = state.store.list_documents_page(None,None,true,None,500).unwrap();
     let claims = state.store.claims_page(None,None,0,None,false,500).unwrap();
     let before_files = files(root.path());
+    #[cfg(target_os = "linux")]
     let processes = std::fs::read_to_string("/proc/self/task".to_owned() + &format!("/{}/children",std::process::id())).unwrap();
     let routes = [
         "/v1/claims", "/v1/documents", "/v1/client/claims", "/v1/client/documents",
@@ -187,6 +190,7 @@ async fn service_r30_both_router_refusal_matrix_preserves_graph_documents_proces
     assert_eq!(serde_json::to_value(state.store.claims_page(None,None,0,None,false,500).unwrap()).unwrap(),serde_json::to_value(claims).unwrap());
     assert_eq!(serde_json::to_value(state.store.list_documents_page(None,None,true,None,500).unwrap()).unwrap(),serde_json::to_value(documents).unwrap());
     assert_eq!(files(root.path()),before_files);
+    #[cfg(target_os = "linux")]
     assert_eq!(std::fs::read_to_string("/proc/self/task".to_owned() + &format!("/{}/children",std::process::id())).unwrap(),processes);
 }
 
@@ -197,7 +201,7 @@ async fn service_audit_is_daemon_owned_closed_and_bounded_per_grant_window() {
     let before = state.store.index().unwrap();
     let app = crate::api::fabric_router(state.clone());
     for _ in 0..20 {
-        assert_eq!(call(&app,"GET","/v1/client/documents",Value::Null,false).await.0,StatusCode::OK);
+        assert_eq!(call(&app,"GET","/v1/client/claims",Value::Null,false).await.0,StatusCode::OK);
     }
     let changed = state.store.claims_page(None,None,before,None,false,500).unwrap().claims;
     // A run crossing a minute boundary may produce two windows, never twenty records.
@@ -211,7 +215,7 @@ async fn service_audit_is_daemon_owned_closed_and_bounded_per_grant_window() {
 }
 
 #[tokio::test]
-async fn service_r29_work_and_document_projection_parity() {
+async fn service_r29_work_parity_and_empty_document_allowlist() {
     let root = tempfile::tempdir().unwrap();
     let (state, _) = fixture(root.path(), SERVICE_SCOPES);
     let source = r#"version 2
@@ -239,21 +243,41 @@ mission "service-work" state="ready" {
         let (status, work) = call(&app,"GET",&format!("/v1/client/work-items/{subject}"),Value::Null,false).await;
         assert_eq!(status,StatusCode::OK,"{work}");
         assert_eq!(work,expected);
-        let (status, list) = call(&app,"GET","/v1/client/documents?prefix=doc/service-parity",Value::Null,false).await;
-        assert_eq!(status,StatusCode::OK,"{list}");
-        assert_eq!(list["items"].as_array().unwrap().len(),1);
-        assert_eq!(list["items"][0]["version"],document.hash);
-        let (status, content) = call(&app,"GET","/v1/client/documents/content?name=doc/service-parity",Value::Null,false).await;
-        assert_eq!(status,StatusCode::OK,"{content}");
-        assert_eq!(content["bytes"],json!(b"service document".to_vec()));
+        for path in [
+            "/v1/client/documents?prefix=doc/service-parity",
+            "/v1/client/documents?history=true",
+            "/v1/client/documents/content?name=doc/service-parity",
+        ] {
+            assert_eq!(call(&app,"GET",path,Value::Null,false).await.0,StatusCode::FORBIDDEN);
+        }
         if !gateway {
             let (status, raw) = call(&app,"GET",&format!("/v1/work-items/{subject}"),Value::Null,false).await;
             assert_eq!(status,StatusCode::OK);
             assert_eq!(raw,work);
-            assert_eq!(call(&app,"GET","/v1/documents",Value::Null,false).await.0,StatusCode::OK);
-            let (status, raw) = call(&app,"GET",&format!("/v1/documents/content?reference=doc/service-parity@{}",document.hash),Value::Null,false).await;
-            assert_eq!(status,StatusCode::OK);
-            assert_eq!(raw["bytes"],content["bytes"]);
+            assert_eq!(call(&app,"GET","/v1/documents?history=true",Value::Null,false).await.0,StatusCode::FORBIDDEN);
+            assert_eq!(call(&app,"GET",&format!("/v1/documents/content?reference=doc/service-parity@{}",document.hash),Value::Null,false).await.0,StatusCode::FORBIDDEN);
         }
+    }
+}
+
+#[tokio::test]
+async fn service_receipt_bodies_use_only_the_closed_field_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(root.path(), SERVICE_SCOPES);
+    let receipt = state.store.append_claim(&ClaimInput {
+        subject:"gate-operation/service/work/review".into(),kind:"gate.result".into(),
+        actor:Some("person/owner".into()),
+        fields:serde_json::from_value(json!({"verdict":"pass","gate":"review","baseline":true,
+            "value":{"declarations_kdl":"receipt-secret-sentinel","code_hash":"other-verifier"},
+            "reason":"private-free-text"})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    for app in [crate::api::router(state.clone()),crate::api::fabric_router(state.clone())] {
+        let (status,value) = call(&app,"GET",&format!("/v1/client/claims/by-id/{}",receipt.id),Value::Null,false).await;
+        assert_eq!(status,StatusCode::OK,"{value}");
+        assert_eq!(value["body"],json!({"fields":{"verdict":"pass","gate":"review","baseline":true}}));
+        assert!(!value.to_string().contains("receipt-secret-sentinel"));
+        assert!(!value.to_string().contains("other-verifier"));
+        assert!(!value.to_string().contains("private-free-text"));
     }
 }
