@@ -480,6 +480,29 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_claims_summary_is_opt_in_and_keeps_the_status_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, mut full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, mut summary) = get_request(app, "/v1/status?subject=agent/eval/named&claims_summary=true").await;
+    assert_eq!(code, StatusCode::OK, "{summary}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert!(summary["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    for response in [&mut full, &mut summary] {
+        response.as_object_mut().unwrap().remove("seat_admission");
+        response["subjects"][0].as_object_mut().unwrap().remove("claims");
+        response["subjects"][0].as_object_mut().unwrap().remove("claims_summary");
+    }
+    assert_eq!(summary, full);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {

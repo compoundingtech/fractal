@@ -5524,7 +5524,7 @@ impl Store {
     /// Keep internal status and authoritative replication readers unchanged.
     pub fn status_for_generic_reads(
         &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
-        history: bool,
+        history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -5549,7 +5549,7 @@ impl Store {
             }
             self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history,
-                StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
+                StatusSubjects { names: None, excluded: Some(&excluded) }, claims,
             )
         })
     }

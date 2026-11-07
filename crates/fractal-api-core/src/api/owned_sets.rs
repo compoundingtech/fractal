@@ -22,7 +22,7 @@ pub async fn preview(
             continue;
         }
         let actual = state.store.status_for_generic_reads(
-            Some(subject), None, None, false,
+            Some(subject), None, None, false, crate::store::ClaimsReduction::Summary,
         ).map_err(ApiError::internal)?.subjects.into_iter().next().and_then(|status| status.actual);
         let incarnation = actual.as_ref().and_then(|a| a["incarnation_id"].as_str());
         let blocking = match incarnation {
@@ -76,7 +76,7 @@ pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     for (subject, member, retired) in state.store.owned_set_effective_members(&view)? {
         let status = state
             .store
-            .status_for_generic_reads(Some(&subject), None, Some(state.store.index()?), false)?
+            .status_for_generic_reads(Some(&subject), None, Some(state.store.index()?), false, crate::store::ClaimsReduction::Summary)?
             .subjects
             .into_iter()
             .find(|s| s.subject == subject);

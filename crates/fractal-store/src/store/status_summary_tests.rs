@@ -37,6 +37,32 @@ fn work(read: impl FnOnce() -> StatusResponse) -> (smallclaims::sqlite::work::Sq
     let status = read();
     (scope.finish(), status)
 }
+#[test]
+fn generic_status_summary_avoids_the_full_claim_vector_at_current_and_historical_cuts() {
+    let store = seat_with(3_000);
+    let cut = store.index().unwrap();
+    for at in [None, Some(cut)] {
+        let (summary_work, summary) = work(|| store.status_for_generic_reads(
+            Some(SEAT), None, at, false, ClaimsReduction::Summary,
+        ).unwrap());
+        let (full_work, full) = work(|| store.status_for_generic_reads(
+            Some(SEAT), None, at, false, ClaimsReduction::Full,
+        ).unwrap());
+        assert!(summary.subjects[0].claims.is_empty(), "hot path enumerated claim ids");
+        assert_eq!(summary.subjects[0].claims_summary.count, 3_000);
+        assert_eq!(full.subjects[0].claims.len(), 3_000);
+        assert!(summary_work.vm_steps < full_work.vm_steps,
+            "summary={summary_work:?}, full={full_work:?}");
+        let mut summary = serde_json::to_value(summary).unwrap();
+        let mut full = serde_json::to_value(full).unwrap();
+        for response in [&mut summary, &mut full] {
+            response["subjects"][0].as_object_mut().unwrap().remove("claims");
+            response["subjects"][0].as_object_mut().unwrap().remove("claims_summary");
+        }
+        assert_eq!(summary, full, "only claim provenance representation may change");
+    }
+}
+
 
 #[test]
 fn a_summary_status_read_of_a_seat_does_not_read_its_history() {

@@ -658,6 +658,9 @@ pub struct StatusQuery {
     /// the full reduction.
     #[serde(default)]
     summary: bool,
+    /// Replace the unbounded canonical claim-id vector with the existing claims summary.
+    #[serde(default)]
+    claims_summary: bool,
 }
 
 pub async fn resource_referrers(
@@ -711,6 +714,8 @@ pub async fn status(
         } else {
             store.status_for_generic_reads(
                 subject.as_deref(), query.owner_run.as_deref(), query.at_index, query.history,
+                if query.claims_summary { crate::store::ClaimsReduction::Summary }
+                else { crate::store::ClaimsReduction::Full },
             )?
         };
         if !query.history && query.at_index.is_none() {
