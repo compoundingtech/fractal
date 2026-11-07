@@ -1985,10 +1985,17 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalE
         observer.set_children(body);
         return parse_structure(&observer, "observer", context);
     }
-    if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
+    if subject.starts_with("notice-owner/") {
+        if context.owner_run.is_some() {
+            return Err(FractalError::new("notice-owner-inside-mission", "notice-owner stops must be at the root"));
+        }
+        fractal_schema::registry().validate_subject(&subject)
+            .map_err(|e| FractalError::new(e.code, e.message))?;
+    }
+    if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty" | "notice-owner")) {
         return Err(FractalError::new(
             "invalid-stop-subject",
-            format!("stop requires a full agent, exec, or PTY subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
+            format!("stop requires a full agent, exec, PTY or notice-owner subject, or a standing GitHub observer `observer/github/OWNER/REPO`; got `{subject}`"),
         ));
     }
     let kind = subject.split('/').next().unwrap_or_default();
@@ -4742,6 +4749,9 @@ mod tests {
             let mission = format!("version 2\nmission \"bad\" state=\"ready\" {{ goal \"Reject nested owners.\"; {body}; }}");
             assert!(parse_intent(&mission, "node").is_err());
         }
+        let stopped = "version 2\nstop \"notice-owner/default\"";
+        assert_eq!(parse_intent(stopped, "node").unwrap().subjects["notice-owner/default"].kind, "stop");
+        assert!(parse_execution_intent(stopped, "node", "run-1").is_err());
     }
 
     #[test]
