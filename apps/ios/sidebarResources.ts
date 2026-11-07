@@ -1,5 +1,12 @@
-import type { ResourceObservation, ResourcesFilter, ResourcesPage } from '../../clients/typescript/fractal-client';
+import type { ResourceObservation, ResourcesFilter, ResourcesPage, Runtime } from '../../clients/typescript/fractal-client';
 import type { SidebarResource } from './sidebarView';
+
+/** Terminal inventories omit presentation names; keep a recognizable ID and the full owner searchable. */
+export function terminalResourceRow(terminal: Pick<Runtime, 'id' | 'owner_id' | 'terminal_id'>): SidebarResource {
+  const tail = terminal.owner_id.split('/').at(-1) ?? '';
+  const title = /^[0-9a-f]{8}-[0-9a-f-]+$/i.test(tail) ? tail.slice(0, 8) : tail || terminal.owner_id;
+  return { id: terminal.id, title, searchText: terminal.owner_id, kind: 'Terminals', target: terminal.terminal_id! };
+}
 
 export const resourceFacts = (row: ResourceObservation): Record<string, unknown> => row.facts as Record<string, unknown>;
 export function resourceRow(row: ResourceObservation): SidebarResource {
