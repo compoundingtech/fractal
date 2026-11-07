@@ -49,6 +49,8 @@ mod drafts_store;
 mod prefs;
 mod recent;
 mod resource_sidebar;
+#[allow(dead_code)] // PR 17 activates the complete v2 path together.
+mod sidebar_store;
 mod observed_resources;
 mod pty;
 pub mod requests;
@@ -6445,6 +6447,7 @@ impl Ui {
                 sidebar.selected[sidebar.section] = index;
                 self.open_from_sidebar();
             }
+            Hit::SidebarToggle => self.toggle_sidebar(),
             Hit::Usage => self.toggle_usage(),
             Hit::Connection => self.show_connection(),
             Hit::Menu(action) => self.run_menu_action(action),

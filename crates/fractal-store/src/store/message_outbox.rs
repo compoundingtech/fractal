@@ -191,9 +191,13 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
             return Ok(false);
         }
     };
+    // Routed again now: the recipient's host may have stopped advertising its inbox since the
+    // sender queued it (message_routing).
+    let routed = super::message_routing::legacy_reason(graph, &input)?.is_none();
     let appended = match shard {
-        Some(shard) if attempts < ATTEMPTS => shard.append_claim(&input).map(|_| ()),
-        // Refused too often, or no shard: the graph takes it, as every message before the shard.
+        Some(shard) if routed && attempts < ATTEMPTS => shard.append_claim(&input).map(|_| ()),
+        // Not routed, refused too often, or no shard: the graph takes it, as every message
+        // before the shard.
         _ => graph.append_claim(&input).map(|_| ()),
     };
     match appended {

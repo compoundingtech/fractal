@@ -8680,6 +8680,142 @@ async fn previous_release_beside_members_that_send_each_message_once_across_stor
     }
 }
 
+/// An agent's message to `to` through `POST /v1/messages` on `node`, under `key`: its receipt.
+async fn agent_send(node: &Node, to: &str, key: &str) -> Value {
+    node.client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": key, "from": "agent/fleet-sender", "to": to, "content": format!("routed mail {key}"),
+        }))
+        .await
+        .unwrap()
+}
+
+/// Where `subject` is on `node`: (graph claims, shard items).
+async fn held(node: &Node, subject: &str) -> (usize, u64) {
+    (graph_sent_claims(node, subject).await, shard_file_claims(node, subject))
+}
+
+/// Mail routes to the stream where its recipient's host reads stream mail, beside a member of
+/// the previous release, which lists, counts and dedupes stream mail but routes none (from
+/// v0.3.30; an earlier release advertises no inbox, so nothing routes to its seats). A send to
+/// a seat on a host that advertises `messages_stream_inbox`, or on this build, is a stream item
+/// every member holds and none holds as a graph claim; a retry replays it. A send to a seat
+/// without a host is a graph claim. The release's own sends stay graph claims. Upgraded in
+/// place, the release routes; rolled back, its sends are graph claims again and it still lists
+/// the stream mail it holds.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_members_that_route_mail_by_the_recipients_host() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "a").await;
+    let b = joined(root.path(), &a, "b", &[]).await;
+    b.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    wait_for_stream_peers(&a, &["b", "o"], 90).await;
+    let declaration = root.path().join("route-seats.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"route/o-seat\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\nagent \"route/b-seat\" {{ host \"b\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root, b.root
+    )).unwrap();
+    a.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    let (o_seat, b_seat) = ("agent/route/o-seat", "agent/route/b-seat");
+    for node in [&b, &o] {
+        wait_until("the seats' declarations replicate", 90, || async {
+            node.claims().await.iter().any(|claim| claim["subject"] == b_seat && claim["kind"] == "intent.desired")
+        })
+        .await;
+    }
+    wait_until("b's start advertises its inbox", 60, || async {
+        newest_start_advertises(&a, "b", "messages_stream_inbox").await
+    })
+    .await;
+    let release_inbox = newest_start_advertises(&a, "o", "messages_stream_inbox").await;
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+
+    // To this build's seat: a stream item, which a retry replays.
+    let to_b = agent_send(&a, b_seat, "route-to-b").await;
+    let to_b_subject = to_b["subject"].as_str().unwrap().to_owned();
+    assert!(to_b["created_index"].as_u64().unwrap() > base, "{to_b}");
+    let again = agent_send(&a, b_seat, "route-to-b").await;
+    assert_eq!(again["already_sent"], true, "{again}");
+    assert_eq!(again["subject"], to_b_subject.as_str());
+    // To the release's seat: a stream item exactly when the release advertises its inbox.
+    let to_o = agent_send(&a, o_seat, "route-to-o").await;
+    let to_o_subject = to_o["subject"].as_str().unwrap().to_owned();
+    assert_eq!(to_o["created_index"].as_u64().unwrap() > base, release_inbox, "{to_o}");
+    // To a seat no declaration places: a graph claim.
+    let nowhere = agent_send(&a, "agent/route/nobody", "route-to-nobody").await;
+    let nowhere_subject = nowhere["subject"].as_str().unwrap().to_owned();
+    assert!(nowhere["created_index"].as_u64().unwrap() < base, "{nowhere}");
+    // The release's own send stays a graph claim, which b's seat gets as before.
+    let from_o = agent_send(&o, b_seat, "route-from-o").await;
+    let from_o_subject = from_o["subject"].as_str().unwrap().to_owned();
+    assert!(from_o["created_index"].as_u64().unwrap() < base, "{from_o}");
+
+    let o_held = if release_inbox { (0, 1) } else { (1, 0) };
+    for node in [&a, &b, &o] {
+        for (subject, expected) in [
+            (&to_b_subject, (0, 1)),
+            (&to_o_subject, o_held),
+            (&nowhere_subject, (1, 0)),
+            (&from_o_subject, (1, 0)),
+        ] {
+            wait_until("each message replicates to its one store", 90, || async { held(node, subject).await == expected }).await;
+        }
+    }
+    // b's seat sees both its messages, whichever store each is in.
+    let page: Value = b.client().get(&format!("/v1/messages?to={b_seat}")).await.unwrap();
+    let listed = page.as_array().unwrap().iter().map(|item| item["subject"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+    assert!(listed.contains(&to_b_subject) && listed.contains(&from_o_subject), "{page}");
+    if release_inbox {
+        wait_until("the release lists the stream mail routed to its seat", 60, || async {
+            client_listed(&o, false, 200).await.contains(&to_o_subject)
+        })
+        .await;
+    }
+
+    // Upgraded in place, the release routes its sends too.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member advertises its inbox", 90, || async {
+        newest_start_advertises(&a, "o", "messages_stream_inbox").await
+    })
+    .await;
+    let upgraded = agent_send(&o, b_seat, "route-from-upgraded-o").await;
+    assert!(upgraded["created_index"].as_u64().unwrap() > base, "{upgraded}");
+    // Rolled back, its sends are graph claims again, and it lists what it holds.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let rolled_back = agent_send(&o, b_seat, "route-from-rolled-back-o").await;
+    assert!(rolled_back["created_index"].as_u64().unwrap() < base, "{rolled_back}");
+    if release_inbox {
+        wait_until("the rolled-back member still lists the stream mail it holds", 60, || async {
+            client_listed(&o, false, 200).await.contains(&to_o_subject)
+        })
+        .await;
+    }
+    for node in [&a, &b, &o] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.
 async fn held_claim_kinds(node: &Node) -> Vec<String> {
     let records: Vec<Value> = node.client().get("/v1/replication/records?unresolved=true").await.unwrap();

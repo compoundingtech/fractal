@@ -26,6 +26,8 @@ pub mod trace_principal;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
+mod notice_authority;
+mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
@@ -44,6 +46,7 @@ mod rename_proof_tests;
 #[cfg(test)]
 mod observation_trim_tests;
 pub mod directive_notes;
+mod declared_admission;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
@@ -258,6 +261,9 @@ pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
+pub mod message_routing;
+#[cfg(test)]
+mod message_routing_tests;
 pub mod message_sent;
 #[cfg(test)]
 mod message_sent_tests;
@@ -312,8 +318,13 @@ pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
 pub mod gate_runners;
+pub mod wake_lookup;
 #[cfg(test)]
 mod gate_runners_tests;
+#[cfg(test)]
+mod wake_lookup_tests;
+#[cfg(test)]
+mod status_summary_tests;
 #[cfg(test)]
 mod run_eta_tests;
 #[cfg(test)]
@@ -1580,6 +1591,20 @@ pub const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
     SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id
 )";
 
+/// The claims a subject's actual state folds. The full fold and the newest-first field read
+/// both filter with it, so a summary read answers each field as the full reduction does.
+pub(crate) static ACTUAL_FOLD_CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!("{ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}")
+});
+
+#[cfg(test)]
+thread_local! {
+    /// A filter the field read uses in place of `ACTUAL_FOLD_CLAIM`, without its index, so a
+    /// test can show that its equivalence check fails when the two filters differ.
+    pub(crate) static ACTUAL_FIELDS_FILTER_FOR_TEST: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 // Both discovery and index installation share the actual fold's open-ended kind predicate.
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
 pub const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
@@ -1897,6 +1922,9 @@ pub enum ClaimsReduction {
     /// Runtime resources do not consume claim ids, counts, or session boundaries.
     Runtime,
     AgentCard,
+    /// Only `status` and `incarnation_id` of the actual state, read newest first, and no claims or
+    /// harness: what a driver or `st work` reads of a seat. Never kept, so never served as another.
+    Incarnation,
 }
 /// One subject's status at `at_index`, and the action it asks of its host when it is current and
 /// differs from what is declared. With `owner_filter`, a subject another run owns is skipped.
@@ -1912,6 +1940,7 @@ pub fn subject_status_at(
         ClaimsReduction::Summary => "status/reduction-summary",
         ClaimsReduction::Runtime => "status/reduction-runtime",
         ClaimsReduction::AgentCard => "status/reduction-agent-card",
+        ClaimsReduction::Incarnation => "status/reduction-incarnation",
     });
     #[cfg(any(test, feature = "test-support"))]
     SUBJECT_REDUCTIONS.with(|reductions| reductions.set(reductions.get() + 1));
@@ -1948,15 +1977,19 @@ pub fn subject_status_at(
         .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok());
     let actual = if matches!(claims, ClaimsReduction::Runtime) {
         latest_actual_fields_at(connection, subject, at_index, RUNTIME_PROJECTION_FIELDS)?
+    } else if matches!(claims, ClaimsReduction::Incarnation) {
+        latest_actual_fields_filtered_at(connection, subject, at_index, INCARNATION_FIELDS, true)?
     } else {
         latest_actual_at(connection, subject, at_index)?
     };
-    let (actual_claim, actual_origin, actual_origin_conflict) = selected_actual_source_at(
+    let (actual_claim, actual_origin, actual_origin_conflict) = selected_actual_source_filtered_at(
         connection,
         subject,
         at_index,
         member.as_ref().map(|member| member.host.as_str()),
+        matches!(claims, ClaimsReduction::Incarnation),
     )?;
+    let exclude_reserved = matches!(claims, ClaimsReduction::Incarnation);
     let (harness, claims, claims_summary, conflicts) = match claims {
         ClaimsReduction::Full => (
             current_harness_at(connection, subject, at_index)?,
@@ -1982,6 +2015,13 @@ pub fn subject_status_at(
         ),
         ClaimsReduction::Runtime => (
             current_harness_at(connection, subject, at_index)?,
+            Vec::new(),
+            ClaimsSummary::default(),
+            desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.claim_id.as_str()), at_index)?,
+        ),
+        // The harness only passes through to the response, and these callers do not read it.
+        ClaimsReduction::Incarnation => (
+            None,
             Vec::new(),
             ClaimsSummary::default(),
             desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.claim_id.as_str()), at_index)?,
@@ -2031,9 +2071,10 @@ pub fn subject_status_at(
     };
     assemble_subject_status(
         connection, subject, at_index, inputs,
-        &mut |owner| latest_actual_fields_at(
+        &mut |owner| latest_actual_fields_filtered_at(
             connection, owner, at_index,
             if owner.starts_with("mission-run/") { &["status", "mode"] } else { &["status"] },
+            exclude_reserved,
         ),
     ).map(Some)
 }
@@ -3242,6 +3283,7 @@ impl Store {
         let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
+                declared_admission::validate_publication(transaction, &self.origin, intent)?;
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
                 let intent = normalized_intent.as_ref();
                 let mut normalized_expected = std::borrow::Cow::Borrowed(expected);
@@ -3323,6 +3365,7 @@ impl Store {
                 }
                 validate_documents(transaction, &intent.document_refs)?;
                 attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
+                notice_authority::refuse_second_holder(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -4967,6 +5010,27 @@ impl Store {
         self.status_at_view(selected, selected_owner_run, at_index, true)
     }
 
+    /// One seat's status for a caller that reads one field of it: its declaration and the
+    /// `status` and `incarnation_id` of its actual state, read newest first. It leaves `harness`,
+    /// `claims` and `claims_summary` empty. A full reduction folds every actual-state claim of
+    /// the subject and lists every claim id, which reads each of a seat's claims in turn.
+    pub fn status_summary_at(&self, selected: &str, at_index: Option<u64>) -> Result<StatusResponse> {
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let selected = identities::resolve_reference_conn(&connection, selected)?;
+            let cut = selected_index(current_index(&connection)?, at_index).map_err(anyhow::Error::new)?;
+            if !self.generic_status_subject_visible_at(&selected, cut)? {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
+                ).with_detail("reason", "notices-unavailable")));
+            }
+            self.status_at_view_for_names_in_snapshot(
+                Some(&selected), None, Some(cut), false,
+                StatusSubjects { names: None, excluded: None }, ClaimsReduction::Incarnation,
+            )
+        })
+    }
+
     pub fn status_for_subject_prefix_uncached(
         &self,
         prefix: &str,
@@ -5184,6 +5248,7 @@ impl Store {
             ClaimsReduction::Runtime => &cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
+            ClaimsReduction::Incarnation => return None,
         };
         entries.get(subject)
             .filter(|entry| {
@@ -5219,6 +5284,7 @@ impl Store {
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
+            ClaimsReduction::Incarnation => return,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
         // frees slots; no growing history map or full-status cache warming is needed.
@@ -5450,14 +5516,8 @@ impl Store {
         if fractal_schema::notice::is_reserved_subject(subject) {
             return Ok(false);
         }
-        let connection = self.readers.get();
-        let mut query = connection.prepare(
-            "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND store_index<=?2",
-        )?;
-        for kind in query.query_map(params![subject,cut], |row| row.get::<_,String>(0))? {
-            if fractal_schema::notice::is_reserved_kind(&kind?) { return Ok(false); }
-        }
-        Ok(true)
+        let kinds = subject_kinds_at(&self.readers.get(), subject, cut)?;
+        Ok(!kinds.iter().any(|kind| fractal_schema::notice::is_reserved_kind(kind)))
     }
 
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
@@ -5574,9 +5634,10 @@ impl Store {
                 )?;
             }
         }
-        // A snapshot reduction is kept per subject until a claim it depends on arrives.
+        // Incarnation reads are uncached: pinning their logical cut must not
+        // scan an unrelated backlog to maintain shared caches they never use.
         let newest = match at_index {
-            Some(_) if selected_owner_run.is_none() => {
+            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation) => {
                 Some(self.advance_subject_cache(&connection, store_index)?)
             }
             _ => None,
@@ -11001,13 +11062,17 @@ pub fn has_unknown_claim_at(
     if let Some(operation) = conflict {
         return Ok(Some(format!("idempotency-conflict:{operation}")));
     }
-    // Seek once per distinct kind, then test the cut with the index's third term.
-    // DISTINCT would still visit every retained diagnostic of the subject.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he1d3df5f7b95 owner=fractal_store::store TODO=trace-statement-and-value-representation */ SUBJECT_KINDS_AT_QUERY)?;
-    let kinds = statement
+    Ok(first_unknown_kind(subject_kinds_at(connection, subject, through)?))
+}
+
+/// The kinds of `subject`'s claims at or below `through`. It seeks once per distinct kind, then
+/// tests the cut with the index's third term: DISTINCT would still visit every retained
+/// diagnostic of the subject, tens of thousands for a busy seat.
+fn subject_kinds_at(connection: &Connection, subject: &str, through: u64) -> Result<Vec<String>> {
+    Ok(connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he1d3df5f7b95 owner=fractal_store::store TODO=trace-statement-and-value-representation */ SUBJECT_KINDS_AT_QUERY)?
         .query_map(params![subject, through], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(first_unknown_kind(kinds))
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn first_unknown_kind(kinds: impl IntoIterator<Item = String>) -> Option<String> {
@@ -11227,7 +11292,7 @@ pub fn append_claim_tx_with_assistant_answer(
 ) -> Result<ClaimRecord> {
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
-        if kind != "message.sent" || actor != Some("assistant/chatgpt")
+        if kind != "message.sent" || actor != Some(authorization.principal())
             || authorization.scope != "write.assistant.answers"
         {
             return Err(anyhow::anyhow!("assistant answer authorization does not bind this notification"));
@@ -11235,7 +11300,7 @@ pub fn append_claim_tx_with_assistant_answer(
         let grant_id = assistant_write::authorize_grant(transaction, origin, authorization)
             .map_err(anyhow::Error::new)?;
         assistant_body = body.clone();
-        assistant_body["fields"]["from"] = json!("assistant/chatgpt");
+        assistant_body["fields"]["from"] = json!(authorization.principal());
         assistant_body["fields"]["sender_class"] = json!("external-assistant");
         assistant_body["fields"]["assistant_grant_id"] = json!(grant_id);
         assistant_body["fields"]["assistant_owner"] = json!(authorization.owner);
@@ -11293,6 +11358,7 @@ pub fn append_claim_tx_with_assistant_answer(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
@@ -11764,6 +11830,16 @@ pub fn selected_actual_source_at(
     at_index: Option<u64>,
     desired_host: Option<&str>,
 ) -> Result<(Option<String>, Option<String>, bool)> {
+    selected_actual_source_filtered_at(connection, subject, at_index, desired_host, false)
+}
+
+fn selected_actual_source_filtered_at(
+    connection: &Connection,
+    subject: &str,
+    at_index: Option<u64>,
+    desired_host: Option<&str>,
+    exclude_reserved: bool,
+) -> Result<(Option<String>, Option<String>, bool)> {
     let through = at_index.unwrap_or(i64::MAX as u64);
     if subject.starts_with("arrangement/") {
         return Ok((arrangements::arrangement_at(connection, subject, through)?
@@ -11798,15 +11874,21 @@ pub fn selected_actual_source_at(
         .map(|(id, kind, origin, body)| Ok((id, kind, origin, serde_json::from_str::<Value>(&body)?)))
         .collect::<Result<Vec<_>>>()?;
     if parsed.is_empty() {
-        return Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2207725f1c2f owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT claims.id, claims.origin FROM claims INDEXED BY claims_actual_accepted_index
+        let mut fallback = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h518e0bfb7ccb owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT claims.id, claims.origin, claims.kind FROM claims INDEXED BY claims_actual_accepted_index
              JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND +claims.store_index<=?2
                AND {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM}
-             ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
-        ))?.query_row(/* sqlite-large-value: allow-for-now lv-h83c147f35b1f owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| {
-            Ok((Some(row.get(0)?), Some(row.get(1)?), false))
-        }).optional()?.unwrap_or((None, None, false)));
+             ORDER BY {CANONICAL_ORDER_DESC} LIMIT ?3"
+        ))?;
+        let mut rows = fallback.query(params![subject, through, if exclude_reserved { -1 } else { 1 }])?;
+        while let Some(row) = rows.next()? {
+            if exclude_reserved && fractal_schema::notice::is_reserved_kind(row.get_ref(2)?.as_str()?) {
+                continue;
+            }
+            return Ok((Some(row.get(0)?), Some(row.get(1)?), false));
+        }
+        return Ok((None, None, false));
     }
     if parsed.len() == 1 {
         let (id, _, origin, _) = parsed.into_iter().next().expect("one runtime source");
@@ -11974,14 +12056,13 @@ pub fn latest_actual_at(
     // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
     // open while fetching each body on this same connection: even an unpinned caller then
     // reads both statements from one SQLite read cut, without retaining history bodies.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4ae5bcd8a91 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7554008ab79c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-           AND claims.kind NOT LIKE 'harness.%'
-           AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
-         ORDER BY {CANONICAL_ORDER}"
+         WHERE claims.subject=?1 AND {} AND claims.store_index<=?2
+         ORDER BY {CANONICAL_ORDER}",
+        ACTUAL_FOLD_CLAIM.as_str()
     ))?;
     let mut rows = statement.query(params![subject, at_index])?;
     let mut bodies = connection
@@ -12006,6 +12087,9 @@ pub fn latest_actual_at(
 const RUNTIME_PROJECTION_FIELDS: &[&str] =
     &["status", "runtime_id", "incarnation_id", "terminal", "reachability", "reason"];
 
+/// Every observation of a running seat carries both, so the newest one resolves them.
+const INCARNATION_FIELDS: &[&str] = &["status", "incarnation_id"];
+
 /// Resolve only the requested actual fields, newest first, including explicit nulls and
 /// omitted state-transition fields. Keep the index cursor open while reading bodies so
 /// both statements share one read cut without retaining discarded history.
@@ -12015,15 +12099,31 @@ fn latest_actual_fields_at(
     at_index: Option<u64>,
     fields: &[&str],
 ) -> Result<Option<Value>> {
+    latest_actual_fields_filtered_at(connection, subject, at_index, fields, false)
+}
+
+fn latest_actual_fields_filtered_at(
+    connection: &Connection,
+    subject: &str,
+    at_index: Option<u64>,
+    fields: &[&str],
+    exclude_reserved: bool,
+) -> Result<Option<Value>> {
     debug_assert!(fields.len() < usize::BITS as usize);
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5911198f6cf3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let fields_sql = format!(
         "SELECT claims.store_index FROM claims INDEXED BY claims_actual_accepted_index
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-           AND claims.kind NOT LIKE 'harness.%'
-           AND +claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
+         WHERE claims.subject=?1 AND {} AND +claims.store_index<=?2
+         ORDER BY {CANONICAL_ORDER_DESC}",
+        ACTUAL_FOLD_CLAIM.as_str()
+    );
+    #[cfg(test)]
+    let fields_sql = ACTUAL_FIELDS_FILTER_FOR_TEST.with(|filter| filter.borrow().as_ref().map(|filter| format!(
+        "SELECT claims.store_index FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND {filter} AND claims.store_index<=?2
          ORDER BY {CANONICAL_ORDER_DESC}"
-    ))?;
+    ))).unwrap_or(fields_sql);
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc44243b75520 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &fields_sql)?;
     let mut rows = statement.query(params![subject, at_index.unwrap_or(i64::MAX as u64)])?;
     let mut bodies = connection.prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
     let mut actual = serde_json::Map::new();
@@ -12033,10 +12133,16 @@ fn latest_actual_fields_at(
     let registry = fractal_schema::registry();
     while resolved != complete {
         let Some(row) = rows.next()? else { break; };
-        seen = true;
         let index: u64 = row.get(0)?;
-        let (kind, body): (String, String) =
-            bodies.query_row(/* sqlite-large-value: allow-for-now lv-ha1002d83b7ac owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let body = bodies.query_row(/* sqlite-large-value: allow-for-now lv-h21c970c2c1f9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| {
+            let kind: String = row.get(0)?;
+            if exclude_reserved && fractal_schema::notice::is_reserved_kind(&kind) {
+                return Ok(None);
+            }
+            Ok(Some((kind, row.get::<_, String>(1)?)))
+        })?;
+        let Some((kind, body)) = body else { continue; };
+        seen = true;
         #[cfg(any(test, feature = "test-support"))]
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
         let value: Value = serde_json::from_str(&body)?;
@@ -20121,6 +20227,56 @@ enum WakeHistory {
     Deferred,
 }
 
+/// Seek the step's wake tags before fetching message bodies. During the one-time copy only
+/// the unindexed historical tail uses the recipient index; its rowid bounds precede body reads.
+/// DISTINCT keeps one row per message; CROSS JOIN fixes candidates as the driving side. An IN
+/// subquery lets SQLite choose the kind index and walk every message claim before testing ids.
+pub(super) fn work_wake_history_query(complete: bool) -> String {
+    let tail = if complete { "" } else {
+        "UNION SELECT pending.id FROM claims pending INDEXED BY claims_message_to_order_index
+         WHERE pending.store_index>(SELECT cursor FROM local_work_wake_backfill WHERE singleton=1)
+           AND pending.store_index<=(SELECT ceiling FROM local_work_wake_backfill WHERE singleton=1)
+           AND pending.kind='message.sent'
+           AND json_extract(pending.body, '$.fields.to') IN (?3, ?4)"
+    };
+    canonical_sql(&format!(
+        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
+                EXISTS(SELECT 1 FROM claims consumed
+                       WHERE consumed.subject=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
+                EXISTS(SELECT 1 FROM claims delivered
+                       WHERE delivered.subject=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
+                EXISTS(SELECT 1 FROM claims staged
+                       WHERE staged.subject=claims.subject
+                         AND staged.kind='message.staged'
+                         AND staged.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_staged staged
+                       WHERE staged.message=claims.subject
+                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
+         FROM (
+             SELECT DISTINCT claim_id FROM local_work_wake_tags
+             WHERE recipient IN (?3, ?4) AND tag>=?2 AND tag<?5
+             {tail}
+         ) AS wake_candidates
+         CROSS JOIN claims ON claims.id=wake_candidates.claim_id
+         WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
+           AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
+         ORDER BY CANONICAL_ASC(claims)"
+    ))
+}
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
@@ -20197,43 +20353,18 @@ fn enrich_step_wake_with(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-habf9fbe214b0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
-                EXISTS(SELECT 1 FROM claims consumed
-                       WHERE consumed.subject=claims.subject
-                         AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_marks consumed
-                       WHERE consumed.message=claims.subject
-                         AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
-                EXISTS(SELECT 1 FROM claims delivered
-                       WHERE delivered.subject=claims.subject
-                         AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_marks delivered
-                       WHERE delivered.message=claims.subject
-                         AND delivered.kind='message.delivered'
-                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
-                EXISTS(SELECT 1 FROM claims staged
-                       WHERE staged.subject=claims.subject
-                         AND staged.kind='message.staged'
-                         AND staged.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_staged staged
-                       WHERE staged.message=claims.subject
-                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
-         FROM claims INDEXED BY claims_message_to_index
-         WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
-           AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
-         ORDER BY CANONICAL_ASC(claims)",
-    ))?;
+    let (_, _, complete) = wake_lookup::status(connection)?;
+    let mut upper = wake_tag_prefix.clone();
+    upper.pop();
+    upper.push('A'); // The exclusive lexicographic successor of the final '@'.
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?;
     let rows = statement.query_map(
         params![
             snapshot_unix_ms.to_string(),
             wake_tag_prefix,
             assignee,
-            bare_assignee
+            bare_assignee,
+            upper
         ],
         |row| {
             Ok((

@@ -1,9 +1,6 @@
 //! MCP transports for the paired client gateway; no daemon-control access.
 use clap::Parser;
-use rmcp::ServiceExt;
-use fractal_chatgpt::{Adapter, http_router};
 use std::{net::SocketAddr, path::PathBuf};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 #[derive(Parser)]
 #[command(name = "fractal-chatgpt")]
@@ -18,47 +15,33 @@ struct Args {
     listen: SocketAddr,
 }
 
-fn is_call_telemetry_target(target: &str) -> bool {
-    let permitted = target == "fractal_chatgpt::call";
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    // Deployments must enable both targets in RUST_LOG before upgrading.
-    let permitted = permitted || target == "st_chatgpt::call";
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target
-    permitted
-}
-
-#[test]
-fn call_telemetry_target_allowlist() {
-    assert!(is_call_telemetry_target("fractal_chatgpt::call"));
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    assert!(is_call_telemetry_target("st_chatgpt::call"));
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target
-    assert!(!is_call_telemetry_target("reqwest::connect"));
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    // Default off; stderr keeps stdio MCP framing untouched. Even a broad
-    // RUST_LOG setting cannot enable HTTP/header/body logs from dependencies.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off"));
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_ansi(false)
-            .with_writer(std::io::stderr)
-            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
-                is_call_telemetry_target(metadata.target())
-            }))
-            .with_filter(filter))
-        .try_init()?;
+    // Keep the historical loopback admission even when --transport=stdio.
     if !args.listen.ip().is_loopback() {
         return Err("the MCP listener must be loopback-only".into());
     }
-    let adapter = Adapter::new(&args.socket, &args.credential_file)?;
-    if args.transport == "stdio" {
-        adapter.serve(rmcp::transport::stdio()).await?.waiting().await?;
-        return Ok(());
+    fractal_chatgpt::cli::run(&args.socket, &args.credential_file, fractal_chatgpt::Profile::ChatGpt,
+        (args.transport != "stdio").then_some(args.listen)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_flags_and_defaults_are_preserved() {
+        let base = ["st-chatgpt", "--socket", "/tmp/st3-client.sock", "--credential-file", "/tmp/credential"];
+        let args = Args::try_parse_from(base).unwrap();
+        assert_eq!(args.transport, "http");
+        assert_eq!(args.listen, "127.0.0.1:8787".parse::<SocketAddr>().unwrap());
+        for transport in ["http", "stdio"] {
+            let args = Args::try_parse_from(base.into_iter().chain(["--transport", transport, "--listen", "127.0.0.1:9000"])).unwrap();
+            assert_eq!(args.transport, transport);
+            assert_eq!(args.listen.port(), 9000);
+        }
+        assert!(Args::try_parse_from(base.into_iter().chain(["--transport", "other"])).is_err());
     }
-    axum::serve(tokio::net::TcpListener::bind(args.listen).await?, http_router(adapter)).await?;
-    Ok(())
 }

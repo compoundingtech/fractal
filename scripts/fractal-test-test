@@ -908,9 +908,43 @@ class LaneBurstTest(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        # Publish complete records: existence is the reader's readiness signal.
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'append_record() (\n'
+            '  exec 9>"$1.lock"\n'
+            '  flock -x 9\n'
+            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
+            '  mv "$1.tmp.$$" "$1"\n'
+            ')\n'
+            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
+            f'append_record {shlex.quote(str(self.released))} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
+
+    def test_concurrent_fake_holders_preserve_every_call_and_release(self):
+        for fake in (LaneBurstTest.fractal, BurstAtTheTree.fractal):
+            with self.subTest(fake=fake.__qualname__):
+                for record in (self.calls, self.released):
+                    record.unlink(missing_ok=True)
+                env = fake(self, 'echo granted')
+                holders = [subprocess.Popen([env['ST3_BIN'], str(index)], stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE, text=True) for index in range(16)]
+                try:
+                    for holder in holders:
+                        self.assertEqual(holder.stdout.readline(), 'granted\n')
+                    self.assertEqual(sorted(self.calls.read_text().splitlines()), sorted(map(str, range(16))))
+                    for holder in holders:
+                        holder.stdin.close()
+                    for holder in holders:
+                        self.assertEqual(holder.wait(timeout=10), 0)
+                    self.assertEqual(self.released.read_text().splitlines(), ['released'] * len(holders))
+                finally:
+                    for holder in holders:
+                        if not holder.stdin.closed:
+                            holder.stdin.close()
+                        holder.wait(timeout=10)
+                        holder.stdout.close()
 
     def burst(self, body, size=(8, '24G'), limit=10, env=None):
         said = io.StringIO()
@@ -4998,7 +5032,17 @@ class BurstAtTheTree(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records each call, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        # Publish complete records: existence is the reader's readiness signal.
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'append_record() (\n'
+            '  exec 9>"$1.lock"\n'
+            '  flock -x 9\n'
+            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
+            '  mv "$1.tmp.$$" "$1"\n'
+            ')\n'
+            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
+            f'append_record {shlex.quote(str(self.released))} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 

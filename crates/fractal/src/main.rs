@@ -89,6 +89,7 @@ mod follow_tests;
 mod presentation;
 mod actor_contract;
 mod inspection_actor;
+mod pairing_qr;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -2114,7 +2115,12 @@ struct ActivityArgs {
 }
 
 /// Observation-only device grant requested by `st devices pair --read-only`.
-const READ_ONLY_PAIRING_SCOPES: &[&str] = &["read.projections", "read.glasses", "terminal.read"];
+const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "read.glasses",
+    "read.arrangements",
+    "terminal.read",
+];
 
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
@@ -2133,15 +2139,18 @@ enum DevicesCommand {
         /// Delegate every current client scope to this trusted device.
         #[arg(long, conflicts_with = "assistant")]
         full_control: bool,
-        /// Delegate only observation: projections, glasses frames, and terminal output.
+        /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
         fabric_gateway: bool,
-        /// Begin a revocable external-assistant grant instead of a person device.
-        #[arg(long, value_parser = parse_assistant_principal)]
+        /// Explicit phone-reachable gateway URL; show a pairing QR in an interactive terminal.
+        #[arg(long, value_parser = pairing_qr::parse_gateway, conflicts_with = "assistant")]
+        gateway: Option<reqwest::Url>,
+        /// Begin a revocable external-assistant grant (defaults to assistant/chatgpt).
+        #[arg(long, num_args = 0..=1, default_missing_value = "assistant/chatgpt", value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
         #[command(flatten)]
         grant: AssistantGrantTerms,
@@ -7520,6 +7529,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.gate_runner_history", copy_gate_runner_history(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.work_wake_index", copy_work_wake_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
         std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
@@ -7528,7 +7538,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
-    spawn_stream_mirror(store.clone(), event_notify.clone());
+    fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
+    spawn_stream_mirror(store.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -7764,6 +7775,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
+    let receipts_started = Instant::now();
     tokio::select! {
         flushed = receipts.shutdown() => if let Err(error) = flushed {
             stderr_message("fractal", format_args!("assistant read receipts failed to commit at shutdown: {}", error.message));
@@ -7771,9 +7783,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    stderr_message("fractal", format_args!("shutdown: receipt drain stage finished in {} ms", receipts_started.elapsed().as_millis()));
     // Leave the replication inventory for the next start, which extends it instead of reading
     // every envelope while its peers reconnect. A second stop signal skips it.
     let saving = store.clone();
+    let inventories_started = Instant::now();
     tokio::select! {
         saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
             stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
@@ -7781,7 +7795,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
     }
+    stderr_message("fractal", format_args!("shutdown: replication inventory save stage finished in {} ms", inventories_started.elapsed().as_millis()));
+    let telemetry_started = Instant::now();
     telemetry.shutdown();
+    stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
@@ -9454,7 +9471,10 @@ async fn run_devices(
             let response = client
                 .pairing_begin(&PairingBegin::Assistant(AssistantPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name: device_name.unwrap_or_else(|| "ChatGPT".into()),
+                    device_name: device_name.unwrap_or_else(|| match assistant {
+                        AssistantPrincipal::Chatgpt => "ChatGPT".into(),
+                        AssistantPrincipal::Mcp => "MCP".into(),
+                    }),
                     assistant_id: assistant,
                     scopes: terms.scopes,
                     expires_in_seconds: Some(terms.expires_in_seconds),
@@ -9476,6 +9496,7 @@ async fn run_devices(
             full_control,
             read_only,
             fabric_gateway,
+            gateway,
             assistant: None,
             grant,
         } => {
@@ -9511,6 +9532,18 @@ async fn run_devices(
                     );
                 }
                 print!("{}", cli_help::pairing_next_steps(&person));
+                if let Some(qr) = pairing_qr::render(
+                    gateway.as_ref(),
+                    &response.value,
+                    json_output,
+                    std::io::stdout().is_terminal(),
+                    chrono::Utc::now().timestamp_millis(),
+                )? {
+                    print!("{qr}");
+                }
+                if gateway.is_none() {
+                    println!("Hint: --gateway <url> enables a pairing QR in an interactive terminal.");
+                }
             }
             Ok(())
         }
@@ -15057,7 +15090,7 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
     };
     let status: StatusResponse = client
         .get(&format!(
-            "/v1/status?subject={}",
+            "/v1/status?subject={}&summary=true",
             urlencoding::encode(&subject)
         ))
         .await?;
@@ -15103,7 +15136,7 @@ fn current_local_pty_incarnation(actor: &str) -> Result<Option<String>> {
 async fn current_local_agent_incarnation(client: &Client, actor: &str) -> Result<Option<String>> {
     let status: StatusResponse = client
         .get(&format!(
-            "/v1/status?subject={}",
+            "/v1/status?subject={}&summary=true",
             urlencoding::encode(actor)
         ))
         .await?;
@@ -17511,7 +17544,7 @@ async fn remove_confirmed_ended_channel_todo_outbox(
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
     let status: Result<StatusResponse> = client.get(&format!(
-        "/v1/status?subject={}", urlencoding::encode(subject),
+        "/v1/status?subject={}&summary=true", urlencoding::encode(subject),
     )).await;
     let status = match status {
         Ok(status) => status,
@@ -20901,6 +20934,27 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
     }
 }
 
+/// Each turn copies at most one fixed page, releases the background writer loan, then yields.
+/// The writer's background admission gives foreground work priority; there is no sleep polling.
+async fn copy_work_wake_history(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.work_wake_index", || {
+                fractal_daemon::store::wake_lookup::advance(&page_store)
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::task::yield_now().await,
+            error => {
+                stderr_message("fractal", format_args!("work wake index copy stopped: {error:?}; doctor reports the retained cursor"));
+                return;
+            }
+        }
+    }
+}
+
 /// Copy the gate requests older than the live gate-runner triggers, a page per writer loan with
 /// a pause between, after the API serves. Until it completes, the reconciler lists gate runners
 /// from the claims.
@@ -20997,7 +21051,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 /// start, which catches up on what a crash left unmirrored, then after each shard commit. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
-fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
+fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, state_dir: PathBuf) {
     const RETRY: Duration = Duration::from_secs(30);
     let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
         return;
@@ -21010,6 +21064,10 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
         let _observer = observer;
         loop {
             receiver.borrow_and_update();
+            // The shard's dialers wake on the replication file, as the graph's do: a stream item
+            // this member wrote goes out to its recipient's host at once, not at the worker's
+            // next timer. An item a peer pushed wakes them too, which finds nothing new to send.
+            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
             let mirror_store = store.clone();
             let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {

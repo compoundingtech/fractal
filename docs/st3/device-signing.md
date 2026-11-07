@@ -57,6 +57,15 @@ On the trusted machine, begin a pairing as the person:
 fractal devices pair cli-device --as person/avery --full-control
 ```
 
+For iOS, add `--gateway https://member.example/base` with the explicit URL the phone can
+reach (HTTP or HTTPS, without a query or fragment). In an interactive terminal, the CLI
+shows a QR below the human output, with its local expiry time and seconds remaining.
+The QR contains only the pairing protocol tag and version, gateway, pairing ID, code,
+and expiry; never the person-root fingerprint. Copy that fingerprint independently from
+the trusted machine. A scan fills a candidate, not a trusted root or an automatic pairing.
+No QR or QR payload is emitted with `--json` or redirected stdout; JSON output is unchanged.
+Without `--gateway`, the CLI prints the usual manual instructions and a QR hint.
+
 On the device, complete it using the member gateway's HTTP or HTTPS origin and the returned
 pairing ID. The command prompts privately for the single-use code, or reads it from stdin:
 
