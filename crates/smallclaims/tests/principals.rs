@@ -68,10 +68,9 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 }
 
 #[test]
-fn signature_upgrade_uses_the_version_assigned_by_queue_order() {
-    // The landed runtime-operation migration owns 19; signature migration takes 20.
-    // Update this assertion only with the reviewed queue disposition.
-    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
+fn storage_version_follows_the_reviewed_migration_order() {
+    // Runtime operations used 19 and signatures used 20. Thread privacy adds reader floor 21.
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 21);
 }
 
 fn key() -> Arc<MemberKey> {

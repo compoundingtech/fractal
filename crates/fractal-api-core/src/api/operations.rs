@@ -708,7 +708,9 @@ pub async fn status(
                     "notices-unavailable", "reserved notice facts are unavailable through generic status",
                 ).with_detail("reason", "notices-unavailable")));
             }
-            store.status_harness_only(subject)?
+            let mut status = store.status_harness_only(subject)?;
+            crate::store::redact_generic_status_message_relations(&mut status);
+            status
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {

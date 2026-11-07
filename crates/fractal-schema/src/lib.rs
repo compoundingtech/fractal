@@ -2526,6 +2526,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "thread.ask-linked",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
+        ),
+        (
             "planning-session.started",
             &["planning-session"],
             WritePolicy::AuthorizedRequester,
@@ -4189,6 +4198,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("assistant_grant_id", string()),
             ("assistant_owner", reference()),
             ("assistant_session_actor", string()),
+            ("thread_id", reference_to(&["thread"])),
+            ("thread_quote_id", reference_to(&["message"])),
+            ("thread_origin_ask", reference_to(&["step-run"])),
+            ("thread_origin_episode", string()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),
@@ -4210,12 +4223,21 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("title", required_string()),
             ("origin_ask", reference_to(&["step-run"])),
             ("origin_ask_episode", string()),
+            ("mission", reference_to(&["mission"])),
             ("first_message", reference_to(&["message"])),
         ],
         "thread.title-set" => &[
             ("title", required_string()),
             ("previous_title", required_string()),
             ("title_revision", required_string()),
+        ],
+        "thread.ask-linked" => &[
+            ("thread_id", required_reference_to(&["thread"])),
+            ("ask", required_reference_to(&["step-run"])),
+            ("ask_episode", required_string()),
+            ("decision_predecessor", reference_to(&["step-run"])),
+            ("decision_predecessor_episode", string()),
+            ("decision_reason", string()),
         ],
         "thread.state-set" => &[("state", required_enum(&["open", "closed"]))],
         "planning-session.started" => &[
