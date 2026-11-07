@@ -25,7 +25,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
   return <NarrowLayoutContext.Provider value={phone}><main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <aside aria-label="Agents" {...stylex.props(styles.sidebar)}>
       <header {...stylex.props(styles.band)}>
-        <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(value => !value)} />
+        <ChromeControl icon="panel-left" label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(value => !value)} />
         <strong>Fractal</strong>
         <span {...stylex.props(styles.push)} />
         <ChromeControl icon="bell" label="Needs me only" pressed={needsMe} onPress={() => setNeedsMe(value => !value)} />

@@ -72,7 +72,7 @@ export const SidebarHeader = ({ ref, label, onCollapse, actions }: {
   readonly onCollapse: () => void
   readonly actions?: React.ReactNode
 }) => <header data-sidebar-header="" {...stylex.props(styles.brand)}>
-  <ChromeControl {...(ref === undefined ? {} : { ref })} icon="chevrons-left" label={label} edge="lead" onPress={onCollapse} />
+  <ChromeControl {...(ref === undefined ? {} : { ref })} icon="panel-left" label={label} edge="lead" onPress={onCollapse} />
   <strong {...stylex.props(styles.wordmark)}>Fractal</strong>
   {actions}
 </header>
