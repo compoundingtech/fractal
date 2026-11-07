@@ -29,6 +29,23 @@ pub fn macos_process_identity(pid: u32) -> Result<(u32, u64, u32)> {
     Ok((info.pbi_ppid, birth, info.pbi_uid))
 }
 
+/// Observe ownership only when full BSD process metadata is inaccessible.
+/// Short BSD info has no birth token and must never authorize a process generation.
+#[cfg(target_os = "macos")]
+pub fn macos_process_owner(pid: u32) -> Result<u32> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    // The kernel initializes this bounded buffer; accept only a complete result.
+    let count = unsafe {
+        libc::proc_pidinfo(i32::try_from(pid)?, libc::PROC_PIDT_SHORTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    anyhow::ensure!(count == size, "Darwin process ownership is unavailable");
+    // A full result initializes proc_bsdshortinfo.
+    let info = unsafe { info.assume_init() };
+    anyhow::ensure!(info.pbsi_pid == pid, "Darwin process ownership PID mismatch");
+    Ok(info.pbsi_uid)
+}
+
 /// The original connector's process generation. A socket may outlive this process.
 #[derive(Clone, Debug)]
 pub struct PeerProcessIdentity {

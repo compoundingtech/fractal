@@ -7194,18 +7194,18 @@ impl HarnessAncestry {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn of_environment(lookup: &impl Fn(&str) -> Option<String>) -> Self {
+    fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
         let primary = lookup("ST_AGENT");
         let legacy = lookup("FRACTAL_AGENT");
         if primary.is_none() && legacy.is_none() {
             return Self::Person;
         }
-        if primary.as_deref().is_some_and(str::is_empty)
-            || legacy.as_deref().is_some_and(str::is_empty)
+        if primary.is_some_and(str::is_empty)
+            || legacy.is_some_and(str::is_empty)
         {
             return Self::Unavailable;
         }
-        fractal_drivers::contracts::env_with("ST_AGENT", lookup)
+        fractal_drivers::contracts::env_with("ST_AGENT", &|name| lookup(name).map(str::to_owned))
             .filter(|value| value.starts_with("agent/") && fractal_schema::registry().validate_subject(value).is_ok())
             .map_or(Self::Unavailable, Self::Bound)
     }
@@ -7270,8 +7270,10 @@ fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
 
 #[cfg(target_os = "macos")]
 fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
-    let (parent, birth, uid) = fractal_runtime::macos_process_identity(pid).ok()?;
-    Some(HarnessProcess { uid, generation: Some((parent, birth)) })
+    match fractal_runtime::macos_process_identity(pid) {
+        Ok((parent, birth, uid)) => Some(HarnessProcess { uid, generation: Some((parent, birth)) }),
+        Err(_) => Some(HarnessProcess { uid: fractal_runtime::macos_process_owner(pid).ok()?, generation: None }),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -7279,7 +7281,7 @@ fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
     let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
     Some(HarnessAncestry::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
         let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-        (key == name).then(|| value.to_owned())
+        (key == name).then_some(value)
     })))
 }
 
@@ -7288,7 +7290,7 @@ fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
     let (_, environment) = local_process_arguments(pid)?;
     Some(HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
         let (key, value) = entry.split_once('=')?;
-        (key == name).then(|| value.to_owned())
+        (key == name).then_some(value)
     })))
 }
 
