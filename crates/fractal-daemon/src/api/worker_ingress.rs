@@ -100,7 +100,15 @@ mod tests {
 
     #[tokio::test]
     async fn worker_ingress_refuses_unbound_before_body_and_accepts_pinned_worker() {
-        let (connector, _) = tokio::net::UnixStream::pair().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("worker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        // Darwin LOCAL_PEERPID is available on accepted connections, not socketpair.
+        let (client, accepted) = tokio::join!(
+            tokio::net::UnixStream::connect(&socket), listener.accept(),
+        );
+        let _client = client.unwrap();
+        let (connector, _) = accepted.unwrap();
         let peer = LocalPeer { pid: std::process::id(), ancestor: None,
             peer_process: Some(local_peer_process(&connector).unwrap()) };
         let observed = Arc::new(AtomicU32::new(0));
