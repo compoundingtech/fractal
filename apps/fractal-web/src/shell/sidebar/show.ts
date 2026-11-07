@@ -91,7 +91,7 @@ export interface ShowRow {
 }
 const noMenuFilters = { hideEnded: false, hideRetired: false, statuses: [] }
 /** A row's menu facts. `ended` also covers state done, as `hideEnded` does; both matchers share this reading. */
-export const showRowFacts = (row: SidebarMatchRow): Pick<ShowRow, 'status' | 'ended' | 'retired'> => ({
+export const showRowFacts = (row: Pick<SidebarMatchRow, 'status' | 'agent'>): Pick<ShowRow, 'status' | 'ended' | 'retired'> => ({
   status: row.status, ended: row.status === 'ended' || row.agent?.state === 'done', retired: row.status === 'retired',
 })
 /** Settings with everything the menu owns removed, so `others` measures only free text and typed facets. */

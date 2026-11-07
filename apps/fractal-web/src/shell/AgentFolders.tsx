@@ -207,6 +207,8 @@ const LegacyAgentFolders = React.memo(
       [filters],
     )
     const fleet = useFleetSelection({ select: identityFleet, equal: equalFleet })
+    // The Filter menu counts facts the collection's comparator ignores under default filters, so it subscribes to them itself.
+    const menuFacts = useFleetSelection({ select: filterMenuFacts, equal: sameFilterMenuFacts })
     const selectAttention = React.useCallback(
       (subjects: readonly { readonly ref: string; readonly attention?: boolean }[]) =>
         filters.sort === 'status'
@@ -295,7 +297,7 @@ const LegacyAgentFolders = React.memo(
       host: workspace.host,
       asking: asking.has(workspace.id),
       others: othersVisible.has(workspace.id),
-      ...showRowFacts(rows.get(workspace.id)!),
+      ...(menuFacts.get(workspace.id) ?? showRowFacts(rows.get(workspace.id)!)),
     }))
     const searching = parsedQuery.text !== ''
     // Any typed query term, including facet-only and machine-only searches, reveals matches and
@@ -829,6 +831,15 @@ const RevealAgentRow = ({ selected, treeRef, items, revealKey = '', expandAncest
 
 const noAttention: readonly string[] = []
 const identityFleet = (fleet: Feed<Fleet>): Feed<Fleet> => fleet
+type FilterMenuFacts = ReadonlyMap<string, ReturnType<typeof showRowFacts>>
+const filterMenuFacts = (fleet: Feed<Fleet>): FilterMenuFacts =>
+  new Map(fleet._tag !== 'Observed' ? [] : fleet.value.agents.map((agent) => [agent.ref, showRowFacts({ agent, status: agentStatus({ agent, fleet }) })] as const))
+// oxlint-disable-next-line overeng/named-args -- Fixed positional Equivalence shape.
+const sameFilterMenuFacts = (left: FilterMenuFacts, right: FilterMenuFacts): boolean =>
+  left.size === right.size && [...left].every(([ref, facts]) => {
+    const other = right.get(ref)
+    return other !== undefined && other.status === facts.status && other.ended === facts.ended && other.retired === facts.retired
+  })
 // oxlint-disable-next-line overeng/named-args -- Retained-ref array comparator; fixed positional Equivalence shape.
 const sameRefs = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((ref, index) => ref === right[index])
