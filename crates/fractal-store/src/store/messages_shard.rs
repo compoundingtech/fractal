@@ -1254,9 +1254,13 @@ mod tests {
         assert_eq!(page.len(), 3);
         assert_eq!(next, None);
 
-        // The unpaged and delivery readers stay on the graph until they learn stream items.
+        // The unpaged reader lists the stream items after the graph's mail; the delivery reader
+        // stays on the graph (mailbox_reads.rs delivers stream mail).
         let unpaged = graph.messages_through(Some("agent/cedar"), false, through).unwrap();
-        assert_eq!(unpaged.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["message/00000000000000a1"]);
+        assert_eq!(
+            unpaged.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(),
+            ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2"]
+        );
         let delivered = graph.messages_through_inner(Some("agent/cedar"), false, through, true).unwrap();
         assert_eq!(delivered.len(), 1);
 

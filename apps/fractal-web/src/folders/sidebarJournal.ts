@@ -33,11 +33,12 @@ const encode = Schema.encodeSync(json, { onExcessProperty: 'error' })
 export type SidebarJournalState = typeof State.Type
 export type SidebarJournalRequest = typeof Request.Type
 export type SidebarJournalEffect = 'PersistPending' | 'PersistCompletion' | 'PersistRemoval' | 'Send' | 'ReadBase' | 'Replan'
+export type SidebarPersistenceFailure = { readonly _tag: 'StorageFailed'; readonly identity: SidebarJournalRequest['identity']; readonly phase: 'Pending' | 'Completion' | 'Removal' }
 export type SidebarJournalError =
   | { readonly _tag: 'Version'; readonly version: number }
   | { readonly _tag: 'InvalidRecord'; readonly cause: unknown }
   | { readonly _tag: 'ScopeMismatch' }
-  | { readonly _tag: 'StorageFailed'; readonly operation: 'read' | 'write' | 'remove'; readonly cause: unknown }
+  | { readonly _tag: 'StorageFailed'; readonly operation: 'read' | 'write' | 'remove'; readonly cause: unknown; readonly event?: SidebarPersistenceFailure }
   | { readonly _tag: 'PersistenceRequired' }
 export type SidebarJournalResult = { readonly _tag: 'Applied'; readonly effects: readonly SidebarJournalEffect[]; readonly event?: { readonly _tag: 'Persisted' | 'CompletionPersisted'; readonly identity: typeof Identity.Type }; readonly request?: SidebarJournalRequest }
   | SidebarJournalError
@@ -85,16 +86,17 @@ export class SidebarJournal {
       return { _tag: 'Applied', effects: ['Send'], request: structuredClone(state.request) }
     }
     this.#permit = undefined
+    const event: SidebarPersistenceFailure | undefined = state.request ? { _tag: 'StorageFailed', identity: structuredClone(state.request.identity), phase: effect === 'PersistRemoval' ? 'Removal' : effect === 'PersistCompletion' ? 'Completion' : 'Pending' } : undefined
     if (effect === 'PersistRemoval') {
       if (state.status !== 'Observed') return { _tag: 'PersistenceRequired' }
       try { (this.storage ?? globalThis.localStorage).removeItem(this.#key); return { _tag: 'Applied', effects: [] } }
-      catch (cause) { return { _tag: 'StorageFailed', operation: 'remove', cause } }
+      catch (cause) { return { _tag: 'StorageFailed', operation: 'remove', cause, event } }
     }
     let bytes: string
     try { bytes = encode({ version: 1, state }); decode(bytes) }
     catch (cause) { return { _tag: 'InvalidRecord', cause } }
     try { (this.storage ?? globalThis.localStorage).setItem(this.#key, bytes) }
-    catch (cause) { return { _tag: 'StorageFailed', operation: 'write', cause } }
+    catch (cause) { return { _tag: 'StorageFailed', operation: 'write', cause, event } }
     if (effect === 'PersistPending' && state.request && ['AwaitingPersistence', 'Sending', 'UnknownDelivery'].includes(state.status)) this.#permit = JSON.stringify(state.request)
     if (effect === 'PersistPending' && state.status === 'AwaitingPersistence' && state.request) {
       // The reducer alone advances AwaitingPersistence to Sending on this acknowledgement.

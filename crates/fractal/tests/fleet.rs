@@ -8376,6 +8376,149 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     assert_eq!(status["invalid_records"], 0, "{status}");
 }
 
+/// The message ids `node`'s client list holds (`GET /v1/client/messages`), current mail only
+/// unless `history`, followed through every page of `limit` items.
+async fn client_listed(node: &Node, history: bool, limit: usize) -> Vec<String> {
+    let mut listed = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut path = format!("/v1/client/messages?limit={limit}&history={history}");
+        if let Some(cursor) = &cursor {
+            path.push_str(&format!("&cursor={cursor}"));
+        }
+        let page: Value = node.client().get(&path).await.unwrap();
+        listed.extend(page["items"].as_array().unwrap().iter().map(|item| item["id"].as_str().unwrap().to_owned()));
+        match page["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => return listed,
+        }
+    }
+}
+
+/// The client item `node` lists for `subject`, from its history.
+async fn client_item(node: &Node, subject: &str) -> Option<Value> {
+    let page: Value = node.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
+    page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).cloned()
+}
+
+/// Stream mail reaches the phone's message list (`GET /v1/client/messages`) on every member of
+/// this build that holds it, beside a member of the previous release. Each lists the items its
+/// shard holds, page by page, with what a graph message's item carries, and a close recorded on
+/// one member moves only that member's list, as stream lifecycle is local. A release that does
+/// not list stream mail (v0.3.28 and earlier: no `messages_stream_selectors`) lists only graph
+/// mail; upgraded in place it lists what its shard held, and after a rollback and another
+/// upgrade it lists what arrived meanwhile too.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_members_that_list_stream_mail_to_the_phone() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "a").await;
+    let b = joined(root.path(), &a, "b", &[]).await;
+    b.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    wait_for_stream_peers(&a, &["b", "o"], 90).await;
+    let release_lists = newest_start_advertises(&a, "o", "messages_stream_selectors").await;
+
+    let items = [("message/0000000000000d01", &a), ("message/0000000000000d02", &b)];
+    for (subject, writer) in items {
+        assert!(append_keyed_stream_item(writer, subject, "agent/fleet-reader", subject).await);
+    }
+    let subjects = items.map(|(subject, _)| subject.to_owned());
+    for (subject, _) in items {
+        for node in [&a, &b] {
+            wait_for_stream_item(node, subject, 90).await;
+        }
+        wait_until("the release holds the stream item", 90, || async { shard_file_claims(&o, subject) == 1 }).await;
+    }
+    let lists_all = |node: &'static str, listed: Vec<String>| {
+        let mut listed = listed;
+        listed.sort();
+        assert_eq!(listed, subjects, "{node} lists the stream mail");
+    };
+    for node in [&a, &b] {
+        wait_until("each member of this build lists both", 60, || async {
+            client_listed(node, false, 200).await.len() == 2
+        })
+        .await;
+    }
+    // One page at a time lists each once, and an item says what a graph message's would.
+    lists_all("a, a page at a time", client_listed(&a, false, 1).await);
+    lists_all("b, a page at a time", client_listed(&b, false, 1).await);
+    let item = client_item(&a, items[1].0).await.unwrap();
+    assert_eq!(item["from"], "agent/fleet-sender", "{item}");
+    assert_eq!(item["to"], "agent/fleet-reader", "{item}");
+    assert_eq!(item["content"], format!("stream mail {}", items[1].0), "{item}");
+    assert_eq!(item["operational"]["layer"], "current", "{item}");
+    assert!(item["revision"].as_str().is_some_and(|revision| !revision.is_empty() && revision != "message/unknown"), "{item}");
+    let release_listed = client_listed(&o, false, 200).await;
+    assert_eq!(release_listed.len(), if release_lists { 2 } else { 0 }, "the release lists only what it can: {release_listed:?}");
+
+    // A close on a is a's: b still lists the item as current mail.
+    let closed = items[0].0;
+    for lifecycle in ["delivered", "read", "closed"] {
+        let receipt: Value = a
+            .client()
+            .post(
+                &format!("/v1/messages/{}/claims", closed.trim_start_matches("message/")),
+                &json!({"lifecycle": lifecycle, "actor": "agent/fleet-reader", "idempotency_key": format!("{closed}-{lifecycle}")}),
+            )
+            .await
+            .unwrap();
+        assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{lifecycle}: {receipt}");
+    }
+    wait_until("a's current list drops the item it closed", 60, || async {
+        !client_listed(&a, false, 200).await.iter().any(|subject| subject == closed)
+    })
+    .await;
+    assert_eq!(
+        client_item(&a, closed).await.unwrap()["operational"],
+        json!({"layer": "history", "actionable": false, "reasons": ["closed"]})
+    );
+    assert!(client_listed(&b, false, 200).await.iter().any(|subject| subject == closed), "b keeps its own lifecycle");
+
+    // Upgraded in place, the release's member lists the stream mail it already held.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member lists what its shard held", 60, || async {
+        client_listed(&o, false, 200).await.len() == 2
+    })
+    .await;
+
+    // Rolled back, then upgraded again, it lists what arrived meanwhile as well.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let late = "message/0000000000000d03";
+    assert!(append_keyed_stream_item(&b, late, "agent/fleet-reader", late).await);
+    wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the member lists the late item and keeps the others", 60, || async {
+        client_listed(&o, false, 200).await.len() == 3
+    })
+    .await;
+    for node in [&a, &b, &o] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.
 async fn held_claim_kinds(node: &Node) -> Vec<String> {
     let records: Vec<Value> = node.client().get("/v1/replication/records?unresolved=true").await.unwrap();

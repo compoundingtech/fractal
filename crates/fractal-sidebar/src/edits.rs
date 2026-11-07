@@ -157,7 +157,7 @@ mod tests {
     use super::*;
     use crate::model::{NodeRef, Parent};
     fn scope() -> Scope { Scope { owner: "owner-a".into(), container: "container-a".into(), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
-    fn base(n: u64) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot-{n}"), host_id: "host-a".into(), store_index: n, projection_version: "1".into(), created_at: "created".into(), published_at: Some("published".into()) }, revision: format!("revision-{n}"), ready: true } }
+    fn base(n: u64) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot-{n}"), host_id: "host-a".into(), store_index: n, projection_version: "1".into(), created_at: "created".into(), published_at: None }, revision: format!("revision-{n}"), ready: true } }
     fn id(n: u64) -> Identity { Identity { actor: "actor-a".into(), action_id: format!("action-{n}"), idempotency_key: format!("key-{n}") } }
     fn members() -> Vec<ordered_membership::Operation> { vec![ordered_membership::Operation::Place { member: "member-a".into(), bucket: Some("folder-a".into()), key: "a0".into() }] }
     fn plan(folder: bool, member: bool) -> V2Plan { V2Plan { folders: if folder { vec![arrangements::Operation::FolderRename { id: "folder-a".into(), name: "Folder".into() }] } else { vec![] }, memberships: if member { members() } else { vec![] } } }
