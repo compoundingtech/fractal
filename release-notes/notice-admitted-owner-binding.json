@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve one explicit notice owner against its exact admitted fleet member incarnation without automatic election.",
+  "replay": { "status": "changed", "detail": "Owner resolution checks the selected declaration and competing causal desired heads, quarantined prerequisites and admitted membership. A canonical or receive-order winner is not an ownership decision." },
+  "schema": { "status": "changed", "detail": "The internal binding retains the declaration claim, subject, member subject, immutable admission claim and admitted member public key. It is a fleet member incarnation, not an agent or terminal process incarnation." },
+  "rules": { "status": "changed", "detail": "A missing, duplicate, conflicted, ended, nonmember or mismatched owner is explicitly unavailable. Graph admission refuses a second retained owner and validates the authored always-on qualification against the exact current admitted incarnation. No fallback owner is elected." },
+  "compatibility": { "status": "changed", "detail": "Desired owner intent does not itself acknowledge ownership or authorize a receipt. The owner acknowledgement fence and receipt causal-position authorization remain separate; receipt admission stays pending and delivery stays unknown until that authority exists." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "changed", "detail": "Publish one reviewed owner declaration bound to an admitted member incarnation with explicit always-on=true. A changed member incarnation needs an explicit new binding." },
+  "recovery": { "status": "changed", "detail": "Restore a unique valid binding and admitted member. Unreachable-owner recovery does not silently choose another member; revocation takes effect only at the separately established owner's acknowledgement fence." }
+}

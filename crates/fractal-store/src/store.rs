@@ -29,6 +29,7 @@ pub mod custom;
 mod notice_authority;
 pub mod notice_materialization;
 pub mod notice_receipts;
+pub mod notice_owner;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
@@ -3303,6 +3304,7 @@ impl Store {
                 }
                 let intent = owned_plan.as_ref().map_or(intent, |p| &p.intent);
                 let expected = owned_plan.as_ref().map_or(expected, |p| &p.preview.expected_subjects);
+                notice_owner::validate_apply(transaction, intent)?;
                 for desired in intent.subjects.values() {
                     retirements::refuse_declaration(transaction, desired)?;
                     crate::terminal_binding::validate_declaration(desired, actor)?;
