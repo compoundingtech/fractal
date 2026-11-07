@@ -11,7 +11,7 @@ import { devBarAvailable, toggleDevBar, useDevBarVisible } from '../telemetry/de
 import { deviceAccess, type SettingsBuild } from './settingsModel.ts'
 import { shortcutCaps, shortcutList, type ShortcutDefinition } from './shortcuts.ts'
 
-export type SettingsScheme = 'dark' | 'light'
+export type SettingsScheme = 'dark' | 'light' | 'system'
 
 export interface SettingsControlProps {
   readonly scheme: SettingsScheme
@@ -60,11 +60,11 @@ const Section = ({ title, children }: { readonly title: string; readonly childre
 
 const ThemeRow = ({ scheme, onSchemeChange }: Pick<SettingsControlProps, 'scheme' | 'onSchemeChange'>) => {
   const touch = React.useContext(NarrowLayoutContext)
-  return <Aria.RadioGroup value={scheme} onChange={value => onSchemeChange(value === 'light' ? 'light' : 'dark')} orientation="horizontal" {...stylex.props(styles.row)}>
+  return <Aria.RadioGroup value={scheme} onChange={value => onSchemeChange(value === 'light' || value === 'system' ? value : 'dark')} orientation="horizontal" {...stylex.props(styles.row)}>
     <Aria.Label {...stylex.props(styles.rowLabel)}>Theme</Aria.Label>
     <div {...stylex.props(styles.segments)}>
-      {(['light', 'dark'] as const).map(option => <Aria.Radio key={option} value={option} {...stylex.props(styles.segment, touch && styles.touch, scheme === option && styles.segmentSelected)}>
-        {option === 'light' ? 'Light' : 'Dark'}
+      {(['light', 'dark', 'system'] as const).map(option => <Aria.Radio key={option} value={option} {...stylex.props(styles.segment, touch && styles.touch, scheme === option && styles.segmentSelected)}>
+        {option === 'light' ? 'Light' : option === 'dark' ? 'Dark' : 'System'}
       </Aria.Radio>)}
     </div>
   </Aria.RadioGroup>

@@ -76,6 +76,7 @@ import { SettingsControl } from './SettingsDialog.tsx'
 import type { SettingsBuild } from './settingsModel.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 import { DecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
+import { schemePreference, useResolvedScheme } from './themePreference.ts'
 
 const emptyAgents: readonly Agent[] = []
 
@@ -304,7 +305,6 @@ class UsageCodeBoundary extends React.Component {
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
 const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false })
-const palette = persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' })
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
 const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
@@ -381,7 +381,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
-  const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
+  const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [preference, setPreference] = useAtom(schemePreference)
   const agentsDrawer = React.useRef<PhoneAgentDrawerHandle>(null)
   const subscribeNarrow = React.useCallback((callback: () => void) => {
     const query = window.matchMedia(narrowLayoutQuery)
@@ -390,7 +390,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [])
   const windowNarrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
   const narrow = dimensions === undefined ? windowNarrow : dimensions.width < 900
-  React.useLayoutEffect(() => setTheme(scheme), [scheme])
+  const scheme = useResolvedScheme(preference)
+  React.useLayoutEffect(() => setTheme(preference), [preference])
   const sidebarOpener = React.useRef<HTMLButtonElement>(null)
   const windowWidth = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
   const windowHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
@@ -704,7 +705,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
   const sidebarHeaderActions = <>
-    <SettingsControl scheme={scheme} onSchemeChange={setScheme} build={build} />
+    <SettingsControl scheme={preference} onSchemeChange={setPreference} build={build} />
   </>
   // The Agents toolbar and tree provide tab stops even while loading or empty; Alerts may have none, so its panel takes focus itself.
   const sidebarBody = <SidebarTabs panelHasTabbableContent={sidebarTab === 'agents' || sidebarTab === 'fleet'} selectedId={sidebarTab === 'alerts' || sidebarTab === 'missions' ? sidebarTab : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')} tabs={[{ id: 'agents', label: 'Agents', icon: 'person', count: agents.length, questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', icon: 'bell', ...alertTabMarkers(attention) }, { id: 'missions', label: 'Missions', icon: 'checklist', ...missionMarkers }]}>

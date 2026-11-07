@@ -10,7 +10,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import type { Grants } from '../data/source.ts'
-import { SettingsControl } from './SettingsDialog.tsx'
+import { SettingsControl, type SettingsScheme } from './SettingsDialog.tsx'
 
 vi.mock('@stylexjs/stylex', () => ({
   create: (styles: unknown) => styles,
@@ -36,7 +36,7 @@ afterEach(async () => {
 })
 
 const none: Grants = { actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
-const mount = async (onSchemeChange: (scheme: 'dark' | 'light') => void = () => undefined) => {
+const mount = async (onSchemeChange: (scheme: SettingsScheme) => void = () => undefined) => {
   const source = { ...fixtureSource({ world: fixtureProjections }), gateway: 'gateway.example', grants: Atom.make(none) }
   await act(async () => root.render(<DataSourceProvider source={source} registry={AtomRegistry.make()}>
     <SettingsControl scheme="dark" onSchemeChange={onSchemeChange} build={{ version: '1.2.3', revision: 'abcdef1234567', dirty: true }} />
@@ -56,13 +56,15 @@ it('reports only what the client holds about this device, and no credential', as
   expect(facts).not.toMatch(/bearer/i)
 })
 
-it('moves theme switching here as a named Light and Dark choice', async () => {
+it('moves theme switching here as a named Light, Dark or System choice', async () => {
   const change = vi.fn()
   const { dialog } = await mount(change)
   const group = within(dialog).getByRole('radiogroup', { name: 'Theme' })
   expect(within(group).getByRole<HTMLInputElement>('radio', { name: 'Dark' }).checked).toBe(true)
   await act(async () => within(group).getByRole('radio', { name: 'Light' }).click())
   expect(change).toHaveBeenCalledWith('light')
+  await act(async () => within(group).getByRole('radio', { name: 'System' }).click())
+  expect(change).toHaveBeenCalledWith('system')
 })
 
 it('lists the shortcut table and the devbar switch, and carries no usage entry', async () => {
