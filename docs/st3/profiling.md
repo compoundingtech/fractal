@@ -408,7 +408,11 @@ same document if retrying an already closed cut.
 
 Fractal computes the lower and upper readiness bounds from these counts. It
 routes one native fault to the named declared agent on a proven miss and
-resolves it only on a proven met reading. Missing, stale, invalid or
+resolves it only on a proven met reading. A stopped or retired reviewer
+receives no new fault, and an existing episode retains its reviewer without
+falling back to the fleet fault handler. A measured breach remains visible
+and the invalid binding appears in Usage and daemon logs. An unreachable but
+still-declared reviewer remains the owner. Missing, stale, invalid or
 indeterminate readings neither open nor resolve a fault. The local
 readiness-slo-cut.json checkpoint is advanced before routing. Replaying the
 same cut is safe. Keep this checkpoint across restart and rollback while using
@@ -416,7 +420,9 @@ the same source identity. The fault reports weekly objective compliance.
 Short outage detection and the publisher's transport remain separate.
 Before enabling both for the same member, the deployment must correlate the
 early warning and weekly miss into one owner-facing case, with a new notice
-only when the case is promoted. This objective does not implement that
+only when the case is promoted. Upgrade all fault readers before enabling
+the policy, since older readers do not recognize this no-fallback condition.
+This objective does not implement that
 delivery policy or its off-host availability fallback.
 
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to

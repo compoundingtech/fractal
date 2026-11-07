@@ -208,6 +208,25 @@ impl Policy {
         })
     }
 
+    fn with_binding(&self, store: &Store, mut row: Value) -> (Value, Option<String>) {
+        let issue = match store.fault_reviewer_is_declared(&self.config.reviewer) {
+            Ok(true) => return (row, None),
+            Ok(false) => format!(
+                "configured reviewer {} is not an active declaration",
+                self.config.reviewer
+            ),
+            Err(error) => format!(
+                "cannot verify the configured reviewer {}: {error:#}",
+                self.config.reviewer
+            ),
+        };
+        let explanation = row["explain"].as_str().unwrap_or_default();
+        row["explain"] = json!(format!(
+            "{explanation} The {issue}. Correct the deployment binding before fault delivery."
+        ));
+        (row, Some(issue))
+    }
+
     fn checkpoint(&self, reading: &Reading) -> Result<()> {
         let parent = self
             .checkpoint
@@ -236,7 +255,7 @@ impl Policy {
             &objectives,
             Some(crate::objective_faults::ObjectiveResponse {
                 reviewer: &self.config.reviewer,
-                condition: "fractal-api-readiness-slo-missed",
+                condition: crate::store::API_READINESS_SLO_MISSED,
                 title: "API readiness",
             }),
         )
@@ -246,40 +265,51 @@ impl Policy {
 }
 
 /// Read the current objective without issuing claims or changing the evidence checkpoint.
-pub fn current() -> Option<Value> {
+pub fn current(store: &Store) -> Option<Value> {
     POLICY.get().map(|policy| {
         let reading = policy
             .checked_reading(now_ms())
             .ok()
             .map(|(reading, _)| reading);
-        policy.row(reading.as_ref())
+        policy.with_binding(store, policy.row(reading.as_ref())).0
     })
 }
 
 /// Evaluate and route one source reading on the existing SLO history cadence.
 pub fn sample(store: &Store) -> Option<Value> {
     static FAILING: AtomicBool = AtomicBool::new(false);
+    static INVALID_BINDING: AtomicBool = AtomicBool::new(false);
     let policy = POLICY.get()?;
-    match policy
+    let row = match policy
         .checked_reading(now_ms())
         .and_then(|(reading, changed)| policy.apply(store, &reading, changed))
     {
         Ok(row) => {
             FAILING.store(false, Ordering::Relaxed);
-            Some(row)
+            row
         }
         Err(error) => {
             if !FAILING.swap(true, Ordering::Relaxed) {
                 eprintln!("fractal: readiness SLO has no admitted reading: {error:#}");
             }
-            Some(policy.row(None))
+            policy.row(None)
         }
+    };
+    let (row, issue) = policy.with_binding(store, row);
+    if let Some(issue) = issue {
+        if !INVALID_BINDING.swap(true, Ordering::Relaxed) {
+            eprintln!("fractal: readiness SLO owner binding is invalid: {issue}");
+        }
+    } else {
+        INVALID_BINDING.store(false, Ordering::Relaxed);
     }
+    Some(row)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RetirementsStore;
     use crate::model::IntentInput;
 
     fn reading(minute: u64, known: u64, good: u64) -> Reading {
@@ -335,7 +365,7 @@ mod tests {
             checkpoint: dir.path().join("readiness-slo-cut.json"),
         };
         let store = Store::open(&db, "node").unwrap();
-        let source = "version 2\nagent \"node.ops\" { command \"true\"; handles-faults }\n";
+        let source = "version 2\nagent \"node.ops\" { command \"true\" }\nagent \"node.backup\" { command \"true\"; handles-faults }\n";
         let intent = crate::graph::parse_intent(source, "node").unwrap();
         let preview = store
             .mission(
@@ -352,7 +382,7 @@ mod tests {
         assert!(applied.changed, "test reviewer was not published");
         assert_eq!(
             store.fleet_fault_agent().unwrap().as_deref(),
-            Some("agent/node.ops")
+            Some("agent/node.backup")
         );
 
         assert_eq!(
@@ -376,6 +406,62 @@ mod tests {
         assert_eq!(
             (first.status.as_str(), first.reviewer.as_str()),
             ("pending", "agent/node.ops")
+        );
+        let fault_owner = |store: &Store| {
+            store
+                .fault_snapshot(u128::from(now_ms()) + 1)
+                .unwrap()
+                .into_iter()
+                .find(|fault| fault.item.episode == first.request)
+                .expect("readiness fault is visible")
+                .owner
+        };
+        assert_eq!(fault_owner(&store).as_deref(), Some("agent/node.ops"));
+
+        let stop_source = "version 2\nstop \"agent/node.ops\"\n";
+        let stop = crate::graph::parse_intent(stop_source, "node").unwrap();
+        let preview = store
+            .mission(
+                &stop,
+                IntentInput {
+                    kdl: stop_source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply(
+                &stop,
+                &preview.subject_tokens,
+                "readiness-slo-stop-reviewer",
+            )
+            .unwrap();
+        assert!(!store.fault_reviewer_is_declared("agent/node.ops").unwrap());
+        assert!(
+            fault_owner(&store).is_none(),
+            "no generic fallback after stop"
+        );
+        assert_eq!(
+            store.operational_failure(&id).unwrap().unwrap().reviewer,
+            "agent/node.ops"
+        );
+        let reviewer = "agent/node.ops";
+        let token = store.selected_desired_token(reviewer).unwrap().unwrap();
+        store
+            .retire_agent(
+                reviewer,
+                reviewer,
+                "fixture completed",
+                &token,
+                None,
+                "readiness-slo-retire-reviewer",
+                &[],
+            )
+            .unwrap();
+        assert!(!store.fault_reviewer_is_declared(reviewer).unwrap());
+        assert!(
+            fault_owner(&store).is_none(),
+            "no generic fallback after retirement"
         );
         drop(store);
 
@@ -415,5 +501,22 @@ mod tests {
             "resolved"
         );
         assert!(policy.admit(&missed, met.end_ms).is_err());
+
+        let new_miss = reading(4, MINUTES, MINUTES - 11);
+        let changed = policy.admit(&new_miss, new_miss.end_ms).unwrap();
+        let row = policy.apply(&store, &new_miss, changed).unwrap();
+        let (row, issue) = policy.with_binding(&store, row);
+        assert_eq!(row["status"], "missed");
+        assert!(issue.unwrap().contains("agent/node.ops"));
+        assert!(
+            row["explain"]
+                .as_str()
+                .unwrap()
+                .contains("Correct the deployment binding")
+        );
+        assert_eq!(
+            store.operational_failure(&id).unwrap().unwrap().status,
+            "resolved"
+        );
     }
 }

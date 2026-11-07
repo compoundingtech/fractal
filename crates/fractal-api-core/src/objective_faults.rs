@@ -130,10 +130,9 @@ pub(crate) fn check_with_response(
         }
         if fault_agent.is_none() {
             fault_agent = Some(match &response {
-                Some(response) => (store
-                    .selected_desired_kind(response.reviewer)
+                Some(response) => store
+                    .fault_reviewer_is_declared(response.reviewer)
                     .map_err(internal)?
-                    .as_deref() == Some("agent"))
                 .then(|| response.reviewer.to_owned()),
                 None => store.fleet_fault_agent().map_err(internal)?,
             });
