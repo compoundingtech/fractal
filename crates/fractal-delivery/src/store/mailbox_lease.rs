@@ -104,6 +104,15 @@ pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &Memb
     Ok(())
 }
 
+/// Whether this capability token's argv binding is stored, so `record_argv_binding` would leave
+/// it as it is.
+pub fn holds_argv_binding(connection: &Connection, fence: &Fence) -> Result<bool, FractalError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_mailbox_argv_bindings WHERE token=?1)",
+        [&fence.token], |row| row.get(0),
+    ).map_err(internal)
+}
+
 pub fn check_declaration(
     connection: &Connection,
     fence: &Fence,
