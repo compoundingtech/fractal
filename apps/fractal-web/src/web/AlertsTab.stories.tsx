@@ -15,13 +15,13 @@ import { AlertsList } from './AlertsTab.tsx'
 
 const decode = Native.decodeUnknownSync(Native.Attention)
 
-type Args = { readonly scheme: 'dark' | 'light'; readonly feed: 'served' | 'waiting' | 'ungranted' | 'stale'; readonly attention?: string; readonly bounded?: boolean }
+type Args = { readonly scheme: 'dark' | 'light'; readonly feed: 'served' | 'waiting' | 'ungranted' | 'stale'; readonly attention?: string; readonly bounded?: boolean; readonly rejected?: boolean }
 
 /** The bounded sidebar's height: shorter than the slice's four 48px rows, as a workspace column is shorter than a long feed. */
 const BOUNDED_HEIGHT = 160
 
 /** The feed the tab reads: the slice's cards as served, or the same cards in the source's waiting, refused and stale states. The play gate sets the scheme and the 440/1440 width. */
-const AlertsTabStory = ({ scheme, feed: state, bounded = false }: Args) => {
+const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false }: Args) => {
   const slice = useScenarioSlice('attention')
   // Scenario readers shift committed instants to the current clock.
   const [now] = React.useState(Date.now)
@@ -32,14 +32,18 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false }: Args) => {
     const value = slice.state.attention.map((card) => decode(card))
     return state === 'stale' ? { _tag: 'Observed', value, freshness: 'stale', readAt: now - 5 * 60_000 } : observed({ value })
   }, [slice, state, now])
+  const evidence = rejected ? { decodeStale: false, undecodable: [
+    { _tag: 'Rejected' as const, id: 'attention/broken', path: 'actions', reason: 'Expected an array' },
+    { _tag: 'Rejected' as const, id: 'attention/other', path: 'title', reason: 'Expected a string' },
+  ] } : undefined
   return (
     <NarrowLayoutContext.Provider value={window.innerWidth < 900}>
       <main data-scheme={scheme} {...stylex.props(styles.canvas, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
         <aside aria-label="Alerts sidebar" data-sidebar-host {...stylex.props(styles.sidebar, bounded && styles.bounded)}>
           {/* Bounded, the list sits where the workspace puts it: in a `minHeight: 0` column panel that clips its overflow. */}
           {bounded
-            ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} now={now} onOpen={setOpened} /></div>
-            : <AlertsList feed={feed} now={now} onOpen={setOpened} />}
+            ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} /></div>
+            : <AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} />}
         </aside>
         {!slice.loading && (state === 'served' || state === 'stale') && slice.state.messages.length > 0 && <section aria-label="Scenario fixture context" {...stylex.props(styles.fixtureContext)}>
           <h2>Scenario fixture context</h2>
@@ -180,9 +184,9 @@ const meta = {
 export default meta
 
 type Story = StoryObj<Args>
-export const Served: Story = { tags: ['critical'], name: 'Served · rows, menu and expand', play: servedPlay }
+export const Served: Story = { tags: ['critical', 'both-widths'], name: 'Served · rows, menu and expand', play: servedPlay }
 /** A sidebar shorter than the feed: the list is its own bounded scroll region inside a `minHeight: 0` panel. */
-export const BoundedScroll: Story = { tags: ['critical'], args: { bounded: true }, name: 'Bounded · scrolls in a short sidebar', play: boundedPlay }
+export const BoundedScroll: Story = { tags: ['critical', 'both-widths'], args: { bounded: true }, name: 'Bounded · scrolls in a short sidebar', play: boundedPlay }
 
 export const Empty: Story = { args: { attention: 'none' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -202,6 +206,20 @@ export const Stale: Story = { args: { feed: 'stale' }, play: async ({ canvasElem
   await expect(await within(within(canvasElement).getByRole('complementary', { name: 'Alerts sidebar' })).findByRole('status')).toHaveTextContent('Last known alerts, as of 5m ago; this list may be out of date.')
   await expect(rows(canvasElement)).toHaveLength(4)
 } }
+
+/** Rejected rows do not become urgent badges; their evidence lives inside the tab panel. */
+export const RejectedRows: Story = {
+  args: { rejected: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('2 alerts could not be shown · their data does not match the expected format')).toBeVisible()
+    await expect(await canvas.findByRole('list', { name: 'Alerts' })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Details' }))
+    const details = canvas.getByRole('list', { name: 'Alerts that could not be shown' })
+    await expect(details).toHaveTextContent('attention/broken')
+    await expect(details).toHaveTextContent('attention/other')
+  },
+}
 
 const styles = stylex.create({
   canvas: { display: 'flex', alignItems: 'flex-start', gap: 16, minHeight: '100vh', boxSizing: 'border-box', padding: 12, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },

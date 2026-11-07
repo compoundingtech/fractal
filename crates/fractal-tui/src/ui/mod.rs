@@ -49,6 +49,8 @@ mod drafts_store;
 mod prefs;
 mod recent;
 mod resource_sidebar;
+#[allow(dead_code)] // PR 17 activates the complete v2 path together.
+mod sidebar_store;
 mod observed_resources;
 mod pty;
 pub mod requests;

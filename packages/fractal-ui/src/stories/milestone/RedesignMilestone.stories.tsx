@@ -1,124 +1,55 @@
-/**
- * Redesign milestone 1 (RM1) — accepted RM1 reference (2026-10-18); the live app ports slices separately.
- *
- * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) and the decided layout calls (RM1-Q1…Q7) with new shell states:
- * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. The
- * thread pane and the docked Changes split are the kit `Pane` and `DockedSplit`. No open question remains, so the only
- * args are scheme and state. The composer is deliberately untouched.
- */
-import * as React from 'react'
-import * as stylex from '@stylexjs/stylex'
+/** RM1 shell driven by scenario roster, conversation and synchronization slices. */
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { RedesignMilestone, type RedesignMilestoneProps } from './RedesignMilestone'
-import { lockedDecisions } from './milestone-decisions'
-import { baselineTheme } from '../../assistant-ui/neutral-theme'
-import { lightTheme } from '../../assistant-ui/composition-theme'
-import { borderVars as border, spaceVars as sp, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { scenarioArgTypes } from '@fractal/scenarios/storybook'
+import { loadWorld } from '@fractal/scenarios'
+import { scenarioSections } from '../../scenario-transcript.story-harness.ts'
+import { ScenarioMilestone, type MilestoneScenarioArgs as Args } from './milestone-scenario.story-harness.tsx'
+const selectedConversation = { conversation: 'The shell mounts only the selected conversation; inactive and closed threads are intentionally not rendered. Navigation plays assert selecting another slice-derived thread.' }
 
-type Args = Omit<RedesignMilestoneProps, 'persistKey' | 'reload'>
-
-const meta: Meta<Args> = {
-  excludeStories: ['scenarioExemptions'],
+const meta = {
   title: 'Fractal UI/Redesign milestone',
-  parameters: {
-    layout: 'fullscreen',
-    scenario: {
-      _tag: 'contract-fixture',
-      reason: 'Accepted RM1 composition imports milestone-fixtures at module level. Loading, empty roster, empty thread and no-match switch on its state prop, not slice data; those stories convert to slices once the composition takes roster and conversation slice data. The remaining contracts require fixture titles, Known usage and duration, unread and prose chips, a fixed last-seen instant and command, branch-named Changes, or host-settled reload promises that worlds do not express.',
-    },
-    docs: { description: { component: `Accepted RM1 reference; live app ports slices separately. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. The sidebar uses the shared kit row.` } },
-  },
+  component: ScenarioMilestone,
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['roster', 'conversation', 'sync'], invariant: selectedConversation } },
   args: { scheme: 'dark', state: 'slice' },
-  argTypes: {
-    scheme: { control: 'inline-radio', options: ['dark', 'light'] },
-    state: { control: 'select', options: ['slice', 'loading', 'empty-roster', 'empty-thread', 'no-match', 'roster-error', 'thread-unavailable', 'stale', 'navigation'] },
-  },
-  // Initial state derives from args, so any arg change remounts with a fresh frame.
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} />,
-}
+  argTypes: { ...scenarioArgTypes(['roster', 'conversation', 'sync']), scheme: { control: 'inline-radio', options: ['dark', 'light'] }, state: { control: 'select', options: ['slice', 'empty-thread', 'no-match', 'navigation'] } },
+  render: (args, context) => <ScenarioMilestone {...args} persistKey={`rm1-${context.id}`} />,
+} satisfies Meta<Args>
 export default meta
-
-// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
-export const scenarioExemptions: readonly string[] = [
-  'Decisions:contract-fixture',
-  'EmptyRoster:contract-fixture',
-  'EmptyRosterLight:contract-fixture',
-  'EmptyThread:contract-fixture',
-  'EmptyThreadLight:contract-fixture',
-  'ErrorRecovery:contract-fixture',
-  'HideChanges:contract-fixture',
-  'Loading:contract-fixture',
-  'LoadingLight:contract-fixture',
-  'Navigation:contract-fixture',
-  'NavigationKeyboard:contract-fixture',
-  'NavigationLight:contract-fixture',
-  'NoMatch:contract-fixture',
-  'NoMatchLight:contract-fixture',
-  'RosterError:contract-fixture',
-  'RosterErrorLight:contract-fixture',
-  'Slice:contract-fixture',
-  'SliceLight:contract-fixture',
-  'Stale:contract-fixture',
-  'StaleLight:contract-fixture',
-  'ThreadRecovery:contract-fixture',
-  'ThreadUnavailable:contract-fixture',
-  'ThreadUnavailableLight:contract-fixture',
-]
 type Story = StoryObj<Args>
+
+const required = <T,>(value: T | null | undefined, label: string): T => {
+  if (value === null || value === undefined) throw new Error(`Missing ${label}`)
+  return value
+}
+
+const world = (id: string) => ({ scenario: { _tag: 'slices', slices: ['roster', 'conversation', 'sync'], world: id } })
 
 const light = (story: Story): Story => ({ ...story, args: { ...story.args, scheme: 'light' } })
 
 export const Slice: Story = { args: { state: 'slice' } }
 export const SliceLight = light(Slice)
-export const Loading: Story = { args: { state: 'loading' } }
+export const Loading: Story = { parameters: { scenario: { ...world('loading').scenario, invariant: { ...selectedConversation, roster: 'The loading shell intentionally withholds roster rows even when the wire retains a previous snapshot.', sync: 'An initial loading snapshot takes precedence over transport status until the roster and conversation have loaded.' } } } }
 export const LoadingLight = light(Loading)
-export const EmptyRoster: Story = { args: { state: 'empty-roster' } }
+export const EmptyRoster: Story = { parameters: world('empty') }
 export const EmptyRosterLight = light(EmptyRoster)
-export const EmptyThread: Story = { args: { state: 'empty-thread' } }
+export const EmptyThread: Story = { args: { state: 'empty-thread' }, parameters: world('fleet-mid-refactor') }
 export const EmptyThreadLight = light(EmptyThread)
-export const NoMatch: Story = { args: { state: 'no-match' } }
+export const NoMatch: Story = { args: { state: 'no-match' }, parameters: { scenario: { _tag: 'slices', slices: ['roster', 'conversation', 'sync'], invariant: { ...selectedConversation, roster: 'The no-match query deliberately filters all roster rows; the empty search result, not every unfiltered agent name, is this shell state.' } } } }
 export const NoMatchLight = light(NoMatch)
-export const RosterError: Story = { args: { state: 'roster-error' } }
+export const RosterError: Story = { parameters: { scenario: { ...world('failed-sync-subscription-error').scenario, invariant: { ...selectedConversation, roster: 'A failed roster renders its retry notice instead of the retained agent rows; the still-open conversation remains available.' } } } }
 export const RosterErrorLight = light(RosterError)
-export const ThreadUnavailable: Story = { args: { state: 'thread-unavailable' } }
+export const ThreadUnavailable: Story = { parameters: { scenario: { ...world('failed-sync-forbidden').scenario, invariant: { ...selectedConversation, roster: 'The forbidden world fails both agents and conversations; the failed roster withholds retained agent rows behind its retry notice.' } } } }
 export const ThreadUnavailableLight = light(ThreadUnavailable)
-export const Stale: Story = {
-  args: { state: 'stale' },
-  play: async ({ canvasElement }) => {
-    const tail = await waitFor(() => { const element = canvasElement.querySelector<HTMLElement>('[data-last-seen]'); expect(element).not.toBeNull(); return element! })
-    // The live region reads only its sentence: the glyph beside it (and its hidden description) is decorative.
-    await expect(tail.querySelector('[role="img"]')?.closest('[aria-hidden="true"]')).not.toBeNull()
-    const announced = tail.cloneNode(true) as HTMLElement
-    announced.querySelectorAll('[aria-hidden="true"]').forEach(node => node.remove())
-    await expect(announced.textContent?.trim()).toMatch(/^Last seen working · 18 s ago\s*pnpm /)
-    // Narrow, the roster sits in the closed drawer and is not rendered.
-    if (canvasElement.querySelector('[data-roster-state="stale"]') === null) return
-    await expect(within(canvasElement).getByText(/^Last observed \d+ s ago$/)).toBeVisible()
-    // A last-observed roster has one glyph tone: nothing reads as live, and stale is never the danger red.
-    const glyphs = [...canvasElement.querySelectorAll<SVGElement>('[data-milestone-row] [data-row-column="status"] svg')]
-    const tones = new Set(glyphs.map(svg => getComputedStyle(svg).color))
-    await expect(tones.size).toBe(1)
-    // One tone, so shape carries the state: frozen working and idle rows draw different shape cues.
-    const shape = (status: string) => canvasElement.querySelector(`[data-milestone-row][data-frozen][data-status="${status}"] [data-row-column="status"] svg`)?.innerHTML
-    await expect(shape('working')).toBeDefined()
-    await expect(shape('idle')).toBeDefined()
-    await expect(shape('working')).not.toBe(shape('idle'))
-    // Frozen times measure against the observation; nothing newer than it reads as a fake 0s.
-    const times = [...canvasElement.querySelectorAll('[data-milestone-row] [data-row-field="last-turn"] time')].map(time => time.textContent)
-    await expect(times.length).toBeGreaterThan(0)
-    await expect(times).not.toContain('0s')
-  },
-}
-export const StaleLight = light(Stale)
 export const Navigation: Story = {
   args: { state: 'navigation' },
+  parameters: world('fleet-mid-refactor'),
   play: async ({ canvasElement }) => {
-    // One status reads the same everywhere: the stale agent's glyph in Mod+K matches its sidebar glyph (muted, never danger).
-    const paletteGlyph = await waitFor(() => { const svg = within(canvasElement).getByRole('menuitem', { name: /Fix flaky interaction gate/ }).querySelector('svg'); expect(svg).not.toBeNull(); return svg! })
-    const sidebarRow = [...canvasElement.querySelectorAll('[data-milestone-row][data-status="stale"]')][0]
+    const title = required(canvasElement.querySelector<HTMLElement>('[data-scenario-navigation-title]')?.dataset.scenarioNavigationTitle, 'scenario navigation title')
+    const paletteGlyph = await waitFor(() => required(within(canvasElement).getAllByRole('menuitem').find(item => item.textContent?.includes(title))?.querySelector('svg'), 'palette status glyph'))
+    const sidebarRow = [...canvasElement.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(row => row.textContent?.includes(title))
     if (sidebarRow === undefined) return
-    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="status"] svg')!).color)
+    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(required(sidebarRow.querySelector('[data-row-column="status"] svg'), 'sidebar status glyph')).color)
   },
 }
 export const NavigationLight = light(Navigation)
@@ -127,20 +58,11 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const chord = (key: string) => isMac ? `{Meta>}${key}{/Meta}` : `{Control>}${key}{/Control}`
 const rows = (root: HTMLElement) => root.querySelectorAll('[data-milestone-row]')
 
-/** A reload the play settles itself: recovery plays assert the loading frame, then complete it with no timer to race. */
-function manualReload() {
-  let settle: (() => void) | undefined
-  return {
-    reload: () => new Promise<void>(resolve => { settle = resolve }),
-    settle: () => { expect(settle).toBeDefined(); settle!(); settle = undefined },
-  }
-}
-const rosterReload = manualReload()
-const threadReload = manualReload()
 
 /** Opening a tool's output shows Changes; hiding changes removes it again, including the narrow Changes tab. */
 export const HideChanges: Story = {
   tags: ['critical'], args: { state: 'slice' },
+  parameters: world('fleet-mid-refactor'),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const page = within(canvasElement.ownerDocument.body)
@@ -149,9 +71,12 @@ export const HideChanges: Story = {
     const changesTab = () => { const strip = canvas.queryByRole('tablist', { name: 'Open conversations' }); return strip === null ? null : within(strip).queryByRole('tab', { name: 'Changes' }) }
     await expect(await canvas.findByRole('tablist', { name: 'Open conversations' })).toBeVisible()
     const docked = () => canvas.queryByRole('separator', { name: 'Resize changes' })
-    await userEvent.click((await canvas.findAllByRole('button', { name: /^Worked for/ }))[0]!)
-    await userEvent.click(await waitFor(() => { const row = canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'); expect(row).not.toBeNull(); return row! }))
-    await userEvent.click((await canvas.findAllByRole('button', { name: 'Show raw input/output' }))[0]!)
+    // The selected world may carry live or failed work rather than an authored known duration.
+    const work = await waitFor(() => required(canvasElement.querySelector<HTMLElement>('[data-testid="work-log"] > button'), 'work log disclosure'))
+    if (work.getAttribute('aria-expanded') === 'false') await userEvent.click(work)
+    await expect(work).toHaveAttribute('aria-expanded', 'true')
+    await userEvent.click(await waitFor(() => required(canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'), 'tool disclosure')))
+    await userEvent.click(required((await canvas.findAllByRole('button', { name: 'Show raw input/output' }))[0], 'raw input/output disclosure'))
     await userEvent.click(await canvas.findByRole('button', { name: /^Open .+ tool detail$/ }))
     if (narrow) await waitFor(() => expect(changesTab()).toHaveAttribute('aria-selected', 'true'))
     else await waitFor(() => expect(docked()).not.toBeNull())
@@ -169,19 +94,22 @@ export const HideChanges: Story = {
 /** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows, Mod+B and the row menu's Open conversation work end to end. */
 export const NavigationKeyboard: Story = {
   tags: ['critical'], args: { state: 'slice' },
+  parameters: world('fleet-mid-refactor'),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const page = within(canvasElement.ownerDocument.body)
     const active = () => canvasElement.ownerDocument.activeElement
+    const title = required(canvasElement.querySelector<HTMLElement>('[data-scenario-navigation-title]')?.dataset.scenarioNavigationTitle, 'scenario navigation title')
+    const primaryTitle = required(canvasElement.querySelector<HTMLElement>('[data-scenario-primary-title]')?.dataset.scenarioPrimaryTitle, 'scenario primary title')
     await waitFor(() => expect(canvas.getByRole('main', { name: 'Workspace' })).toBeVisible())
     await userEvent.click(canvas.getByRole('main', { name: 'Workspace' }), { skipHover: true })
     await userEvent.keyboard(chord('k'))
     const palette = await page.findByRole('dialog', { name: 'Command palette' })
-    await userEvent.keyboard('hover')
-    await waitFor(() => expect(within(palette).getAllByRole('menuitem')[0]).toHaveTextContent(/hover/i))
+    await userEvent.keyboard(title)
+    await waitFor(() => expect(within(palette).getAllByRole('menuitem')[0]).toHaveTextContent(title))
     await userEvent.keyboard('{Enter}')
     await waitFor(() => expect(page.queryByRole('dialog', { name: 'Command palette' })).toBeNull())
-    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent('Hover card shows reported scopes'))
+    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent(title))
     await userEvent.keyboard('/')
     const search = await canvas.findByRole('searchbox', { name: 'Filter agents' })
     await waitFor(() => expect(search).toHaveFocus())
@@ -199,85 +127,44 @@ export const NavigationKeyboard: Story = {
     await userEvent.keyboard(chord('b'))
     await waitFor(() => expect(canvas.getByRole('searchbox', { name: 'Filter agents' })).toBeVisible())
     // The row menu opens the same conversation a row press does: enabled, and it lands on the agent's tab.
-    await userEvent.click(canvas.getByRole('button', { name: 'Actions for Fix flaky interaction gate' }))
-    const rowMenu = await page.findByRole('menu', { name: 'Actions for Fix flaky interaction gate' })
+    await userEvent.click(canvas.getByRole('button', { name: `Actions for ${primaryTitle}` }))
+    const rowMenu = await page.findByRole('menu', { name: `Actions for ${primaryTitle}` })
     const openItem = within(rowMenu).getByRole('menuitem', { name: 'Open conversation' })
     await expect(openItem).not.toHaveAttribute('aria-disabled', 'true')
     await userEvent.click(openItem)
     await waitFor(() => expect(page.queryByRole('menu')).toBeNull())
-    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent('Fix flaky interaction gate'))
+    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent(primaryTitle))
   },
 }
 
-/** A roster fault stays in the sidebar while the open thread keeps working; Retry walks loading back to a loaded roster. */
-export const ErrorRecovery: Story = {
-  tags: ['critical'], args: { state: 'roster-error' },
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} reload={rosterReload.reload} />,
+
+/** Preserve the world's actual transport issue and retry attempt, not the authored stale fallback. */
+export const ReconnectingSync: Story = {
+  parameters: world('failed-sync-open-fail'),
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement)
-    const alert = await canvas.findByRole('alert')
-    await expect(alert).toHaveTextContent('Couldn’t load agents')
-    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
-    await userEvent.click(within(alert).getByRole('button', { name: 'Details' }))
-    await waitFor(() => expect(alert).toHaveTextContent('HTTP 503'))
-    await userEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
-    // Loading holds until the play settles the reload.
-    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'loading'))
-    await expect(canvas.queryByRole('alert')).toBeNull()
-    rosterReload.settle()
-    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'ready'))
-    await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3))
+    const expected = loadWorld('failed-sync-open-fail').slices.sync.state.expected.find(entry => entry.surface.startsWith('conversation:'))?.status
+    if (expected?._tag !== 'Stale' || expected.reason._tag !== 'Reconnecting') throw new Error('Open-fail world must retain a reconnecting conversation status')
+    const banner = await waitFor(() => {
+      const element = canvasElement.querySelector<HTMLElement>('[data-connection-state="reconnecting"]')
+      expect(element).not.toBeNull()
+      if (element === null) throw new Error('Missing reconnecting connection banner')
+      return element
+    })
+    await expect(banner).toHaveTextContent(expected.reason.issue)
+    await expect(banner).toHaveTextContent(`attempt ${expected.reason.attempt}`)
+    await expect(canvasElement).not.toHaveTextContent('Gateway connection interrupted')
   },
 }
 
-/** A thread fault stays in its pane while the roster stays live; Retry loads that conversation only. */
-export const ThreadRecovery: Story = {
-  tags: ['critical'], args: { state: 'thread-unavailable' },
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} reload={threadReload.reload} />,
+/** Mounting committed messages must not relabel an incomplete server history as Complete. */
+export const HugeHistory: Story = {
+  parameters: world('long-debug-rabbit-hole'),
   play: async ({ canvasElement }) => {
+    const sections = scenarioSections(loadWorld('long-debug-rabbit-hole').slices.conversation, 'whole-thread').sections
+    await expect(sections[0]?.history?._tag).toBe('HasOlder')
     const canvas = within(canvasElement)
-    await userEvent.click(await canvas.findByRole('button', { name: 'Retry: Conversation unavailable' }))
-    // Loading holds until the play settles the reload.
-    await waitFor(() => expect(canvasElement.querySelector('[data-thread-loading]')).not.toBeNull())
-    await expect(canvasElement.querySelector('[data-thread-unavailable]')).toBeNull()
-    // Docked, the roster stays loaded throughout; narrow, it sits in the closed drawer and is not rendered.
-    const roster = canvasElement.querySelector('[data-roster-state]')
-    if (roster !== null) await expect(roster).toHaveAttribute('data-roster-state', 'ready')
-    threadReload.settle()
-    await waitFor(() => expect(canvasElement.querySelector('[data-thread-unavailable], [data-thread-loading]')).toBeNull())
-    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
+    await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
+    // This world's 105 committed entries retain has_more=true without the huge variant's 1,600-row reveal.
+    await waitFor(() => expect(canvas.getByTestId('history-boundary-note')).toHaveTextContent('Earlier messages not loaded'), { timeout: 5_000 })
   },
 }
-
-/** Decision sheet: every row is decided; rows settled by a decision request carry its question ID. */
-export const Decisions: Story = {
-  args: { scheme: 'dark' },
-  parameters: {
-    scenario: {
-      _tag: 'contract-fixture',
-      reason: 'Static decision sheet shares this CSF module with RedesignMilestone, whose runtime import graph reaches milestone-fixtures; it is not a fixture-free primitive.',
-    },
-  },
-  render: args => <article {...stylex.props(styles.sheet, ...baselineTheme, args.scheme === 'light' && lightTheme)}>
-    <h1 {...stylex.props(styles.h1)}>Redesign milestone 1 — decisions</h1>
-    <h2 {...stylex.props(styles.h2)}>Decided (composed, not re-asked)</h2>
-    <table {...stylex.props(styles.table)}>
-      <thead><tr><th scope="col" {...stylex.props(styles.cell, styles.head)}>ID</th><th scope="col" {...stylex.props(styles.cell, styles.head)}>Decided by</th><th scope="col" {...stylex.props(styles.cell, styles.head)}>Decision</th></tr></thead>
-      <tbody>{lockedDecisions.map(decision => <tr key={decision.id}>
-        <th scope="row" {...stylex.props(styles.cell, styles.id)}>{decision.id}</th>
-        <td {...stylex.props(styles.cell, styles.id)}>{decision.question ?? '—'}</td>
-        <td {...stylex.props(styles.cell)}>{decision.summary}</td>
-      </tr>)}</tbody>
-    </table>
-  </article>,
-}
-
-const styles = stylex.create({
-  sheet: { minHeight: '100dvh', boxSizing: 'border-box', padding: sp.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  h1: { margin: 0, marginBlockEnd: sp.lg, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
-  h2: { margin: 0, marginBlock: sp.lg, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium, textTransform: 'uppercase', letterSpacing: '0.04em' },
-  table: { width: '100%', maxWidth: 1080, borderCollapse: 'collapse' },
-  cell: { paddingBlock: sp.sm, paddingInlineEnd: sp.lg, textAlign: 'start', verticalAlign: 'top', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  head: { color: ink.fgMuted, fontWeight: t.weightMedium },
-  id: { whiteSpace: 'nowrap', fontFamily: t.fontMono, fontWeight: t.weightRegular, color: ink.fgSoft },
-})

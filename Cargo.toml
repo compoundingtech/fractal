@@ -27,6 +27,7 @@ members = [
   "crates/fractal-daemon",
   "crates/fractal-e2e",
   "crates/fractal-kernel",
+  "crates/fractal-jobs",
   "crates/fractal-telemetry",
   "crates/fractal-secrets",
   "crates/fractal-seats-base",
