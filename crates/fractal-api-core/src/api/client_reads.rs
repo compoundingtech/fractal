@@ -1533,7 +1533,7 @@ pub async fn client_history(
     };
     let store = state.store.clone();
     let page =
-        blocking_store(move || store.claims_page(None, None, 0, Some(before_index), true, limit))
+        blocking_store(move || records::generic_claims_page(&store, None, None, 0, Some(before_index), true, limit))
             .await?;
     let has_more = page.next_cursor.is_some();
     let items = page
@@ -1616,13 +1616,15 @@ pub async fn client_history_detail(
     let page =
         blocking_store(move || store.claims_page(None, None, index - 1, Some(upper), true, 1))
             .await?;
-    page.claims
+    let claim = page.claims
         .into_iter()
         .next()
         .filter(|claim| claim.store_index == index)
-        .map(client_history_resource)
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))
+        .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))?;
+    if !records::generic_claim_visible(&claim) {
+        return Err(custom::notices_unavailable());
+    }
+    Ok(Json(client_history_resource(claim)))
 }
 
 /// [`blocking_store`] for an HTTP roster read: worker queue wait, then the attributed read.

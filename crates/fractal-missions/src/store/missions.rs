@@ -7430,6 +7430,8 @@ impl MissionsStore for Store {
                             if latest_claim_id_tx(transaction, &wake.subject)
                                 .map_err(internal)?
                                 .is_none()
+                                && !fractal_store::store::message_sent::message_sent_tx(transaction, &wake.subject)
+                                    .map_err(internal)?
                             {
                                 append_first_receipt_claim_tx(
                                     transaction,

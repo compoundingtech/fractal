@@ -21,10 +21,9 @@ pub async fn preview(
         if !effect.starts_with("drain") && !manual {
             continue;
         }
-        let actual = state
-            .store
-            .latest_actual_value(subject)
-            .map_err(ApiError::internal)?;
+        let actual = state.store.status_for_generic_reads(
+            Some(subject), None, None, false,
+        ).map_err(ApiError::internal)?.subjects.into_iter().next().and_then(|status| status.actual);
         let incarnation = actual.as_ref().and_then(|a| a["incarnation_id"].as_str());
         let blocking = match incarnation {
             _ if manual => intent.subjects.get(subject)
@@ -77,7 +76,7 @@ pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     for (subject, member, retired) in state.store.owned_set_effective_members(&view)? {
         let status = state
             .store
-            .status_at(Some(&subject), None, Some(state.store.index()?))?
+            .status_for_generic_reads(Some(&subject), None, Some(state.store.index()?), false)?
             .subjects
             .into_iter()
             .find(|s| s.subject == subject);
