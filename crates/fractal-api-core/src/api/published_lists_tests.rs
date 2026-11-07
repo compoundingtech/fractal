@@ -2184,6 +2184,29 @@ async fn replicated_claims_keep_the_full_runtimes_pause() {
     replicated_claims_keep_the_full_pause(runtimes_refresher()).await;
 }
 
+/// A check registered while a look runs is asked about the claims that look reads without it: a
+/// write made then still wakes its holder, with no later commit to start another look.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_check_registered_during_a_look_is_asked_about_the_claims_that_look_read() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    let from = store.index().unwrap();
+    let (first, gate) =
+        local_commits::LocalCommits::from_index_gated(&store, from, 10_000, "first", local_commits::every_local_claim(&store));
+    // A commit starts a look, which waits at the gate before it reads the index.
+    crate::test_support::note_local_claim(&store, "message/during-a-look-first");
+    until_within(Duration::from_secs(2), "the look", || first.looking()).await;
+    // A second holder registers while the look runs, and writes: the look reads that write.
+    let mut second = first.also("second", local_commits::every_local_claim(&store));
+    let before = store.index().unwrap();
+    crate::test_support::note_local_claim(&store, "message/during-a-look-second");
+    gate.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), second.after(before))
+        .await
+        .expect("the second check was asked about the claim the look read without it");
+    assert!(first.cut().newest_local_of("first") > before, "the first check saw both claims");
+}
+
 /// Every refresher on a store pauses on one scanner: a commit is read once, however many hold it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_refresher_on_a_store_shares_one_look_at_each_commit() {

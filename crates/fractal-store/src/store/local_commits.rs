@@ -46,7 +46,11 @@ impl LocalCut {
     }
 }
 
-type Checks = Arc<Mutex<BTreeMap<&'static str, LocalCheck>>>;
+/// Each holder's check, and how far it has been asked: every claim after its registration point
+/// through that index. A check asked through less than the scanner has read (as one registered
+/// while a look ran) is asked about the rest on the next look, so none of its claims is passed
+/// over.
+type Checks = Arc<Mutex<BTreeMap<&'static str, (LocalCheck, u64)>>>;
 
 /// One store's scanner, shared by every refresher that holds a [`LocalCommits`]: it ends when
 /// the last of them drops it.
@@ -106,13 +110,45 @@ impl LocalCommits {
         Self::holding(Self::scanning(store, from, scan), name, check)
     }
 
+    /// Another hold on this holder's scanner, under its own check, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn also(&self, name: &'static str, check: LocalCheck) -> Self {
+        Self::holding(Arc::clone(&self.scanner), name, check)
+    }
+
+    /// Register `check` from what the scanner has published as read, never from a look still
+    /// running: a claim that look passes over is the check's on the next.
     fn holding(scanner: Arc<Scanner>, name: &'static str, check: LocalCheck) -> Self {
-        scanner.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(name).or_insert(check);
+        let from = scanner.cut.borrow().scanned;
+        scanner.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(name).or_insert((check, from));
         let cut = scanner.cut.clone();
         LocalCommits { scanner, cut, check: name }
     }
 
     fn scanning(store: &Arc<Store>, from: u64, scan: u64) -> Arc<Scanner> {
+        Self::scanning_gated(store, from, scan, None)
+    }
+
+    /// A scanner of its own whose first look waits, before it reads the store's index, until
+    /// `gate` sends, for tests that register a check while a look runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_index_gated(
+        store: &Arc<Store>,
+        from: u64,
+        scan: u64,
+        name: &'static str,
+        check: LocalCheck,
+    ) -> (Self, std::sync::mpsc::SyncSender<()>) {
+        let (gate, held) = std::sync::mpsc::sync_channel(0);
+        (Self::holding(Self::scanning_gated(store, from, scan, Some(held)), name, check), gate)
+    }
+
+    fn scanning_gated(
+        store: &Arc<Store>,
+        from: u64,
+        scan: u64,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+    ) -> Arc<Scanner> {
         let (sender, cut) = tokio::sync::watch::channel(LocalCut { scanned: from, newest_local: BTreeMap::new() });
         let checks = Checks::default();
         let looks = Arc::new(AtomicU64::new(0));
@@ -130,7 +166,13 @@ impl LocalCommits {
             commits,
             sender,
             scan,
-            Scanned { checks: Arc::clone(&checks), looks: Arc::clone(&looks), checked: Arc::clone(&checked), looking: Arc::clone(&looking) },
+            Scanned {
+                checks: Arc::clone(&checks),
+                looks: Arc::clone(&looks),
+                checked: Arc::clone(&checked),
+                looking: Arc::clone(&looking),
+                gate: Arc::new(Mutex::new(gate)),
+            },
         ));
         Arc::new(Scanner { cut, checks, looks, checked, looking, task })
     }
@@ -181,12 +223,15 @@ struct Scanned {
     looks: Arc<AtomicU64>,
     checked: Arc<AtomicU64>,
     looking: Arc<AtomicBool>,
+    /// For tests: the first look waits here before it reads the index.
+    gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 
 /// Read each run of commits once, one look at a time on the blocking pool, and publish what it
-/// found. A run that holds a claim this node wrote is put to each holder's check once. A wake
-/// during a look leaves its permit for the next; a failed look costs only the shortcut, and the
-/// next commit reads from where the last good look ended.
+/// found. Each check is asked once a look about the claims after where it was last asked, through
+/// the look's end, and only when that run holds a claim this node wrote. A wake during a look
+/// leaves its permit for the next; a failed look costs only the shortcut, and the next commit
+/// reads from where the last good look ended.
 async fn scan_commits(
     store: Arc<Store>,
     _observer: smallclaims::sqlite::CommitObserver,
@@ -208,45 +253,70 @@ async fn scan_commits(
         shared.looks.fetch_add(1, Ordering::AcqRel);
         shared.looking.store(true, Ordering::Release);
         let reader = Arc::clone(&store);
-        let checks: Vec<(&'static str, LocalCheck)> = shared
+        let checks: Vec<(&'static str, LocalCheck, u64)> = shared
             .checks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|(name, check)| (*name, Arc::clone(check)))
+            .map(|(name, (check, through))| (*name, Arc::clone(check), *through))
             .collect();
         let checked = Arc::clone(&shared.checked);
+        let gate = shared.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         let read = tokio::task::spawn_blocking(move || {
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
             let index = reader.index()?;
             let upto = index.min(scanned.saturating_add(scan));
-            if upto <= scanned {
-                return anyhow::Ok((scanned, Vec::new(), false));
-            }
-            let mut found = Vec::new();
-            if reader.first_local_commit_after(scanned, upto)?.is_some() {
-                for (name, check) in checks {
-                    checked.fetch_add(1, Ordering::AcqRel);
-                    if check(scanned, upto).unwrap_or(true) {
-                        found.push(name);
-                    }
+            let mut asked = Vec::new();
+            // Checks asked through the same index share one read of whether the run holds a
+            // claim this node wrote.
+            let mut local = BTreeMap::new();
+            for (name, check, through) in checks {
+                let to = index.min(through.saturating_add(scan));
+                if to <= through {
+                    continue;
                 }
+                let holds = match local.get(&(through, to)) {
+                    Some(holds) => *holds,
+                    None => {
+                        let holds = reader.first_local_commit_after(through, to)?.is_some();
+                        local.insert((through, to), holds);
+                        holds
+                    }
+                };
+                let found = holds && {
+                    checked.fetch_add(1, Ordering::AcqRel);
+                    check(through, to).unwrap_or(true)
+                };
+                asked.push((name, to, found));
             }
-            Ok((upto, found, upto < index))
+            anyhow::Ok((upto.max(scanned), asked, index))
         })
         .await;
         shared.looking.store(false, Ordering::Release);
         more = false;
-        if let Ok(Ok((upto, found, rest))) = read {
+        if let Ok(Ok((upto, asked, index))) = read {
             scanned = upto;
+            let mut checks = shared.checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (name, to, _) in &asked {
+                if let Some((_, through)) = checks.get_mut(name) {
+                    *through = (*through).max(*to);
+                }
+            }
+            // The rest of a long run, and a check behind it, are read at once, with no commit to
+            // wait for.
+            more = upto < index || checks.values().any(|(_, through)| *through < index);
+            drop(checks);
             sender.send_modify(|cut| {
                 cut.scanned = upto;
-                for name in found {
-                    let newest = cut.newest_local.entry(name).or_default();
-                    *newest = (*newest).max(upto);
+                for (name, to, found) in asked {
+                    if found {
+                        let newest = cut.newest_local.entry(name).or_default();
+                        *newest = (*newest).max(to);
+                    }
                 }
             });
-            // The rest of a long run is read at once, with no commit to wait for.
-            more = rest;
         }
     }
 }
