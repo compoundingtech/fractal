@@ -11,16 +11,16 @@ pub struct Token { pub scope: Scope, pub generation: u64, pub attempt: u64 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frontier { pub epoch: String, pub changed_index: u64, pub live_count: u64 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Snapshot { pub id: String, pub host_id: String, pub store_index: u64, pub projection_version: String, pub created_at: String, pub expires_at: String }
+pub struct Snapshot { pub id: String, pub host_id: String, pub store_index: u64, pub projection_version: String, pub created_at: String, pub published_at: Option<String> }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Complete { pub scope: Scope, pub frontier: Frontier, pub snapshots: Vec<Snapshot>, pub members: Vec<MembershipInput> }
 #[derive(Debug)]
 pub struct Page { pub frontier: Frontier, pub snapshot: Snapshot, pub members: Vec<MembershipInput>, pub has_more: bool, pub next: Option<String> }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status { Unloaded, Paging, Ready, Disconnected, Refused, Exhausted }
+pub enum Status { Unloaded, Paging, Ready, Disconnected, Refused, Unsupported, InvalidCursor, FrontierInconsistent, Exhausted }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect { SubscribeAndRead(Token), Read(Token, String), PersistBase }
-pub enum Event { Refresh(Scope, u64), Page(Token, Page), Metadata(Token, Frontier), Expired(Token), Refused(Token), Disconnect }
+pub enum Event { Refresh(Scope, u64), Page(Token, Page), Metadata(Token, Frontier), Expired(Token), Refused(Token), Unsupported(Token), InvalidCursor(Token), FrontierInconsistent(Token), Disconnect }
 #[derive(Default)]
 struct Staged { frontier: Option<Frontier>, rows: BTreeMap<String, MembershipInput>, cursors: BTreeSet<String>, snapshots: Vec<Snapshot> }
 pub struct Paging {
@@ -64,6 +64,9 @@ impl Paging {
             Event::Refused(token) => {
                 return if self.token.as_ref() == Some(&token) { self.stop(Status::Refused) } else { Vec::new() };
             }
+            Event::Unsupported(token) => return if self.token.as_ref() == Some(&token) { self.stop(Status::Unsupported) } else { Vec::new() },
+            Event::InvalidCursor(token) => return if self.token.as_ref() == Some(&token) { self.stop(Status::InvalidCursor) } else { Vec::new() },
+            Event::FrontierInconsistent(token) => return if self.token.as_ref() == Some(&token) { self.stop(Status::FrontierInconsistent) } else { Vec::new() },
         };
         if self.token.as_ref() != Some(&token) { return Vec::new(); }
         let page = match event {
@@ -116,7 +119,7 @@ mod tests {
     fn scope() -> Scope { Scope { owner: "owner-a".into(), container: "container-a".into(), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
     fn frontier(index: u64, count: u64) -> Frontier { Frontier { epoch: "epoch-a".into(), changed_index: index, live_count: count } }
     fn page(index: u64, count: u64, ids: &[&str], next: Option<&str>) -> Page {
-        Page { frontier: frontier(index, count), snapshot: Snapshot { id: format!("snapshot-{index}"), host_id: "host-a".into(), store_index: index, projection_version: "1".into(), created_at: "created".into(), expires_at: "expires".into() }, members: ids.iter().map(|id| MembershipInput { container: "container-a".into(), member: (*id).into(), revision: "revision".into(), position: fractal_schema::ordered_membership::Position { bucket: None, key: "a0".into() } }).collect(), has_more: next.is_some(), next: next.map(str::to_owned) }
+        Page { frontier: frontier(index, count), snapshot: Snapshot { id: format!("snapshot-{index}"), host_id: "host-a".into(), store_index: index, projection_version: "1".into(), created_at: "created".into(), published_at: None }, members: ids.iter().map(|id| MembershipInput { container: "container-a".into(), member: (*id).into(), revision: "revision".into(), position: fractal_schema::ordered_membership::Position { bucket: None, key: "a0".into() } }).collect(), has_more: next.is_some(), next: next.map(str::to_owned) }
     }
     fn refresh(state: &mut Paging) -> Token {
         let effects = state.reduce(Event::Refresh(scope(), 1));

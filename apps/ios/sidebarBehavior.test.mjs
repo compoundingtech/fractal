@@ -5,7 +5,8 @@ import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
 import { fakeClient } from './fakeFeed.mjs';
 import { sidebarGroups, rememberResources } from './sidebarView.ts';
-import { placeResource, moveFolder } from './sidebarEdits.ts';
+import { placeResource, moveFolder, validateSidebarMove } from './sidebarEdits.ts';
+import { buildTree } from './sidebarPlanning.ts';
 
 const fixtures = loadSidebarBehavior();
 const nested = 'nested-and-dormant-non-agent-placements';
@@ -92,9 +93,12 @@ for (const fixture of fixtures.cases) test(`native sidebar behavior: ${fixture.n
     assert.equal(event.moves.length, checkpoint.moves.length);
     for (const [index, intent] of event.moves.entries()) {
       const expected = checkpoint.moves[index];
-      const delta = difference(`${fixture.name}/${index}`);
-      if (delta) {
-        assert.equal(expected._tag, 'Refused');
+      const refusal = validateSidebarMove(buildTree(arrangement, undefined, catalog), intent);
+      if (expected._tag === 'Refused') {
+        assert.deepEqual(refusal, expected.refusal);
+        // The validator is unwired: retain the live editor/Feed contract until activation.
+        const delta = difference(`${fixture.name}/${index}`);
+        assert.ok(delta, 'Every live native planning difference must remain explicit.');
         assert.equal(expected.refusal._tag, delta.shared);
         if (delta.error) { assert.throws(() => plan(arrangement, intent), { message: delta.error }); continue; }
         const operations = plan(arrangement, intent);
@@ -104,7 +108,7 @@ for (const fixture of fixtures.cases) test(`native sidebar behavior: ${fixture.n
         assert.deepEqual(delivered, [next]);
         continue;
       }
-      assert.equal(expected._tag, 'Planned', 'Every unsupported native move must have an explicit divergence.');
+      assert.equal(refusal, undefined);
       assert.deepEqual(expected.intent, intent);
       const operations = plan(arrangement, intent);
       assert.deepEqual(operations.map(({ key, ...operation }) => operation), [{ op: 'subject.place', subject: intent.node.subject, folder: intent.parent.id ?? null }]);

@@ -1,3 +1,4 @@
+import { SidebarJournal, type SidebarJournalState, type SidebarJournalRequest, type SidebarJournalEffect, type SidebarJournalResult, type SidebarPersistenceFailure } from './sidebarJournal.ts'
 import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
 import { ErrorCode, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { ActionResult } from '@fractal/client/schema'
@@ -417,4 +418,95 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
     abort.abort()
     for (const job of queue.splice(0)) job.done.resolve({ _tag: 'Refused', ...unknown('The arrangement editor is closed.', job) })
   } }
+}
+
+type MembershipIdentity = SidebarJournalRequest['identity']
+type MembershipBase = SidebarJournalRequest['fence']
+type MembershipRefusal = NonNullable<SidebarJournalState['refusal']>
+type MembershipOperations = SidebarJournalRequest['operations']
+export type MembershipEditEvent =
+  | { readonly _tag: 'Plan'; readonly base: MembershipBase; readonly folders: Extract<MembershipOperations, { Folders: unknown }>['Folders']; readonly memberships: Extract<MembershipOperations, { Memberships: unknown }>['Memberships']; readonly folder: MembershipIdentity; readonly membership: MembershipIdentity }
+  | { readonly _tag: 'Fresh'; readonly base: MembershipBase; readonly memberships: Extract<MembershipOperations, { Memberships: unknown }>['Memberships']; readonly refusal?: MembershipRefusal }
+  | { readonly _tag: 'Persisted' | 'CompletionPersisted' | 'Ack' | 'Unknown' | 'Observed'; readonly identity: MembershipIdentity }
+  | { readonly _tag: 'Refused'; readonly identity: MembershipIdentity; readonly refusal: MembershipRefusal }
+  | SidebarPersistenceFailure
+  | { readonly _tag: 'Replay' | 'Retry' }
+const sameMembershipIdentity = (a: MembershipIdentity, b: MembershipIdentity): boolean => a.actor === b.actor && a.action_id === b.action_id && a.idempotency_key === b.idempotency_key
+/** Unwired Rust edits.rs port. Host serializes events and executes every journal effect. */
+export class MembershipEditor {
+  state: SidebarJournalState
+  constructor(readonly journal: SidebarJournal, intent: SidebarJournalState['intent'], restored?: SidebarJournalState) {
+    this.state = restored ?? { scope: journal.scope, intent, status: 'Intent', refusal: null, request: null, dependent: null, folder_completed: false, used: [] }
+  }
+  #valid(base: MembershipBase): boolean {
+    const s = this.state.scope
+    return base.ready && base.scope.owner === s.owner && base.scope.container === s.container && base.scope.endpoint === s.endpoint && base.scope.host === s.host && base.scope.projection === s.projection && base.snapshot.host_id === s.host && base.snapshot.projection_version === s.projection
+  }
+  #unused(id: MembershipIdentity): boolean {
+    return id.actor !== '' && id.action_id !== '' && id.idempotency_key !== '' && !this.state.used.some(used => used.action_id === id.action_id || used.idempotency_key === id.idempotency_key)
+  }
+  #refuse(refusal: MembershipRefusal): SidebarJournalEffect[] {
+    this.state = { ...this.state, refusal, status: this.state.folder_completed ? 'PartiallyApplied' : 'Refused' }
+    return ['PersistPending', 'ReadBase']
+  }
+  #stage(identity: MembershipIdentity, fence: MembershipBase, operations: MembershipOperations): SidebarJournalEffect[] {
+    if (!this.#unused(identity)) return this.#refuse('InvalidPlan')
+    this.state = { ...this.state, used: [...this.state.used, identity], request: structuredClone({ identity, fence, operations }), status: 'AwaitingPersistence' }
+    return ['PersistPending']
+  }
+  /** Persistence acknowledgements come only from this journal executor, never transport. */
+  execute(effect: SidebarJournalEffect): SidebarJournalResult & { readonly effects?: readonly SidebarJournalEffect[] } {
+    const result = this.journal.run(effect, this.state)
+    if (result._tag === 'Applied' && result.event) return { ...result, effects: this.reduce(result.event) }
+    if (result._tag === 'StorageFailed' && result.event) return { ...result, effects: this.reduce(result.event) }
+    return result
+  }
+  reduce(event: MembershipEditEvent): SidebarJournalEffect[] {
+    const state = this.state
+    const request = state.request
+    if ('identity' in event && (!request || !sameMembershipIdentity(request.identity, event.identity))) return []
+    if (event._tag === 'Plan' && state.status === 'Intent') {
+      if (!this.#valid(event.base) || request && (event.base.snapshot.id === request.fence.snapshot.id || event.base.snapshot.store_index < request.fence.snapshot.store_index)) return ['ReadBase']
+      if (!event.folders.length && !event.memberships.length) return this.#refuse('InvalidPlan')
+      if (event.folders.length) {
+        if (event.memberships.length) {
+          if (!this.#unused(event.membership) || event.folder.action_id === event.membership.action_id || event.folder.idempotency_key === event.membership.idempotency_key) return this.#refuse('InvalidPlan')
+          this.state = { ...state, dependent: event.membership }
+        }
+        return this.#stage(event.folder, event.base, { Folders: event.folders })
+      }
+      return this.#stage(event.membership, event.base, { Memberships: event.memberships })
+    }
+    if (event._tag === 'Fresh' && state.status === 'AwaitingFreshBase' && request && state.dependent) {
+      const previous = request.fence
+      if (!this.#valid(event.base) || event.base.snapshot.id === previous.snapshot.id || event.base.revision === previous.revision || event.base.snapshot.store_index < previous.snapshot.store_index) return ['ReadBase']
+      if (event.refusal || !event.memberships.length) return this.#refuse(event.refusal ?? 'InvalidPlan')
+      this.state = { ...state, dependent: null }
+      return this.#stage(state.dependent, event.base, { Memberships: event.memberships })
+    }
+    if (event._tag === 'Retry' && ['Refused', 'PartiallyApplied'].includes(state.status)) {
+      this.state = { ...state, status: 'Intent', refusal: null, dependent: null }; return ['ReadBase', 'Replan']
+    }
+    if (event._tag === 'StorageFailed' && (state.status === 'AwaitingPersistence' && event.phase === 'Pending' || state.status === 'AwaitingCompletionPersistence' && event.phase === 'Completion')) return this.#refuse('Storage')
+    if (event._tag === 'Replay' && state.status === 'UnknownDelivery' || event._tag === 'Persisted' && state.status === 'AwaitingPersistence') {
+      this.state = { ...state, status: 'Sending' }; return ['Send']
+    }
+    if (event._tag === 'CompletionPersisted' && state.status === 'AwaitingCompletionPersistence') {
+      this.state = { ...state, status: state.dependent ? 'AwaitingFreshBase' : 'Observed' }
+      return state.dependent ? ['ReadBase'] : ['PersistRemoval']
+    }
+    if (event._tag === 'Ack' && ['Sending', 'UnknownDelivery'].includes(state.status)) {
+      this.state = { ...state, status: 'AwaitingObservation' }; return ['PersistPending', 'ReadBase']
+    }
+    if (event._tag === 'Unknown' && state.status === 'Sending') {
+      this.state = { ...state, status: 'UnknownDelivery' }; return ['PersistPending']
+    }
+    if (['Sending', 'UnknownDelivery', 'AwaitingObservation'].includes(state.status)) {
+      if (event._tag === 'Observed' && request) {
+        this.state = { ...state, status: 'AwaitingCompletionPersistence', folder_completed: state.folder_completed || 'Folders' in request.operations }; return ['PersistCompletion']
+      }
+      if (event._tag === 'Refused') return this.#refuse(event.refusal)
+    }
+    return []
+  }
 }
