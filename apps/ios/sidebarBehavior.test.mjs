@@ -248,6 +248,32 @@ test('projection cache reuses revisions, invalidates every relevant identity and
   assert.equal(cache.get(changed).nodes[`subject:${f.catalog[0]}`].shownUnder.id, f.intent.parent.id);
   assert.deepEqual(planSidebarV2({ error: { _tag: 'NotReady' } }, f.intent), { error: { _tag: 'Projection', error: { _tag: 'NotReady' } } });
 });
+test('same-revision resolution recovery never caches failures or scans members on warm hits', () => {
+  const f = scaleFixture(4096, 2), input = projectionInput(f), cache = new SidebarProjectionCache();
+  const [root, child] = Object.keys(f.arrangement.body.folders), parents = f.arrangement.resolved.parents;
+  delete parents[child];
+  assert.deepEqual(cache.get(input), { error: { _tag: 'NotReady' } });
+  parents[child] = root;
+  const complete = cache.get(input); assert.ok(!('error' in complete));
+  delete parents[root];
+  assert.deepEqual(cache.get(input), { error: { _tag: 'NotReady' } });
+  parents[root] = null;
+  const recovered = cache.get(input); assert.ok(!('error' in recovered)); assert.notEqual(recovered, complete);
+  input.complete.members = new Proxy(f.memberships, { get() { assert.fail('warm cache must not inspect members'); } });
+  assert.equal(cache.get(input), recovered);
+  input.complete.members = f.memberships;
+  parents[root] = child;
+  assert.deepEqual(cache.get(input), { error: { _tag: 'InvalidResolution' } }, 'same-revision parent change creates a cycle');
+  parents[root] = null;
+  const valid = cache.get(input); assert.ok(!('error' in valid)); assert.notEqual(valid, recovered);
+  parents[child] = null;
+  assert.equal(cache.get(input).nodes[`folder:${child}`].shownUnder._tag, 'Root');
+  const invalid = projectionInput(scaleFixture(1)), badCache = new SidebarProjectionCache();
+  invalid.complete.members[0].container = 'arrangement/other';
+  assert.deepEqual(badCache.get(invalid), { error: { _tag: 'InvalidResolution' } });
+  invalid.complete.members[0].container = invalid.arrangement.id;
+  assert.ok(!('error' in badCache.get(invalid)), 'non-readiness errors are not cached either');
+});
 const pendingEdit = (f, edit) => {
   const state = createWriteState(scaleScope, f.intent);
   writeReducer.reduce(state, { type: 'Plan', base: { scope: scaleScope, snapshot, revision: f.arrangement.revision, ready: true }, plan: edit, folder: { actor: 'actor/test', action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: { actor: 'actor/test', action_id: 'action/member', idempotency_key: 'key/member' } });
