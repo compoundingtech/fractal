@@ -18,6 +18,27 @@ pub(super) fn parse_gateway(value: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
+/// Configuration can identify a different member without sending local person authority
+/// to the gateway. Unknown URLs remain the server's completion-origin check to decide.
+pub(super) fn check_begin_member(
+    gateway: &reqwest::Url,
+    local_member: &str,
+    peers: &[fractal_daemon::config::PeerConfig],
+) -> Result<()> {
+    for peer in peers {
+        let Ok(url) = parse_gateway(&peer.url) else { continue };
+        if url.as_str().trim_end_matches('/') == gateway.as_str().trim_end_matches('/')
+            && peer.name.trim_start_matches("host/") != local_member.trim_start_matches("host/")
+        {
+            anyhow::bail!(
+                "pairing would begin on {local_member}, but the gateway names member {}; run the pair command on {}",
+                peer.name, peer.name,
+            );
+        }
+    }
+    Ok(())
+}
+
 fn payload(gateway: &reqwest::Url, challenge: &PairingChallenge, expires_at_unix_ms: i64) -> Result<String> {
     // A struct, rather than a JSON map, fixes the wire field order as well as the field set.
     #[derive(Serialize)]
@@ -69,6 +90,22 @@ pub(super) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_other_member_is_refused_before_begin_but_unknown_gateway_is_allowed() {
+        let peers = vec![fractal_daemon::config::PeerConfig {
+            name: "member-b".into(), url: "https://member-b.example/base/".into(),
+        }];
+        let gateway = parse_gateway("https://MEMBER-B.example:443/base").unwrap();
+        let error = check_begin_member(&gateway, "host/member-a", &peers).unwrap_err().to_string();
+        assert!(error.contains("host/member-a"));
+        assert!(error.contains("member-b"));
+        assert!(error.contains("run the pair command on member-b"));
+        assert!(check_begin_member(&gateway, "host/member-b", &peers).is_ok());
+        assert!(check_begin_member(&parse_gateway("https://unknown.example").unwrap(), "host/member-a", &peers).is_ok());
+        // A base path can route to a different daemon: don't infer identity from hostname alone.
+        assert!(check_begin_member(&parse_gateway("https://member-b.example/other").unwrap(), "host/member-a", &peers).is_ok());
+    }
 
     fn challenge() -> PairingChallenge {
         serde_json::from_value(serde_json::json!({
