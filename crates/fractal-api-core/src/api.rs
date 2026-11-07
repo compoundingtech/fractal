@@ -128,6 +128,8 @@ pub mod mail_backlog;
 pub mod message_reads;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
+pub mod population_metrics;
+pub mod population_attention;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -3329,10 +3331,21 @@ fn overlay_agent_resources_at(
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let heard = HeardSeats::read(store, &subjects.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let subject_refs = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subject_refs)?;
+        let workspace_observations = store.latest_workspace_observations(&subject_refs)?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
+            }
+            item.as_object_mut().expect("agent resource").remove("observed_repository");
+            if let Some(observation) = workspace_observations.get(item["id"].as_str().unwrap_or_default()) {
+                let fields = &observation.body["fields"];
+                if fields["workspace"] == item["workspace"]
+                    && fields["host"].as_str().map(client_host_id).as_deref() == item["host_id"].as_str()
+                {
+                    item["observed_repository"] = fields["repository"].clone();
+                }
             }
             let source = item
                 .as_object_mut()
@@ -4039,6 +4052,7 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "runtime_state": observed,
                 "_restart_underlying_state": restart_underlying_state,
                 "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,

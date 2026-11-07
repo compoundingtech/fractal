@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Export host-owned live agent population, open attention counts, and snapshot freshness through OTLP",
+  "replay": { "status": "none", "detail": "The exporter folds existing observations and authoritative source ownership; no replay or backfill is required." },
+  "schema": { "status": "none", "detail": "No persisted schema or claim changes." },
+  "rules": { "status": "none", "detail": "Runtime ownership, work assignment, suspension and attention lifecycle are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Adds st.agents, st.attention.open and st.agents.refresh.last_success on the daemon meter. Population uses exclusive state/reason buckets with unattributed evidence gaps, ten-minute empty retention, and current local membership plus live leased children. Attention emits all ten closed kinds including zeros. Agent resources expose observed_repository when a current workspace observation matches the resource, and runtime_state carries the underlying runtime observation independently of presentation state." },
+  "downtime": { "status": "none", "detail": "Ordinary daemon restart activates the exporter and its repository registry." },
+  "manual": { "status": "changed", "detail": "The optional agent_population_repositories configuration contains at most eight canonical names and defaults to empty, preserving totals with unattributed repository labels. Review the shared daemon series allocation before rollout: the HTTP, mailbox and delivery allocation already exceeds the 2,000-series budget at 47 local members, before the new 267-series allocation. Export intervals must be no longer than five minutes." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback removes the new telemetry without modifying durable state." }
+}

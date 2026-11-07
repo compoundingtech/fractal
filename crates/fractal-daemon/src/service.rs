@@ -1727,6 +1727,7 @@ mod tests {
             url: "http://127.0.0.1:31314".into(),
         }], planner: crate::model::PlannerSpec::default(), private_notes_catalogs: Vec::new(), observations: crate::config::ObservationsConfig::default(),
         github: crate::config::GithubConfig::default(),
+        agent_population_repositories: Vec::new(),
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),

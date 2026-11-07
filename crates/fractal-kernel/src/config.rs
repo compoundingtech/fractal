@@ -98,6 +98,9 @@ pub struct Config {
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
+    /// Closed repository registry R for population metrics; empty maps every repo to unattributed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_population_repositories: Vec<String>,
     /// Git change pilot: explicit repositories and one designated discovery owner.
     #[serde(skip_serializing_if = "changes::Config::is_default")]
     pub changes: changes::Config,
@@ -138,6 +141,10 @@ pub struct Config {
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
 }
+
+/// Validated population repository registry, pinned for the lifetime of this daemon.
+#[derive(Default)]
+pub struct AgentPopulationRepositories(pub std::sync::OnceLock<Vec<String>>);
 
 /// An operator-selected external quota source; clients cannot override its URL.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -687,6 +694,7 @@ impl Default for Config {
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             github: GithubConfig::default(),
+            agent_population_repositories: Vec::new(),
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
@@ -921,6 +929,23 @@ impl Config {
         self.reconcile.validate()?;
         self.asks.validate()?;
         self.github.validate()?;
+        anyhow::ensure!(
+            self.agent_population_repositories.len() <= 8,
+            "agent_population_repositories permits at most eight canonical owner/repo names"
+        );
+        for (index, repository) in self.agent_population_repositories.iter().enumerate() {
+            anyhow::ensure!(
+                repository.split_once('/').is_some_and(|(owner, repo)| {
+                    [owner, repo].into_iter().all(|part| !part.is_empty()
+                        && !matches!(part, "." | "..")
+                        && part.bytes().all(|byte| byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit() || b"-_.".contains(&byte)))
+                })
+                    && !repository.ends_with(".git")
+                    && !self.agent_population_repositories[..index].contains(repository),
+                "agent_population_repositories requires unique canonical lowercase owner/repo names, without URLs, paths or .git suffixes"
+            );
+        }
         anyhow::ensure!(
             self.private_notes_catalogs.iter().all(|path| path.is_absolute()
                 && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))),
@@ -1245,6 +1270,28 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn population_repository_registry_is_explicit_bounded_and_canonical() {
+        let mut config = super::Config::default();
+        assert!(config.agent_population_repositories.is_empty());
+        assert!(!toml::to_string(&config).unwrap().contains("agent_population_repositories"));
+        config.agent_population_repositories = vec!["example/repo".into()];
+        config.validate().unwrap();
+        let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.agent_population_repositories, config.agent_population_repositories);
+        for invalid in ["", "repo", "Example/repo", "example/repo.git", "/example/repo",
+            "https://example.invalid/repo", "example/../repo", "example/..", "example/repo "] {
+            config.agent_population_repositories = vec![invalid.into()];
+            assert!(config.validate().unwrap_err().to_string().contains("agent_population_repositories"));
+        }
+        config.agent_population_repositories = vec!["example/repo".into(); 2];
+        assert!(config.validate().unwrap_err().to_string().contains("agent_population_repositories"));
+        config.agent_population_repositories = (0..8).map(|index| format!("example/repo{index}")).collect();
+        config.validate().unwrap();
+        config.agent_population_repositories.push("example/extra".into());
+        assert!(config.validate().unwrap_err().to_string().contains("at most eight"));
+    }
+
     #[test]
     fn store_directory_defaults_to_state_root_and_roundtrips_explicit_configuration() {
         let state = tempfile::tempdir().unwrap();
