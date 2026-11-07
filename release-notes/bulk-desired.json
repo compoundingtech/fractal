@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read desired declarations, selected declaration tokens and cheap actual summaries together with fractal subject desired --json [--all | SUBJECT...] [--kind K]. The batch API reads one store snapshot without status reduction or card folds.",
+  "replay": {"status": "none", "detail": "No graph replay or new projection."},
+  "schema": {"status": "changed", "detail": "Adds POST /v1/desired/batch with subjects (default empty, meaning all) and optional kind. The JSON array flattens DesiredSubject with nullable desired_token and optional extensible actual. Includes published mission definitions. More than 1,000 supplied names returns desired-batch-limit. This raw route is outside generated client-v0 schemas."},
+  "rules": {"status": "none", "detail": "No checkpoint or declaration selection rule changes."},
+  "compatibility": {"status": "changed", "detail": "Additive API and subject desired CLI subcommand; existing desired reads and subject cards are unchanged. Missing summary fields require fetching the card, not interpreting them as negative observations."},
+  "downtime": {"status": "none", "detail": "No startup work or downtime."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Older daemons do not expose the batch route; existing per-subject desired and card reads remain available."}
+}

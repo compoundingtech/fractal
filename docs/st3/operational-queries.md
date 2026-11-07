@@ -1,5 +1,51 @@
 # Operational queries
 
+## Bulk desired declarations
+
+Use `fractal subject desired --json [--all | SUBJECT...] [--kind K]` to read desired
+declarations and selected declaration tokens with cheap actual summaries, without
+reducing status or folding cards. The existing CLI noun is `subject`, singular.
+An empty subject selection means all declarations; explicit names are exact IDs.
+The API is `POST /v1/desired/batch` with `{"subjects":[],"kind":"agent"}` (`kind`
+optional), returning a JSON array of flattened `DesiredSubject` entries plus
+`desired_token` and optional extensible `actual`. At most 1,000 supplied names are
+accepted (`desired-batch-limit` otherwise). All sources are read in one store snapshot.
+See the [CLI reference](../site/reference/cli.md#bulk-desired-declarations) for the
+selection and response contract. Missing actual fields are not negative observations:
+fetch the card with `fractal subject show SUBJECT` or `fractal agents show AGENT`.
+
+The kind filter matches the literal desired declaration kind. Stopped and terminally
+retired agents have kind `stop`, not `agent`; unfiltered all includes their retained
+declarations. Agent revision summaries also apply to those retained declarations.
+Synthesized published mission entries have `desired_token: null`, matching mission
+cards, because mission publications are not desired-table rows. Their publication
+claim IDs are not replacement desired tokens; compare `actual.revision` and
+`actual.digest` for declaration changes.
+For agents, `actual` contains only the maintained published declaration `revision`
+when available, matching the card's desired content revision. It omits runtime
+`status`, `operation_status`, `state`, `host`, `incarnation_id`, `suspension`, `hold`,
+`kind`, and `repo`, and card-level `actual_origin` and `projection`
+(`layer`, `runtime_incarnation`). Those have no cheap, correct maintained source
+for this snapshot path: fetch the card. For bulk roster status, use
+`fractal agents ls --all --json`; roster fields such as `state`, `host_id`, and
+`operational` are not interchangeable with card state, host, or projection fields.
+
+Non-agent actual summaries contain the published declaration `revision` and `digest`,
+plus `state` when cheaply maintained (`draft`, `ready`, or `retired` for missions).
+They never contain the published body. `digest` is `sha256:` followed by lowercase
+hexadecimal SHA-256 of the UTF-8 canonical JSON text of the published declaration:
+recursively sort object keys, preserve array order, and use compact JSON with no
+whitespace. The input is the declaration itself, not the surrounding
+`PublicationDefinition` metadata, revision, or selected desired token.
+
+The raw batch API is not a client-v0 operation. The committed Rust, Swift and
+TypeScript clients are generated from `docs/st3/client-v0/schemas/operations.json`
+and `client-v0.schema.json`, so this route does not change those inputs or outputs.
+Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
+it also invokes `rustfmt` internally. No generator execution is needed for this route.
+
+## Published current lists
+
 Mission lists page mission IDs and return compact cards with at most three recent runs and
 twenty step previews per run. Progress counts cover every step; a larger total signals an
 incomplete step preview.

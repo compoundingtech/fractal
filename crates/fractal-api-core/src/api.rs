@@ -816,6 +816,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/desired/batch", post(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))

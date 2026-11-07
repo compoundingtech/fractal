@@ -686,6 +686,15 @@ pub async fn get_desired(
         .ok_or_else(|| ApiError::not_found(format!("`{subject}` has no desired record")))
 }
 
+/// Bulk comparison read: no status reduction or cold actual-state folds.
+pub async fn desired_batch(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::desired_batch::DesiredBatchRequest>,
+) -> Result<Json<Vec<crate::store::desired_batch::DesiredBatchItem>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.desired_batch(&request)).await.map(Json)
+}
+
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,

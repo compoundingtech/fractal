@@ -47,6 +47,49 @@ still take precedence.
 
 For small independent authorized work, use `fractal work start`. Claim before executing assigned work, record progress, and complete with evidence. Use `fractal work revise` for an explicit new generation of an existing run.
 
+### Bulk desired declarations
+
+```sh
+fractal subject desired --json --all
+fractal subject desired --json agent/garden/worker mission/garden
+fractal subject desired --json --all --kind agent
+```
+
+The existing noun is singular: `fractal subject desired --json [--all | SUBJECT...] [--kind K]`.
+No subjects (with or without `--all`) selects all declarations. Named subjects are exact IDs,
+not fuzzy matches; `--all` cannot be combined with names. `--kind` filters either selection
+by the literal desired kind: stopped and terminally retired agents are `stop`, not
+`agent`; unfiltered all includes their retained declarations.
+The server accepts at most 1,000 supplied names and returns the typed error
+`desired-batch-limit` above that limit.
+
+This is one `POST /v1/desired/batch` with JSON body
+`{"subjects":["agent/garden/worker"],"kind":"agent"}`. `subjects` defaults to `[]`;
+`kind` is optional. The response is a JSON array, not a client-v0 envelope. Each item
+flattens `DesiredSubject` (`subject`, `kind`, `desired`, `member`, and ownership fields)
+alongside `desired_token` (a selected declaration claim ID or `null`) and optional
+`actual` (an extensible JSON summary). The whole read uses one store snapshot.
+Published mission definitions are included as synthesized `DesiredSubject` entries:
+`desired` is the canonical published `MissionSpec`; optional `member` and ownership
+fields are absent, including for retained retired definitions.
+Their `desired_token` is `null`, matching mission cards: publication claim IDs are
+not selected desired-table tokens. Compare mission declarations using
+`actual.revision` and `actual.digest`, not a substituted publication claim ID.
+
+Agent `actual` currently includes only the maintained published declaration `revision`
+when available. Non-agents include the published `revision`, declaration `digest`,
+and maintained `state` when available (missions: `draft`, `ready`, `retired`), never
+the body. Runtime and card state fields are intentionally absent. For bulk roster
+status, use `fractal agents ls --all --json`, whose status is not card state. See
+[the operational query contract](../../st3/operational-queries.md#bulk-desired-declarations)
+for exact omissions and the SHA-256 digest's canonical input.
+
+This automation read deliberately does not reduce status or fold cards. It is not a
+replacement for `fractal subject show SUBJECT` or `fractal agents show AGENT`: fetch
+the card for fields absent from the cheap summary. These raw `/v1/desired` routes are
+outside the generated client-v0 contract; no generated client or OpenAPI artifact
+is needed for this command.
+
 ## Operating a machine
 
 | Command | Purpose |
