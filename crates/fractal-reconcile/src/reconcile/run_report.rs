@@ -161,7 +161,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let key = format!("st3-run-report:{run}:seat-down:{seat}:{token}");
         let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
         let subject = format!("message/{message_id}");
-        if self.store.latest_claim(&subject, Some("message.sent"))?.is_some()
+        if self.store.message_sent(&subject)?
             || !self.store.agent_is_live(&report.to)?
         {
             return Ok(());
@@ -209,11 +209,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
         let subject = format!("message/{message_id}");
-        if self
-            .store
-            .latest_claim(&subject, Some("message.sent"))?
-            .is_some()
-        {
+        if self.store.message_sent(&subject)? {
             return self.close_fault(
                 &run.subject,
                 REPORT_FAULT_SCOPE,

@@ -320,9 +320,13 @@ A message a graph write sends waits in `local_message_outbox` until the daemon w
 messages shard (db break-up step 4c). The archive does not carry the outbox: a live export first
 drains it, and refuses while a message remains ("backup waits for the messages in the outbox to
 drain"), so pending mail is never left out of an archive silently and no format version changes.
-The offline exporter opens its copy without the shard, so it does not drain; it refuses a copy
-whose outbox is not empty. In this build nothing queues messages, so the outbox is always empty
-and archives are unchanged.
+The offline exporter never drains, even when the copy's `shards` directory is beside it and it
+opens the copy's shard: the exporter is not the member, and a drain would write the member's
+mail into the copy under the copy's writer. It refuses a copy whose outbox is not empty and names
+the waiting messages (`offline export refuses a copy whose message outbox holds 2 message(s) not
+yet in its messages shard (...)`); start the member's daemon so it writes them, then copy the
+database again. In this build nothing queues messages, so the outbox is always empty and archives
+are unchanged.
 
 ### Permanent ledgers
 
