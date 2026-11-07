@@ -332,10 +332,26 @@ stage `main` using the same Cloudflare account and remote state.
 These instructions describe the deployment configuration, not evidence of a
 successful live deployment or a recorded approval for public hosting.
 
+### Storybook structure
+
+Run it with `pnpm --filter @fractal/ui storybook`. It is one Storybook for design review first,
+organized as `Start`, `Screens`, `Surfaces`, `Components` and `Foundations`. Stories are moving
+into those areas by product area; the rest remain under `Fractal UI`, `Fractal` and `wf` for now.
+
+- Each story is one state. Sentence-case titles and state-only names leave theme and width to the
+  toolbar: the `Theme` global overrides a story's `scheme` or `dark` arg only when set, and the
+  `Viewport` options set no default, so play gate cases keep their own scheme and window.
+- `Screens` mount real product compositions over scenario worlds. A screen that pins no world
+  follows the `Scenario` toolbar.
+- A retitled story pins `meta.id`, so its story ids, and the gate policies that name them, survive.
+- States that exist for the gate rather than for review carry the `gate` tag. The sidebar hides
+  that tag by default (`tags` in `.storybook/main.ts`); the tag filter shows them, and the play
+  gate selects from the built index without regard to it.
+
 ### Production app stories
 
-The kit Storybook loads app stories only by the explicit file entries in
-`packages/fractal-ui/.storybook/stories.ts`. A story titled `Fractal/App/<Module>` is a
+`packages/fractal-ui/.storybook/stories.ts` discovers kit and app stories by glob, and
+`scenario.story-check.test.ts` checks the same inventory. A story titled `Fractal/App/<Module>` is a
 production module suite: its `meta.component` is that app module, imported from its
 production file and mounted by the story. `Fractal/App/LiveAgentWorkspace` and
 `Fractal/App/ConversationPane` mount the real modules under `DataSourceProvider` over
