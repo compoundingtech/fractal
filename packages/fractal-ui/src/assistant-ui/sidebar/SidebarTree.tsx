@@ -260,17 +260,17 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       return true
     }
     const rect = virtualizer.visibleRect
-    let offset = rect.y
+    let inset = stickyInset.current
     if (anchorMode.current === 'reveal') {
       const infos = ancestors.map(item => layout.getLayoutInfo(item.id))
       if (infos.some(info => info == null || info.estimatedSize)) return false
-      const inset = props.stickyAncestors === false ? 0 : Math.min(rect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
-      offset = Math.max(0, info.rect.y - inset)
-    } else {
-      const inset = props.stickyAncestors === false ? 0 : stickyInset.current
-      if (info.rect.y < rect.y + inset) offset = Math.max(0, info.rect.y - inset)
-      else if (info.rect.maxY > rect.maxY) offset = info.rect.maxY - rect.height
+      inset = Math.min(rect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
     }
+    if (props.stickyAncestors === false) inset = 0
+    // A row already in view stays where it is, so selecting it never moves the list under the pointer.
+    let offset = rect.y
+    if (info.rect.y < rect.y + inset) offset = Math.max(0, info.rect.y - inset)
+    else if (info.rect.maxY > rect.maxY) offset = info.rect.maxY - rect.height
     if (Math.abs(rect.y - offset) > 0.5) scrollToLayoutKey(layout, key, viewport, info.rect.y - offset)
     return true
   })
