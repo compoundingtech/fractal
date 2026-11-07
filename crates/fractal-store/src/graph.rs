@@ -6407,4 +6407,21 @@ mod declared_admission_tests {
             assert_eq!(error.details["field"], "declared_priority");
         }
     }
+
+    #[test]
+    fn non_agent_desired_children_pass_both_typed_entrypoints() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let desired = intent.subjects.get_mut("agent/example/worker").unwrap();
+        desired.kind = "resource".into();
+        desired.member = None;
+        desired.desired = serde_json::json!({"children": [{"name": "declared-priority"}]});
+        let body = serde_json::to_value(&*desired).unwrap();
+        fractal_missions_base::declared_admission::validate_claim(
+            "intent.desired", &desired.subject, &body,
+        ).unwrap();
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+    }
 }
