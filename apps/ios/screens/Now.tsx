@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { Alert, Linking, Pressable, ScrollView, SectionList, View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { Alert, Keyboard, KeyboardAvoidingView, Linking, Pressable, ScrollView, SectionList, TextInput, View } from 'react-native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useHeaderHeight } from '@react-navigation/elements';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
@@ -102,6 +103,22 @@ export function NowScreen() {
 export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) {
   const { data, busy, status, actions, hasSynced, loadErrors } = useStore();
   useMissionsOnFocus();
+  const requestScroll = useRef<ScrollView>(null);
+  const headerHeight = useHeaderHeight();
+  useFocusEffect(useCallback(() => {
+    // The only inline text input on an Inbox request is its thread composer.
+    // Reveal it at the foot of the request after the keyboard reduces the view.
+    let frame: number | undefined;
+    const listener = Keyboard.addListener('keyboardDidShow', () => {
+      if (TextInput.State.currentlyFocusedInput()) {
+        frame = requestAnimationFrame(() => requestScroll.current?.scrollToEnd({ animated: false }));
+      }
+    });
+    return () => {
+      listener.remove();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, []));
   const found = data.attention.find(candidate => candidate.id === route.params.id);
   // Nothing leaves Now by itself: an update is read when the person says so, never by opening it.
   const kept = useRef(found);
@@ -159,21 +176,23 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     return <Screen>
       <Banners />
       {/* Automatic insets keep the end of a long request clear of the floating tab bar. */}
-      <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
-        <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
-        <T bold selectable>{row.title}</T>
-        <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
-        {item.request ? <StructuredRequestView item={item} request={item.request} from={from} onAnswered={() => navigation.goBack()} /> : <>
-          <RequestQuestion text={cleanMessageText(item.detail ?? '')} />
-          <T bold color={theme.person}>{from} is waiting on you.</T>
-          <RequestAnswers item={item} from={from} onAnswered={() => navigation.goBack()} />
-        </>}
-        {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
-        {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
-        {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
-        {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
-        <T dim selectable>{item.id}</T>
-      </ScrollView>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
+  <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+          <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
+          <T bold selectable>{row.title}</T>
+          <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
+          {item.request ? <StructuredRequestView item={item} request={item.request} from={from} onAnswered={() => navigation.goBack()} /> : <>
+            <RequestQuestion text={cleanMessageText(item.detail ?? '')} />
+            <T bold color={theme.person}>{from} is waiting on you.</T>
+            <RequestAnswers item={item} from={from} onAnswered={() => navigation.goBack()} />
+          </>}
+          {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
+          {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
+          {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
+          {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
+          <T dim selectable>{item.id}</T>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Screen>;
   }
   return <Screen>

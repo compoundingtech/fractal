@@ -32,9 +32,9 @@ function render(item, enabled = true, start = true) {
   });
   const dependencies = {
     useStore: () => ({ data: { attention: [item], agents: [], missions: [] }, actions: {} }),
-    useMissionsOnFocus() {}, useRef: current => ({ current }), detailRow: () => ({}),
+    useMissionsOnFocus() {}, useFocusEffect() {}, useHeaderHeight: () => 0, useCallback: callback => callback, useRef: current => ({ current }), detailRow: () => ({}),
     cleanMessageText: text => text, blockedLine: () => undefined, theme: {},
-    Screen: 'Screen', Banners: 'Banners', ScrollView: 'ScrollView', T: 'Text',
+    Screen: 'Screen', Banners: 'Banners', ScrollView: 'ScrollView', KeyboardAvoidingView: 'KeyboardAvoidingView', T: 'Text',
     Button: 'Button', Markdown: 'Markdown', RequestQuestion: 'RequestQuestion', RequestAnswers: 'RequestAnswers', isRequest, AskThread,
   };
   const AttentionScreen = component('./screens/Now.tsx', 'AttentionScreen', undefined, dependencies);
@@ -56,6 +56,7 @@ test('the active Inbox ask mounts inline start with the exact origin and keeps i
     assert.equal(gated.type, 'AskThreadStart');
     assert.equal(gated.props.canStart, true);
     assert.ok(find(screen, 'RequestAnswers'));
+    assert.equal(find(screen, 'KeyboardAvoidingView').props.behavior, 'padding');
   }
 });
 
