@@ -55,11 +55,8 @@ const iframe = (report, probes = [], navigation, prependProbes = []) => `<!docty
 const policyFixtureIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-transcript--no-green-all-states',
-  'fractal-ui-composer--footer-width-budget-narrow-light',
   'fractal-ui-composer--footer-width-budget-narrow',
-  'fractal-ui-composer--footer-width-budget-medium-light',
   'fractal-ui-composer--footer-width-budget-medium',
-  'fractal-ui-composer--footer-width-budget-wide-light',
   'fractal-ui-composer--footer-width-budget-wide',
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',

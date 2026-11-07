@@ -138,7 +138,7 @@ const styles = stylex.create({
 })
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Details Data',
+  id: 'fractal-ui-details-data', title: 'Surfaces/Details/Data',
   component: DetailsPane,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact TraceSeries matrix pins independent spend/token windows, 0.9949/0.995 and invalid attribution fractions, missing versus zero subagent counts, and first-read resource/timing skeletons. Catalog details slices contain missions and work, not these trace facts or pending-field contracts.' }, layout: 'fullscreen' },
   args: {

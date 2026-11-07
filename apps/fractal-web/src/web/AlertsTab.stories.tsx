@@ -150,7 +150,7 @@ const boundedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElem
 }
 
 const meta = {
-  title: 'Fractal/App/Sidebar/Alerts tab',
+  id: 'fractal-app-sidebar-alerts-tab', title: 'Surfaces/Sidebar/Alerts tab',
   component: AlertsTabStory,
   parameters: {
     layout: 'fullscreen',
