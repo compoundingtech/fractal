@@ -430,7 +430,7 @@ export const membershipWriteResult = (request: SidebarJournalRequest, delivery: 
   const identity = request.identity
   if (typeof result === 'object' && result !== null && 'action_id' in result && result.action_id === identity.action_id && 'status' in result) {
     if (result.status === 'accepted' || result.status === 'completed') return { _tag: 'Ack', identity }
-    if (result.status === 'rejected' && delivery === 'First') return { _tag: 'Refused', identity, refusal: 'Conflict' }
+    if (result.status === 'rejected') return { _tag: 'Refused', identity, refusal: 'Conflict' }
   }
   if (delivery === 'Replay') return { _tag: 'Unknown', identity }
   if (result instanceof ClientError) {

@@ -195,3 +195,10 @@ it.each(['accepted', 'completed'])('success %s acknowledges both delivery kinds'
   stage(editor)
   for (const delivery of ['First', 'Replay'] as const) expect(membershipWriteResult(editor.state.request!, delivery, { action_id: 'action/2', status })).toEqual({ _tag: 'Ack', identity: identity(2) })
 })
+it.each(['First', 'Replay'] as const)('matching rejected receipt is definitive on %s', delivery => {
+  const { editor } = setup()
+  stage(editor)
+  const result = membershipWriteResult(editor.state.request!, delivery, { action_id: 'action/2', status: 'rejected' })
+  expect(result).toEqual({ _tag: 'Refused', identity: identity(2), refusal: 'Conflict' })
+  expect(membershipWriteResult(editor.state.request!, delivery, { action_id: 'action/other', status: 'rejected' })).toEqual({ _tag: 'Unknown', identity: identity(2) })
+})
