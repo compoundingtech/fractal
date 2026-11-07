@@ -36,7 +36,7 @@ export const wrapTraceFetch = ({
 export const browserSocket: CollectionSocketFactory = (url, protocols, headers) => {
   const target = new URL(url)
   if (headers['x-st3-client'] !== undefined) target.searchParams.set('client', headers['x-st3-client'])
-  const socket = new WebSocket(target, protocols)
+  const socket = new WebSocket(target.toString(), protocols)
   const wrapped: CollectionSocket = {
     onopen: null,
     onmessage: null,
@@ -57,7 +57,7 @@ export const browserSocket: CollectionSocketFactory = (url, protocols, headers) 
 export const browserPtySocket = (client: string | undefined): PtySocketFactory => (url, protocols) => {
   const target = new URL(url)
   if (client !== undefined) target.searchParams.set('client', client)
-  const socket = new WebSocket(target, [...protocols])
+  const socket = new WebSocket(target.toString(), [...protocols])
   socket.binaryType = 'arraybuffer'
   const wrapped: PtySocket = {
     binaryType: 'arraybuffer',
