@@ -657,7 +657,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const sidebarBody = <SidebarTabs panelHasTabbableContent selectedId={sidebarTab === 'alerts' ? 'alerts' : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' ? 'alerts' : 'agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', ...alertTabMarkers(attention) }]}>
     {sidebarTab === 'alerts' ? <AlertsTabCodeBoundary onOpen={ref => { if (ref.startsWith('agent/')) select(ref); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
-    {credentialNotice(fleet) ? <RosterUnavailable reason="unauthorized" /> : fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
+    {credentialNotice(fleet) ? <RosterUnavailable reason="unauthorized" onRetry={undefined} /> : fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
       : fleet._tag !== 'Observed' ? null
       : <>
         {stale ? <RosterStaleNotice decodeStale={rosterDecode.decodeStale} observedAt={rosterObservedAt} partial={fleet.coverage?._tag === 'Partial'} refreshFailed={fleet.error?.reason === 'failed'} onRetry={folderSource.retryAgents} /> : null}
