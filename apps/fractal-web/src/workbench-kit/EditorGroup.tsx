@@ -7,9 +7,10 @@ import * as stylex from '@stylexjs/stylex'
 import { useRef, useState, type ReactNode } from 'react'
 import { useDrop } from 'react-aria'
 
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import { readTabDrop, type TabDragPayload } from './EditorTabs.tsx'
+import { accentVars, borderVars, statusVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Drop region: the centre moves an editor, edges split in that direction. */
 export type DropZone = 'center' | 'left' | 'right' | 'top' | 'bottom'
@@ -21,27 +22,27 @@ const styles = stylex.create({
     flexGrow: 1,
     minWidth: 0,
     minHeight: 0,
-    backgroundColor: tokens['--ds-background-100'],
+    backgroundColor: surfaceVars.canvas,
     position: 'relative',
   },
   card: {
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
     borderRadius: scale.radiusLg,
     overflow: 'hidden',
   },
-  cardFocused: { borderColor: tokens['--ds-gray-alpha-600'] },
+  cardFocused: { borderColor: borderVars.borderStrong },
   // Keep content at full contrast; neutral chrome recedes while focus and attention stay distinct.
   ring: {
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
     borderRadius: scale.radiusDefault,
     overflow: 'hidden',
   },
-  ringFocused: { borderColor: tokens['--ds-blue-700'] },
-  ringAttention: { borderColor: tokens['--ds-amber-700'] },
+  ringFocused: { borderColor: accentVars.primary },
+  ringAttention: { borderColor: statusVars.attention },
   flatFocused: {
     '::before': {
       content: '""',
@@ -49,7 +50,7 @@ const styles = stylex.create({
       top: 0,
       insetInline: 0,
       height: '1px',
-      backgroundColor: tokens['--ds-gray-1000'],
+      backgroundColor: textVars.fg,
       pointerEvents: 'none',
       zIndex: 2,
     },
@@ -57,7 +58,7 @@ const styles = stylex.create({
   attentionRing: {
     outlineWidth: '1px',
     outlineStyle: 'solid',
-    outlineColor: tokens['--ds-amber-700'],
+    outlineColor: statusVars.attention,
     outlineOffset: '-1px',
   },
   body: {
@@ -73,11 +74,11 @@ const styles = stylex.create({
     position: 'absolute',
     zIndex: 3,
     pointerEvents: 'none',
-    backgroundColor: tokens['--ds-blue-200'],
+    backgroundColor: surfaceVars.message,
     opacity: 0.7,
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-blue-700'],
+    borderColor: accentVars.primary,
     borderRadius: scale.radiusDefault,
   },
   center: { inset: '4px' },

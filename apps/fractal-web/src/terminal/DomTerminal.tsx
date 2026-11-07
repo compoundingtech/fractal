@@ -11,13 +11,13 @@ import { memo, Suspense, use, type CSSProperties, type ReactNode } from 'react'
 // The renderer owns its font so every host uses the same text and box-drawing cell advances.
 // oxlint-disable-next-line import/no-unassigned-import -- CSS side-effect import
 import './fonts.css'
-import { tokens } from '../ui-compat/tokens.stylex.ts'
 
 import { graphemes, graphemeWidth, isPlainAscii, textWidth } from './cellWidth.ts'
 import { terminalRunStyle, type TerminalPalette } from './palette.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
 
 import { terminalMetrics } from './terminalMetrics.stylex.ts'
+import { interactionVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Inputs of the DOM renderer: the screen frame and the palette its colours resolve against. */
 export type DomTerminalProps = {
@@ -134,7 +134,7 @@ const styles = stylex.create({
     tabSize: 8,
     outline: {
       default: 'none',
-      ':focus-visible': `2px solid ${tokens['--ds-focus-color']}`,
+      ':focus-visible': `2px solid ${interactionVars.focusRing}`,
     },
   },
   line: {
@@ -160,10 +160,10 @@ const styles = stylex.create({
   },
   redacted: {
     fontStyle: 'italic',
-    color: tokens['--ds-gray-700'],
+    color: textVars.fgMuted,
   },
   truncatedMark: {
-    color: tokens['--ds-gray-700'],
+    color: textVars.fgMuted,
   },
   cursor: {
     position: 'absolute',

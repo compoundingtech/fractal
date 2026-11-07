@@ -12,9 +12,10 @@ import {
   type Key,
 } from 'react-aria-components'
 
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import { ChevronRightIcon } from './icons.tsx'
+import { interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   tree: {
@@ -27,7 +28,7 @@ const styles = stylex.create({
   },
   item: {
     outlineStyle: 'none',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
     cursor: 'default',
   },
   row: {
@@ -40,9 +41,9 @@ const styles = stylex.create({
     borderRadius: scale.radiusSm,
     backgroundColor: 'transparent',
   },
-  rowHovered: { backgroundColor: tokens['--ds-gray-alpha-100'] },
-  rowSelected: { backgroundColor: tokens['--ds-gray-alpha-200'] },
-  rowFocusVisible: { boxShadow: `inset 0 0 0 2px ${tokens['--ds-focus-color']}` },
+  rowHovered: { backgroundColor: surfaceVars.message },
+  rowSelected: { backgroundColor: surfaceVars.message },
+  rowFocusVisible: { boxShadow: `inset 0 0 0 2px ${interactionVars.focusRing}` },
   indent: (level: number) => ({ paddingInlineStart: `${(level - 1) * 12 + 4}px` }),
   chevron: {
     display: 'inline-flex',
@@ -53,7 +54,7 @@ const styles = stylex.create({
     height: '1rem',
     padding: 0,
     borderWidth: 0,
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
     backgroundColor: 'transparent',
     cursor: 'pointer',
     transitionProperty: 'transform',

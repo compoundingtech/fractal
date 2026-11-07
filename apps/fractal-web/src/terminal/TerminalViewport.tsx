@@ -3,9 +3,10 @@ import * as React from 'react'
 import { useKeyboard } from 'react-aria'
 import { Button, Input, Label, SearchField } from 'react-aria-components'
 
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import { terminalMatches, terminalText } from './terminalText.ts'
+import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const searches = new Map<string, readonly Range[]>()
 const activeSearches = new Map<string, readonly Range[]>()
@@ -238,9 +239,9 @@ const styles = stylex.create({
     padding: scale.space1,
     borderBottomWidth: '1px',
     borderBottomStyle: 'solid',
-    borderBottomColor: tokens['--ds-gray-alpha-400'],
+    borderBottomColor: borderVars.borderStrong,
     fontSize: '0.75rem',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
   },
   search: {
     display: 'flex',
@@ -255,35 +256,35 @@ const styles = stylex.create({
     width: '100%',
     padding: scale.space1,
     fontSize: '0.75rem',
-    color: tokens['--ds-gray-1000'],
-    backgroundColor: tokens['--ds-background-100'],
+    color: textVars.fg,
+    backgroundColor: surfaceVars.canvas,
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
   },
   button: {
     paddingInline: scale.space2,
     height: '1.5rem',
     fontSize: '0.75rem',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
     backgroundColor: {
       default: 'transparent',
-      ':is([data-hovered])': tokens['--ds-gray-alpha-100'],
+      ':is([data-hovered])': surfaceVars.message,
     },
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
-    outlineColor: tokens['--ds-focus-color'],
+    outlineColor: interactionVars.focusRing,
     outlineWidth: '2px',
   },
-  status: { whiteSpace: 'nowrap', color: tokens['--ds-gray-900'] },
+  status: { whiteSpace: 'nowrap', color: textVars.fg },
   copyStatus: {
     margin: 0,
     padding: scale.space1,
     fontSize: '0.75rem',
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
   },
   body: { overflow: 'auto', flexGrow: 1, minHeight: 0, padding: scale.space2 },
   ended: { opacity: 0.55, filter: 'grayscale(0.6)' },

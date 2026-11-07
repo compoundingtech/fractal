@@ -7,7 +7,8 @@ import type { ReactNode } from 'react'
 import { Button as AriaButton, type ButtonProps as AriaButtonProps } from 'react-aria-components'
 
 import { Tooltip, TooltipTrigger } from '../ui-compat/components.tsx'
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
+import { interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   button: {
@@ -18,23 +19,23 @@ const styles = stylex.create({
     borderWidth: 0,
     borderRadius: scale.radiusSm,
     padding: 0,
-    color: { default: tokens['--ds-gray-900'], ':is([data-hovered])': tokens['--ds-gray-1000'] },
+    color: { default: textVars.fg, ':is([data-hovered])': textVars.fg },
     backgroundColor: {
       default: 'transparent',
-      ':is([data-hovered])': tokens['--ds-gray-alpha-200'],
-      ':is([data-pressed])': tokens['--ds-gray-alpha-300'],
+      ':is([data-hovered])': surfaceVars.message,
+      ':is([data-pressed])': surfaceVars.message,
     },
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
     outlineWidth: '2px',
-    outlineColor: tokens['--ds-focus-color'],
+    outlineColor: interactionVars.focusRing,
     outlineOffset: '-2px',
   },
   sm: { width: '1.375rem', height: '1.375rem' },
   md: { width: '1.75rem', height: '1.75rem' },
   active: {
-    color: tokens['--ds-gray-1000'],
-    backgroundColor: tokens['--ds-gray-alpha-200'],
+    color: textVars.fg,
+    backgroundColor: surfaceVars.message,
   },
 })
 

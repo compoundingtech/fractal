@@ -12,9 +12,10 @@ import {
   NumberField,
 } from 'react-aria-components'
 
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import type { TerminalResizePort } from './terminal-resize-port.ts'
+import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Changing dimensions is deliberate: other viewers share the same PTY. */
 export const TerminalResize = ({
@@ -142,31 +143,31 @@ const styles = stylex.create({
     height: '1.5rem',
     paddingInline: scale.space2,
     fontSize: '0.75rem',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
     backgroundColor: {
       default: 'transparent',
-      ':is([data-hovered])': tokens['--ds-gray-alpha-100'],
+      ':is([data-hovered])': surfaceVars.message,
     },
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
-    outlineColor: tokens['--ds-focus-color'],
+    outlineColor: interactionVars.focusRing,
     outlineWidth: '2px',
   },
   overlay: {
     position: 'fixed',
     inset: 0,
-    backgroundColor: tokens['--ds-gray-alpha-400'],
+    backgroundColor: borderVars.borderStrong,
     display: 'grid',
     placeItems: 'center',
     zIndex: 100,
   },
   modal: {
     width: 'min(28rem, 90vw)',
-    backgroundColor: tokens['--ds-background-100'],
-    color: tokens['--ds-gray-1000'],
+    backgroundColor: surfaceVars.canvas,
+    color: textVars.fg,
     borderRadius: scale.radiusDefault,
   },
   dialog: {
@@ -182,11 +183,11 @@ const styles = stylex.create({
   input: {
     width: '6rem',
     padding: scale.space1,
-    color: tokens['--ds-gray-1000'],
-    backgroundColor: tokens['--ds-background-100'],
+    color: textVars.fg,
+    backgroundColor: surfaceVars.canvas,
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
   },
   actions: { display: 'flex', justifyContent: 'flex-end', gap: scale.space2 },
 })

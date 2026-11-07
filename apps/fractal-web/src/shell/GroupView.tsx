@@ -5,7 +5,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import type { PresentationId, SubjectRendererManifest } from '../resources/contract.ts'
 import { HarnessIcon } from '../workbench-kit/brand-icons.tsx'
@@ -24,6 +24,7 @@ import {
   type WorkbenchAction,
   type WorkbenchState,
 } from './state.ts'
+import { borderVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Surface strip: classic tabs, compact pills, title-bar-only label, vertical list. */
 export type TabsVariant = 'classic' | 'compact' | 'title' | 'list'
@@ -40,9 +41,9 @@ const styles = stylex.create({
     paddingInline: scale.space3,
     borderBottomWidth: '1px',
     borderBottomStyle: 'solid',
-    borderBottomColor: tokens['--ds-gray-alpha-400'],
+    borderBottomColor: borderVars.borderStrong,
     fontSize: '0.8125rem',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
   },
   titleText: {
     fontWeight: 500,
@@ -50,9 +51,9 @@ const styles = stylex.create({
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
-  titleDetail: { color: tokens['--ds-gray-900'], fontSize: '0.75rem', whiteSpace: 'nowrap' },
+  titleDetail: { color: textVars.fg, fontSize: '0.75rem', whiteSpace: 'nowrap' },
   titleCount: {
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
     fontSize: '0.75rem',
     marginInlineStart: 'auto',
     display: 'flex',
@@ -67,7 +68,7 @@ const styles = stylex.create({
     justifyContent: 'center',
     gap: scale.space3,
     flexGrow: 1,
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
     fontSize: '0.8125rem',
   },
   emptyRow: { display: 'flex', alignItems: 'center', gap: scale.space3 },

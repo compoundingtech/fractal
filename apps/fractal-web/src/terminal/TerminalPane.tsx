@@ -15,10 +15,11 @@ import {
   Tooltip,
   TooltipTrigger,
 } from '../ui-compat/components.tsx'
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
+import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import { BrandText } from '../workbench-kit/brand-icons.tsx'
 import { TerminalViewport } from './TerminalViewport.tsx'
+import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Viewer state of a pane: waiting for the first screen, following frames, quiet, showing an old snapshot, or frozen for good. */
 export type PaneState = 'connecting' | 'live' | 'idle' | 'stale' | 'ended'
@@ -35,10 +36,10 @@ const styles = stylex.create({
     minHeight: 0,
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
+    borderColor: borderVars.borderStrong,
     borderRadius: 0,
     overflow: 'hidden',
-    backgroundColor: tokens['--ds-background-100'],
+    backgroundColor: surfaceVars.canvas,
   },
   header: {
     display: 'flex',
@@ -49,10 +50,10 @@ const styles = stylex.create({
     flexShrink: 0,
     borderBottomWidth: '1px',
     borderBottomStyle: 'solid',
-    borderBottomColor: tokens['--ds-gray-alpha-400'],
-    backgroundColor: tokens['--ds-background-200'],
+    borderBottomColor: borderVars.borderStrong,
+    backgroundColor: surfaceVars.raised,
     fontSize: '0.8125rem',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
   },
   title: {
     flexGrow: 1,
@@ -70,18 +71,18 @@ const styles = stylex.create({
     height: '1.5rem',
     backgroundColor: {
       default: 'transparent',
-      ':is([data-hovered])': tokens['--ds-gray-alpha-100'],
+      ':is([data-hovered])': surfaceVars.message,
     },
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
     outlineWidth: '2px',
-    outlineColor: tokens['--ds-focus-color'],
+    outlineColor: interactionVars.focusRing,
     outlineOffset: '-2px',
     flexShrink: 0,
     whiteSpace: 'nowrap',
     fontFamily: scale.fontMono,
     fontSize: '0.75rem',
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
   },
   banner: {
     padding: scale.space2,
