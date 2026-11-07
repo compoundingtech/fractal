@@ -115,8 +115,13 @@ export type ConversationItem =
       readonly _tag: 'Message'
       readonly id: string
       readonly messageId: string
+      /** Who wrote it; `daemon/runtime` for a wake. */
+      readonly author?: string
       readonly from?: string
       readonly to?: string
+      /** The body, when the window holds it; a header alone has none. */
+      readonly text?: string
+      readonly attachments?: readonly Attachment[]
       readonly title?: string
       readonly replyTo?: string
       readonly at: string

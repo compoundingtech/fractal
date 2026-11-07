@@ -40,6 +40,7 @@ pub mod assistant;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+mod github_plugin_reads;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
@@ -114,6 +115,13 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/usage", get(usage_period))
         .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/usage/quota", get(usage_hub::read))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(github_plugin_reads::pull))
+        .route("/v1/client/plugins/github/{owner}/{repo}/issues/{number}", get(github_plugin_reads::issue))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation", get(github_plugin_reads::conversation))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks", get(github_plugin_reads::checks))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files", get(github_plugin_reads::files))
+        .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(github_plugin_reads::comment))
+        .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))

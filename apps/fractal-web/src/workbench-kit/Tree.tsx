@@ -12,22 +12,21 @@ import {
   type Key,
 } from 'react-aria-components'
 
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
-
 import { ChevronRightIcon } from './icons.tsx'
+import { interactionVars, surfaceVars, textVars, radiusVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   tree: {
     display: 'flex',
     flexDirection: 'column',
-    paddingBlock: scale.space1,
+    paddingBlock: spaceVars.xs,
     outlineStyle: 'none',
     fontSize: '0.8125rem',
     lineHeight: '1.25rem',
   },
   item: {
     outlineStyle: 'none',
-    color: tokens['--ds-gray-1000'],
+    color: textVars.fg,
     cursor: 'default',
   },
   row: {
@@ -35,14 +34,14 @@ const styles = stylex.create({
     alignItems: 'center',
     gap: '6px',
     height: '1.75rem',
-    marginInline: scale.space1,
-    paddingInlineEnd: scale.space2,
-    borderRadius: scale.radiusSm,
+    marginInline: spaceVars.xs,
+    paddingInlineEnd: spaceVars.md,
+    borderRadius: radiusVars.xs,
     backgroundColor: 'transparent',
   },
-  rowHovered: { backgroundColor: tokens['--ds-gray-alpha-100'] },
-  rowSelected: { backgroundColor: tokens['--ds-gray-alpha-200'] },
-  rowFocusVisible: { boxShadow: `inset 0 0 0 2px ${tokens['--ds-focus-color']}` },
+  rowHovered: { backgroundColor: surfaceVars.message },
+  rowSelected: { backgroundColor: surfaceVars.message },
+  rowFocusVisible: { boxShadow: `inset 0 0 0 2px ${interactionVars.focusRing}` },
   indent: (level: number) => ({ paddingInlineStart: `${(level - 1) * 12 + 4}px` }),
   chevron: {
     display: 'inline-flex',
@@ -53,7 +52,7 @@ const styles = stylex.create({
     height: '1rem',
     padding: 0,
     borderWidth: 0,
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
     backgroundColor: 'transparent',
     cursor: 'pointer',
     transitionProperty: 'transform',

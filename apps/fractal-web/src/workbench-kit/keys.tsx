@@ -4,7 +4,7 @@
 import * as stylex from '@stylexjs/stylex'
 
 import { Kbd } from '../ui-compat/components.tsx'
-import { scale } from '../ui-compat/tokens.stylex.ts'
+import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Parsed chord with exact modifiers and a normalized event key. */
 export interface Keybinding {
@@ -132,7 +132,7 @@ export const formatKeybinding = ({
 }
 
 const styles = stylex.create({
-  chord: { display: 'inline-flex', gap: scale.space1, flexShrink: 0 },
+  chord: { display: 'inline-flex', gap: spaceVars.xs, flexShrink: 0 },
 })
 
 /** Renders a keybinding string as keyboard `Kbd` chips. */

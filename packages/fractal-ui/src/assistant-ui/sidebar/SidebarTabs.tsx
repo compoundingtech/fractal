@@ -87,7 +87,8 @@ export function CountPill({ count, needsYou = false }: { readonly count: number;
 
 /**
  * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row and labels
- * never truncate; when the row cannot hold every count, all counts drop together and attention stays as a dot.
+ * never truncate. Tab icons only repeat the label, so they give way first; only when even the iconless row cannot hold every
+ * count do all counts drop together, attention staying as a dot.
  */
 export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabbableContent = false, children }: SidebarTabsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
@@ -95,6 +96,7 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
   const [iconsFit, setIconsFit] = React.useState(true)
   const bar = React.useRef<HTMLDivElement>(null)
   const replica = React.useRef<HTMLDivElement>(null)
+  const iconlessReplica = React.useRef<HTMLDivElement>(null)
   const countlessReplica = React.useRef<HTMLDivElement>(null)
   const prefix = React.useId()
   const list = React.useRef<HTMLDivElement>(null)
@@ -107,17 +109,20 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
   const { tabListProps } = useTabList({ 'aria-label': 'Sidebar' }, state, list)
   const { focusProps, isFocusVisible } = useFocusRing()
   React.useLayoutEffect(() => {
-    const host = bar.current, row = replica.current, countless = countlessReplica.current
-    if (host === null || row === null || countless === null) return
+    const host = bar.current, row = replica.current, iconless = iconlessReplica.current, countless = countlessReplica.current
+    if (host === null || row === null || iconless === null || countless === null) return
     const fit = () => {
       const width = host.getBoundingClientRect().width + fitSlack
-      setCountsFit(row.getBoundingClientRect().width <= width)
-      setIconsFit(countless.getBoundingClientRect().width <= width)
+      const whole = row.getBoundingClientRect().width <= width
+      const counts = whole || iconless.getBoundingClientRect().width <= width
+      setCountsFit(counts)
+      setIconsFit(whole || (!counts && countless.getBoundingClientRect().width <= width))
     }
     fit()
     const observer = new ResizeObserver(fit)
     observer.observe(host)
     observer.observe(row)
+    observer.observe(iconless)
     observer.observe(countless)
     return () => observer.disconnect()
   }, [])
@@ -126,7 +131,11 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
     <div ref={replica} aria-hidden inert data-sidebar-tabs-measure {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
       {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount /></span>)}
     </div>
-    {/* The next step down: no counts, icons kept. If even this overflows the icons go too, because labels never truncate. */}
+    {/* The next step down: counts kept, icons gone. */}
+    <div ref={iconlessReplica} aria-hidden inert data-sidebar-tabs-measure-iconless {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
+      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount showIcon={false} /></span>)}
+    </div>
+    {/* Then no counts, icons back. If even this overflows the icons go too, because labels never truncate. */}
     <div ref={countlessReplica} aria-hidden inert data-sidebar-tabs-measure-countless {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
       {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={false} /></span>)}
     </div>

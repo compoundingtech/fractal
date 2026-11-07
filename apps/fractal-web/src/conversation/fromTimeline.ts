@@ -6,7 +6,7 @@ import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, typ
 import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/read'
 import { DateTime, Option, Schema } from 'effect'
 
-import type { ConversationItem, ToolCallItem, ToolResult, UnsupportedReason } from './model.ts'
+import type { ConversationItem, MessageItem, TextItem, ToolCallItem, ToolResult, UnsupportedReason } from './model.ts'
 import { contentEvent, proseItem, withoutShownDeliveries } from './semantics.ts'
 import { ompNoticeExcerpt, q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 import { blockFacts, recordValue } from './blocks.ts'
@@ -14,6 +14,7 @@ import { blockRole, isKnownView, viewMeaning } from './vocabulary.ts'
 import { inspectPreview } from './inspect.ts'
 import { recordTranscriptTelemetry } from './telemetry.ts'
 import { bodyRepeatsRecord, systemRecordItem } from './systemRecords.ts'
+import { mailAuthor, mailOrigin, wakeExcerpt, wakeTitle } from './mail.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the Fractal wire contract.
@@ -101,7 +102,7 @@ const joinResult = ({
  * parts after it carry the content.
  */
 const isTurnHeader = (entry: Entry) =>
-  entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined
+  entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined && entry.body.author === undefined
 
 /**
  * Ids Fractal mints for a mailbox message's own content (`client_v0.rs`): the native projection
@@ -247,17 +248,21 @@ const baseItemOf = ({
         at: entryTimestamp(entry),
       })
     }
-    case 'message':
+    case 'message': {
+      // A header alone: its body is outside the window. A wake still reads as one quiet row.
+      if (mailOrigin(entry.body) === 'machine') return wakeItem(entry, undefined)
       return {
         _tag: 'Message',
         id: entry.id,
         messageId: entry.body.message_id,
+        ...(entry.body.author !== undefined ? { author: entry.body.author } : {}),
         ...(entry.body.from !== undefined ? { from: entry.body.from } : {}),
         ...(entry.body.to !== undefined ? { to: entry.body.to } : {}),
         ...(entry.body.title !== undefined ? { title: entry.body.title } : {}),
         ...(Option.isSome(entry.body.reply_to) ? { replyTo: entry.body.reply_to.value } : {}),
         at: entryTimestamp(entry),
       }
+    }
     case 'reasoning':
       return {
         _tag: 'Reasoning',
@@ -332,6 +337,53 @@ const baseItemOf = ({
       return unsupported(entry.id, 'st', entry.rawType, 'undecodable-entry', entry.raw, entry.timestamp)
   }
   return unsupported(entry.id, 'st', entry.type.raw, 'unknown-entry-type', entry.body, entryTimestamp(entry))
+}
+
+/**
+ * Machine mail (a daemon wake, a restart handoff) as one quiet row: who woke the agent and why, a
+ * bounded one-line excerpt, and the whole body only behind Read message. `body` is undefined when
+ * only the header is loaded.
+ */
+const wakeItem = (header: MessageEntry, body: { readonly id: string; readonly text: string } | undefined): ConversationItem => {
+  const title = header.body.title
+  const facts = { message_id: header.body.message_id, author: mailAuthor(header.body) ?? null, to: header.body.to ?? null, title: title ?? null }
+  return {
+    _tag: 'Event',
+    id: body?.id ?? header.id,
+    kind: 'delivery',
+    title: wakeTitle(title),
+    text: body === undefined ? 'Message body not loaded' : wakeExcerpt(body.text),
+    sender: { kind: 'system', label: 'Fractal', via: 'daemon' },
+    data: facts,
+    notice: {
+      _tag: 'Delivery',
+      from: 'Fractal',
+      to: header.body.to ?? 'this agent',
+      ...(title === undefined ? {} : { subject: title }),
+      payload: body?.text ?? '',
+      raw: JSON.stringify(facts),
+    },
+    at: entryTimestamp(header),
+  }
+}
+
+/** A mail header and its body as one object; the body's id keeps a send's identity across frames. */
+const mailItem = (header: MessageEntry, body: TextItem): MessageItem | ConversationItem => {
+  if (mailOrigin(header.body) === 'machine') return wakeItem(header, { id: body.id, text: body.text })
+  const { _tag, role, streaming, sendState, model, sender, text, attachments, ...facts } = body
+  return {
+    ...facts,
+    _tag: 'Message',
+    messageId: header.body.message_id,
+    ...(header.body.author !== undefined ? { author: header.body.author } : {}),
+    ...(header.body.from !== undefined ? { from: header.body.from } : {}),
+    ...(header.body.to !== undefined ? { to: header.body.to } : {}),
+    ...(header.body.title !== undefined ? { title: header.body.title } : {}),
+    ...(Option.isSome(header.body.reply_to) ? { replyTo: header.body.reply_to.value } : {}),
+    text,
+    attachments,
+    at: entryTimestamp(header),
+  }
 }
 
 const itemOf = (args: Parameters<typeof baseItemOf>[0]): ConversationItem => {
@@ -475,6 +527,15 @@ export const timelineItems = (
   return timeline.project().items
 }
 
+interface MailPairs {
+  /** Each shown message's body, by message id (delivery-echo removal compares against it). */
+  readonly bodies: ReadonlyMap<string, string>
+  /** The header a content entry is the body of, by content entry id. */
+  readonly headerOf: ReadonlyMap<string, MessageEntry>
+  /** Header entry ids whose body is in the window. */
+  readonly paired: ReadonlySet<string>
+}
+
 interface CachedItem {
   readonly entry: Entry
   readonly result: ToolResultEntry | undefined
@@ -600,6 +661,8 @@ export class LiveTimeline {
         }
       }
       this.dirtyFrom = Math.min(this.dirtyFrom, at)
+      // Content right after a header may be that header's body: the header's row moves into it.
+      if (entry.type === 'content' && this.ordered[at - 1]?.type === 'message') this.dirtyFrom = Math.min(this.dirtyFrom, at - 1)
       // Re-pointed identities or sequence changes invalidate invocation/result segmentation.
       if (
         previous !== undefined &&
@@ -816,17 +879,22 @@ export class LiveTimeline {
    * Each mail message's body as this window shows it. A header owns the content its mailbox id pairs
    * with, or, for ids that pair with nothing, the content right after it. A header alone shows no body.
    */
-  private shownMailBodies(mailboxHeaders: ReadonlyMap<string, MessageEntry>): ReadonlyMap<string, string> {
+  private mailPairs(mailboxHeaders: ReadonlyMap<string, MessageEntry>): MailPairs {
     const bodies = new Map<string, string>()
+    const headerOf = new Map<string, MessageEntry>()
+    const paired = new Set<string>()
     this.ordered.forEach((entry, at) => {
       if (entry.type !== 'content') return
       const key = mailboxPairKey(entry)
       const previous = this.ordered[at - 1]
       const header = key !== undefined ? mailboxHeaders.get(key)
         : previous?.type === 'message' && !isTurnHeader(previous) && mailboxPairKeys(previous).length === 0 ? previous : undefined
-      if (header !== undefined && !bodies.has(header.body.message_id)) bodies.set(header.body.message_id, optionalSource(entry.body.text) ?? '')
+      if (header === undefined || bodies.has(header.body.message_id)) return
+      bodies.set(header.body.message_id, optionalSource(entry.body.text) ?? '')
+      headerOf.set(entry.id, header)
+      paired.add(header.id)
     })
-    return bodies
+    return { bodies, headerOf, paired }
   }
 
   /** Register only a send that painted an outbox row; an already-shown Resend keeps its server id. */
@@ -868,7 +936,8 @@ export class LiveTimeline {
       const key = mailboxPairKey(entry)
       if (key !== undefined) userMailContent.add(key)
     }
-    const shownBodies = this.shownMailBodies(mailboxHeaders)
+    const pairs = this.mailPairs(mailboxHeaders)
+    const shownBodies = pairs.bodies
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
@@ -879,6 +948,8 @@ export class LiveTimeline {
         // Keep header-only mail and separate agent mail; one person send needs only its user row.
         if (mailboxPairKeys(entry).some(key => userMailContent.has(key))) continue
       }
+      // A header whose body is loaded is drawn once, as one object, at its body.
+      if (entry.type === 'message' && pairs.paired.has(entry.id)) continue
       // Only native harness turns repeat shown mail as delivery copies; a mailbox
       // message's own content is person-authored text that may quote anything.
       if (
@@ -911,10 +982,9 @@ export class LiveTimeline {
       if (entry.type === 'tool_call')
         items.push(...this.cached({ entry, result: this.joined.get(at), active: this.active }))
       else {
-        const key = entry.type === 'content' ? mailboxPairKey(entry) : undefined
         items.push(...this.cached({
           entry, result: undefined, active: true,
-          mailbox: key === undefined ? undefined : mailboxHeaders.get(key),
+          mailbox: entry.type === 'content' ? pairs.headerOf.get(entry.id) : undefined,
         }))
       }
     }
@@ -1008,6 +1078,13 @@ export class LiveTimeline {
       }
     }
     if (item?._tag === 'Text' && item.id !== id) item = { ...item, id }
+    // Mail reads as one object; only a person's mail keeps the person's row (the blue bar).
+    if (item?._tag === 'Text' && mailbox !== undefined && mailOrigin(mailbox.body) !== 'person') item = mailItem(mailbox, item)
+    // Fractal-minted mail content whose header left the window: who wrote it is unknown, so not a person's row.
+    else if (item?._tag === 'Text' && mailbox === undefined && entry.type === 'content' && MAILBOX_CONTENT_ID.test(entry.id) && id === entry.id) {
+      const { _tag, role, streaming, sendState, model, sender, ...rest } = item
+      item = { ...rest, _tag: 'Message', messageId: entry.body.message_id ?? '' }
+    }
     const items = [...classified.markers, ...(item === undefined ? [] : [item])]
     if (this.telemetryRevisions.get(entry.id) !== entry.revision) {
       this.telemetryRevisions.set(entry.id, entry.revision)

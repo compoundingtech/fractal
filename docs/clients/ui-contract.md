@@ -321,10 +321,11 @@ The web app is the most capable display, so it leads the conversation view:
    they can draw it. When one cannot yet, its PR or a follow-up says which expected entries it
    skips and why. The fixtures stay as Fractal wrote them.
 
-Today only Rust and the phone run the fixtures; `noise` and `claude-skill` run only in Rust,
+Rust and the phone run every fixture; `noise` and `claude-skill` run only in Rust,
 and only the phone runs `conversation-style.json`. Fractal cleans conversations in
-`apps/fractal-web/src/conversation/` without `@fractal/views` and runs none of them. Adding that
-test is the first step of this rule
+`apps/fractal-web/src/conversation/` without `@fractal/views` and runs two of them so far,
+`omp-delivery-echo` and `wakes`, through its own derivation (`fromTimeline.unit.test.ts`). Running
+the rest is the remaining step of this rule
 ([#2647](https://github.com/compoundingtech/fractal/issues/2647)).
 Once the [conversation projection](#conversation-stream) is served, it is the derivation the
 fixtures pin, and a Fractal PR that changes the fixtures changes the projection with them.
@@ -346,9 +347,32 @@ Rules every client follows; `transcripts/*.expected.json` checks the cleaning.
     `<permissions …>`, `<collaboration_mode>`, `<multi_agent_mode>`, `*_instructions` blocks,
     including blocks that never close.
   - Leave assistant prose alone: an agent may mention `<smalltalk-message>` by name.
-- "Mission step ready" pings from `daemon/runtime` render as one event line.
+- Mail Fractal itself writes, such as a "Mission step ready" wake or a restart handoff, renders as
+  one event line. The writer is the message's `author` (negotiate
+  `conversation-message-participants.v1`), else its `from`. A wake has author `daemon/runtime` and
+  never a `from`. A read without participants drops both, so a header that names a recipient and
+  no writer is Fractal's, never a person's. `wakes` pins both shapes.
+- A message is one object: sender, recipient, subject, then the body. Only mail a person writes
+  takes the person's own style. Mail between others takes `mail.between_others` and mail to or from
+  the person `mail.involving_you` (`conversation-style.json`).
 - Message headers use names ("you", "Fractal", agent names), not graph ids.
 - Tool calls take their results by call id; a failed result tints the box red.
+
+### Episodes
+
+The fixtures pin rows. How the web groups them is presentation, and the terminal UI and phone may
+follow it:
+
+- An episode is its trigger, its work, then its outcome. A trigger is the person's prompt, a wake
+  (one quiet row, "Woken by mission step · <step>", with the whole body behind Read message), or
+  mail another agent sent this one. Mail this agent sends stays in the episode it was sent from.
+- One timestamp per episode, at its head, and a day line where an episode starts on another day.
+- The outcome reads at full contrast, never dimmer than the prompt. The work line always carries a
+  number: how long the episode worked (its settling status, else its first to last entry), else
+  how many tools it ran.
+- A participant reads as its roster name. An unresolved ref reads as its last segment, with the
+  full ref on hover.
+- A long mail body collapses behind Read message.
 
 ### Sending
 

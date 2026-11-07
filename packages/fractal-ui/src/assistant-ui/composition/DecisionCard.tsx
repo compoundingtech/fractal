@@ -295,7 +295,7 @@ const styles = stylex.create({
   optionTop: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: s.md, rowGap: s.xs2 },
   optionLabel: { fontWeight: t.weightMedium, overflowWrap: 'anywhere' },
   optionDanger: { color: c.dangerFg },
-  badge: { flexShrink: 0, paddingInline: s.sm, borderRadius: r.keyboard, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.primary, color: c.runningFg, fontSize: t.denseSize, lineHeight: t.metaLeading },
+  badge: { flexShrink: 0, paddingInline: s.sm, borderRadius: r.keyboard, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, color: c.fgMuted, fontSize: t.denseSize, lineHeight: t.metaLeading },
   reason: { color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   rationale: { color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   unavailable: { flexShrink: 0, margin: 0, paddingBlock: s.sm, paddingInline: s.lg, color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },

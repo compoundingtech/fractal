@@ -23,6 +23,8 @@ import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
 import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 import * as InputPaint from '../telemetry/inputPaint.ts'
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('../telemetry/inputPaint.ts', { spy: true })
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
@@ -51,6 +53,8 @@ vi.mock('../data/react.tsx', async () => {
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
   useConnection: () => ({ _tag: 'Live' }),
+  // Roster names for mail headers; an empty roster reads refs by their last segment.
+  useFleetSelection: () => noRosterNames,
   // A sendable view exposes attachments; the composer stays disabled otherwise.
   useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},

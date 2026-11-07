@@ -36,11 +36,13 @@ describe('Waiting for answer reads only Fractal', () => {
     expect(asking([agent('agent/x', fields)])).toEqual([])
   })
 
-  it('maps open attention raised by, requested by, or on a current mission of the agent', () => {
+  it('maps open attention raised or requested by the agent, not by a mission it shares', () => {
     const rows = [agent('agent/source'), agent('agent/requester'), agent('agent/mission', onMission('mission/one')), agent('agent/none')]
     expect(asking(rows, [card({ source_id: 'agent/source' })])).toEqual(['agent/source'])
     expect(asking(rows, [card({ requester_id: 'agent/requester' })])).toEqual(['agent/requester'])
-    expect(asking(rows, [card({ mission_id: 'mission/one' })])).toEqual(['agent/mission'])
+    // A card on a shared mission is the mission's question, not every member's own ask (QA: 4 counted while 2 needed you).
+    expect(asking(rows, [card({ mission_id: 'mission/one' })])).toEqual([])
+    expect(asking(rows, [card({ source_id: 'agent/source', mission_id: 'mission/one' })])).toEqual(['agent/source'])
     expect(asking(rows, [card({ mission_id: 'mission/other' })])).toEqual([])
   })
 

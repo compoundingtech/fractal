@@ -26,7 +26,7 @@ import { RegisteredPortal, usePortalContainerRegistration } from '../../../../pa
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
-import { useAtom, useAtomValue } from '@effect/atom-react'
+import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
@@ -47,6 +47,8 @@ import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
+import { leftSidebar } from '../state/cells/panels.ts'
+import { persistedFolds } from '../state/cells/view.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
@@ -325,9 +327,10 @@ class UsageCodeBoundary extends React.Component {
   }
 }
 
-const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
+// The sidebar's open state and width live in one boot cell so the inline script paints them on the first frame.
+const sidebarRatio = Atom.writable((get) => get(leftSidebar).ratio, (ctx, ratio: number) => { ctx.set(leftSidebar, { ...ctx.get(leftSidebar), ratio }) })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
-const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false })
+const sidebarClosed = Atom.writable((get) => !get(leftSidebar).open, (ctx, closed: boolean) => { ctx.set(leftSidebar, { ...ctx.get(leftSidebar), open: !closed }) })
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
 const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
@@ -863,7 +866,9 @@ const GatewayConnectionStatus = () => {
 export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focusShownView, agentName, onOpenTool, onOpenDocument, onOpenAgent, onFocusMission, alertControls, ux }: { readonly onFocusMission?: (ref: string | undefined) => void; readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly focusShownView?: React.RefObject<boolean>; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly alertControls?: Omit<React.ComponentProps<typeof AlertDetailsPane>, 'id' | 'ux'>; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
-  const [viewportStore] = React.useState(() => new ViewportStore())
+  // Work-log folds outlive the surface and reload; reading positions stay with this surface.
+  const registry = React.useContext(RegistryContext)
+  const [viewportStore] = React.useState(() => new ViewportStore({ folds: persistedFolds(registry) }))
   React.useEffect(() => {
     viewportStore.open()
     return () => viewportStore.dispose()
