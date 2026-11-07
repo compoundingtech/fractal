@@ -265,10 +265,9 @@ impl Cache {
     fn touch(&mut self, key: &str) -> Option<&mut CacheEntry> {
         self.tick += 1;
         let tick = self.tick;
-        self.entries.get_mut(key).map(|entry| {
-            entry.used = tick;
-            entry
-        })
+        let entry = self.entries.get_mut(key)?;
+        entry.used = tick;
+        Some(entry)
     }
 
     fn insert(&mut self, key: String, entry: CacheEntry) {
