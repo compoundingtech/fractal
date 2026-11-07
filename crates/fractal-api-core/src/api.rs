@@ -109,6 +109,7 @@ pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
+mod agents_request_slo;
 #[cfg(test)]
 mod harness_health_controls;
 #[cfg(test)]
@@ -1066,8 +1067,10 @@ struct RequestDuration<'a> {
 
 impl Drop for RequestDuration<'_> {
     fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        agents_request_slo::record(self.method, self.route, self.outcome, elapsed);
         crate::otel::record_http_request_duration(
-            self.method, self.route, self.client_class, self.outcome, self.started.elapsed(),
+            self.method, self.route, self.client_class, self.outcome, elapsed,
         );
     }
 }
@@ -1617,8 +1620,10 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     let mut seats_until = 0;
     let mut unsettled = None;
     loop {
-        let minute = client_now_ms() as u64 / 60_000;
+        let now_ms = client_now_ms() as u64;
+        let minute = now_ms / 60_000;
         let (at, daemon_ns) = (Instant::now(), smallclaims::windows::process_cpu_ns());
+        agents_request_slo::boundary(now_ms, at);
         let catching_up = store.replication_catching_up();
         let closed = {
             let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9854,6 +9859,7 @@ fn doctor_report_within(
     let report_status = doctor_status(&checks);
     let mut performance = crate::performance::snapshot();
     performance["seatAdmission"] = admission;
+    performance["agentsRequestSloShadow"] = json!(agents_request_slo::read(client_now_ms() as u64));
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
