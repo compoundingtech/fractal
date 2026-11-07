@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Ratchet Effect language-service diagnostics and effect-utils oxlint findings for the web packages.
+
+Effect diagnostics come from the effect-tsgo compiler (`tsgo` in `nix develop .#web`), which reads the
+`@effect/language-service` plugin entry in each project's tsconfig. Lint findings come from oxlint with
+the root `.oxlintrc.json` (generated from effect-utils' shared base). Counts are kept per package and rule
+in `scripts/ci-fractal-web-effect-lint.baseline.json`: a count above its baseline fails, and so does a
+count below it, so fixed findings are removed from the baseline in the same change and cannot be spent
+again later. `--update` rewrites the baseline from the current tree.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+BASELINE = ROOT / 'scripts' / 'ci-fractal-web-effect-lint.baseline.json'
+# Projects whose tsconfig carries the plugin entry. A file reached by several projects counts once.
+PROJECTS = [
+    'apps/fractal-web/tsconfig.json',
+    'packages/fractal-ui/tsconfig.json',
+    'packages/fractal-sdk/tsconfig.json',
+    'clients/typescript/fractal-client/tsconfig.json',
+    'clients/typescript/fractal-client/tsconfig.schema.json',
+    'clients/typescript/fractal-views/tsconfig.json',
+    'clients/typescript/fractal-scenarios/tsconfig.json',
+    'clients/typescript/fractal-declarations/tsconfig.json',
+]
+PACKAGES = [
+    'apps/fractal-web',
+    'packages/fractal-ui',
+    'packages/fractal-sdk',
+    'clients/typescript/fractal-client',
+    'clients/typescript/fractal-views',
+    'clients/typescript/fractal-scenarios',
+    'clients/typescript/fractal-declarations',
+]
+LINT_TARGETS = ['apps/fractal-web/src', 'apps/fractal-web/server', 'packages/fractal-ui/src', 'packages/fractal-sdk/src', 'clients/typescript']
+# The effect-utils oxlint products ship the configured TypeScript plugin modules prebuilt.
+PLUGIN_PRODUCTS = {'mod.ts': 'oxc-config-plugin.js', 'stylex-upstream-plugin.ts': 'stylex-upstream-plugin.js'}
+DIAGNOSTIC = re.compile(r'^(?P<file>[^\s(][^(]*)\((?P<line>\d+),(?P<column>\d+)\): (?P<severity>error|warning|suggestion|message) TS\d+: (?P<message>.*)$')
+RULE = re.compile(r'effect\((?P<rule>[A-Za-z]+)\)\s*$')
+
+
+def package_of(path):
+    """The workspace package owning a repository-relative path, or `other`."""
+    return next((package for package in PACKAGES if path == package or path.startswith(package + '/')), 'other')
+
+
+def parse_effect(output, project_dir):
+    """Effect plugin diagnostics in one tsgo run as {(path, line, column, rule)}; compiler errors are not counted here."""
+    found = set()
+    for line in output.splitlines():
+        match = DIAGNOSTIC.match(line)
+        if match is None:
+            continue
+        rule = RULE.search(match['message'])
+        if rule is None:
+            continue
+        path = os.path.relpath(os.path.normpath(project_dir / match['file']), ROOT)
+        found.add((path, int(match['line']), int(match['column']), rule['rule']))
+    return found
+
+
+def parse_oxlint(report):
+    """oxlint `--format json` findings as {(path, line, column, rule)}."""
+    document, _ = json.JSONDecoder().raw_decode(report)
+    found = set()
+    for item in document['diagnostics']:
+        span = (item.get('labels') or [{}])[0].get('span', {})
+        found.add((item['filename'], span.get('line', 0), span.get('column', 0), item.get('code', 'unknown')))
+    return found
+
+
+def tally(findings):
+    """Counts per package and rule, with sorted keys."""
+    counts = {}
+    for path, _line, _column, rule in findings:
+        package = counts.setdefault(package_of(path), {})
+        package[rule] = package.get(rule, 0) + 1
+    return {package: dict(sorted(rules.items())) for package, rules in sorted(counts.items())}
+
+
+def compare(current, baseline):
+    """Messages for every package/rule count that differs from its baseline."""
+    problems = []
+    for package in sorted(set(current) | set(baseline)):
+        now, then = current.get(package, {}), baseline.get(package, {})
+        for rule in sorted(set(now) | set(then)):
+            count, allowed = now.get(rule, 0), then.get(rule, 0)
+            if count > allowed:
+                problems.append(f'{package} {rule}: {count} findings, baseline allows {allowed}')
+            elif count < allowed:
+                problems.append(f'{package} {rule}: {count} findings, below baseline {allowed}; lower it with --update')
+    return problems
+
+
+def tool_version(command):
+    return subprocess.run([command, '--version'], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def run_effect(tsgo):
+    findings = set()
+    for project in PROJECTS:
+        path = ROOT / project
+        done = subprocess.run([tsgo, '-p', str(path), '--noEmit', '--pretty', 'false'], cwd=path.parent, capture_output=True, text=True)
+        output = done.stdout + done.stderr
+        if done.returncode not in (0, 1, 2) or 'error TS5' in output:
+            sys.exit(f'{project}: tsgo failed ({done.returncode})\n{output[-2000:]}')
+        findings |= parse_effect(output, path.parent)
+    return findings
+
+
+def run_oxlint(oxlint):
+    config = json.loads((ROOT / '.oxlintrc.json').read_text())
+    products = os.environ.get('FRACTAL_OXLINT_PLUGINS')
+    if products:
+        config['jsPlugins'] = [str(Path(products) / PLUGIN_PRODUCTS[Path(plugin).name]) for plugin in config['jsPlugins']]
+    else:
+        config['jsPlugins'] = [str(ROOT / plugin) for plugin in config['jsPlugins']]
+    # Ignore patterns and override globs resolve from the config's directory, so the copy sits
+    # beside the root config (ignored by Git) and is removed afterwards.
+    config_path = ROOT / '.oxlintrc.ratchet.json'
+    config_path.write_text(json.dumps(config))
+    try:
+        with tempfile.TemporaryFile('w+') as report:
+            # oxlint truncates large reports written to a pipe, so it writes to a file.
+            done = subprocess.run([oxlint, '-c', str(config_path), '--import-plugin', '--format', 'json', *LINT_TARGETS],
+                                  cwd=ROOT, stdout=report, stderr=subprocess.PIPE, text=True)
+            report.seek(0)
+            text = report.read()
+    finally:
+        config_path.unlink()
+    if done.returncode not in (0, 1):
+        sys.exit(f'oxlint failed ({done.returncode})\n{done.stderr[-2000:]}')
+    return parse_oxlint(text)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--update', action='store_true', help='rewrite the baseline from the current tree')
+    parser.add_argument('--tsgo', default=os.environ.get('FRACTAL_EFFECT_TSGO', 'tsgo'))
+    parser.add_argument('--oxlint', default=os.environ.get('FRACTAL_OXLINT', 'oxlint'))
+    arguments = parser.parse_args()
+    tsgo_version = tool_version(arguments.tsgo)
+    if 'effect-tsgo' not in tsgo_version:
+        sys.exit(f'{arguments.tsgo} is not effect-tsgo ({tsgo_version}); run inside nix develop .#web')
+    # The app project imports this generated module; without it tsgo reports a missing import, not a lint.
+    subprocess.run(['node', 'apps/fractal-web/scripts/changelog-registry.mjs'], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+    current = {
+        'tools': {'tsgo': tsgo_version, 'oxlint': tool_version(arguments.oxlint)},
+        'effect': tally(run_effect(arguments.tsgo)),
+        'oxlint': tally(run_oxlint(arguments.oxlint)),
+    }
+    if arguments.update:
+        BASELINE.write_text(json.dumps(current, indent=2, sort_keys=True) + '\n')
+        print(f'wrote {BASELINE.relative_to(ROOT)}')
+        return
+    baseline = json.loads(BASELINE.read_text())
+    problems = []
+    if baseline['tools'] != current['tools']:
+        problems.append(f"toolchain changed from {baseline['tools']} to {current['tools']}; review and run --update")
+    for kind in ('effect', 'oxlint'):
+        problems += [f'{kind}: {problem}' for problem in compare(current[kind], baseline[kind])]
+    total = {kind: sum(sum(rules.values()) for rules in current[kind].values()) for kind in ('effect', 'oxlint')}
+    print(f"Effect diagnostics {total['effect']}, oxlint findings {total['oxlint']}")
+    if problems:
+        print('\n'.join(problems), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

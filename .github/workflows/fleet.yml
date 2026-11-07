@@ -4279,6 +4279,7 @@ jobs:
               ".npmrc",
               "flake.nix",
               "tsconfig*.json*",
+              ".oxlintrc.json*",
               ".buckroot*",
               ".buckconfig*",
               "BUCK*",
