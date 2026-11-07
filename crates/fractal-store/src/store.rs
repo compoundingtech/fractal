@@ -258,6 +258,7 @@ pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
+pub mod message_routing;
 pub mod message_sent;
 #[cfg(test)]
 mod message_sent_tests;
