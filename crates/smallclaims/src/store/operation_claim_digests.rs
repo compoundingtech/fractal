@@ -18,6 +18,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::sqlite::{ReadPool, WriterConnection};
 
 pub const NAME: &str = "operation_claim_digests";
+/// The profile operation and writer-holder label of one backfill page.
+pub const LABEL: &str = "maintenance.operation_claim_digests";
 pub const PAGE_SIZE: i64 = 32;
 /// A page stops reading claims after this long, so its reader snapshot stays short.
 pub const PAGE_READ_BUDGET: Duration = Duration::from_millis(20);
@@ -109,8 +111,10 @@ pub fn ready(connection: &Connection) -> Result<bool> {
     ).optional()?.unwrap_or(false))
 }
 
+/// Copy the next page. Each page is its own profile operation, so its reads and writer hold are
+/// named whether or not task metrics are on.
 pub fn advance(readers: &ReadPool, writer: &WriterConnection) -> Result<Page> {
-    advance_with_budget(readers, writer, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {})
+    crate::profile::task(LABEL, || advance_with_budget(readers, writer, PAGE_READ_BUDGET, PAGE_WRITE_BUDGET, &mut || {}))
 }
 
 fn advance_with_budget(
