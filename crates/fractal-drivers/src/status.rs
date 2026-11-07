@@ -116,15 +116,6 @@ pub fn set_state(status_path: &Path, state: State) -> anyhow::Result<()> {
     write_record(status_path, state, crate::message::now_ms())
 }
 
-/// Timestamp contributed by the status record to `agents --enrich`. Version 1 returns its embedded
-/// writer time, clamped to the reader's current time within the allowed future skew. Legacy records
-/// return mtime during migration. Invalid records and excessive future skew contribute nothing.
-pub fn activity_time_ms(status_path: &Path) -> Option<f64> {
-    let (record, legacy_mtime_ms) = read_record(status_path).ok()?;
-    activity_time_at(record, legacy_mtime_ms, crate::message::now_ms())
-        .map(|timestamp| timestamp as f64)
-}
-
 /// Outcome of a [`refresh`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshOutcome {
@@ -253,25 +244,6 @@ fn effective_state_at(state: State, written_at_ms: u64, now_ms: u64) -> State {
         State::Unknown
     } else {
         state
-    }
-}
-
-fn activity_time_at(
-    record: ParsedRecord,
-    legacy_mtime_ms: Option<u64>,
-    now_ms: u64,
-) -> Option<u64> {
-    let written_at_ms = match record {
-        ParsedRecord::Legacy(_) => legacy_mtime_ms?,
-        ParsedRecord::Version1 { written_at_ms, .. } => written_at_ms,
-        ParsedRecord::LiteralUnknown | ParsedRecord::InvalidState | ParsedRecord::Malformed => {
-            return None;
-        }
-    };
-    if written_at_ms > now_ms {
-        (written_at_ms - now_ms <= duration_ms(STATUS_FUTURE_SKEW)).then_some(now_ms)
-    } else {
-        Some(written_at_ms)
     }
 }
 
@@ -632,37 +604,5 @@ mod tests {
             assert_eq!(refresh(&sp), RefreshOutcome::LeftCorrupt);
             assert_eq!(fs::read_to_string(&sp).unwrap(), raw);
         }
-    }
-
-    #[test]
-    fn activity_uses_origin_time_and_clamps_only_allowed_future_skew() {
-        let now_ms = 2_000_000_u64;
-        let skew_ms = duration_ms(STATUS_FUTURE_SKEW);
-
-        let record = ParsedRecord::Version1 {
-            state: State::Available,
-            written_at_ms: 1234,
-        };
-        assert_eq!(activity_time_at(record, None, now_ms), Some(1234));
-        assert_eq!(
-            activity_time_at(ParsedRecord::Legacy(State::Busy), Some(1234), now_ms),
-            Some(1234)
-        );
-
-        let bounded_future = ParsedRecord::Version1 {
-            state: State::Available,
-            written_at_ms: now_ms + skew_ms,
-        };
-        assert_eq!(activity_time_at(bounded_future, None, now_ms), Some(now_ms));
-
-        let excessive_future = ParsedRecord::Version1 {
-            state: State::Available,
-            written_at_ms: now_ms + skew_ms + 1,
-        };
-        assert_eq!(activity_time_at(excessive_future, None, now_ms), None);
-        assert_eq!(
-            activity_time_at(ParsedRecord::Malformed, None, now_ms),
-            None
-        );
     }
 }

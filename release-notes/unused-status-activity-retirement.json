@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the unused status activity timestamp projection",
+  "replay": {
+    "status": "none",
+    "detail": "Native presence refresh, status reads and one-time DND adoption are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No status record, heartbeat, legacy reader or stored-format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Only the uncalled status::activity_time_ms wrapper, its private activity_time_at helper and the one test of that helper are removed. All remaining status code and tests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes one unused workspace Rust function. Unknown external source consumers are not claimed absent and must remove any use. Published client, wire, CLI and stored-format contracts are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart required for removal of uncalled code."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or state cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the projection without changing stored state."
+  }
+}
