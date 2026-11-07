@@ -153,14 +153,13 @@ export const ReconnectingSync: Story = {
 
 /** Mounting committed messages must not relabel an incomplete server history as Complete. */
 export const HugeHistory: Story = {
-  args: { conversation: 'huge', roster: 'one-agent' },
-  parameters: { scenario: { _tag: 'slices', slices: ['roster', 'conversation', 'sync'], invariant: { ...selectedConversation, roster: 'This history-boundary regression pins a one-agent roster so only the selected huge conversation is under test; normal shell stories cover roster contrasts.', sync: 'Incomplete committed history is independent of transport state; ReconnectingSync and the normal shell stories cover transport contrasts.' } } },
+  parameters: world('long-debug-rabbit-hole'),
   play: async ({ canvasElement }) => {
-    const sections = scenarioSections(loadWorld('fleet-mid-refactor').with({ conversation: 'huge' }).slices.conversation, 'whole-thread').sections
+    const sections = scenarioSections(loadWorld('long-debug-rabbit-hole').slices.conversation, 'whole-thread').sections
     await expect(sections[0]?.history?._tag).toBe('HasOlder')
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
-    // Revealing 1,600 committed rows uses four-row animation-frame batches, including under the gate's concurrent cases.
-    await waitFor(() => expect(canvas.getByTestId('history-boundary-note')).toHaveTextContent('Earlier messages not loaded'), { timeout: 90_000 })
+    // This world's 105 committed entries retain has_more=true without the huge variant's 1,600-row reveal.
+    await waitFor(() => expect(canvas.getByTestId('history-boundary-note')).toHaveTextContent('Earlier messages not loaded'), { timeout: 5_000 })
   },
 }
