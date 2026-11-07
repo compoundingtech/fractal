@@ -74,6 +74,12 @@ at the persisted owner's acknowledgement fence, not remote graph publication; a
 stale owner retains the residual exposure. Owner binding, acknowledgement and
 action routing are not provided by the internal models or lineage validation.
 
+The standalone `notice-owner` root explicitly names a `member` host subject, its
+immutable fleet admission claim in `incarnation`, and `always-on=true`. The name
+does not confer authority: the binding must resolve exactly one admitted member
+incarnation, never an agent process or inferred uptime. Syntax alone is not an
+owner acknowledgement and cannot establish historical receipt authorization.
+
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
 WebSocket senders now offer only the corresponding `fractal.client.*` protocol

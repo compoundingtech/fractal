@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Define a standalone notice-owner graph declaration with explicit member incarnation and always-on qualification.",
+  "replay": { "status": "changed", "detail": "Older members that do not recognize the new subject family or desired kind cannot interpret the owner declaration. They must not infer an owner from an agent runtime or host placement." },
+  "schema": { "status": "changed", "detail": "The notice-owner root takes one name and exactly member, incarnation and always-on properties. Member is a host subject; incarnation is the immutable fleet.member-admitted claim hash; always-on must explicitly be true. Children, missing qualifications and execution-owned declarations are rejected." },
+  "rules": { "status": "changed", "detail": "This declaration expresses graph-publisher intent, not a liveness probe or ownership acknowledgement. Structural validation does not establish admitted fleet membership, singleton availability or receipt authorization; the separate store binding and owner acknowledgement checks must establish those before use." },
+  "compatibility": { "status": "changed", "detail": "No owner is automatically elected. The declaration registers no native notice capability or action. It is a new graph declaration kind and requires the graph declaration review gate before publication." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "changed", "detail": "Declare the intended member's exact admitted incarnation and explicit always-on qualification; restart policy and agent lifecycle are not substitutes." },
+  "recovery": { "status": "changed", "detail": "No acknowledgement fence or historical receipt authorization is established by the syntax contract alone." }
+}

@@ -11,6 +11,7 @@ pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
 pub mod notice;
+pub mod notice_owner;
 pub mod notice_receipt;
 pub mod ordered_membership;
 pub mod harness_questions;
@@ -1000,6 +1001,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "notice-owner",
+            "notice-owner/NAME",
+            "An explicit notice owner bound to an admitted fleet incarnation.",
+            false,
+        ),
+        (
             "agent",
             "agent/RUN/LOCAL_ID",
             "A mission-run agent runtime.",
@@ -1556,6 +1563,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
                 "observer",
                 "mission",
                 "mission-run",
+                "notice-owner",
                 "planning-session",
                 "pty",
                 "resource",

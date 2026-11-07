@@ -23,6 +23,7 @@ const ROOT_NODES: &[&str] = &[
     "subscription",
     "person",
     "mission",
+    "notice-owner",
     "mission-run",
     "planning-session",
     "message",
@@ -377,6 +378,12 @@ fn parse_desired_node(
         return Err(FractalError::new(
             "account-inside-mission",
             "an account declaration must be at the root",
+        ));
+    }
+    if kind == "notice-owner" && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "notice-owner-inside-mission",
+            "a notice-owner declaration must be at the root",
         ));
     }
     match kind {
@@ -1683,6 +1690,11 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     validate_name(&name, false)?;
     match kind {
         "account" => validate_account(node)?,
+        "notice-owner" => {
+            ensure_no_children(node)?;
+            fractal_schema::notice_owner::Declaration::from_desired(&canonical_node(node)?)
+                .map_err(|e| FractalError::new(e.code, e.message))?;
+        }
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -4690,6 +4702,46 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(invalid.code, "invalid-replacement-claim");
+    }
+
+    #[test]
+    fn notice_owner_is_a_strict_standalone_declaration() {
+        let declaration = format!(
+            "notice-owner \"default\" member=\"host/example\" incarnation=\"{}\" always-on=true",
+            "a".repeat(64)
+        );
+        let source = format!("version 2\n{declaration}");
+        let intent = parse_intent(&source, "node").unwrap();
+        let desired = &intent.subjects["notice-owner/default"];
+        assert_eq!(desired.kind, "notice-owner");
+        assert!(desired.member.is_none());
+        assert!(desired.owner_run.is_none());
+        let decoded = fractal_schema::notice_owner::Declaration::from_desired(&desired.desired).unwrap();
+        assert_eq!(decoded.member, "host/example");
+        assert!(decoded.always_on);
+        assert_eq!(desired.desired["properties"], serde_json::to_value(decoded).unwrap());
+        for invalid in [
+            declaration.replace(" always-on=true", ""),
+            declaration.replace("always-on=true", "always-on=false"),
+            declaration.replace("host/example", "agent/worker"),
+            declaration.replace("host/example", "host/"),
+            declaration.replace(&"a".repeat(64), &"A".repeat(64)),
+            declaration.replace(&"a".repeat(64), "short"),
+            format!("{declaration} extra=true"),
+            format!("{declaration} \"extra\""),
+            format!("{declaration} {{ child \"no\"; }}"),
+            format!("{declaration} {{}}"),
+        ] {
+            assert!(parse_intent(&format!("version 2\n{invalid}"), "node").is_err(), "{invalid}");
+        }
+        assert!(parse_execution_intent(&source, "node", "run-1").is_err());
+        for body in [
+            declaration.clone(),
+            format!("step \"work\" {{ {declaration}; }}"),
+        ] {
+            let mission = format!("version 2\nmission \"bad\" state=\"ready\" {{ goal \"Reject nested owners.\"; {body}; }}");
+            assert!(parse_intent(&mission, "node").is_err());
+        }
     }
 
     #[test]
