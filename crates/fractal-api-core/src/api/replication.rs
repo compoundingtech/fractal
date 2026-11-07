@@ -24,12 +24,35 @@ pub struct ReplicationRecordsQuery {
     unresolved: bool,
 }
 
+fn generic_replica_record_visible(record: &ReplicaRecordView) -> bool {
+    !record.subject.as_deref().is_some_and(fractal_schema::notice::is_reserved_subject)
+        && !record.kind.as_deref().is_some_and(fractal_schema::notice::is_reserved_kind)
+}
+
+#[test]
+fn notice_replication_diagnostics_hide_reserved_subject_or_kind() {
+    let mut record: ReplicaRecordView = serde_json::from_value(json!({
+        "record_ref":"record/example", "writer":"example", "sequence":1,
+        "envelope_hash":"example", "position":0, "state":"valid",
+        "subject":"custom/example/ordinary", "kind":"custom.example.created"
+    })).unwrap();
+    assert!(generic_replica_record_visible(&record));
+    record.subject = Some("custom/attention/source/legacy".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.subject = Some("custom/example/alternate".into());
+    record.kind = Some("custom.attention.notice-created".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.kind = Some("attention.notice-source".into());
+    assert!(!generic_replica_record_visible(&record));
+}
+
 pub async fn replication_records(
     State(state): State<AppState>,
     Query(query): Query<ReplicationRecordsQuery>,
 ) -> Result<Json<Vec<ReplicaRecordView>>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.replica_records(query.unresolved))
+    blocking_store(move || Ok(store.replica_records(query.unresolved)?
+        .into_iter().filter(generic_replica_record_visible).collect()))
         .await
         .map(Json)
 }
@@ -47,6 +70,7 @@ pub async fn replication_record(
     let record_for_read = record.clone();
     blocking_store(move || store.replica_record(&record_for_read))
         .await?
+        .filter(generic_replica_record_visible)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
@@ -656,6 +680,20 @@ pub async fn test_shard_append(
     let mut answer = serde_json::to_value(claim).map_err(ApiError::internal)?;
     answer["appended"] = serde_json::Value::Bool(appended);
     Ok(Json(answer))
+}
+
+/// Test support: write a claim to the messages shard as a peer's replicated copy arrives, without
+/// the graph check a send makes, so a test can hold a stream item under a subject the graph has.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_copy(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let (claim, _) = blocking_action(move || crate::store::messages_shard::append_replicated_copy(&store, &input)).await?;
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
+    Ok(Json(serde_json::to_value(claim).map_err(ApiError::internal)?))
 }
 
 /// Test support: the claims the messages shard holds about one subject.
