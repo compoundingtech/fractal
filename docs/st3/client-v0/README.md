@@ -39,8 +39,9 @@ This is a finalization contract, not a checked performance result.
 Generic seat-summary visibility and reduction use one pinned read snapshot and
 effective claim cut. The incarnation reduction independently excludes reserved
 notice kinds from both actual fields and source attribution. Managed-session owner
-visibility and identity selection also share one read snapshot; a numeric claim
-cut alone does not pin mutable identity and repair state.
+visibility and identity selection also share one read snapshot and read routing
+identities uncached on its connection; a shared map keyed only by the numeric
+claim cut cannot pin mutable identity and repair state.
 
 Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
 Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
