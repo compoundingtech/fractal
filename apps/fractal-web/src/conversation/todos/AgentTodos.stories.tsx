@@ -1,3 +1,4 @@
+import type * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Option } from 'effect'
 import type { Meta, StoryObj } from '@storybook/react'
@@ -23,7 +24,9 @@ const finished = withSnapshot(snapshot => ({
   phases: snapshot.phases.map(phase => ({ ...phase, tasks: phase.tasks.map(task => ({ ...task, status: 'completed' as const })) })),
 }))
 
-const Surface = ({ scheme, agent }: { readonly scheme: 'dark' | 'light'; readonly agent?: TodoAgent }) =>
+type Args = { readonly scheme: 'dark' | 'light'; readonly agent?: TodoAgent }
+
+const Surface = ({ scheme, agent }: Args) =>
   <main {...stylex.props(styles.root, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
     <div {...stylex.props(styles.panel)}><AgentTodos placement="resources" state={state(agent)} /></div>
   </main>
@@ -31,12 +34,13 @@ const Surface = ({ scheme, agent }: { readonly scheme: 'dark' | 'light'; readonl
 const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/AgentTodos',
-  component: Surface,
+  component: AgentTodos,
+  render: Surface,
   args: { scheme: 'dark' },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'An accepted synthetic to-do claim, through the same projection the live roster uses, pins the focus-first plan at panel width.' } },
-} satisfies Meta<typeof Surface>
+} satisfies Meta<Args & React.ComponentProps<typeof AgentTodos>>
 export default meta
-type Story = StoryObj<typeof meta>
+type Story = StoryObj<Args>
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
