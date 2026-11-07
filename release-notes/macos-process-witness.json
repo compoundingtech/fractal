@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "macOS worker ingress now validates the Unix connector's LOCAL_PEERPID against a proc_pidinfo process-birth witness, including explicit foreground worker enrollment. A path-filtered hosted macos-bound-peer CI lane covers process identity and worker ingress.",
+  "summary": "macOS worker ingress now validates the Unix connector's LOCAL_PEERPID against a proc_pidinfo process-birth witness, including explicit foreground worker enrollment.",
   "replay": { "status": "none", "detail": "No graph or claim change." },
   "schema": { "status": "none", "detail": "No schema change." },
   "rules": { "status": "none", "detail": "No checkpoint rule change." },
