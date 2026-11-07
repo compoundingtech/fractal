@@ -388,6 +388,9 @@ impl AnswerTiming {
 }
 
 enum Fetched {
+    ThreadDetail(u64, String, Result<fractal_client::Envelope<fractal_client::ThreadSummary>, fractal_client::ClientError>),
+    ThreadWrite(u64, super::threads_live::Receipt),
+    ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
     Protocol(super::content::Key, u16, u16, super::content::Encoding),
@@ -630,6 +633,9 @@ pub fn run(context: Context) -> Result<()> {
     let mut resources_stale = true;
     let mut resources_reading = false;
     let mut resources_generation = 0_u64;
+    let mut thread_interests = Vec::new();
+    let mut thread_refresh = std::collections::BTreeSet::new();
+    let mut thread_reads = std::collections::BTreeSet::new();
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -725,6 +731,10 @@ pub fn run(context: Context) -> Result<()> {
                     glasses_ready = true;
                     client = member;
                     resources_generation += 1;
+                    ui.threads.enable(false);
+                    thread_interests.clear();
+                    thread_refresh.clear();
+                    thread_reads.clear();
                     resources_stale = true;
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
@@ -737,6 +747,24 @@ pub fn run(context: Context) -> Result<()> {
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
                     body_requested.clear();
+                    changed = true;
+                }
+                feed::Update::ThreadSupport(granted) => {
+                    ui.threads.enable(granted);
+                    if granted { ui.threads.model(&model); }
+                    changed = true;
+                }
+                feed::Update::ThreadWindow { interest, snapshot, replace, rows, removes, order, has_more } => {
+                    if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
+                    if let feed::ThreadInterest::Timeline(id) = &interest {
+                        thread_refresh.insert(id.clone());
+                    }
+                    ui.threads.window(interest, snapshot, replace, rows, removes, order, has_more);
+                    changed = true;
+                }
+                feed::Update::ThreadWindowFailed { interest, message, permanent } => {
+                    if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
+                    ui.threads.failure(interest, message, permanent);
                     changed = true;
                 }
                 feed::Update::InventorySupport { granted, member_build } => {
@@ -833,6 +861,7 @@ pub fn run(context: Context) -> Result<()> {
                     match window {
                         Window::Attention => {
                             model.now = collection;
+                            ui.threads.model(&model);
                             extras.attention_live = true;
                         }
                         Window::Missions => {
@@ -847,7 +876,10 @@ pub fn run(context: Context) -> Result<()> {
                         Window::Inventory(inventory) => match inventory {
                             Inventory::Machines => model.machines = collection,
                             Inventory::Devices => model.devices = collection,
-                            Inventory::Sessions => model.sessions = collection,
+                            Inventory::Sessions => {
+                                model.sessions = collection;
+                                ui.threads.model(&model);
+                            }
                             Inventory::Terminals => {
                                 ui.resource_sidebar.terminals = terminal_rows(collection.items);
                                 ui.resource_sidebar.terminals_has_more = collection.truncated;
@@ -1089,6 +1121,24 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
+                Fetched::ThreadDetail(generation, id, result) => {
+                    if generation == resources_generation {
+                        thread_reads.remove(&id);
+                        ui.threads.detail(&id, result);
+                    }
+                }
+                Fetched::ThreadEarlier(generation, id, page) => {
+                    if generation == resources_generation
+                        && let Some(error) = ui.threads.earlier_loaded(&id, page) {
+                        ui.flash(error);
+                    }
+                }
+                Fetched::ThreadWrite(generation, receipt) => {
+                    if generation == resources_generation
+                        && let Some(error) = ui.threads.complete(receipt, &mut ui.conversation_state.drafts) {
+                        ui.flash(error);
+                    }
+                }
                 Fetched::Notice(notice) => ui.flash(notice),
                 Fetched::AlertOutcome(id, accepted) => {
                     if !accepted {
@@ -1104,7 +1154,10 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::Session(id, outcome) => match outcome {
-                    Ok(session) => model.add_opened_session(*session),
+                    Ok(session) => {
+                        model.add_opened_session(*session);
+                        ui.threads.model(&model);
+                    },
                     Err(message) => {
                         if opens.remove(&id).is_some() {
                             super::slo::METRICS.add("open_cannot_load", 1);
@@ -1182,7 +1235,10 @@ pub fn run(context: Context) -> Result<()> {
                             match inventory {
                                 Inventory::Machines => model.machines = rows,
                                 Inventory::Devices => model.devices = rows,
-                                Inventory::Sessions => model.sessions = rows,
+                                Inventory::Sessions => {
+                                    model.sessions = rows;
+                                    ui.threads.model(&model);
+                                }
                                 _ => unreachable!(),
                             }
                         },
@@ -1411,6 +1467,55 @@ pub fn run(context: Context) -> Result<()> {
                 said_typed = None;
             }
             _ => {}
+        }
+        let wanted_threads = ui.threads.interests(&ui.main_pane());
+        if wanted_threads != thread_interests {
+            for interest in &wanted_threads {
+                if let feed::ThreadInterest::Timeline(id) = interest
+                    && !thread_interests.contains(interest) {
+                    thread_refresh.insert(id.clone());
+                }
+            }
+            ui.threads.keep_windows(&wanted_threads);
+            let _ = commands.send(Command::Threads(wanted_threads.clone()));
+            thread_interests = wanted_threads;
+            changed = true;
+        }
+        thread_refresh.retain(|id| thread_interests.contains(&feed::ThreadInterest::Timeline(id.clone())));
+        for id in std::mem::take(&mut thread_refresh) {
+            if !thread_reads.insert(id.clone()) {
+                thread_refresh.insert(id);
+                continue;
+            }
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = reader.thread_get(&id).await;
+                let _ = tx.send(Fetched::ThreadDetail(generation, id, result));
+            });
+        }
+        for earlier in ui.threads.take_earlier() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = earlier.read(&reader).await;
+                let _ = tx.send(Fetched::ThreadEarlier(generation, earlier.id, result));
+            });
+        }
+        for write in ui.threads.writes() {
+            if !extras.live {
+                if let Some(error) = ui.threads.complete(write.offline(), &mut ui.conversation_state.drafts) { ui.flash(error); }
+                continue;
+            }
+            let writer = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let receipt = write.perform(writer).await;
+                let _ = tx.send(Fetched::ThreadWrite(generation, receipt));
+            });
         }
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
@@ -2071,7 +2176,7 @@ pub fn run(context: Context) -> Result<()> {
             .collect();
         for id in visible
             .into_iter()
-            .filter(|id| incoming.contains(id.as_str()))
+            .filter(|id| incoming.contains(id.as_str()) || ui.threads.incoming_visible(id, &person))
         {
             read_receipts.displayed(id, Instant::now());
         }

@@ -3067,6 +3067,7 @@ impl Ui {
             }
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
             Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
+            Pane::Thread(id) => self.threads.summary(id).map(|row| row.title.clone()).unwrap_or_else(|| "Thread".into()),
             Pane::Document(name) => document_title(name),
             Pane::Documents(None) => "Documents".into(),
             Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),

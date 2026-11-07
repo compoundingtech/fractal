@@ -14,6 +14,9 @@ pub mod model;
 mod inventory;
 mod terminal;
 pub mod tree;
+mod thread_windows;
+pub use thread_windows::ThreadInterest;
+use thread_windows::{MAX_THREADS, ThreadSubscription};
 #[cfg(test)]
 mod revisioned_agents_tests;
 
@@ -179,6 +182,17 @@ pub enum Update {
     /// are out of date and must not be shown as current.
     WindowStopped(Window),
     Terminal { generation: u64, update: TerminalUpdate },
+    ThreadSupport(bool),
+    ThreadWindow {
+        interest: ThreadInterest,
+        snapshot: Snapshot,
+        replace: bool,
+        rows: fractal_client::ThreadCollectionRows,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    ThreadWindowFailed { interest: ThreadInterest, message: String, permanent: bool },
     /// The open conversation's entries. `replace` means these are its newest page and every
     /// earlier entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
@@ -245,6 +259,7 @@ pub enum Command {
     Converse {
         targets: Vec<String>,
     },
+    Threads(Vec<ThreadInterest>),
     /// Subscribe to a followed agent's conversation again: st resolves an agent to its session
     /// when the subscription starts, so after the agent restarts into a new session the old
     /// subscription would keep showing the old one.
@@ -338,6 +353,7 @@ pub async fn run_members_with_sidebar(
     let mut member = 0;
     let mut following: Option<Following> = None;
     let mut conversing: Vec<Conversing> = Vec::new();
+    let mut threads: Vec<ThreadSubscription> = Vec::new();
     loop {
         // Try every paired member before waiting. Never forward a grant to another origin.
         let mut selected = None;
@@ -371,6 +387,7 @@ pub async fn run_members_with_sidebar(
                 &mut commands,
                 &mut following,
                 &mut conversing,
+                &mut threads,
                 &mut missions,
                 &mut failures,
                 &mut inventories,
@@ -423,6 +440,9 @@ pub async fn run_members_with_sidebar(
                     Some(Command::Inventories(wanted)) => inventories = wanted,
                     Some(Command::Converse { targets }) => {
                         conversing = targets.into_iter().take(MAX_CONVERSATIONS).map(Conversing::new).collect();
+                    }
+                    Some(Command::Threads(targets)) => {
+                        threads = targets.into_iter().take(MAX_THREADS).map(ThreadSubscription::new).collect();
                     }
                     // Not connected: the next connection subscribes afresh anyway.
                     Some(Command::Resubscribe { .. }) => {}
@@ -530,6 +550,7 @@ async fn connected(
     commands: &mut channel::UnboundedReceiver<Command>,
     following: &mut Option<Following>,
     conversing: &mut Vec<Conversing>,
+    threads: &mut Vec<ThreadSubscription>,
     missions: &mut bool,
     failures: &mut usize,
     inventories: &mut Inventories,
@@ -573,6 +594,14 @@ async fn connected(
     };
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
+    let threads_granted = supports("threads-v1") && supports("collections");
+    if updates.send(Update::ThreadSupport(threads_granted)).is_err() { return Ended::Closed; }
+    if threads_granted {
+        for window in threads.iter() {
+            if let Err(error) = window.subscribe(stream).await { return Ended::Dropped(error.human()); }
+        }
+    }
+
     let inventory_granted = supports("inventory-collections") && supports("collections");
     let revisioned_agents = supports("collections.agents.revisioned.v1");
     if updates.send(Update::InventorySupport {
@@ -764,6 +793,23 @@ async fn connected(
                     }
                     // st keeps a conversation's subscription and retries it itself; it says why
                     // so the last copy shown can say it is stale (the owner's host is away).
+                    CollectionEvent::ThreadWindow { id, snapshot, replace, rows, removes, order, has_more } => {
+                        let Some(window) = threads.iter().find(|window| window.id == id) else { continue };
+                        if updates.send(Update::ThreadWindow { interest: window.interest.clone(),
+                            snapshot, replace, rows, removes, order, has_more }).is_err() { return Ended::Closed; }
+                    }
+                    CollectionEvent::Error { id, code, message, .. } if id.starts_with("thread-window/") => {
+                        let Some(window) = threads.iter().find(|window| window.id == id) else { continue };
+                        let message = fractal_client::human_message(code.as_ref(), &message);
+                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), message,
+                            permanent: true }).is_err() { return Ended::Closed; }
+                    }
+                    CollectionEvent::Resync { id, code, message, .. } if id.starts_with("thread-window/") => {
+                        let Some(window) = threads.iter().find(|window| window.id == id) else { continue };
+                        let message = fractal_client::human_message(code.as_ref(), message.as_deref().unwrap_or("Thread window needs a fresh snapshot"));
+                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), message,
+                            permanent: false }).is_err() { return Ended::Closed; }
+                    }
                     CollectionEvent::Resync { id, code, message: Some(message), .. } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         if !current.failed_long(Instant::now()) { continue; }
@@ -906,6 +952,27 @@ async fn connected(
                     for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
                         if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
                     }
+                }
+                Some(Command::Threads(targets)) => {
+                    let targets = targets.into_iter().take(MAX_THREADS).collect::<Vec<_>>();
+                    let mut kept = Vec::new();
+                    for window in std::mem::take(threads) {
+                        if targets.contains(&window.interest) {
+                            kept.push(window);
+                        } else if threads_granted
+                            && let Err(error) = stream.unsubscribe(&window.id).await {
+                            return Ended::Dropped(error.human());
+                        }
+                    }
+                    for interest in targets {
+                        if kept.iter().any(|window| window.interest == interest) { continue; }
+                        let window = ThreadSubscription::new(interest);
+                        if threads_granted && let Err(error) = window.subscribe(stream).await {
+                            return Ended::Dropped(error.human());
+                        }
+                        kept.push(window);
+                    }
+                    *threads = kept;
                 }
                 Some(Command::Converse { targets }) => {
                     let targets = targets.into_iter().take(MAX_CONVERSATIONS).collect::<Vec<_>>();

@@ -6,6 +6,7 @@
 
 use super::text::{self, run};
 use super::theme;
+use fractal_conversation_ui::doc::{Doc as SharedDoc, Target as SharedTarget};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -102,20 +103,22 @@ pub enum Hit {
     PaletteChoice(usize),
     /// A document page's or the documents list's own button: back, try again, more.
     Document(super::documents::Tap),
+    Thread(String, super::thread::Tap),
 }
 
-pub type Target = fractal_conversation_ui::doc::Target<Hit>;
-pub type Doc = fractal_conversation_ui::doc::Doc<Hit>;
+pub type Target = SharedTarget<Hit>;
+pub type Doc = SharedDoc<Hit>;
 
 /// Shell-only cards, graph fields and buttons layered on the shared document.
-pub trait DocExt {
+pub trait DocExt<H = Hit> {
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style);
     fn section(&mut self, title: &str, count: Option<usize>, width: usize);
-    fn buttons(&mut self, buttons: &[(&str, &str, Hit, Color)]);
-    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: Doc, width: usize);
+    fn buttons(&mut self, buttons: &[(&str, &str, H, Color)]);
+    fn button_rows(&mut self, buttons: &[(&str, &str, H, Color)], width: usize);
+    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: SharedDoc<H>, width: usize);
 }
 
-impl DocExt for Doc {
+impl<H: Clone> DocExt<H> for SharedDoc<H> {
     /// A "label   value" row with the value wrapped under itself.
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style) {
         let label = format!("{label:<10}");
@@ -143,7 +146,7 @@ impl DocExt for Doc {
         self.lines.push(Line::from(spans));
     }
     /// A row of buttons. Each is `[key label]`, and clicking it presses the key.
-    fn buttons(&mut self, buttons: &[(&str, &str, Hit, Color)]) {
+    fn buttons(&mut self, buttons: &[(&str, &str, H, Color)]) {
         let line = self.lines.len();
         let mut spans = Vec::new();
         let mut column = 0u16;
@@ -166,7 +169,7 @@ impl DocExt for Doc {
                 label_text,
                 Style::default().fg(*color).bg(theme::SURFACE0),
             ));
-            self.targets.push(Target {
+            self.targets.push(SharedTarget {
                 line,
                 column,
                 width,
@@ -176,9 +179,26 @@ impl DocExt for Doc {
         }
         self.lines.push(Line::from(spans));
     }
+    /// Keep related actions together, breaking only between buttons when the pane is narrow.
+    fn button_rows(&mut self, buttons: &[(&str, &str, H, Color)], width: usize) {
+        let mut row_start = 0;
+        let mut used = 0;
+        for (index, (key, label, _, _)) in buttons.iter().enumerate() {
+            let size = text::width(key) + text::width(label) + 4;
+            if index > row_start && used + 2 + size > width {
+                self.buttons(&buttons[row_start..index]);
+                row_start = index;
+                used = 0;
+            }
+            used += if index == row_start { size } else { size + 2 };
+        }
+        if !buttons.is_empty() {
+            self.buttons(&buttons[row_start..]);
+        }
+    }
     /// A card in deck's style: a rounded frame with its title in the top edge. A heavy
     /// card (thick frame, coloured) is reserved for the thing that needs a person.
-    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: Doc, width: usize) {
+    fn card(&mut self, title: &str, color: Color, heavy: bool, inner: SharedDoc<H>, width: usize) {
         let width = width.max(8);
         let (tl, tr, bl, br, h, v) = if heavy {
             ("┏", "┓", "┗", "┛", "━", "┃")
@@ -199,7 +219,7 @@ impl DocExt for Doc {
         let base = self.lines.len();
         let inner_width = width.saturating_sub(4);
         for target in inner.targets {
-            self.targets.push(Target {
+            self.targets.push(SharedTarget {
                 line: base + target.line,
                 column: target.column + 2,
                 ..target
