@@ -166,7 +166,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject,
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),
@@ -267,7 +267,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             run_subject = run.subject,
             mission = run.mission,
         );
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject,
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),

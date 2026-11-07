@@ -336,9 +336,9 @@ impl Store {
     }
 
     /// A page of a mailbox, or of every message without a recipient. A page outside delivery
-    /// continues into the messages shard once the graph's messages are listed; delivery pages
-    /// and the unpaged readers, which order and hold graph mail, stay on the graph until they
-    /// learn stream items.
+    /// continues into the messages shard once the graph's messages are listed; other delivery
+    /// pages and the unpaged readers, which order and hold graph mail, stay on the graph (a
+    /// seat's own poll goes on: [`Self::messages_page_for_seat`]).
     /// A cursor past the graph is only good for its own `through`: a new listing starts over.
     pub fn messages_page_inner(
         &self,
@@ -350,6 +350,20 @@ impl Store {
         delivery: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery, false)
+    }
+
+    /// A seat's own poll of its open mail (`GET /v1/messages?to=` from the seat): the delivery
+    /// listing of its graph mail, then on into its stream items, as every other page goes on.
+    /// Mail routed to the stream (4c-2b) reaches a seat that polls as it reaches one on the
+    /// mailbox stream.
+    pub fn messages_page_for_seat(
+        &self,
+        recipient: &str,
+        after: Option<u64>,
+        through: u64,
+        limit: usize,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        self.messages_page_from(Some(recipient), false, after, through, limit, true, true, false)
     }
 
     /// [`Self::messages_page_once`], read on past a page that lists nothing yet has a cursor. The
