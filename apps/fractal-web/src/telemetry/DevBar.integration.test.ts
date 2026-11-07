@@ -28,6 +28,7 @@ vi.mock('virtual:build-identity', () => ({
 vi.mock('@overeng/meters/react', () => ({
   MetersProvider: ({ children }: { readonly children: unknown }) => children,
   MeterStrip: () => null,
+  MeterTile: () => null,
 }))
 // One deterministic entry instead of the app registry, in both the unseen ids and the lazy prose.
 vi.mock('../changelog/metadata.ts', () => ({ changelogDeployment: 'main', changelogEntryIds: [fixture.entryId] }))
@@ -174,6 +175,6 @@ it('mirrors the unseen indicator on the overflow control when the changelog segm
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ width: 48, height: 20 }))
   const { host } = await mount()
   const overflow = host.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"][aria-label*="more status items"]')
-  expect(overflow?.getAttribute('aria-label')).toMatch(/: version, changelog, .*, including unseen changes$/)
+  expect(overflow?.getAttribute('aria-label')).toMatch(/: .*version, changelog, including unseen changes$/)
   expect(overflow?.querySelector('[data-devbar-unseen]')).not.toBeNull()
 }, 30_000)

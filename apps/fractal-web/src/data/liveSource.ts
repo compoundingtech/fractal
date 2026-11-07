@@ -29,7 +29,7 @@ import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import type { TextItem } from '../conversation/model.ts'
 import { undeclared } from '../monitor/source.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
-import { instrumentFetch } from '../telemetry/transport.ts'
+import { instrumentFetch, recordSocketState } from '../telemetry/transport.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
@@ -230,6 +230,7 @@ export const liveSource = ({
             }
             if (event.state._tag === 'Reconnecting') connectionAttempt = event.state.attempt
             setDebug('Wf.socketLive', event.state._tag === 'Live' ? 1 : 0)
+            recordSocketState(event.state)
             if (event.state._tag === 'Rejected') {
               readRejection = event.state.message
               registry.set(readRefusal, event.state.message)
