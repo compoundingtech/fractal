@@ -131,14 +131,20 @@ export const VisibleRevealDoesNotJump: Story = { parameters: { scenario: { _tag:
   await userEvent.click(reveal)
   await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled)
   await frames()
-  const bounds = real(yes, deepKey)!.getBoundingClientRect()
   const view = viewport(yes).getBoundingClientRect()
-  await scroll(yes, viewport(yes).scrollTop + bounds.top - view.top - view.height / 2)
-  const before = viewport(yes).scrollTop
-  await expect(clear(yes, real(yes, deepKey)!)).toBe(true)
-  await userEvent.click(reveal)
-  await frames()
-  await expect(viewport(yes).scrollTop).toBe(before)
+  // From the top of the list the row is below the view: it scrolls only until its bottom edge shows.
+  await waitFor(() => expect(Math.abs(real(yes, deepKey)!.getBoundingClientRect().bottom - view.bottom)).toBeLessThanOrEqual(1), settled)
+  const stays = async (top: () => number) => {
+    await scroll(yes, viewport(yes).scrollTop + real(yes, deepKey)!.getBoundingClientRect().top - view.top - top())
+    const before = viewport(yes).scrollTop
+    await expect(clear(yes, real(yes, deepKey)!)).toBe(true)
+    await userEvent.click(reveal)
+    await frames()
+    await expect(viewport(yes).scrollTop).toBe(before)
+  }
+  await stays(() => view.height / 2)
+  // Just below the painted stack, inside the height all its ancestors would take: still clear, so still no scroll.
+  await stays(() => stack(yes).getBoundingClientRect().height + 4)
 } }
 export const VisibleFocusDoesNotJump: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
