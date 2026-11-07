@@ -4,6 +4,7 @@ import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTree.tsx'
+import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { openAgentRowMenu } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/MilestoneAgentRow.tsx'
 import {
   Button as AriaButton,
@@ -158,6 +159,8 @@ const styles = stylex.create({
     fontSize: '0.6875rem',
     fontVariantNumeric: 'tabular-nums',
   },
+  // The roster ends here: rows stop at this line rather than running into the status text.
+  rosterStatus: { flexShrink: 0, borderBlockStartWidth: 1, borderBlockStartStyle: 'solid', borderBlockStartColor: tokens['--ds-gray-alpha-400'], color: tokens['--ds-gray-900'], fontSize: '0.6875rem' },
   notice: { color: tokens['--ds-gray-900'], fontSize: '0.6875rem', padding: scale.space2 },
   highlight: {
     color: tokens['--ds-gray-1000'],
@@ -692,8 +695,10 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     const item = event.items[0]
     if (target === undefined || item?.kind !== 'text' || event.items.length !== 1) return
     const id = await item.getText('application/x-fractal-sidebar-row')
-    if ('ok' in props.canDrop([id], target)) props.onMove({ items: [id], target })
-  }, [dropTarget, props.canDrop, props.onMove])
+    const verdict = props.canDrop([id], target)
+    if ('ok' in verdict) props.onMove({ items: [id], target })
+    else props.onEditRefused?.(verdict.refused)
+  }, [dropTarget, props.canDrop, props.onMove, props.onEditRefused])
   const dragOptions = React.useMemo<DragAndDropOptions<AgentFolderTreeItem>>(() => ({
     getItems: keys => [...keys].filter(key => {
       const node = foldersById.get(String(key))
@@ -774,8 +779,10 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
   return <BoundFolderPresentation.Provider value={props}>
     <AgentFolderTree items={items} expanded={expanded} onExpandedChange={onExpandedChange} treeRef={treeRef} dragAndDropHooks={dragAndDropHooks} />
     <RevealAgentRow selected={props.selectedId ?? ''} treeRef={treeRef} items={items} revealKey={props.revealKey} expandAncestors={expandAncestors} />
-    {props.treeStatus}
-    {props.unavailable === undefined ? null : <div role="status">{props.unavailable}</div>}
+    {props.treeStatus === undefined && props.unavailable === undefined ? null : <div data-wf-roster-status="" {...stylex.props(styles.rosterStatus)}>
+      {typeof props.treeStatus === 'string' ? <SystemNotice kind={props.treeStatus.endsWith('…') ? 'loading' : 'offline'} scope="rail" title={props.treeStatus} /> : props.treeStatus}
+      {props.unavailable === undefined ? null : <SystemNotice data-wf-folder-status="" kind={props.unavailableKind ?? 'offline'} scope="rail" title={props.unavailable} {...(props.onRetryUnavailable === undefined ? {} : { onRetry: props.onRetryUnavailable })} />}
+    </div>}
   </BoundFolderPresentation.Provider>
 }
 

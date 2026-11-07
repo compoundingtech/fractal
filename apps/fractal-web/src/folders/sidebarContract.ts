@@ -2,6 +2,7 @@
 // TODO(kit): replace this structural copy with the kit import when AgentFolders lands.
 import type * as React from 'react'
 import type { StyleXStyles } from '@stylexjs/stylex'
+import type { SystemStateKind } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 
 export type SidebarAgent = {
   readonly _tag: 'Agent'; readonly id: string; readonly subject: string; readonly label: string
@@ -38,7 +39,13 @@ export type AgentFoldersProps = {
   readonly onToggleCollapsed: (intent: { readonly id: string; readonly collapsed: boolean }) => void
   readonly rowStatus?: ReadonlyMap<string, SidebarRowStatus>
   readonly treeStatus?: React.ReactNode
-  readonly unavailable?: React.ReactNode
+  /** One quiet line under the roster about the layout itself. */
+  readonly unavailable?: string
+  readonly unavailableKind?: SystemStateKind
+  /** Present only when trying again can change the outcome. */
+  readonly onRetryUnavailable?: () => void
+  /** A drop `canDrop` refused, with its sentence; refusals surface only on an attempted edit. */
+  readonly onEditRefused?: (sentence: string) => void
   readonly selectedId?: string
   /** Search changes request a selected-row reveal without treating clock ticks as navigation. */
   readonly revealKey?: string
