@@ -4,49 +4,115 @@
   "platform": "linux-systemd",
   "mem_available_floor": {
     "coverage": "enforced",
-    "value": "16G"
+    "value": "6G"
   },
   "slice_psi": {
     "memory": {
       "coverage": "not-enforced",
-      "reason": "not measured"
+      "reason": "no slice-PSI admission active; heavy-short uses host memory some avg60 only"
     },
     "cpu": {
       "coverage": "not-enforced",
-      "reason": "not measured"
+      "reason": "no slice-PSI admission active; heavy-short uses host memory some avg60 only"
     }
   },
   "slices": [
     {
-      "name": "app-capped.slice",
+      "name": "app.slice",
       "memory": {
         "max": {
           "coverage": "not-enforced",
-          "reason": "not measured"
+          "reason": "unset (`max`)"
         },
         "high": {
           "coverage": "not-enforced",
-          "reason": "not measured"
+          "reason": "unset (`max`)"
         }
-      },
-      "cpu": {
-        "coverage": "not-enforced",
-        "reason": "CPU limits are not configured"
-      },
-      "io": {
-        "coverage": "not-enforced",
-        "reason": "not measured"
       },
       "swap": {
         "max": {
           "coverage": "not-enforced",
-          "reason": "not measured"
+          "reason": "unset (`max`)"
         }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "unset (`max 100000`)"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
       },
       "tasks": {
         "max": {
           "coverage": "not-enforced",
-          "reason": "not measured"
+          "reason": "unset (`max`)"
+        }
+      }
+    },
+    {
+      "name": "app-batch.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "unset (`max 100000`)"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      }
+    },
+    {
+      "name": "app-capped.slice",
+      "memory": {
+        "max": {
+          "coverage": "enforced",
+          "value": "57982058496"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "unset (`max 100000`)"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
         }
       }
     },
@@ -55,86 +121,12 @@
       "memory": {
         "max": {
           "coverage": "enforced",
-          "value": "16G"
+          "value": "17179869184"
         },
         "high": {
           "coverage": "not-enforced",
-          "reason": "not measured"
+          "reason": "unset (`max`)"
         }
-      },
-      "cpu": {
-        "coverage": "not-enforced",
-        "reason": "CPU limits are not configured"
-      },
-      "io": {
-        "coverage": "not-enforced",
-        "reason": "not measured"
-      },
-      "swap": {
-        "max": {
-          "coverage": "not-enforced",
-          "reason": "not measured"
-        }
-      },
-      "tasks": {
-        "max": {
-          "coverage": "not-enforced",
-          "reason": "not measured"
-        }
-      }
-    },
-    {
-      "name": "app-seats.slice",
-      "memory": {
-        "max": {
-          "coverage": "not-enforced",
-          "reason": "not measured"
-        },
-        "high": {
-          "coverage": "not-enforced",
-          "reason": "not measured"
-        }
-      },
-      "cpu": {
-        "coverage": "not-enforced",
-        "reason": "CPU limits are not configured"
-      },
-      "io": {
-        "coverage": "not-enforced",
-        "reason": "not measured"
-      },
-      "swap": {
-        "max": {
-          "coverage": "not-enforced",
-          "reason": "not measured"
-        }
-      },
-      "tasks": {
-        "max": {
-          "coverage": "not-enforced",
-          "reason": "not measured"
-        }
-      }
-    },
-    {
-      "name": "app-capped-jobs.slice",
-      "memory": {
-        "max": {
-          "coverage": "enforced",
-          "value": "16G"
-        },
-        "high": {
-          "coverage": "enforced",
-          "value": "14G"
-        }
-      },
-      "cpu": {
-        "coverage": "not-enforced",
-        "reason": "CPU limits are not configured"
-      },
-      "io": {
-        "coverage": "not-enforced",
-        "reason": "not measured"
       },
       "swap": {
         "max": {
@@ -142,10 +134,282 @@
           "value": "0"
         }
       },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "controller not enabled in parent"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "io controller not enabled in parent"
+      },
       "tasks": {
         "max": {
           "coverage": "not-enforced",
-          "reason": "not measured"
+          "reason": "unset (`max`)"
+        }
+      }
+    },
+    {
+      "name": "app-st3.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "unset (`max 100000`)"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      }
+    },
+    {
+      "name": "background.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "unset (`max 100000`)"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      }
+    },
+    {
+      "name": "session.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "unset (`max 100000`)"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      }
+    },
+    {
+      "name": "app-agent-seats.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      }
+    },
+    {
+      "name": "app-lanes.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      }
+    },
+    {
+      "name": "interactive.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      }
+    },
+    {
+      "name": "interactive-seats.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      }
+    },
+    {
+      "name": "interactive-control.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "inactive; no cgroup"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
         }
       }
     }

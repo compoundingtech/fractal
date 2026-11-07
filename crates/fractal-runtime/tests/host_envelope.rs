@@ -15,11 +15,29 @@ fn measured_host_shapes_are_readable_and_roundtrip() {
             HostEnvelope::parse(&serde_json::to_vec(&envelope).unwrap()).unwrap(),
             envelope
         );
-        if let Coverage::Enforced { value } = envelope.mem_available_floor {
-            assert_eq!(value.bytes(), 16 * 1024 * 1024 * 1024);
-        } else {
-            panic!("fixture floor must be enforced");
+        match &envelope.mem_available_floor {
+            Coverage::Enforced { value } => assert_eq!(
+                value.bytes(),
+                if envelope.host == "fixture-nvme" {
+                    12
+                } else {
+                    6
+                } * 1024
+                    * 1024
+                    * 1024
+            ),
+            Coverage::NotEnforced { reason } => {
+                assert_eq!(envelope.host, "fixture-capped");
+                assert_eq!(reason, "host-budget admission off");
+            }
         }
+        assert!(
+            envelope
+                .slices
+                .iter()
+                .all(|slice| slice.name != "app-capped-jobs.slice")
+        );
+        assert!(!envelope.slice_psi.memory.enforced() && !envelope.slice_psi.cpu.enforced());
     }
 }
 
@@ -82,7 +100,7 @@ fn coverage_is_required_for_each_resource_and_unknown_fields_are_errors() {
 #[test]
 fn advisory_platform_cpu_weight_and_all_named_psi_windows_are_supported() {
     let mut value: Value = serde_json::from_slice(CAPPED).unwrap();
-    value["slices"][0]["cpu"]["value"] = json!({"weight":100});
+    value["slices"][0]["cpu"] = json!({"coverage":"enforced","value":{"weight":100}});
     value["slices"][0]["io"] = json!({"coverage":"enforced","value":{"weight":100}});
     for window in ["avg10", "avg60", "avg300"] {
         value["slice_psi"]["cpu"] = json!({"coverage":"enforced","value":{
@@ -111,9 +129,9 @@ fn advisory_platform_cpu_weight_and_all_named_psi_windows_are_supported() {
 #[test]
 fn shared_size_overflow_and_invalid_targets_are_refused() {
     let mut value: Value = serde_json::from_slice(CAPPED).unwrap();
-    value["mem_available_floor"]["value"] = json!("18446744073709551615T");
+    value["mem_available_floor"] = json!({"coverage":"enforced","value":"18446744073709551615T"});
     assert!(parse(&value).is_err());
-    value["mem_available_floor"]["value"] = json!("16G");
+    value["mem_available_floor"] = json!({"coverage":"enforced","value":"16G"});
     value["slice_psi"]["memory"] = json!({"coverage":"enforced","value":{
         "window":"avg60","percent":10,"target_slice":"unknown.slice"
     }});
