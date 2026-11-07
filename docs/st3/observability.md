@@ -693,6 +693,13 @@ review. The same rule applies to unknown driver and kind values. Agent, parent,
 session, mission, message, PR, PID and commit identifiers are never labels on
 either gauge, including resource attributes promoted to labels.
 
+Configure R with the daemon's root `agent_population_repositories` TOML key,
+an array of at most eight unique canonical lowercase `owner/repo` names (for
+example, `["example/repo"]`), validated at configuration load. URLs, filesystem
+paths and `.git` suffixes are rejected. The source default is an empty registry:
+every repository is `unattributed` until explicitly configured.
+Restart the daemon after changing this registry.
+
 Kind describes provenance, not activity. Use an explicit semantic discriminator
 for roots, mission seats, gates and verifiers; harness children always take
 `subagent`. `owner_run_id` alone cannot distinguish mission, gate and verifier,
@@ -852,10 +859,11 @@ for any of the three metrics: overflow is a contract violation, never a valid
 fallback bucket or silently accepted population total.
 
 This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
-another 2,000. SQL already reserves up to 1,500 series; mailbox/delivery and
-other instruments consume the remainder. Capacity and label-churn review is an
-implementation gate, not a claim of current compliance. If inventory exceeds
-the allocation, the decision owner must approve a revised budget or a lossless
+another 2,000. The HTTP request-duration instrument already reserves up to 1,500
+series; mailbox/delivery and other instruments consume the remainder. Capacity
+and label-churn review is an implementation gate, not a claim of current
+compliance. If inventory exceeds the allocation, the decision owner must approve
+a revised budget or a lossless
 dimension policy before rollout: never truncate agents, use SDK overflow to
 silently lose the contract's labels, or discard counts to meet a budget.
 

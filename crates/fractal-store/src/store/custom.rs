@@ -908,6 +908,32 @@ impl Store {
             .collect()
     }
 }
+/// Metadata of the canonical, registration-pinned creation that owns the custom projection.
+/// Replies and repaired claims cannot change the source publisher.
+pub(super) fn attention_creation_owner(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    let Some((hash, manifest, state)) = registration(connection, subject)? else {
+        return Ok(None);
+    };
+    if state != "ready" {
+        return Ok(None);
+    }
+    Ok(connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-hc6d9629e0a8a owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT claims.origin, claims.actor FROM claims
+             JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject=?1 AND claims.kind=?2
+               AND json_extract(claims.body, '$.fields._registration')=?3
+               AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+             ORDER BY CANONICAL_ASC(claims) LIMIT 1",
+        ),
+        params![subject, manifest.creation_kind, hash],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?)
+}
+
 /// One canonical custom source, shared by the collection reader and keyed maintenance.
 pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
     let a = &body["attention"];

@@ -128,6 +128,8 @@ pub mod mail_backlog;
 pub mod message_reads;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
+pub mod population_metrics;
+pub mod population_attention;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -3334,6 +3336,15 @@ fn overlay_agent_resources_at(
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
             }
+            item.as_object_mut().expect("agent resource").remove("observed_repository");
+            if let Some(observation) = store.latest_observation(item["id"].as_str().unwrap_or_default(), "workspace.observed")? {
+                let fields = &observation.body["fields"];
+                if fields["workspace"] == item["workspace"]
+                    && fields["host"].as_str().map(client_host_id).as_deref() == item["host_id"].as_str()
+                {
+                    item["observed_repository"] = fields["repository"].clone();
+                }
+            }
             let source = item
                 .as_object_mut()
                 .unwrap()
@@ -4039,6 +4050,7 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "runtime_state": observed,
                 "_restart_underlying_state": restart_underlying_state,
                 "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
