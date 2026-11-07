@@ -297,6 +297,7 @@
    "extra": [
     "docs/st3/schema.md",
     "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree-v2.json",
     "examples/fractal/decision-tree.json"
    ]
   },

@@ -1,0 +1,228 @@
+//! Pure decision.tree v1/v2 interpretation; no writes or ask creation.
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Claim {
+    pub id: String,
+    pub kind: String,
+    pub actor: Option<String>,
+    pub order: u64,
+    pub fields: Value,
+}
+impl Claim {
+    fn text(&self, field: &str) -> Option<&str> { self.fields.get(field)?.as_str() }
+    fn is(&self, kind: &str) -> bool {
+        ["custom.decision.tree.v1.", "custom.decision.tree.v2."].iter()
+            .any(|prefix| self.kind.strip_prefix(prefix) == Some(kind))
+    }
+}
+
+/// Unknown source time is evidence only, never an ordering value.
+fn provenance_time(provenance: &Claim, claims: &[Claim]) -> Result<Option<i64>, &'static str> {
+    let time = provenance.fields.get("written_ms").and_then(Value::as_object)
+        .ok_or("written_ms must be a tagged object")?;
+    if time.len() != 1 { return Err("written_ms must contain exactly one tag"); }
+    if let Some(known) = time.get("known") {
+        return known.as_i64().map(Some).ok_or("known written_ms must be an integer");
+    }
+    if time.get("unknown").and_then(Value::as_str).is_some_and(|reason| !reason.trim().is_empty()) {
+        if claims.iter().any(|target| Some(target.id.as_str()) == provenance.text("target") && target.is("damaged")) {
+            return Ok(None);
+        }
+        return Err("unknown written_ms requires a damaged target");
+    }
+    Err("unknown written_ms requires a nonempty reason")
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status { Pending, Answered, Withdrawn, Superseded, Moot }
+#[derive(Debug, Serialize)]
+pub struct Request<'a> {
+    pub request: &'a str,
+    pub source_scope: &'a str,
+    pub q: Option<i64>,
+    pub status: Status,
+    pub assumed: bool,
+    pub open: bool,
+    pub answer: Option<&'a str>,
+    pub approval_gate: bool,
+    pub ask_links: Vec<&'a Value>,
+    pub needs_ask: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct Fold<'a> {
+    /// The caller obtains this exact token through the existing subject basis read.
+    pub basis: Value,
+    pub requests: Vec<Request<'a>>,
+    pub defects: Vec<String>,
+}
+
+/// All input kinds, excluding the derived status kind, for the #1321 basis fence.
+pub fn input_kinds(version: u8) -> Vec<String> {
+    let mut kinds = vec!["opened", "requested", "answered", "assumed", "promoted", "damaged"];
+    if version == 2 { kinds.extend(["provenance", "withdrawn", "recorded", "ask_linked"]); }
+    kinds.into_iter().map(|kind| format!("custom.decision.tree.v{version}.{kind}")).collect()
+}
+
+/// Only a native person answer can satisfy an approval gate. Imported answers have provenance.
+pub fn approval_gate(answer: &Claim, claims: &[Claim]) -> bool {
+    answer.is("answered") && answer.actor.as_deref().is_some_and(|a| a.starts_with("person/"))
+        && !claims.iter().any(|c| c.is("provenance") && c.text("target") == Some(&answer.id))
+}
+
+/// `claims` must be the complete, basis-fenced history of one tree. Native ordering is explicit.
+/// Guards are ANDed `{q, selection, source_scope?}` predicates; selections are ORed.
+#[must_use]
+pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a> {
+    let requests: Vec<_> = claims.iter().filter(|c| c.is("requested")).collect();
+    let mut defects = Vec::new();
+    let mut source_times = BTreeMap::new();
+    for p in claims.iter().filter(|claim| claim.is("provenance")) {
+        match provenance_time(p, claims) {
+            Ok(Some(time)) => { source_times.insert(p.id.as_str(), time); }
+            Ok(None) => {}
+            Err(reason) => defects.push(format!("invalid provenance time: {}: {reason}", p.id)),
+        }
+    }
+    let provenance: BTreeMap<_, _> = claims.iter().filter(|c| c.is("provenance"))
+        .filter_map(|c| c.text("target").map(|target| (target, c))).collect();
+    let scope = |c: &'a Claim| provenance.get(c.id.as_str())
+        .and_then(|p| p.text("source_scope")).unwrap_or(subject);
+    let mut keys = BTreeSet::new();
+    for request in &requests {
+        if let Some(q) = request.fields.get("q").and_then(Value::as_i64)
+            && !keys.insert((scope(request), q)) {
+            defects.push(format!("duplicate request key: {}:{q}", scope(request)));
+        }
+    }
+    let latest = |request: &Claim, kind: &str| claims.iter()
+        .filter(|c| c.is(kind) && c.text("request") == Some(&request.id))
+        .max_by_key(|c| c.order);
+    let mut answers = BTreeMap::new();
+    let mut assumptions = BTreeMap::new();
+    for request in &requests {
+        for assumption in [false, true] {
+        let candidates: Vec<_> = claims.iter().filter(|c|
+            (if assumption { c.is("assumed") } else { c.is("answered") || c.is("recorded") })
+            && c.text("request") == Some(&request.id)).collect();
+        let mut successors = BTreeMap::new();
+        for answer in &candidates {
+            if answer.is("recorded") && answer.text("recorder") != answer.actor.as_deref() {
+                defects.push(format!("recorder differs from writing actor: {}", answer.id));
+            }
+            if let Some(previous) = answer.text("supersedes") {
+                if successors.insert(previous, &answer.id).is_some() {
+                    defects.push(format!("answer supersession fork: {previous}"));
+                }
+                if !candidates.iter().any(|c| c.id == previous) {
+                    defects.push(format!("missing answer predecessor: {previous}"));
+                }
+                let mut seen = BTreeSet::new();
+                let mut cursor = Some(answer.id.as_str());
+                while let Some(id) = cursor {
+                    if !seen.insert(id) { defects.push(format!("answer supersession cycle: {id}")); break; }
+                    cursor = candidates.iter().find(|c| c.id == id).and_then(|c| c.text("supersedes"));
+                }
+            }
+        }
+        // Explicit supersession outranks timestamp and lexical tie-breaks.
+        let heads: Vec<_> = candidates.iter().copied()
+            .filter(|candidate| !successors.contains_key(candidate.id.as_str())).collect();
+        // First select the imported head by original chronology, then merge it with
+        // native writes by claim order. This is a total order even for mixed histories.
+        let imported = heads.iter().copied().filter(|a| provenance.get(a.id.as_str())
+            .is_some_and(|p| source_times.contains_key(p.id.as_str())))
+            .max_by_key(|a| {
+                let p = provenance[a.id.as_str()];
+                (source_times[p.id.as_str()],
+                    p.text("legacy_id").unwrap_or_default(), p.text("source_scope").unwrap_or_default(), a.order)
+            });
+        let native = heads.iter().copied().filter(|a| !provenance.contains_key(a.id.as_str()))
+            .max_by_key(|a| a.order);
+        let chosen = imported.into_iter().chain(native).max_by_key(|a| a.order);
+        if assumption { assumptions.insert(request.id.as_str(), chosen); }
+        else { answers.insert(request.id.as_str(), chosen); }
+        }
+    }
+    // Resolve guard dependencies recursively: a guard reads only an active request's
+    // effective answer or assumption. Cycles are defects, never silently active.
+    struct Guards<'a> {
+        requests: &'a [&'a Claim],
+        answers: &'a BTreeMap<&'a str, Option<&'a Claim>>,
+        assumptions: &'a BTreeMap<&'a str, Option<&'a Claim>>,
+        claims: &'a [Claim],
+        scopes: BTreeMap<&'a str, &'a str>,
+        active: BTreeMap<&'a str, bool>,
+        visiting: BTreeSet<&'a str>,
+        defects: Vec<String>,
+    }
+    impl Guards<'_> {
+        fn evaluate(&mut self, request: &Claim) -> bool {
+            if let Some(active) = self.active.get(request.id.as_str()) { return *active; }
+            let Some(request) = self.requests.iter().copied().find(|r| r.id == request.id) else { return false; };
+            if !self.visiting.insert(&request.id) {
+                self.defects.push(format!("guard cycle: {}", request.id)); return false;
+            }
+            let result = match request.fields.get("applies_when") {
+                None => true,
+                Some(Value::Array(guards)) => guards.iter().all(|guard| {
+                    let q = guard.get("q").and_then(Value::as_i64);
+                    let scope = guard.get("source_scope").and_then(Value::as_str).unwrap_or(self.scopes[request.id.as_str()]);
+                    let decision = guard.get("decision").and_then(Value::as_str);
+                    let dependency = self.requests.iter().copied().find(|r|
+                        decision == Some(r.id.as_str()) || (decision.is_none() && q.is_some()
+                        && r.fields.get("q").and_then(Value::as_i64) == q && self.scopes[r.id.as_str()] == scope));
+                    let Some(dependency) = dependency else {
+                        self.defects.push(format!("missing guard dependency: {}", request.id)); return false;
+                    };
+                    if !self.evaluate(dependency) { return false; }
+                    if self.claims.iter().any(|c| c.is("withdrawn") && c.text("request") == Some(&dependency.id)) { return false; }
+                    let answer = self.answers[dependency.id.as_str()]
+                        .or(self.assumptions[dependency.id.as_str()]);
+                    let Some(answer) = answer else { return false; };
+                    if let Some(option) = guard.get("option") {
+                        return answer.fields.get("selection").and_then(Value::as_array)
+                            .is_some_and(|actual| actual.contains(option));
+                    }
+                    match (guard.get("selection").and_then(Value::as_array), answer.fields.get("selection").and_then(Value::as_array)) {
+                        (Some(expected), Some(actual)) => expected.iter().any(|v| actual.contains(v)),
+                        _ => { self.defects.push(format!("invalid guard selection: {}", request.id)); false }
+                    }
+                }),
+                Some(_) => { self.defects.push(format!("invalid guards: {}", request.id)); false }
+            };
+            self.visiting.remove(request.id.as_str());
+            self.active.insert(&request.id, result);
+            result
+        }
+    }
+    let mut guards = Guards { requests: &requests, answers: &answers, assumptions: &assumptions, claims,
+        scopes: requests.iter().map(|r| (r.id.as_str(), scope(r))).collect(),
+        active: BTreeMap::new(), visiting: BTreeSet::new(), defects: Vec::new() };
+    for request in &requests { guards.evaluate(request); }
+    let mut output: Vec<_> = requests.iter().map(|request| {
+        let answer = answers[request.id.as_str()];
+        let assumed = assumptions[request.id.as_str()].is_some();
+        let status = if !guards.active[request.id.as_str()] { Status::Moot }
+            else if latest(request, "withdrawn").is_some() { Status::Withdrawn }
+            else if requests.iter().any(|child| child.text("parent") == Some(&request.id) && guards.active[child.id.as_str()]) { Status::Superseded }
+            else if answer.is_some() { Status::Answered } else { Status::Pending };
+        let open = status == Status::Pending;
+        let ask_links: Vec<_> = claims.iter().filter(|c| c.is("ask_linked") && c.text("request") == Some(&request.id)).map(|c| &c.fields).collect();
+        Request { request: &request.id, source_scope: scope(request), q: request.fields.get("q").and_then(Value::as_i64),
+            approval_gate: status == Status::Answered && answer.is_some_and(|a| approval_gate(a, claims)),
+            status, assumed, open, answer: answer.map(|a| a.id.as_str()),
+            needs_ask: open && ask_links.is_empty()
+                && !subject.starts_with("custom/decision/tree/v2/legacy/"), ask_links }
+    }).collect();
+    defects.extend(guards.defects);
+    if !defects.is_empty() {
+        for request in &mut output { request.approval_gate = false; }
+    }
+    Fold { basis, requests: output, defects }
+}
+
+#[cfg(test)]
+mod tests;
