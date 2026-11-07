@@ -1338,6 +1338,7 @@ fn parse_agent(
         || format!("agent/{bus_id}"),
         |run| format!("agent/{}/{identity}", owner_run_id(run)),
     );
+    let admission = fractal_missions_base::declared_admission::parse(children, "agent", &subject)?;
     let runtime_id = context.owner_run.as_ref().map_or_else(
         || bounded_runtime_id(&bus_id.replace('/', ".")),
         |run| {
@@ -1485,6 +1486,9 @@ fn parse_agent(
     }
 
     if let Some(member) = primary.as_mut() {
+        member.declared_priority = admission.priority;
+        member.declared_lane = admission.lane;
+        member.declared_budgets = admission.budgets;
         member.one_shot = unique_child(children, "one-shot")?.is_some();
         member.capacity = unique_child(children, "capacity")?
             .map(parse_capacity)
@@ -2400,6 +2404,9 @@ fn restart_type_value(document: &KdlDocument) -> Result<Option<String>, FractalE
 
 fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), FractalError> {
     const ALLOWED: &[&str] = &[
+        "declared-priority",
+        "declared-lane",
+        "declared-budgets",
         "identity",
         "name",
         "description",
@@ -6312,4 +6319,67 @@ schedule "orchard" {{ host "ivory"; {standby}
         assert_eq!(schedule_spec(&parsed.subjects["schedule/orchard"].desired, "ivory").unwrap().host, "ivory");
         assert!(parse_intent(&source(r#"standby { host "ivory"; after "5m" }"#).replace("host \"ivory\";", "host \"local\";"), "ivory").is_err());
     }
+}
+
+#[cfg(test)]
+mod declared_admission_tests {
+    use super::*;
+    use crate::model::{DeclaredLane, DeclaredPriority};
+
+    const FIELDS: &str = r#"declared-priority "normal"; declared-lane "check"; declared-budgets { cpu-seconds 300; memory-max "8G"; disk-max "20G"; token-budget 100000; }"#;
+
+    #[test]
+    fn agent_and_mission_authoring_roundtrip() {
+        let source = format!(
+            "version 2\nagent \"example/worker\" {{ command \"true\"; {FIELDS} }}\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {FIELDS} }}"
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let member = intent.subjects["agent/example/worker"].member.as_ref().unwrap();
+        let mission = &intent.missions["example/work"];
+        assert_eq!(member.declared_priority, Some(DeclaredPriority::Normal));
+        assert_eq!(member.declared_lane, Some(DeclaredLane::Check));
+        assert_eq!(member.declared_budgets, mission.declared_budgets);
+        assert_eq!(mission.declared_budgets.as_ref().unwrap().cpu_seconds, Some(300));
+        let json = serde_json::to_value(&intent).unwrap();
+        let decoded: NormalizedIntent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.missions["example/work"].declared_budgets, mission.declared_budgets);
+        assert_eq!(decoded.subjects["agent/example/worker"].member.as_ref().unwrap().declared_lane, member.declared_lane);
+        let rendered = source.parse::<KdlDocument>().unwrap().to_string();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(reparsed.subjects["agent/example/worker"].member.as_ref().unwrap().declared_budgets, member.declared_budgets);
+    }
+
+    #[test]
+    fn both_declaration_kinds_refuse_invalid_fields() {
+        for fields in [
+            "declared-priority \"urgent\"",
+            "declared-lane \"other\"",
+            "declared-budgets { cpu-seconds 0; }",
+            "declared-budgets { disk-max \"16777216T\"; }",
+            "declared-budgets { memory-max \"8GB\"; }",
+        ] {
+            for source in [
+                format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields}; }}"),
+                format!("version 2\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {fields}; }}"),
+            ] {
+                assert_eq!(parse_intent(&source, "node").unwrap_err().code, "invalid-declared-admission");
+            }
+        }
+    }
+
+
+    #[test]
+    fn omission_and_empty_budgets_do_not_serialize_new_fields() {
+        for fields in ["", "declared-budgets {}"] {
+            let intent = parse_intent(&format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields} }}\nmission \"example/work\" state=\"ready\" {{ goal \"Work.\"; {fields} }}"), "node").unwrap();
+            let member = serde_json::to_value(intent.subjects["agent/example/worker"].member.as_ref().unwrap()).unwrap();
+            let mission = serde_json::to_value(&intent.missions["example/work"]).unwrap();
+            for value in [&member, &mission] {
+                for key in ["declared_priority", "declared_lane", "declared_budgets"] {
+                    assert!(value.get(key).is_none(), "{key}");
+                }
+            }
+        }
+    }
+
 }
