@@ -2205,6 +2205,7 @@ mod tests {
                 include_closed: false,
             }),
             None,
+            None,
         )
         .await
         .unwrap()
