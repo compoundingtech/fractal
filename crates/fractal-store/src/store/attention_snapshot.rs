@@ -341,6 +341,12 @@ impl Store {
         Ok(if holders.len() == 1 { holders.pop() } else { None })
     }
 
+    /// Is the selected reviewer still an active declaration? Runtime reachability is separate.
+    pub fn fault_reviewer_is_declared(&self, reviewer: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        fault_reviewer_is_declared(&connection, reviewer)
+    }
+
     /// The agent that owns `fault`: the agent it names, as a broken gate names the agent that
     /// published it, else the agent assigned to the failed step, else the requester of its run
     /// or of a run above it when that is an agent, else `fallback`. Only a live agent
@@ -352,13 +358,20 @@ impl Store {
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
         let owns = |agent: &str| -> Result<bool> {
-            Ok(agent.starts_with("agent/")
-                && agent != fault.subject
-                && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
-                && person_work::declaration_live(&connection, agent)?)
+            Ok(agent != fault.subject && fault_reviewer_is_declared(&connection, agent)?)
         };
         if owns(&fault.person)? {
             return Ok(Some(fault.person.clone()));
+        }
+        // An explicitly owned API readiness fault keeps its recorded reviewer.
+        // A stopped or retired declaration makes it undeliverable, not generic.
+        if fault.subject.starts_with("daemon/")
+            && self.claim_by_id(&fault.episode)?.is_some_and(|claim| {
+                claim.kind == "operational.failure"
+                    && claim.body["fields"]["condition"] == API_READINESS_SLO_MISSED
+            })
+        {
+            return Ok(None);
         }
         let mut step = fault.step.clone().or_else(|| {
             fault
@@ -1712,6 +1725,12 @@ pub fn fault_agent_holders(connection: &Connection) -> Result<Vec<String>> {
         }
     }
     Ok(holders)
+}
+
+fn fault_reviewer_is_declared(connection: &Connection, reviewer: &str) -> Result<bool> {
+    Ok(reviewer.starts_with("agent/")
+        && current_desired_row(connection, reviewer)?.is_some_and(|row| row.kind == "agent")
+        && person_work::declaration_live(connection, reviewer)?)
 }
 
 /// Whether `desired` declares a running agent that handles faults.
