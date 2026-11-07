@@ -115,10 +115,10 @@ fn complete_scale_paging_ignores_unrelated_indexes_and_keeps_stale_base_on_loss(
     assert_eq!(state.status, Status::Disconnected);
 }
 fn p95(mut samples: Vec<Duration>) -> Duration { samples.sort_unstable(); samples[(samples.len() * 95).div_ceil(100) - 1] }
+#[allow(clippy::assertions_on_constants, reason = "ignored latency gate must compile in debug but reject debug measurements at runtime")]
 #[test]
 #[ignore = "explicit release latency gate; run on a stated idle runner with --nocapture"]
 fn latency_projection_planning_render_and_same_data_v1_baseline() {
-    #[allow(clippy::assertions_on_constants, reason = "ignored latency gate must compile in debug but reject debug measurements at runtime")]
     assert!(!cfg!(debug_assertions), "measure --release only");
     println!("runner={} arch={} os={} viewport=38x24 samples=100 warmup=10", std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()), std::env::consts::ARCH, std::env::consts::OS);
     let mut failures = Vec::new();
