@@ -36,6 +36,7 @@ fn sidebar_scale_real_server_refuses_4097th_live_member_atomically() {
     assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 4096);
 }
 async fn socket_load(count: usize, sustained: bool) {
+    #[allow(clippy::assertions_on_constants, reason = "ignored latency gate must compile in debug but reject debug measurements at runtime")]
     assert!(!cfg!(debug_assertions), "measure --release only");
     let root = tempfile::tempdir().unwrap(); let socket = root.path().join("scale.sock");
     let store = Arc::new(Store::open(&root.path().join("graph.db"), "sidebar-scale").unwrap()); fixture(&store, count);
