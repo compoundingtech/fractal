@@ -73,7 +73,7 @@ mission "service-planned" state="ready" {
     for body in [
         json!({"api_version":"st3.client.v0","device_name":"Pending device","person_id":OWNER,"scopes":["read.projections"]}),
         json!({"api_version":"st3.client.v0","device_name":"Pending assistant","assistant_id":"assistant/chatgpt",
-            "scopes":["read.assistant.summary"],"disclosure_consent":true,"consent_evidence":"Recorded owner consent"}),
+            "scopes":&external_grants::SCOPES[..4],"disclosure_consent":true,"consent_evidence":"Recorded owner consent"}),
     ] {
         let (status,challenge) = request(&native,"POST","/v1/client/pairings",None,body).await;
         assert_eq!(status,StatusCode::OK,"{challenge}");
@@ -173,10 +173,11 @@ async fn paired_devices_and_browser_sessions_cannot_use_service_claim_routes() {
 #[tokio::test]
 async fn real_predicate_gate_receipt_withholds_gate_name() {
     use fractal_reconcile::reconcile::{Reconciler, tests::FakeRuntime};
-    use fractal_api_core::{MissionsStore, MissionsStoreCore};
+    use fractal_api_core::MissionsStore;
     let root = tempfile::tempdir().unwrap();
     let mut state = tests_shared::state(root.path());
     state.owning_person = Some(OWNER.into());
+    let document = state.store.put_document_as("doc/service-gate-input",b"present",&None,"service-gate-input",None).unwrap();
     let source = r#"version 2
 mission "service-gate" state="ready" {
   goal "Protect literal gate names."
@@ -185,11 +186,10 @@ mission "service-gate" state="ready" {
     gate "gate-name-secret-sentinel" { exists "doc/service-gate-input" }
   }
 }
-"#;
-    let intent = crate::graph::parse_test_intent(source,"node").unwrap();
-    let plan = state.store.mission(&intent,crate::model::IntentInput { kdl:source.into(),source_name:None }).unwrap();
+"#.replace("doc/service-gate-input",&format!("doc/service-gate-input@{}",document.hash));
+    let intent = crate::graph::parse_test_intent(&source,"node").unwrap();
+    let plan = state.store.mission(&intent,crate::model::IntentInput { kdl:source,source_name:None }).unwrap();
     state.store.apply(&intent,&plan.subject_tokens,"service-gate-publish").unwrap();
-    state.store.put_document_as("doc/service-gate-input",b"present",&None,"service-gate-input",None).unwrap();
     state.store.create_mission_run(&crate::model::MissionRunRequest {
         mission:"service-gate".into(),revision:None,workspace:root.path().display().to_string(),
         requester:Some(OWNER.into()),mode:Some("run".into()),inputs:std::collections::BTreeMap::new(),
