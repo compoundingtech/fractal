@@ -111,6 +111,7 @@ const AllStatesSurface = (args: Args) =>
   </main>
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/UsageSection',
   component: UsageSection,
   render: Surface,
@@ -120,6 +121,18 @@ const meta = {
 } satisfies Meta<Args & React.ComponentProps<typeof UsageSection>>
 export default meta
 type Story = StoryObj<Args>
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'Collapsed:contract-fixture',
+  'KeyboardAndMemory:contract-fixture',
+  'Light:contract-fixture',
+  'MinimumWidth:contract-fixture',
+  'NarrowDrawer:contract-fixture',
+  'NoQuotaSource:contract-fixture',
+  'Open:contract-fixture',
+]
 
 const section = (canvas: HTMLElement) => canvas.querySelector<HTMLElement>('[data-usage-section]')!
 
