@@ -52,10 +52,10 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
-Heavy checks use `gate-slot --class heavy --profile disk=cargo-cold` when gate-slot is on PATH: its admission owns the
-host's memory cap and disk floor, and its wait/refusal reason is printed with the check output. Without gate-slot (standalone
-use), the existing caller/seat/builds.slice cap is used when available, otherwise the check runs without a host cap.
-ST_EVIDENCE_GOVERN=off explicitly disables this wrapping.
+Runs selecting heavy checks take exactly one `gate-slot --class heavy --profile disk=cargo-cold` admission when gate-slot is
+on PATH. All checks share its capped scope and disk reservation until the run ends; host wait/refusal reasons reach the terminal.
+Without gate-slot (standalone use), the existing per-check caller/seat/builds.slice cap is used when available, otherwise checks
+run without a host cap. ST_EVIDENCE_GOVERN=off explicitly disables this wrapping.
 
 A run's TMPDIR (and TMP and TEMP), for itself and every check, is a directory of its own on disk, /var/tmp/st-test.XXXXXXXX (in
 ST_TEST_TMP when set), removed when the run ends; --keep keeps it and says where. Each `nix develop` leaves a nix-shell.* directory
@@ -629,7 +629,7 @@ def run_base_copy(argv):
     changes are still tested by ci-script-tests (fractal-test-test runs from the tree), and that is what is signed. There is no opt-out.
     This copy runs only when the base's st-test is absent, empty or this file, or this already is the base's copy (ST_TEST_REEXEC).
     The human-facing fractal-test shim cannot be copied alone; retain st-test until every supported base permits contraction."""
-    if os.environ.get(REEXEC):
+    if os.environ.get(REEXEC) or os.environ.get(RUN_ADMITTED):
         return
     scrub_git_environment()
     parser = argparse.ArgumentParser(add_help=False)
@@ -1002,13 +1002,32 @@ def heavy_admission(argv, gate_slot):
     return [gate_slot, '--class', 'heavy', '--profile', 'disk=cargo-cold', '--'] + argv
 
 
-def governed(argv, name, output=None):
-    """Wrap a building check in the host's heavy admission, including its disk profile and capped scope, when gate-slot is installed.
-    Admission diagnostics go to the same output as evidence-wrap; a refusal is a failed check, never retried outside admission.
-    The recorded command is unchanged: only what starts evidence-wrap changes.
+RUN_ADMITTED = 'ST_EVIDENCE_RUN_ADMITTED'
 
-    Standalone hosts retain their existing cap selection below, with no heavy-stage cargo ticket: the test guardian detaches
-    from its parents, so cargo commands beneath it cannot reuse an ancestor's stage ticket and would queue behind that ticket.
+
+def admit_run(argv, checks, environment):
+    """Re-enter this runner once inside the host scope, before it takes a pool tree or starts any check.
+
+    The continuation marker prevents recursion, including accepted-runner handovers. It is not proof of a cap: governed()
+    still checks the kernel before marking cargo as already capped. The existing explicit off switch remains the opt-out.
+    """
+    if environment.get('ST_EVIDENCE_GOVERN') == 'off' or environment.get(RUN_ADMITTED) or not BUILDS.intersection(checks):
+        return None
+    gate_slot = shutil.which('gate-slot')
+    if not gate_slot:
+        return None
+    print('fractal-test: run waits for gate-slot heavy admission (disk=cargo-cold); host wait/refusal reasons follow',
+          file=sys.stderr, flush=True)
+    child_environment = dict(environment, **{RUN_ADMITTED: '1'})
+    # Replace the outside process: gate-slot owns signals and the complete runner lifetime, with no waiting parent left outside its scope.
+    return os.execve(gate_slot, heavy_admission([sys.executable, str(Path(__file__).resolve()), *argv], gate_slot),
+                     child_environment)
+
+
+def governed(argv, name, output=None):
+    """Use the enclosing run's kernel-verified cap, or the existing standalone per-check cap selection.
+    No cargo stage ticket is held for a whole check: the test guardian detaches from its parents, so cargo beneath it cannot
+    reuse an ancestor's stage ticket and would queue behind that ticket. Run-wide gate-slot admission uses a separate semaphore.
     A host without a user systemd bus runs as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
     A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
@@ -1026,11 +1045,6 @@ def governed(argv, name, output=None):
     lane's sccache socket, since a lane's server started inside a run kept the run's removed TMPDIR (2026-11-01)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
-    gate_slot = shutil.which('gate-slot')  # resolve before the check's fixed PATH replaces the caller's
-    if gate_slot:
-        print(f'fractal-test: {name} waits for gate-slot heavy admission (disk=cargo-cold); host wait/refusal reasons follow',
-              file=output or sys.stderr, flush=True)
-        return heavy_admission(argv, gate_slot)
     cap = own_cap()
     if cap:
         print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=output or sys.stderr)
@@ -3574,6 +3588,7 @@ def main(argv):
 
 def run_main(argv, cleanup):
     main_started = time.monotonic()
+    caller_environment = dict(os.environ)  # retain pool/handover switches across admission before the seat scrub drops them
     # Measurement-only callers may execute a candidate with REEXEC set. Such a run must never enter the accepted runner's SLOs.
     candidate = bool(os.environ.get(REEXEC) and not Path(__file__).parent.name.startswith('st-test-base-'))
     CLAIMED.clear()
@@ -3596,7 +3611,11 @@ def run_main(argv, cleanup):
     # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
     if not (HANDOVER and os.environ.get('ADMISSION_RUN')):  # a handed-over run keeps its place in the host's order too
         os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
-    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split('\n\n')[0],
+        epilog='Heavy runs take one gate-slot --class heavy --profile disk=cargo-cold admission for the entire run when gate-slot is '
+               'on PATH. Without gate-slot, standalone use retains the existing per-check host cap when available, otherwise no host cap. '
+               'ST_EVIDENCE_GOVERN=off explicitly disables wrapping.')
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     publication = parser.add_mutually_exclusive_group()
@@ -3650,6 +3669,11 @@ def run_main(argv, cleanup):
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
         return 0
+    if not args.status:
+        # Publication can top up to the full suite after merging a newer base, even if its initial selection was light.
+        admitted = admit_run(argv, all_checks if args.push and not args.out and not TARGET else checks, caller_environment)
+        if admitted is not None:
+            return admitted  # refusal propagates without any pool preparation, checks, or signing in this process
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
