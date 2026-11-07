@@ -19,10 +19,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(bound: bool) -> Self {
-        fn chooser(_: u32) -> HarnessAncestry {
+        fn chooser(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
             HarnessAncestry::Bound(SEAT.into())
         }
-        fn unbound(_: u32) -> HarnessAncestry {
+        fn unbound(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
             HarnessAncestry::Person
         }
         let root = tempfile::tempdir().unwrap();

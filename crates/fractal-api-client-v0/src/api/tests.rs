@@ -12,7 +12,7 @@ use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, g
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
-    fn own_seat(_pid: u32) -> fractal_api_core::api::HarnessAncestry {
+    fn own_seat(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_api_core::api::HarnessAncestry {
         fractal_api_core::api::HarnessAncestry::Bound("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();

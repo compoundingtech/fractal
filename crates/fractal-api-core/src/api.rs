@@ -6924,7 +6924,7 @@ pub async fn serve_unix_with_ancestor(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> HarnessAncestry,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
@@ -6934,7 +6934,7 @@ async fn serve_unix_with_ancestor_ready(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> HarnessAncestry,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
@@ -7032,7 +7032,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> HarnessAncestry,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let ReservedUnixSocket {
@@ -7091,12 +7091,19 @@ async fn serve_reserved_unix_with_ancestor_ready(
             if let Some(connection) = &mut diagnostic_connection {
                 connection.queued();
             }
+            let ancestry_peer = peer_process.clone();
             let (ancestry, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.started();
                     }
-                    let ancestry = if bind_ancestry { ancestor(pid) } else { HarnessAncestry::Person };
+                    let ancestry = if !bind_ancestry {
+                        HarnessAncestry::Person
+                    } else if ancestry_peer.is_none() {
+                        HarnessAncestry::Unavailable
+                    } else {
+                        ancestor(pid, ancestry_peer.as_ref())
+                    };
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
                         ancestry.agent(),
@@ -7219,10 +7226,15 @@ struct HarnessProcess {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn walk_harness_ancestry(
     mut pid: u32,
+    peer: Option<&fractal_runtime::PeerProcessIdentity>,
     mut inspect: impl FnMut(u32) -> Option<HarnessProcess>,
     identity: impl Fn(u32) -> Option<HarnessAncestry>,
 ) -> HarnessAncestry {
     let Some(first) = inspect(pid) else { return HarnessAncestry::Unavailable; };
+    let Some(peer) = peer else { return HarnessAncestry::Unavailable; };
+    let Some((_, birth)) = first.generation else { return HarnessAncestry::Unavailable; };
+    if peer.validate_generation(pid, birth).is_err() { return HarnessAncestry::Unavailable; }
+    let connector = pid;
     let uid = first.uid;
     let mut first = Some(first);
     let mut observed = std::collections::BTreeMap::new();
@@ -7245,6 +7257,11 @@ fn walk_harness_ancestry(
     if observed.into_iter().any(|(pid, birth)| {
         !inspect(pid).is_some_and(|current| current.uid == uid && current.generation.is_some_and(|(_, token)| token == birth))
     }) {
+        return HarnessAncestry::Unavailable;
+    }
+    if !inspect(connector).and_then(|process| process.generation)
+        .is_some_and(|(_, token)| peer.validate_generation(connector, token).is_ok())
+    {
         return HarnessAncestry::Unavailable;
     }
     binding
@@ -7293,12 +7310,12 @@ fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn harness_ancestor(pid: u32) -> HarnessAncestry {
-    walk_harness_ancestry(pid, local_harness_process, local_harness_identity)
+fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn harness_ancestor(_pid: u32) -> HarnessAncestry {
+fn harness_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
     HarnessAncestry::Unavailable
 }
 

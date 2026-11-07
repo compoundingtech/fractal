@@ -16,15 +16,18 @@ use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
-    let pid = std::process::id() + 1;
+    let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
     for (ancestor, expected) in [
         (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
         (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
         (None, HarnessAncestry::Unavailable),
     ] {
-        let result = walk_harness_ancestry(pid, |candidate| {
+        let result = walk_harness_ancestry(pid, Some(&peer), |candidate| {
             if candidate == pid {
-                Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, 123)) })
+                Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)) })
             } else {
                 ancestor
             }
@@ -34,6 +37,50 @@ fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
         });
         assert_eq!(result, expected);
     }
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> HarnessAncestry {
+    let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let process = local_harness_process(pid).unwrap();
+    let mut inspection = 0;
+    let result = walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+        let mut current = process;
+        if changed_at == Some(inspection) {
+            current.generation.as_mut().unwrap().1 =
+                current.generation.unwrap().1.wrapping_add(1);
+        }
+        inspection += 1;
+        Some(current)
+    }, |_| Some(HarnessAncestry::Bound("agent/fixture/worker".into())));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_connector_generation_mismatch_is_unavailable() {
+    for inspection in [0, 1, 2] {
+        assert_eq!(captured_connector_case(true, Some(inspection)), HarnessAncestry::Unavailable);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_failed_connector_capture_is_unavailable() {
+    assert_eq!(captured_connector_case(false, None), HarnessAncestry::Unavailable);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_matching_connector_capture_binds() {
+    assert_eq!(captured_connector_case(true, None),
+        HarnessAncestry::Bound("agent/fixture/worker".into()));
 }
 
 // A real serving-boundary probe for manual person-CLI integration checks.
@@ -56,7 +103,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_| HarnessAncestry::Bound("agent/example".into()),
+        reserved, router(state), Some(store.clone()), |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -87,10 +134,10 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         let socket = root.path().join("bound.sock");
         let reserved = reserve_unix_socket(&socket, None).await.unwrap();
         let (ready, waiting) = tokio::sync::oneshot::channel();
-        let lookup: fn(u32) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
-            |_| HarnessAncestry::Unavailable
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
+            |_, _| HarnessAncestry::Unavailable
         } else {
-            |_| HarnessAncestry::Person
+            |_, _| HarnessAncestry::Person
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
         let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
@@ -141,7 +188,8 @@ async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, 
         if let Some(value) = primary { command.env("ST_AGENT", value); }
         if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
         let mut child = command.spawn().unwrap();
-        let ancestry = harness_ancestor(child.id());
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(child.id()).unwrap();
+        let ancestry = harness_ancestor(child.id(), Some(&peer));
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(ancestry, HarnessAncestry::Unavailable);
@@ -183,7 +231,8 @@ fn a_harness_descendant_without_agent_environment_is_bound() {
     let mut pid = String::new();
     std::io::BufReader::new(harness.stdout.take().unwrap()).read_line(&mut pid).unwrap();
     let pid: u32 = pid.trim().parse().unwrap();
-    let ancestry = harness_ancestor(pid);
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
     // The child announces readiness after exec, then stays alive until inspection ends.
     harness.stdin.take().unwrap().write_all(b"done\n").unwrap();
     harness.wait().unwrap();
@@ -952,7 +1001,8 @@ fn a_unix_peer_is_bound_to_its_harness_environment() {
         .unwrap();
     let mut bound = HarnessAncestry::Unavailable;
     for _ in 0..50 {
-        bound = harness_ancestor(child.id());
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(child.id()).unwrap();
+        bound = harness_ancestor(child.id(), Some(&peer));
         if bound.agent().is_some() {
             break;
         }
@@ -2997,7 +3047,7 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     use http_body_util::{BodyExt as _, Empty};
     use hyper::client::conn::http1::SendRequest;
 
-    fn slow_ancestor(_pid: u32) -> HarnessAncestry {
+    fn slow_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
         std::thread::sleep(Duration::from_millis(500));
         HarnessAncestry::Person
     }
@@ -3056,8 +3106,8 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
 async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
     use http_body_util::{BodyExt as _, Full};
 
-    fn ancestor(_pid: u32) -> Option<String> {
-        Some("agent/example-bound-original/worker".into())
+    fn ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+        HarnessAncestry::Bound("agent/example-bound-original/worker".into())
     }
 
     let root = tempfile::tempdir().unwrap();

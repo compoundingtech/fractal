@@ -84,6 +84,18 @@ impl PeerProcessIdentity {
         self.pid
     }
 
+    /// Match an inspected generation to the accept-time witness, including liveness.
+    pub fn validate_generation(&self, pid: u32, start_token: u64) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            anyhow::ensure!(pid == self.pid && start_token == self.start_token,
+                "ancestry connector differs from the accepted process generation");
+            self.validate()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { let _ = (pid, start_token); anyhow::bail!("process generation witnesses unavailable") }
+    }
+
     /// Pin a process explicitly enrolled by the trusted launcher before listening.
     pub fn capture_pid(pid: u32) -> Result<Self> {
         #[cfg(target_os = "linux")]
