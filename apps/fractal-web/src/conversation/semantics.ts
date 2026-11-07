@@ -35,7 +35,9 @@ export const roleSender = ({
 
 /** Fractal subjects carry provenance in their explicit subject prefix. */
 export const deliverySender = (from: string | undefined): Sender =>
-  from?.startsWith('agent/') === true
+  from?.startsWith('daemon/') === true
+    ? { kind: 'system', label: 'Fractal', via: 'daemon' }
+    : from?.startsWith('agent/') === true
     ? { kind: 'st-agent', label: from.slice('agent/'.length), via: 'st' }
     : from?.startsWith('human/') === true ||
         from?.startsWith('user/') === true ||
@@ -286,7 +288,7 @@ export const senderOf = ({
     case 'Text':
       return roleSender({ role: item.role, agentName: agentName })
     case 'Message':
-      return deliverySender(item.from)
+      return deliverySender(item.author ?? item.from)
     case 'Reasoning':
     case 'ToolCall':
       return { kind: 'agent', label: agentName }
