@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reserve a reviewed immutable delivery receipt contract outside disposable notice snapshots.",
+  "replay": { "status": "changed", "detail": "The receipt namespace is reserved before receipt admission is enabled. Generic custom data under it is not authorized delivery evidence and stays hidden." },
+  "schema": { "status": "changed", "detail": "Add the compiled pinned creation-only attention.notice-receipt v1 manifest, custom/attention/receipt/ subjects and custom.attention.receipt-created kind. Receipt structure binds source creation, producer, person recipient, opaque owner declaration hash, adapter surface and delivered/failed evidence. It has no runtime field or update claim." },
+  "rules": { "status": "changed", "detail": "Structural validation authenticates nothing by itself. Durable receipt authorization is a separate fail-closed owner-incarnation causal-position check; a runtime designation, old declaration hash or payload timestamp is not a substitute." },
+  "compatibility": { "status": "changed", "detail": "Roots, ancestors, descendants and claim kinds are reserved together, including alternate-prefix squats. Generic list/detail reads do not expose receipts. This internal contract registers no native API operation or capability." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "There is no supported receipt history to migrate." },
+  "recovery": { "status": "changed", "detail": "Missing receipt authorization means delivery unknown. Snapshot reconstruction must not invent delivered status or trigger automatic redelivery." }
+}

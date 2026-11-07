@@ -1,4 +1,4 @@
-//! Reviewed v1 registrations for the three notice authority domains.
+//! Reviewed v1 registrations for the four notice authority domains.
 //! These manifests describe storage, not the joined NoticeSnapshot read model.
 //! Storage field bounds do not replace native lineage or typed view/action validation.
 use crate::{ValidationError, custom, error};
@@ -9,11 +9,13 @@ use std::{collections::BTreeMap, sync::LazyLock};
 pub const SOURCE_PREFIX: &str = "custom/attention/source/";
 pub const SNAPSHOT_PREFIX: &str = "custom/attention/snapshot/";
 pub const CONTROL_PREFIX: &str = "custom/attention/control/";
-pub const PREFIXES: [&str; 3] = [SOURCE_PREFIX, SNAPSHOT_PREFIX, CONTROL_PREFIX];
-pub const HASHES: [&str; 3] = [
+pub const RECEIPT_PREFIX: &str = "custom/attention/receipt/";
+pub const PREFIXES: [&str; 4] = [SOURCE_PREFIX, SNAPSHOT_PREFIX, CONTROL_PREFIX, RECEIPT_PREFIX];
+pub const HASHES: [&str; 4] = [
     "1282a67945367e1557ab423f0ad6e4547c48629d9cbc0479ad70b15ef7c6a530",
     "975f19c2cd036faa8ba19c663a5557e2cad01ba3eb4f2c274773f5a2685aec10",
     "ea890a46d937566b480ea782047f3e6d923810414e5b0e52e0c8a883561efbb0",
+    "0d9b72fca0f63e4bbcc2509d0fe6cfc3b11b81d16255fc02c5b00c89a93084eb",
 ];
 
 /// Stable domain identity: the immutable source UUID, never a runtime snapshot subject.
@@ -42,16 +44,16 @@ pub fn is_reserved_kind(kind: &str) -> bool {
         || kind == "attention.notice" || kind.starts_with("attention.notice-")
 }
 
-pub fn manifests() -> &'static [custom::Manifest; 3] {
-    static MANIFESTS: LazyLock<[custom::Manifest; 3]> = LazyLock::new(|| {
-        [build("source"), build("snapshot"), build("control")]
+pub fn manifests() -> &'static [custom::Manifest; 4] {
+    static MANIFESTS: LazyLock<[custom::Manifest; 4]> = LazyLock::new(|| {
+        [build("source"), build("snapshot"), build("control"), build("receipt")]
     });
     &MANIFESTS
 }
 
 /// A candidate identity selects a reviewed pin, never a caller-provided hash.
 pub fn pinned_hash(manifest: &custom::Manifest) -> Option<&'static str> {
-    ["attention.notice-source", "attention.notice-snapshot", "attention.notice-control"]
+    ["attention.notice-source", "attention.notice-snapshot", "attention.notice-control", "attention.notice-receipt"]
         .iter().position(|kind| manifest.kind == *kind)
         .filter(|_| manifest.version == 1)
         .map(|index| HASHES[index])
@@ -110,13 +112,21 @@ fn build(family: &str) -> custom::Manifest {
         claim.pattern = Some("[0-9a-f]{64}".into());
         fields.insert("creation_claim".into(), claim);
         if family == "snapshot" {
-            fields.insert("policy".into(), field("object", true, &[]));
-            let mut delivery = field("array", true, &[]);
             let mut binding = field("string", true, &[]);
             binding.pattern = Some("[0-9a-f]{64}".into());
             fields.insert("runtime_binding".into(), binding);
+            fields.insert("policy".into(), field("object", true, &[]));
+            let mut delivery = field("array", true, &[]);
             delivery.max_items = 4;
             fields.insert("delivery".into(), delivery);
+        } else if family == "receipt" {
+            let mut binding = field("string", true, &[]);
+            binding.pattern = Some("[0-9a-f]{64}".into());
+            fields.insert("owner_binding".into(), binding);
+            let mut surface = field("string", true, &[]);
+            surface.values = ["tray", "speech", "push", "log"].map(String::from).into();
+            fields.insert("surface".into(), surface);
+            fields.insert("outcome".into(), field("object", true, &[]));
         } else {
             for name in ["seen_at", "dismissed_at", "snoozed_until"] {
                 fields.insert(name.into(), field("any", true, &[]));
@@ -132,7 +142,7 @@ fn build(family: &str) -> custom::Manifest {
     }
     let creation_kind = format!("custom.attention.{}-created", if family == "source" { "notice" } else { family });
     let mut claims = BTreeMap::new();
-    if family != "source" {
+    if family != "source" && family != "receipt" {
         claims.insert(format!("custom.attention.{family}-updated"), custom::ClaimSchema {
             authority: custom::Authority::Owner, fields: fields.clone(), additional_fields: false,
         });
@@ -200,5 +210,38 @@ mod tests {
         assert!(validate_registration(&manifest, HASHES[0]).is_err());
         assert!(validate_registration(&manifest, &recomputed).is_err());
         assert!(validate_registration(&manifests()[0], &"0".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn notice_receipt_registration_is_pinned_and_creation_only() {
+        let manifest = &manifests()[3];
+        assert_eq!(manifest.creation_kind, crate::notice_receipt::KIND);
+        assert_eq!(manifest.claims.len(), 1);
+        assert_eq!(pinned_hash(manifest), Some(HASHES[3]));
+        validate_registration(manifest, HASHES[3]).unwrap();
+        let fields = &manifest.claims[&manifest.creation_kind].fields;
+        assert_eq!(fields.len(), 7);
+        assert!(!fields.contains_key("runtime"));
+        let mut changed = manifest.clone();
+        changed.claims.get_mut(&manifest.creation_kind).unwrap().additional_fields = true;
+        let hash = hex::encode(Sha256::digest(serde_json::to_vec(&changed).unwrap()));
+        assert!(validate_registration(&changed, &hash).is_err());
+    }
+
+    #[test]
+    fn notice_receipt_namespace_rejects_root_ancestor_descendant_and_kind_squats() {
+        for prefix in ["custom/attention/receipt", "custom/attention/", RECEIPT_PREFIX,
+            "custom/attention/receipt/nested/"] {
+            let mut manifest = manifests()[3].clone();
+            manifest.kind = "attention.other".into();
+            manifest.subject_prefix = prefix.into();
+            assert!(is_reserved_subject(prefix));
+            assert!(validate_registration(&manifest, HASHES[3]).is_err());
+        }
+        let mut manifest = manifests()[3].clone();
+        manifest.subject_prefix = "custom/unrelated/receipt/".into();
+        assert!(is_reserved_kind(&manifest.kind));
+        assert!(is_reserved_kind(&manifest.creation_kind));
+        assert!(validate_registration(&manifest, HASHES[3]).is_err());
     }
 }
