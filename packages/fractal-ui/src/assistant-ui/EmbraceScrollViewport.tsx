@@ -1,3 +1,4 @@
+import { LiveRing } from './composition/LiveRing'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
@@ -116,6 +117,7 @@ class FollowAnimation {
 class ViewportController {
   private element: HTMLDivElement | null = null
   private jumpButton: HTMLButtonElement | null = null
+  private running = false
   private following = true
   private anchor: { element: HTMLElement; offset: number } | undefined
   /** The anchor by row identity, captured while this conversation owns the DOM. */
@@ -184,9 +186,15 @@ class ViewportController {
     this.dock()
   }
 
-  /** Shows the jump only for unread rows, and never reflows the lane under an active press. */
+  /** Shows the jump for unread rows or a run the reader has scrolled away from, and never reflows the lane under an active press. */
   private dock() {
-    if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !this.unread
+    if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !(this.unread || (this.running && !this.following))
+  }
+
+  /** Host fact: a run is producing output below the reader. */
+  readonly setRunning = (running: boolean) => {
+    this.running = running
+    this.dock()
   }
 
   readonly released = (): ViewportState => {
@@ -410,7 +418,10 @@ class ViewportController {
         this.unread = false
         this.dock()
         this.anchor = undefined
-      } else this.scheduleCapture()
+      } else {
+        this.dock()
+        this.scheduleCapture()
+      }
       this.loadEarlierIfNeeded()
     }
     // Document-wide, so presses that start anywhere (a row action included) defer the reveal.
@@ -512,6 +523,8 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly stateKey?: string
   /** Host command: a changed, defined key resumes following and clears unread; an unchanged key never scrolls. */
   readonly scrollToBottomKey?: string
+  /** A run is in progress: a reader scrolled away from the end gets "Working · Jump to latest" instead of waiting for new rows. */
+  readonly running?: boolean
   /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
   readonly initialTailCount?: number
   /** Deferred rows below which a conversation mounts whole; defaults to one history batch. A strict bound passes 0. */
@@ -525,7 +538,7 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
 
 export const historyBatchSize = 4
 
-export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, anchorHistory, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, wholeMountSlack = historyBatchSize, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
+export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, anchorHistory, children, contentProps, stateKey, scrollToBottomKey, running = false, initialTailCount, wholeMountSlack = historyBatchSize, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)
   const saved = stateKey === undefined ? undefined : store?.get(stateKey)
   const rememberedFirstId = saved?.following === false ? saved.firstRenderedId : undefined
@@ -595,6 +608,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   }, [active, controller, firstId, items, materializing, stateKey, startIndex, window.key, window.firstId])
   // Every layout commit can insert above a pressed row, including runtime adoption without new items.
   React.useLayoutEffect(() => { controller.preservePress() })
+  React.useLayoutEffect(() => { controller.setRunning(running) }, [controller, running])
   // Mutation-phase saves precede the owning surface's layout effect that removes closed keys.
   React.useLayoutEffect(() => () => {
     if (previousKey.current !== undefined) store?.save(previousKey.current, controller.released())
@@ -602,12 +616,13 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   return <div {...stylex.props(styles.frame)}>
     {renderHeader?.(startIndex, revealRow, materializing)}
     <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{typeof children === 'function' ? children(startIndex, revealRow, materializing) : children}</div></div>
-    <Button ref={controller.attachJump} onPress={controller.jump} hidden {...stylex.props(styles.jump)}>New messages ↓</Button>
+    <Button ref={controller.attachJump} onPress={controller.jump} hidden {...stylex.props(styles.jump)}>{running ? <span {...stylex.props(styles.jumpWorking)}><LiveRing size="sm" />Working · Jump to latest</span> : 'New messages ↓'}</Button>
   </div>
 })
 
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
   // A visible jump control gets its own dock, never covering a reader's current line.
+  jumpWorking: { display: 'inline-flex', alignItems: 'center', gap: spaceVars.sm },
   jump: { flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
 })
