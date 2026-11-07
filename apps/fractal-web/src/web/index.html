@@ -22,16 +22,38 @@
         root.style.setProperty('--wf-boot-line', scheme === 'dark' ? '#242424' : '#e4e4e7')
       })()
     </script>
+    <script data-wf-layout-bootstrap>
+      // First-frame panel layout from `wf.boot@1`, the flat projection StateCell keeps of the panel
+      // cells (src/state/cells/panels.ts). Field names are a contract with those cells' `boot`.
+      ;(() => {
+        try {
+          const boot = JSON.parse(localStorage.getItem('wf.boot@1') ?? 'null')
+          if (boot === null || typeof boot !== 'object' || innerWidth < 900) return
+          const root = document.documentElement
+          if (boot['sidebar.open'] === false) root.dataset.wfBootSidebar = 'closed'
+          const ratio = boot['sidebar.ratio']
+          if (typeof ratio === 'number' && ratio > 0 && ratio < 1) root.style.setProperty('--wf-boot-sidebar-w', Math.round(ratio * innerWidth) + 'px')
+          const width = boot['dock.width']
+          if (boot['dock.open'] === true && typeof width === 'number' && location.pathname.startsWith('/w/')) {
+            root.dataset.wfBootDock = 'open'
+            root.style.setProperty('--wf-boot-dock-w', Math.round(width) + 'px')
+          }
+        } catch {}
+      })()
+    </script>
     <style data-wf-shell-bootstrap>
       html { background: var(--wf-boot-canvas, #0a0a0a); color-scheme: dark; }
       html, body, #root { height: 100%; margin: 0; }
       body { background: var(--wf-boot-canvas, #0a0a0a); }
       [data-wf-shell-skeleton] { display: flex; height: 100dvh; background: var(--wf-boot-canvas, #0a0a0a); }
-      [data-wf-sidebar-skeleton] { width: 256px; max-width: 40vw; padding: 8px; box-sizing: border-box; background: var(--wf-boot-sidebar, #000000); border-right: 1px solid var(--wf-boot-line, #242424); }
+      [data-wf-sidebar-skeleton] { width: var(--wf-boot-sidebar-w, 256px); max-width: 40vw; padding: 8px; box-sizing: border-box; background: var(--wf-boot-sidebar, #000000); border-right: 1px solid var(--wf-boot-line, #242424); }
       [data-wf-sidebar-skeleton] > div { height: 40px; display: flex; align-items: center; gap: 8px; }
       [data-wf-sidebar-skeleton] i { width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0; background: var(--wf-boot-line, #242424); }
       [data-wf-sidebar-skeleton] span { height: 8px; width: 65%; border-radius: 4px; background: var(--wf-boot-line, #242424); }
-      [data-wf-workspace-skeleton] { flex: 1; }
+      [data-wf-workspace-skeleton] { flex: 1; min-width: 0; }
+      [data-wf-dock-skeleton] { display: none; box-sizing: border-box; width: var(--wf-boot-dock-w, 440px); max-width: 50vw; border-left: 1px solid var(--wf-boot-line, #242424); }
+      html[data-wf-boot-dock='open'] [data-wf-dock-skeleton] { display: block; }
+      html[data-wf-boot-sidebar='closed'] [data-wf-sidebar-skeleton] { display: none; }
       [data-wf-header-skeleton] { height: 52px; box-sizing: border-box; border-bottom: 1px solid var(--wf-boot-line, #242424); display: flex; align-items: center; padding-inline: 16px; }
       [data-wf-header-skeleton] span { width: 140px; height: 8px; border-radius: 4px; background: var(--wf-boot-line, #242424); }
       [data-wf-style-failure] { padding: 16px; font: 12px/1.5 system-ui, sans-serif; color: CanvasText; }
@@ -123,6 +145,7 @@
           <div><i></i><span></span></div><div><i></i><span></span></div>
         </aside>
         <div data-wf-workspace-skeleton aria-hidden="true"><div data-wf-header-skeleton><span></span></div></div>
+        <div data-wf-dock-skeleton aria-hidden="true"></div>
       </div>
     </div>
     <script type="module" src="/main.tsx"></script>
