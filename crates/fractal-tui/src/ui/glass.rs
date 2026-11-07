@@ -2614,8 +2614,23 @@ impl Ui {
     fn status_line(&self, buf: &mut Buffer, area: Rect, glass: &Glass) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
         let bar = |style: Style| style.bg(theme::CRUST);
-        // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
-        let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
+        let mut spans = vec![Span::raw(" ")];
+        let sidebar_style = if self.glasses.sidebar.shown {
+            theme::strong(theme::ACCENT)
+        } else {
+            theme::dim()
+        };
+        let sidebar_text = "sidebar";
+        self.hit(
+            Rect {
+                x: area.x + 1,
+                width: sidebar_text.len() as u16,
+                ..area
+            },
+            Hit::SidebarToggle,
+        );
+        spans.push(Span::styled(sidebar_text, bar(sidebar_style)));
+        spans.push(Span::styled(" · ", bar(theme::dim())));
         let (glyph, word, color) = match &self.world.link {
             Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
             // Stale says which list: the word alone sent the person hunting for why.
@@ -8373,6 +8388,48 @@ mod tests {
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!ui.home_open());
         assert_eq!(ui.inventories_wanted().usage_hours, None);
+    }
+
+    #[test]
+    fn the_top_bar_sidebar_item_toggles_the_sidebar_like_ctrl_s() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut ui = glass();
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let target = ui.frame.borrow().hits.iter()
+            .find(|(_, hit)| *hit == Hit::SidebarToggle)
+            .map(|(rect, _)| *rect)
+            .expect("the top bar has a sidebar toggle");
+        assert_eq!(target, Rect::new(1, 0, 7, 1));
+        let top = screen(&ui);
+        assert!(top.lines().next().unwrap().starts_with(" sidebar · "));
+        assert_eq!(terminal.backend().buffer()[(target.x, target.y)].fg, theme::dim().fg.unwrap());
+        let click = |ui: &mut Ui| {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                ui.mouse(MouseEvent {
+                    kind,
+                    column: target.x + target.width / 2,
+                    row: target.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+            }
+        };
+        click(&mut ui);
+        assert!(ui.glasses.sidebar.shown && ui.glasses.sidebar.focused);
+        assert!(ui.glasses.sidebar.configured && ui.resource_sidebar.focused);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(target.x, target.y)].fg, theme::ACCENT);
+        assert!(terminal.backend().buffer()[(target.x, target.y)].modifier.contains(Modifier::BOLD));
+        click(&mut ui);
+        assert!(!ui.glasses.sidebar.shown && !ui.glasses.sidebar.focused);
+        assert!(!ui.resource_sidebar.focused);
+        ctrl(&mut ui, 's');
+        assert!(ui.glasses.sidebar.shown && ui.glasses.sidebar.focused);
+        click(&mut ui);
+        assert!(!ui.glasses.sidebar.shown);
     }
 
     #[test]
