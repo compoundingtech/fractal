@@ -279,7 +279,7 @@ pub async fn replication_receive(
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
-    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+    let (response, reconcile_changed, waking_kind, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -364,22 +364,32 @@ pub async fn replication_receive(
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
+        // One read answers both whether every new claim is quiet and which kind names the wake;
+        // only a change that projected can wake the reconciler, so no other receive asks it.
+        let (any_new, waking_kind) = if changed && projected {
+            store
+                .claims_since_waking_kind(before_index)
+                .map_err(|error| FractalError::new("internal", error.to_string()))?
+        } else {
+            (false, None)
+        };
         let quiet_only = projection_was_healthy
             && projected
             && repairs == 0
             && admission.unknown == 0
             && admission.invalid == 0
-            && store
-                .claims_since_only_quiet_notifications(before_index)
-                .map_err(|error| FractalError::new("internal", error.to_string()))?;
+            && any_new
+            && waking_kind.is_none();
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
+        let reconcile_changed = changed && !quiet_only && projected;
         Ok((
             ReplicationReceiveResponse {
                 receipt,
                 changed,
                 store_index,
             },
-            changed && !quiet_only && projected,
+            reconcile_changed,
+            waking_kind,
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
@@ -387,7 +397,7 @@ pub async fn replication_receive(
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,
-            None,
+            waking_kind.as_deref(),
         );
         state.notify.notify_one();
     }

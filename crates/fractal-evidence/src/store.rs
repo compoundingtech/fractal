@@ -126,6 +126,8 @@ pub mod owned_sets_tests;
 pub mod roster_fresh_proof_tests;
 #[cfg(test)]
 pub mod projection_catch_up_tests;
+#[cfg(test)]
+mod gate_runners_cost_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 
