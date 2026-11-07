@@ -56,16 +56,16 @@ async function columns(canvasElement: HTMLElement) {
 }
 
 /** The composer and the transcript rows share one column: equal edges, capped at the lane maximum. */
-export const ReadingColumn: Story = { ...scenarioColumn, tags: ['critical'], play: async ({ canvasElement }) => {
+export const ReadingColumn: Story = { ...scenarioColumn, tags: ['critical', 'both-widths'], play: async ({ canvasElement }) => {
   const { row, composer, lane } = await columns(canvasElement)
   await expect(Math.abs(composer.left - row.left), `composer left ${composer.left} vs transcript left ${row.left}`).toBeLessThanOrEqual(0.5)
   await expect(Math.abs(composer.right - row.right), `composer right ${composer.right} vs transcript right ${row.right}`).toBeLessThanOrEqual(0.5)
   await expect(composer.width).toBeLessThanOrEqual(lane + 0.5)
   await expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
 } }
-export const ReadingColumnLight: Story = { ...ReadingColumn, args: { ...scenarioColumn.args, scheme: 'light' } }
+export const ReadingColumnLight: Story = { ...ReadingColumn, tags: ['critical', '!both-widths'], args: { ...scenarioColumn.args, scheme: 'light' } }
 /** Without the opt-in, the composer keeps filling its host. */
-export const HostWidth: Story = { ...scenarioColumn, tags: ['critical'], args: { ...scenarioColumn.args, readingColumn: false }, play: async ({ canvasElement }) => {
+export const HostWidth: Story = { ...scenarioColumn, tags: ['critical', 'both-widths'], args: { ...scenarioColumn.args, readingColumn: false }, play: async ({ canvasElement }) => {
   const { composer, dock } = await columns(canvasElement)
   await expect(Math.abs(composer.width - dock.width)).toBeLessThanOrEqual(0.5)
 } }

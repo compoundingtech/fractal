@@ -24,12 +24,35 @@ pub struct ReplicationRecordsQuery {
     unresolved: bool,
 }
 
+fn generic_replica_record_visible(record: &ReplicaRecordView) -> bool {
+    !record.subject.as_deref().is_some_and(fractal_schema::notice::is_reserved_subject)
+        && !record.kind.as_deref().is_some_and(fractal_schema::notice::is_reserved_kind)
+}
+
+#[test]
+fn notice_replication_diagnostics_hide_reserved_subject_or_kind() {
+    let mut record: ReplicaRecordView = serde_json::from_value(json!({
+        "record_ref":"record/example", "writer":"example", "sequence":1,
+        "envelope_hash":"example", "position":0, "state":"valid",
+        "subject":"custom/example/ordinary", "kind":"custom.example.created"
+    })).unwrap();
+    assert!(generic_replica_record_visible(&record));
+    record.subject = Some("custom/attention/source/legacy".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.subject = Some("custom/example/alternate".into());
+    record.kind = Some("custom.attention.notice-created".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.kind = Some("attention.notice-source".into());
+    assert!(!generic_replica_record_visible(&record));
+}
+
 pub async fn replication_records(
     State(state): State<AppState>,
     Query(query): Query<ReplicationRecordsQuery>,
 ) -> Result<Json<Vec<ReplicaRecordView>>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.replica_records(query.unresolved))
+    blocking_store(move || Ok(store.replica_records(query.unresolved)?
+        .into_iter().filter(generic_replica_record_visible).collect()))
         .await
         .map(Json)
 }
@@ -47,6 +70,7 @@ pub async fn replication_record(
     let record_for_read = record.clone();
     blocking_store(move || store.replica_record(&record_for_read))
         .await?
+        .filter(generic_replica_record_visible)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }

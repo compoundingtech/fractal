@@ -28,7 +28,7 @@ for (const vector of vectors.cases) it(`v2 planner ${vector.name}`, () => {
       const identity = { actor: base.owner, action_id: 'action/test', idempotency_key: 'key/test' }
       editor.reduce({ _tag: 'Plan', base: { scope, ready: true, revision: base.revision, snapshot: { id: 'snapshot/test', host_id: scope.host, store_index: 1, projection_version: '1', created_at: 'created', expires_at: 'expires' } }, ...plan.edit, folder: { ...identity, action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: identity })
       editor.execute('PersistPending')
-      const sent = editor.execute('Send')
+      const sent = editor.execute({ _tag: 'Send', delivery: 'Replay' })
       if (sent._tag !== 'Applied' || !sent.request) throw new Error('request not journaled')
       expect(membershipWriteRequest(sent.request).parameters.operations).toEqual(plan.edit.folders.length ? plan.edit.folders : plan.edit.memberships)
     }

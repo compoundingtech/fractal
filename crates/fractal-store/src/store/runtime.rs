@@ -762,10 +762,12 @@ impl FractalRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         cache.views.clear();
+        cache.serving_views.clear();
         cache.statuses.clear();
         cache.summary_statuses.clear();
         cache.runtime_statuses.clear();
         cache.card_statuses.clear();
+        cache.serving_card_statuses.clear();
         drop(cache);
         let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
         self.conversation_owner_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

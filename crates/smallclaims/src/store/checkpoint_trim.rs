@@ -9,6 +9,7 @@
 //! what is left. At every point the inventory lists the same identities, since a tombstone and
 //! the envelope it stands for have one identity, so peers cannot tell.
 
+use super::checkpoint::stage_times::{StageTimes, timing_deletes};
 use super::checkpoint::{
     CheckpointManifest, ClaimTombstone, EnvelopeTombstone, checkpoint_name, delete_dropped_rows_tx,
     record_checkpoint_tombstones_tx, verify_checkpoint_manifest,
@@ -132,9 +133,23 @@ impl<'a> TrimViews<'a> {
 
     fn patch_snapshot(&mut self) {
         let trimmed = std::mem::take(&mut self.trimmed);
-        if self.store.mark_payloads_trimmed(&trimmed).is_err() {
+        match self.store.mark_payloads_trimmed(&trimmed) {
+            // Each patch moves the replica generation, so every peer's next exchange builds and
+            // serves on from it; the line says what that patch cost the snapshot build lock.
+            Ok(patch) => self.store.trim_log(format_args!(
+                "a trim patched the replication snapshot {}",
+                serde_json::json!({
+                    "envelopes": patch.envelopes,
+                    "marked": patch.marked,
+                    "cached": patch.cached,
+                    "cloned": patch.cloned,
+                    "lock_wait_ms": patch.lock_wait.as_millis(),
+                    "held_ms": patch.held.as_millis(),
+                    "generation": patch.generation,
+                }),
+            )),
             // A snapshot that cannot be patched is built from nothing instead.
-            self.store.forget_replication_snapshot();
+            Err(_) => self.store.forget_replication_snapshot(),
         }
     }
 }
@@ -184,6 +199,8 @@ struct TrimWalState {
 
 /// A trim chunk that holds the writer longer than this logs one line saying what it did.
 pub const LOGGED_TRIM_CHUNK: std::time::Duration = std::time::Duration::from_secs(1);
+/// How many of a slow chunk's stages its line names, longest first.
+const TRIM_CHUNK_LOGGED_STAGES: usize = 6;
 
 /// The bytes of the bodies of `claims` that this store still holds.
 fn claim_body_bytes(transaction: &Transaction<'_>, claims: &[ClaimTombstone]) -> Result<u64> {
@@ -400,8 +417,10 @@ impl Store {
     }
 
     /// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
-    /// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
-    /// and the commit, so a member attributes its own outliers.
+    /// claims it took, the bytes of the claim bodies it deleted, its hold split into the steps
+    /// and the commit, and the steps' longest stages, so a member attributes its own outliers to
+    /// the statement behind them.
+    #[allow(clippy::too_many_arguments)]
     fn log_if_slow_trim_chunk(
         &self,
         phase: &str,
@@ -410,22 +429,24 @@ impl Store {
         envelopes: usize,
         claims: usize,
         body_bytes: u64,
+        stages: Option<&StageTimes>,
     ) {
         if held <= LOGGED_TRIM_CHUNK {
             return;
         }
-        self.trim_log(format_args!(
-            "a trim chunk held the store's writer over 1 s {}",
-            serde_json::json!({
-                "phase": phase,
-                "held_ms": held.as_millis(),
-                "step_ms": held.saturating_sub(commit).as_millis(),
-                "commit_ms": commit.as_millis(),
-                "envelopes": envelopes,
-                "claims": claims,
-                "body_bytes": body_bytes,
-            }),
-        ));
+        let mut fields = serde_json::json!({
+            "phase": phase,
+            "held_ms": held.as_millis(),
+            "step_ms": held.saturating_sub(commit).as_millis(),
+            "commit_ms": commit.as_millis(),
+            "envelopes": envelopes,
+            "claims": claims,
+            "body_bytes": body_bytes,
+        });
+        if let Some(stages) = stages {
+            fields["stages"] = stages.largest(TRIM_CHUNK_LOGGED_STAGES);
+        }
+        self.trim_log(format_args!("a trim chunk held the store's writer over 1 s {fields}"));
     }
 
     pub fn set_trim_wal(&self, limits: TrimWal) {
@@ -1144,7 +1165,7 @@ impl Store {
                 let committing = std::time::Instant::now();
                 transaction.commit()?;
                 let held = held_since.elapsed();
-                self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
+                self.log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0, None);
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
@@ -1256,20 +1277,28 @@ impl Store {
             let mut claims = Vec::new();
             let mut body_bytes = 0;
             let mut steps = 0;
+            let mut stages = StageTimes::default();
             // Only an empty lookup proves exhaustion. Even if transaction setup spent the
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
             while steps < most
                 && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET)
                 && left.is_none_or(|left| (claims.len() as u64) < left)
             {
-                let Some((envelope, envelope_claims)) = next_trim_rows(&transaction, &mut cursor)? else {
+                let Some((envelope, envelope_claims)) = stages.time("walk", || next_trim_rows(&transaction, &mut cursor))? else {
                     break;
                 };
-                body_bytes += claim_body_bytes(&transaction, &envelope_claims)?;
-                self.runtime.delete_trimmed_claims_tx(&transaction, &envelope_claims, &mut || {
-                    delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)
-                })?;
-                self.pause_for_trim_row_cost();
+                body_bytes += stages.time("body_bytes", || claim_body_bytes(&transaction, &envelope_claims))?;
+                // The runtime's work around the delete is what the hook took beyond its statements.
+                let hooked = std::time::Instant::now();
+                let (deleted, deletes) = timing_deletes(|| {
+                    self.runtime.delete_trimmed_claims_tx(&transaction, &envelope_claims, &mut || {
+                        delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)
+                    })
+                });
+                deleted?;
+                stages.add("runtime_hook", hooked.elapsed().saturating_sub(deletes.total()));
+                stages.merge(deletes);
+                stages.time("row_cost_pause", || self.pause_for_trim_row_cost());
                 envelopes.extend(envelope);
                 claims.extend(envelope_claims);
                 steps += 1;
@@ -1281,13 +1310,15 @@ impl Store {
             let changed = if projection_digest::generation(&transaction)? == generation {
                 false
             } else {
-                let after = graph_digest(&transaction)?;
-                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcad476fc11b6 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "ROLLBACK TO trim_chunk")?;
-                let before = graph_digest(&transaction)?;
-                self.runtime.delete_trimmed_claims_tx(&transaction, &claims, &mut || {
-                    delete_dropped_rows_tx(&transaction, &envelopes, &claims)
-                })?;
-                before != after || graph_digest(&transaction)? != before
+                stages.time("graph_check", || -> Result<bool> {
+                    let after = graph_digest(&transaction)?;
+                    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcad476fc11b6 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "ROLLBACK TO trim_chunk")?;
+                    let before = graph_digest(&transaction)?;
+                    self.runtime.delete_trimmed_claims_tx(&transaction, &claims, &mut || {
+                        delete_dropped_rows_tx(&transaction, &envelopes, &claims)
+                    })?;
+                    Ok(before != after || graph_digest(&transaction)? != before)
+                })?
             };
             transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4f653c779b09 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "RELEASE trim_chunk")?;
             if changed {
@@ -1320,7 +1351,7 @@ impl Store {
             transaction.commit()?;
             let held = held_since.elapsed();
             let phase = if envelopes.is_empty() { "claims" } else { "envelopes" };
-            self.log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
+            self.log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes, Some(&stages));
             drop(connection);
             // A cursor-only chunk inspected already-absent rows. A chunk that deletes tells
             // replication at once, and leaves the views serving until a refold is due: their
@@ -1388,7 +1419,7 @@ impl Store {
             let committing = std::time::Instant::now();
             transaction.commit()?;
             let held = held_since.elapsed();
-            self.log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
+            self.log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0, None);
             drop(connection);
             if !more {
                 return Ok(());

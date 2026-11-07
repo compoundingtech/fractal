@@ -51,8 +51,7 @@ const iframe = (report, probes = [], navigation, prependProbes = []) => `<!docty
   }
 </script>`
 
-// These untagged stories satisfy the complete-index policy without satisfying the per-commit
-// critical inventory: that test must still fail at its own missing-critical-story check.
+// These untagged stories satisfy the complete-index case-override policy.
 const policyFixtureIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-transcript--no-green-all-states',
@@ -66,16 +65,16 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
 
-const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false } = {}) => {
+const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false, criticalTags = ['dev', 'critical'], policyTags = ['dev'], criticalImportPath = './Kit.stories.tsx', syntheticCost = false } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: {
-      critical: { type: 'story', id: 'kit--critical', importPath: './Kit.stories.tsx', tags: ['dev', 'critical'] },
+      critical: { type: 'story', id: 'kit--critical', importPath: criticalImportPath, tags: criticalTags },
       other: { type: 'story', id: 'kit--other', importPath: './Kit.stories.tsx', tags: ['dev'] },
       ...Object.fromEntries(policyFixtureIds.map(id => [id, {
-        type: 'story', id, importPath: './Kit.stories.tsx', tags: ['dev'],
+        type: 'story', id, importPath: './Kit.stories.tsx', tags: policyTags,
       }])),
     } }))
     await writeFile(join(build, 'iframe.html'), iframe(report, probes, navigation, prependProbes))
@@ -86,6 +85,7 @@ const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fi
       ? [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output]
       : ['--input-type=module', '--eval', `
           import { runKitPlayGate } from ${JSON.stringify(new URL('./kit-play-gate-runner.mjs', import.meta.url).href)}
+          import { assessKitPlayCost } from ${JSON.stringify(new URL('./kit-play-budget.mjs', import.meta.url).href)}
           if (${retainWebStorage}) {
             const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
             const launch = chromium.launch.bind(chromium)
@@ -110,20 +110,22 @@ const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fi
           const receipt = await runKitPlayGate({
             buildDirectory: ${JSON.stringify(build)}, outputDirectory: ${JSON.stringify(output)},
             ${fixtureOverrides === undefined ? '' : `overrides: new Map(${JSON.stringify(fixtureOverrides)}),`}
+            ${syntheticCost ? 'assessCost: (budget, usage) => assessKitPlayCost(budget, { ...usage, costRequired: false }),' : ''}
           })
           if (!receipt.pass) process.exitCode = 1
         `]
     const child = spawn(process.execPath, args, {
       env: { ...inherited, ...env },
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
-    let stdout = ''
+    let stdout = '', stderr = ''
     child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
     const code = await new Promise((resolve, reject) => {
       child.once('error', reject)
       child.once('close', resolve)
     })
-    return { code, stdout, receipt: JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8')) }
+    return { code, stdout, stderr, receipt: JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8')) }
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -282,12 +284,22 @@ test('critical set without a11y selects tagged stories and asks addon-a11y not t
   assert.ok(receipt.rows.every(row => row.timings.a11yMilliseconds === 0))
 })
 
-test('the per-commit set refuses a build whose critical stories are not the ones it names', { timeout: 60000 }, async () => {
-  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' } })
-  assert.equal(code, 1)
-  assert.equal(receipt.pass, false)
-  assert.equal(receipt.cases, 0)
-  assert.match(receipt.fatalError, /names fractal-ui-.*, which is not a critical story/)
+test('the per-commit set refuses policy-tagged stories that are not critical before browser execution', { timeout: 60000 }, async () => {
+  for (const tag of ['both-widths', 'merge-only']) {
+    const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' }, policyTags: [tag] })
+    assert.equal(code, 1)
+    assert.equal(receipt.pass, false)
+    assert.equal(receipt.cases, 0)
+    assert.match(receipt.fatalError, /names fractal-ui-.*, which is not a critical story/)
+  }
+})
+
+test('a new-folder critical story tagged both-widths runs both browser widths without lane edits', { timeout: 60000 }, async () => {
+  // This synthetic selection fixture is not a production CPU-budget sample; that policy has unit tests.
+  const { code, receipt, stderr } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' }, criticalTags: ['critical', 'both-widths'], criticalImportPath: './new-folder/Kit.stories.tsx', syntheticCost: true })
+  assert.equal(code, 0, JSON.stringify({ stderr, receipt }, null, 2))
+  assert.ok(receipt.rows.every(row => row.pass))
+  assert.deepEqual(receipt.rows.map(({ scheme, width }) => [scheme, width]), [['dark', 440], ['dark', 1440]])
 })
 
 test('a11y off rejects a case where axe still ran', { timeout: 60000 }, async () => {
