@@ -847,6 +847,14 @@
       in
       {
         packages.st = st3;
+        # One locked compiler and target-stdlib set for every iOS framework caller.
+        packages.ios-rust-toolchain = fenix.packages.${system}.combine [
+          fenix.packages.${system}.stable.cargo
+          fenix.packages.${system}.stable.rustc
+          fenix.packages.${system}.stable.rust-std
+          fenix.packages.${system}.targets.aarch64-apple-ios.stable.rust-std
+          fenix.packages.${system}.targets.aarch64-apple-ios-sim.stable.rust-std
+        ];
         # Release runners need a host linker for Cargo build scripts and stamp tests.
         # The release target still links through the pinned Zig/glibc-baseline wrapper.
         packages.release-cc = pkgs.stdenv.cc;
