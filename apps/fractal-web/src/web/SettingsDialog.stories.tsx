@@ -36,7 +36,7 @@ const openEscapeReturn = async ({ canvasElement }: { readonly canvasElement: HTM
   const gear = canvas.getByRole('button', { name: 'Settings' })
   await userEvent.click(gear)
   const dialog = await within(document.body).findByRole('dialog', { name: 'Settings' })
-  for (const section of ['Appearance', 'Keyboard shortcuts', 'Dev tools', 'Device and connection']) await expect(within(dialog).getByRole('region', { name: section })).toBeVisible()
+  for (const section of ['Appearance', 'Conversations', 'Keyboard shortcuts', 'Dev tools', 'Device and connection']) await expect(within(dialog).getByRole('region', { name: section })).toBeVisible()
   await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
   for (let press = 0; press < 8; press += 1) {
     await userEvent.tab()
