@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Main's warm jobs drop the linked executables (test binaries, examples, binaries) from a Cargo target before saving it as an Actions cache (scripts/ci-cargo-cache-trim), after the exact-source build snapshot has packed the whole target. The repository's caches share a 10 GB limit and were at 10.15 GB, so GitHub evicted one every hour or two. In linux-tests' target the executables are 71% of 16.2 GB.",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "What every check builds and runs is unchanged. A build that restores a trimmed cache relinks the executables it needs, from the cached libraries."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "After the next main run that saves a cargo cache, the repository's cache list shows the smaller entries."},
+  "recovery": {"status": "none", "detail": "Revert this change; the next cache saves are whole targets again."}
+}

@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""ci-cargo-cache-trim TARGET_DIR: drop the linked executables from a Cargo target directory before main saves it as a cache.
+
+The repository's Actions caches share a 10 GB limit, and on 2026-11-07 12 caches on main held 10.15 GB, so GitHub evicted the least
+recently used one every hour or two (the genie closure, missed in 4 of 6 merge groups). Most of a test build's target directory is its
+linked executables: each test binary, example and top-level binary statically links everything it depends on. A later build relinks
+them from the libraries anyway whenever anything they link changed, and the cache's key (the lock files and manifests) outlives many
+source changes. So the cache keeps what a build reuses (the compiled libraries, build-script outputs and fingerprints, and the registry
+and git checkouts beside it) and drops the executables. What any check builds or runs is unchanged: a missing executable is rebuilt.
+
+Removed, under every profile directory (TARGET_DIR/<profile>/, and TARGET_DIR/<triple>/<profile>/):
+  deps/NAME-HASH           regular, executable files with no extension (test, bench and binary targets)
+  examples/*               every example
+  NAME                     regular, executable files with no extension directly in the profile directory (the binaries' copies)
+Kept: libraries (.rlib .rmeta .so .a .d), build/ (build scripts and their out/ directories), .fingerprint/, and everything else.
+Nothing is followed through a symlink: a symlinked target directory is refused, and a symlinked profile, deps/ or examples/ directory is
+skipped, so nothing outside the target is ever removed. Prints what it removed and what is left; a target directory that does not exist
+is nothing to trim."""
+import os
+from pathlib import Path
+import shutil
+import stat
+import sys
+
+
+def executable(entry):
+    try:
+        mode = entry.stat(follow_symlinks=False).st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and mode & 0o111 and '.' not in entry.name
+
+
+def size(path):
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return path.lstat().st_size
+    except OSError:
+        return 0
+    total = 0
+    for directory, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def real_directory(path):
+    """A directory that is not a symlink (is_dir alone follows one)."""
+    return path.is_dir() and not path.is_symlink()
+
+
+def profiles(target):
+    """Every directory that holds a real deps/ directory, one or two levels down (a profile, or a target triple's profile)."""
+    for first in sorted(target.iterdir()):
+        if not real_directory(first):
+            continue
+        if real_directory(first / 'deps'):
+            yield first
+            continue
+        for second in sorted(first.iterdir()):
+            if real_directory(second) and real_directory(second / 'deps'):
+                yield second
+
+
+def trim(target):
+    """(files removed, bytes removed, bytes left) for TARGET."""
+    removed = freed = 0
+    for profile in profiles(target):
+        doomed = [Path(entry.path) for entry in os.scandir(profile / 'deps') if executable(entry)]
+        doomed += [Path(entry.path) for entry in os.scandir(profile) if executable(entry)]
+        if real_directory(profile / 'examples'):
+            doomed += [Path(entry.path) for entry in os.scandir(profile / 'examples')]
+        for path in doomed:
+            freed += size(path)
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            removed += 1
+    return removed, freed, size(target)
+
+
+def main(argv):
+    if len(argv) != 1:
+        print(__doc__.split('\n\n')[0], file=sys.stderr)
+        return 2
+    target = Path(argv[0])
+    if target.is_symlink():
+        print(f'ci-cargo-cache-trim: {target} is a symlink; not trimming through it')
+        return 0
+    if not target.is_dir():
+        print(f'ci-cargo-cache-trim: no target directory at {target}; nothing to trim')
+        return 0
+    removed, freed, left = trim(target)
+    print(f'ci-cargo-cache-trim: removed {removed} linked executables ({freed / 1e9:.2f} GB) from {target}; {left / 1e9:.2f} GB left to cache')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

@@ -96,6 +96,15 @@ fi`,
       ...(stage === 'genie' ? [megarepoApplyStep] : []),
       nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
+      // The exact-source snapshot packs the whole target first; only then is the cargo cache trimmed.
+      ...(stage === 'genie' ? [] : buildSnapshotSave),
+      // The repository's caches share 10 GB: the cargo cache keeps the libraries a build reuses and
+      // drops the linked executables, which any later build relinks (scripts/ci-cargo-cache-trim).
+      ...(nixOnly ? [] : [{
+        name: 'Trim linked executables from the cargo cache',
+        if: "github.ref == 'refs/heads/main' && steps.cargo-probe.outputs.cache-hit != 'true'",
+        run: 'python3 scripts/ci-cargo-cache-trim "$GITHUB_WORKSPACE/target"',
+      }]),
       // PR/merge builds restore these entries and retain exact-source artifacts. Only
       // protected main fills the shared dependency quota, including after eviction.
       ...(nixOnly ? [genieNixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
@@ -104,7 +113,6 @@ fi`,
         uses: 'actions/cache/save@v4',
         with: { path: step.with.path, key: step.with.key },
       })),
-      ...(stage === 'genie' ? [] : buildSnapshotSave),
     ], nixOnly ? "steps.nix-probe.outputs.cache-hit != 'true'" : missing),
   ],
 })
