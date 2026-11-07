@@ -12,6 +12,12 @@ automatic pairing/renewal. Provision it with an `assistant/mcp` bearer, never a
 person or `assistant/chatgpt` credential. The existing `st-chatgpt` entrypoint and its
 ChatGPT-specific deployment remain separate and compatible.
 
+Inbound stdio frames are limited to 2 MiB per line, excluding the terminating LF
+(a CR counts toward the limit). Overflow ends the adapter session without
+processing the oversized frame or subsequent requests, even if no LF arrives.
+This also bounds the shared ChatGPT adapter's stdio mode; its HTTP profile is
+unchanged.
+
 The complete ChatGPT `tools/list` result is pinned as identical JSON (tool order,
 names, descriptions, schemas, annotations) by
 `crates/fractal-chatgpt/src/testdata/chatgpt-tools-list.json`, captured from main commit
@@ -206,7 +212,7 @@ Approved reads disclose data to the external model provider. A compromised execu
 
 ### Wire shape
 
-`POST /v1/client/pairings` accepts disjoint untagged `PersonPairingBegin` and `AssistantPairingBegin` variants. The person variant retains its existing `person_id`, optional `full_control`, and optional limited scopes. The assistant variant has `api_version`, `device_name`, `assistant_id` (`assistant/chatgpt` or `assistant/mcp`), explicit `scopes`, optional `expires_in_seconds`, `disclosure_consent: true`, and `consent_evidence`: a non-empty free-form string of at most 512 bytes naming the recorded owner consent (for example an `axe decision ask` reference). It has no `person_id` or `full_control`. Consent must explicitly cover disclosure of reads to OpenAI; missing or empty consent evidence denies issuance. The consent evidence is not a read approval, send approval, or permission to disclose to unrelated callers.
+`POST /v1/client/pairings` accepts disjoint untagged `PersonPairingBegin` and `AssistantPairingBegin` variants. The person variant retains its existing `person_id`, optional `full_control`, and optional limited scopes. The assistant variant has `api_version`, `device_name`, `assistant_id` (`assistant/chatgpt` or `assistant/mcp`), explicit `scopes`, optional `expires_in_seconds`, `disclosure_consent: true`, and `consent_evidence`: a non-empty free-form string of at most 512 bytes naming the recorded owner consent (for example an `axe decision ask` reference). It has no `person_id` or `full_control`. Consent must explicitly cover disclosure of reads to the principal-specific recipient: OpenAI for `assistant/chatgpt`, or the local MCP client's model provider for `assistant/mcp`; missing or empty consent evidence denies issuance. The consent evidence is not a read approval, send approval, or permission to disclose to unrelated callers.
 
 An assistant challenge retains `kind: "pairing-challenge"`, pairing ID, code, and challenge `expires_at`; it also returns principal, `grant_kind: "assistant"`, grant ID, grant expiry, policy revision, and `minimal_read_mode: "approval-once"`. Existing person challenges remain unchanged, apart from optional `grant_kind: "person"`.
 
