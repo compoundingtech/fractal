@@ -212,7 +212,7 @@ export const RejectedRows: Story = {
   args: { rejected: true },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(canvas.getByRole('status')).toHaveTextContent('2 alerts could not be shown · their data does not match the expected format')
+    await expect(canvas.getByText('2 alerts could not be shown · their data does not match the expected format')).toBeVisible()
     await expect(await canvas.findByRole('list', { name: 'Alerts' })).toBeVisible()
     await userEvent.click(canvas.getByRole('button', { name: 'Details' }))
     const details = canvas.getByRole('list', { name: 'Alerts that could not be shown' })
