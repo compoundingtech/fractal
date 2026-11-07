@@ -194,6 +194,16 @@ mod tests {
     }
 
     #[test]
+    fn canonical_declared_admission_round_trip() {
+        round_trip(r#"mission "test" state="ready" {
+            goal "Keep declaration metadata."
+            declared-priority "normal"
+            declared-lane "check"
+            declared-budgets { cpu-seconds 300; token-budget 100000; memory-max "8G"; disk-max "20G"; }
+        }"#);
+    }
+
+    #[test]
     fn canonical_declared_admission_retains_typed_metadata() {
         let mut spec = parse(r#"mission "test" state="ready" { goal "Keep declaration metadata."; }"#);
         spec.declared_priority = Some(crate::model::DeclaredPriority::Unknown("future-priority".into()));
