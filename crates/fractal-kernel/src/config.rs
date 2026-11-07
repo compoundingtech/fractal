@@ -49,6 +49,9 @@ pub struct Config {
     /// Worker socket-generation admission. Absent observes without refusing; restart to change.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_ingress_generation_check: Option<WorkerIngressGenerationCheck>,
+    /// Temporary rollout opt-in after all fleet readers run the topic privacy build.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thread_writes: bool,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
@@ -666,6 +669,7 @@ impl Default for Config {
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
             worker_ingress_generation_check: None,
+            thread_writes: false,
             seat_priority: None,
             unlaned_seat: None,
             seat_admission: None,

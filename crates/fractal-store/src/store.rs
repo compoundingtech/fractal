@@ -259,7 +259,10 @@ pub mod message_marks;
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
+pub mod thread_delivery;
+pub mod thread_links;
 pub mod thread_metadata;
+pub mod thread_rollout;
 #[cfg(test)]
 mod message_routing_tests;
 pub mod message_sent;
@@ -792,6 +795,19 @@ WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
 WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
+ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_origin_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.origin_ask'),
+          json_extract(body, '$.fields.origin_ask_episode'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_mission_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
+ON claims(actor, store_index DESC)
+WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -2298,6 +2314,8 @@ pub struct Store {
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
+    /// Startup attestation of the reader rollout, with configured peers to check at each write.
+    thread_write_peers: std::sync::OnceLock<BTreeSet<String>>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2739,6 +2757,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2762,6 +2781,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2786,6 +2806,7 @@ impl Store {
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -5392,7 +5413,9 @@ impl Store {
         &self, subjects: BTreeSet<String>, index: u64, history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
         let subjects = self.generic_status_subject_names_at(subjects, index)?;
-        self.status_for_subject_names_at(subjects, index, history, claims)
+        let mut response = self.status_for_subject_names_at(subjects, index, history, claims)?;
+        redact_generic_status_message_relations(&mut response);
+        Ok(response)
     }
 
     pub fn generic_status_subject_names_at(
@@ -5550,10 +5573,12 @@ impl Store {
                     "notices-unavailable", "reserved notice facts are unavailable through generic status",
                 ).with_detail("reason", "notices-unavailable")));
             }
-            self.status_at_view_for_names_in_snapshot(
+            let mut response = self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history,
                 StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
-            )
+            )?;
+            redact_generic_status_message_relations(&mut response);
+            Ok(response)
         })
     }
 
@@ -11310,6 +11335,8 @@ pub fn append_claim_tx_with_assistant_answer(
         &assistant_body
     } else { body };
     let fields = body.get("fields").unwrap_or(body);
+    refuse_untyped_thread_message(kind, |field| fields.get(field).is_some())
+        .map_err(anyhow::Error::new)?;
     if authorization.is_none() {
         assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
             ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| fields.get(*key).is_some()))
@@ -12166,6 +12193,18 @@ fn fold_latest_parsed_values(
         merge_actual_value(&mut merged, &kind, value);
     }
     Ok(any.then_some(Value::Object(merged)))
+}
+
+/// Keep thread routing out of generic status without altering the internal status fold.
+pub fn redact_generic_status_message_relations(response: &mut StatusResponse) {
+    for subject in &mut response.subjects {
+        if !subject.subject.starts_with("message/") {
+            continue;
+        }
+        for body in [&mut subject.actual, &mut subject.desired].into_iter().flatten() {
+            fractal_schema::threads::redact_message_relations(body);
+        }
+    }
 }
 
 /// Apply one eligible claim in canonical order, shared by history folds and the
@@ -22484,6 +22523,20 @@ pub fn append_claim_with_subject_fences(
     append_claim_with_commit_context(graph, input, fence, event_runtime, expected_subjects, observer_completion, Default::default())
 }
 
+/// These fields belong to the typed thread writer. Local ordinary sends cannot set them.
+pub(crate) fn refuse_untyped_thread_message(
+    kind: &str,
+    has_field: impl Fn(&str) -> bool,
+) -> Result<(), FractalError> {
+    if kind == "message.sent"
+        && fractal_schema::threads::MESSAGE_RELATION_FIELDS
+            .iter().any(|field| has_field(field))
+    {
+        return Err(FractalError::new("thread-delivery-required", "use a typed thread message operation"));
+    }
+    Ok(())
+}
+
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
 
 #[derive(Default)]
@@ -22496,6 +22549,7 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     /// Current authority required for both a new append and replay of an existing receipt.
     pub authority: Option<&'a ClaimAdmission<'a>>,
+    pub thread_delivery: bool,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Write the claim as a build from before its kind became a local observation did: a
@@ -22513,6 +22567,9 @@ pub fn append_claim_with_commit_context(
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
+    if !context.thread_delivery {
+        refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
+    }
     let admission = |connection: &Connection| {
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());

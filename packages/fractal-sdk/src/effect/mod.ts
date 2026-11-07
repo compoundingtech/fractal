@@ -23,6 +23,11 @@
  */
 import {
   ClientError,
+  applyWindow,
+  type CollectionWindow,
+  type ThreadCollectionContext,
+  type ThreadSummary as ThreadSummaryWire,
+  type ThreadTimelineEvent as ThreadTimelineEventWire,
   type CollectionSocket,
   type CollectionFilters,
   type CollectionFrame,
@@ -39,6 +44,8 @@ import {
   decodeUnknownSync,
   Resource,
   Runtime,
+  ThreadSummary,
+  ThreadTimelineEvent,
 } from '@fractal/client/schema/read'
 import type { TerminalScreen } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
@@ -185,6 +192,8 @@ export type FollowSpec =
       /** Local decoder identity, never serialized; different typed descriptors remain independent. */
       readonly descriptor?: string
     }
+  | { readonly _tag: 'ThreadSummary'; readonly context: ThreadCollectionContext; readonly limit: number }
+  | { readonly _tag: 'ThreadTimeline'; readonly thread: string; readonly limit: number }
   | { readonly _tag: 'Conversation'; readonly ref: string }
   | {
       readonly _tag: 'Terminal'
@@ -198,11 +207,20 @@ export const followKey = (spec: FollowSpec): string => {
   switch (spec._tag) {
     case 'Window':
       return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}${spec.descriptor === undefined ? '' : `:descriptor:${spec.descriptor}`}`
+    case 'ThreadSummary':
+      return `threads:${JSON.stringify(spec.context)}:${spec.limit}`
+    case 'ThreadTimeline':
+      return `thread-timeline:${spec.thread}:${spec.limit}`
     case 'Conversation':
       return `conversation:${spec.ref}`
     case 'Terminal':
       return `terminal:${spec.runtime}`
   }
+}
+
+export interface ThreadWindow<Row> {
+  readonly items: readonly Row[]
+  readonly hasMore: boolean
 }
 
 /** A collection window: decoded rows in the server's order. */
@@ -272,6 +290,12 @@ export class Fractal extends Context.Service<
     /** Typed descriptors share the existing scoped window ingest and multiplexed socket. */
     readonly watch: <TResource>(descriptor: FollowDescriptor<TResource>) =>
       Stream.Stream<FollowEvent<WindowValue<TResource>>>
+    readonly followThreadSummaries: (
+      spec: Extract<FollowSpec, { _tag: 'ThreadSummary' }>,
+    ) => Stream.Stream<FollowEvent<ThreadWindow<ThreadSummary>>>
+    readonly followThreadTimeline: (
+      spec: Extract<FollowSpec, { _tag: 'ThreadTimeline' }>,
+    ) => Stream.Stream<FollowEvent<ThreadWindow<ThreadTimelineEvent>>>
     readonly followConversation: (
       spec: Extract<FollowSpec, { _tag: 'Conversation' }>,
     ) => Stream.Stream<FollowEvent<ConversationChunk>>
@@ -440,7 +464,8 @@ const tracedStream = (
     }
   return {
     ...stream,
-    subscribe: issue(stream.subscribe),
+    // The tracing wrapper forwards all arguments, including the typed overloads.
+    subscribe: issue(stream.subscribe) as CollectionStream['subscribe'],
     subscribeGlasses: issue(stream.subscribeGlasses),
     subscribeArrangements: issue(stream.subscribeArrangements),
     subscribeOrderedMemberships: issue(stream.subscribeOrderedMemberships),
@@ -756,7 +781,7 @@ const make = (options: FractalOptions) =>
                 ? early?.wouldAdopt({ kind: 'subscribe', collection: spec.collection, limit: spec.limit, ...spec.filters })
                 : undefined
               const current = firstFrames.begin({
-                kind: spec._tag === 'Window' ? 'window' : spec._tag === 'Conversation' ? 'conversation' : 'terminal',
+                kind: spec._tag === 'Conversation' ? 'conversation' : spec._tag === 'Terminal' ? 'terminal' : 'window',
                 label: spec._tag === 'Window' ? spec.collection : spec._tag.toLowerCase(),
                 ...(adopted === undefined ? {} : { adopted }),
               })
@@ -938,6 +963,50 @@ const make = (options: FractalOptions) =>
 
     const followWindow = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
       watch(collectionWindow(spec))
+
+    const followThreadSummaries = (spec: Extract<FollowSpec, { _tag: 'ThreadSummary' }>) =>
+      follow<ThreadWindow<ThreadSummary>>({
+        spec,
+        makeProtocol: (observe) => {
+          let window: CollectionWindow<ThreadSummaryWire> | undefined
+          return {
+            subscribe: ({ stream, id }) => Effect.sync(() => stream.subscribe(id, 'threads', spec.limit, { thread_context: spec.context })),
+            onData: (frame) => {
+              if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'threads') return
+              window = applyWindow(window, frame)
+              if (window === undefined) return
+              try {
+                observe({ items: window.items.map(row => decodeUnknownSync(ThreadSummary)(row)), hasMore: window.hasMore }, window.snapshot)
+              } catch {
+                return new DecodeFailure({ message: 'Thread summaries could not be decoded' })
+              }
+            },
+            reset: () => { window = undefined },
+          }
+        },
+      })
+
+    const followThreadTimeline = (spec: Extract<FollowSpec, { _tag: 'ThreadTimeline' }>) =>
+      follow<ThreadWindow<ThreadTimelineEvent>>({
+        spec,
+        makeProtocol: (observe) => {
+          let window: CollectionWindow<ThreadTimelineEventWire> | undefined
+          return {
+            subscribe: ({ stream, id }) => Effect.sync(() => stream.subscribe(id, 'thread-timeline', spec.limit, { subject: spec.thread })),
+            onData: (frame) => {
+              if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'thread-timeline') return
+              window = applyWindow(window, frame)
+              if (window === undefined) return
+              try {
+                observe({ items: window.items.map(row => decodeUnknownSync(ThreadTimelineEvent)(row)), hasMore: window.hasMore }, window.snapshot)
+              } catch {
+                return new DecodeFailure({ message: 'Thread history could not be decoded' })
+              }
+            },
+            reset: () => { window = undefined },
+          }
+        },
+      })
 
     const followConversation = (spec: Extract<FollowSpec, { _tag: 'Conversation' }>) =>
       follow<ConversationChunk>({
@@ -1147,6 +1216,8 @@ const make = (options: FractalOptions) =>
         ),
       ),
       followWindow,
+      followThreadSummaries,
+      followThreadTimeline,
       watch,
       followConversation,
       followTerminal,

@@ -539,6 +539,7 @@ async fn collection_items_with_windows(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
             | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+            | "threads" | "thread-timeline"
     ) {
         return Err(validation("unknown collection subscription"));
     }
@@ -551,10 +552,8 @@ async fn collection_items_with_windows(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
-    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") {
-        return Err(validation(
-            "subject filters are supported for arrangements and ordered memberships only",
-        ));
+    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "thread-timeline") {
+        return Err(validation("this collection does not accept a subject filter"));
     }
     if request.collection == "ordered-memberships" && request.subject.is_none() {
         return Err(validation("ordered memberships require an arrangement subject"));
@@ -570,6 +569,7 @@ async fn collection_items_with_windows(
     if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
         return Err(validation("arrangements select an explicit person, not an actor"));
     }
+    let thread_window = threads::stream_selection(request)?;
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
@@ -621,7 +621,7 @@ async fn collection_items_with_windows(
     if request.collection == "devices" && person.as_deref().is_none_or(|person| !person.starts_with("person/")) {
         return Err(forbidden("device inventory requires an explicitly authenticated person"));
     }
-    let prepared = windows.as_ref().and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h5d92b2a013b1 owner=fractal_api_client_v0::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
+    let prepared = windows.as_ref().filter(|_| thread_window.is_none()).and_then(|windows| windows.prepare(/* sqlite-large-value: allow-for-now lv-h5d92b2a013b1 owner=fractal_api_client_v0::api::client_v0 TODO=trace-statement-and-value-representation */ state, current, request));
     let state = state.clone();
     let session = session.clone();
     let request = request.clone();
@@ -657,6 +657,7 @@ async fn collection_items_with_windows(
         let status = status.clone();
         let collection = collection.clone();
         let person = person.clone();
+        let thread_window = thread_window.clone();
         let prepared = prepared.clone();
         let windows = windows.clone();
         let worker_store = state.store.clone();
@@ -697,6 +698,11 @@ async fn collection_items_with_windows(
                     Ok(current) => current,
                     Err(error) => return Ok(Err(error)),
                 };
+                if let Some(thread_window) = &thread_window {
+                    let read = threads::stream_rows(&store, &session, &current, thread_window, limit)
+                        .map(|(items, more)| Some((client_snapshot_at(&state, index), items, more, None)));
+                    return Ok(read);
+                }
                 // An exact agent selector reads its own selected projection: one card folds
                 // in the caller's snapshot, so it neither waits for nor reads the fleet roster.
                 let mut published = None;
@@ -1103,6 +1109,8 @@ fn collection_window_label(collection: &str) -> &'static str {
         "devices" => "stream collection/devices",
         "sessions" => "stream collection/sessions",
         "terminals" => "stream collection/terminals",
+        "threads" => "stream collection/threads",
+        "thread-timeline" => "stream collection/thread-timeline",
         _ => "stream collection/invalid",
     }
 }
@@ -9377,6 +9385,12 @@ async fn action_inner(
     }
     if matches!(request.action_type.as_str(), "thread.rename" | "thread.close" | "thread.reopen") {
         return threads::lifecycle_action(state, session, request).await;
+    }
+    if matches!(request.action_type.as_str(), "thread.start" | "thread.reply") {
+        return threads::message_action(state, session, request).await;
+    }
+    if request.action_type == "thread.link-ask" {
+        return threads::link_ask_action(state, session, request).await;
     }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
@@ -24063,6 +24077,7 @@ mission "example/zero-run" state="ready" {
             authority_actor: "person/alex".into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,

@@ -57,6 +57,16 @@ pub mod related_runs;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadCollectionContext {
+    pub agent_id: Option<String>,
+    pub origin_ask: Option<String>,
+    pub origin_ask_episode: Option<String>,
+    pub mission_id: Option<String>,
+    pub recently_closed: Option<bool>,
+}
+
 // A client holds one socket for all its current collection views. A subscription
 // is a bounded window; history stays on the paged HTTP endpoints. A terminal is one
 // more subscription on the same socket: whole screens, the latest only.
@@ -71,8 +81,10 @@ pub struct CollectionSubscribe {
     #[serde(default, deserialize_with = "deserialize_agents_publication_version")]
     pub agents_publication_version: Option<u8>,
     pub person: Option<String>,
-    /// Follow one arrangement instead of the owner's bounded prefix window.
+    /// The exact subject of a window that follows one resource.
     pub subject: Option<String>,
+    /// Select exactly one owner-scoped thread context.
+    pub thread_context: Option<ThreadCollectionContext>,
     pub actor: Option<String>,
     /// Follow exactly one current agent instead of the fleet window.
     pub agent: Option<String>,
@@ -252,6 +264,10 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
         return false;
     }
     match collection {
+        "threads" | "thread-timeline" => {
+            return !(kind.starts_with("thread.") || kind.starts_with("message.")
+                || matches!(kind, "agent.renamed" | "agent.retired" | "intent.desired" | "record.repaired"));
+        }
         "machines" if kind == "transport.observed" => return false,
         "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
         "clients" | "devices" => return !kind.starts_with("custom.client.pairing-"),
@@ -468,6 +484,8 @@ pub struct ClientSession {
     pub pairing_grant: Option<String>,
     /// Exact person-pairing completion authenticated by the request bearer.
     pub pairing_completion: Option<String>,
+    /// Seat identity bound by Unix peer provenance, never a request parameter.
+    pub bound_agent: Option<String>,
     /// Local-only push registrations belong to the member that issued this exact pairing.
     pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
@@ -495,6 +513,7 @@ impl ClientSession {
             authority_actor: authority_actor.into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -539,6 +558,7 @@ impl ClientSession {
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
                 pairing_completion: None,
+                bound_agent: None,
                 pairing_issued_here: false,
             grant_expires_at: None,
                 assistant_write: None,
@@ -564,6 +584,7 @@ impl ClientSession {
             authority_actor: person.into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -586,6 +607,7 @@ impl ClientSession {
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -777,6 +799,7 @@ pub fn authenticate(
             let mut session = ClientSession::local(person)?;
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
+            session.bound_agent = request.extensions().get::<super::BoundAgent>().map(|bound| bound.0.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
@@ -896,6 +919,7 @@ pub fn paired_client_session(
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
         pairing_completion: Some(paired.id.clone()),
+        bound_agent: None,
         pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,
@@ -4380,8 +4404,11 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
-    if matches!(action, "thread.rename" | "thread.close" | "thread.reopen") {
+    if matches!(action, "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
         return Some("control.messages");
+    }
+    if action == "thread.link-ask" {
+        return Some("control.work");
     }
     if action == "harness.answer" {
         return Some("terminal.control");

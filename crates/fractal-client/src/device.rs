@@ -2,7 +2,10 @@
 //! This is client state, never a graph replica or a peer configuration.
 mod grant_proof;
 pub(crate) mod transport;
-use crate::{AssistantPairedSession, AssistantPrincipal, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
+use crate::{
+    AssistantPairedSession, AssistantPrincipal, Client, DeviceSignature, MessageSendParameters,
+    PairingComplete, PersonPairedSession, ThreadReplyParameters, ThreadStartParameters,
+};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
@@ -215,6 +218,16 @@ impl Device {
         idempotency_key: &str,
         parameters: &MessageSendParameters,
     ) -> Result<DeviceSignature> {
+        let key = self.message_signing_key()?;
+        let nonce = random_nonce()?;
+        let signed_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        self.sign_message_at(idempotency_key, parameters, &nonce, signed_at_unix_ms, key)
+    }
+
+    fn message_signing_key(&self) -> Result<&SigningKey> {
         let key = self
             .signing_key
             .as_ref()
@@ -228,12 +241,99 @@ impl Device {
                     .any(|scope| scope == "control.messages"),
             "This device is not delegated message signing"
         );
+        Ok(key)
+    }
+
+    pub(crate) fn sign_thread_start(
+        &self,
+        idempotency_key: &str,
+        parameters: &ThreadStartParameters,
+    ) -> Result<DeviceSignature> {
+        self.sign_thread_message(
+            idempotency_key,
+            &parameters.target_id,
+            "start",
+            &parameters.agent_id,
+            &parameters.content,
+            [
+                ("thread_origin_ask", parameters.origin_ask.as_str()),
+                (
+                    "thread_origin_episode",
+                    parameters.origin_ask_episode.as_str(),
+                ),
+                ("title", parameters.title.as_str()),
+            ],
+        )
+    }
+
+    pub(crate) fn sign_thread_reply(
+        &self,
+        idempotency_key: &str,
+        agent_id: &str,
+        parameters: &ThreadReplyParameters,
+    ) -> Result<DeviceSignature> {
+        self.sign_thread_message(
+            idempotency_key,
+            &parameters.target_id,
+            "reply",
+            agent_id,
+            &parameters.content,
+            parameters
+                .thread_quote_id
+                .as_deref()
+                .map(|quote| ("thread_quote_id", quote)),
+        )
+    }
+
+    fn sign_thread_message<'a>(
+        &self,
+        idempotency_key: &str,
+        thread: &str,
+        action: &str,
+        recipient: &str,
+        content: &str,
+        extra: impl IntoIterator<Item = (&'static str, &'a str)>,
+    ) -> Result<DeviceSignature> {
+        let key = self.message_signing_key()?;
         let nonce = random_nonce()?;
         let signed_at_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
             .try_into()?;
-        self.sign_message_at(idempotency_key, parameters, &nonce, signed_at_unix_ms, key)
+        // The thread action scopes the normal message idempotency key by participant and target.
+        let mut digest = Sha256::new();
+        for part in [
+            "fractal.thread-message.v1",
+            &self.session.person_id,
+            thread,
+            action,
+            idempotency_key,
+        ] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        let encoded: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let scoped_key = format!("thread-message:{encoded}");
+        let mut fields: Vec<_> = [
+            ("content", content),
+            ("from", self.session.person_id.as_str()),
+            ("thread_id", thread),
+            ("to", recipient),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, serde_json::Value::from(value)))
+        .chain(
+            extra
+                .into_iter()
+                .map(|(name, value)| (name, serde_json::Value::from(value))),
+        )
+        .collect();
+        fields.sort_unstable_by_key(|(name, _)| *name);
+        self.sign_message_fields(&scoped_key, &fields, &nonce, signed_at_unix_ms, key)
     }
 
     fn sign_message_at(
@@ -244,12 +344,6 @@ impl Device {
         signed_at_unix_ms: u64,
         key: &SigningKey,
     ) -> Result<DeviceSignature> {
-        let public = key.public_key()?;
-        let subject_hash = Sha256::digest(idempotency_key.as_bytes());
-        let subject = format!(
-            "message/{:016x}",
-            u64::from_be_bytes(subject_hash[..8].try_into()?)
-        );
         // Past `INLINE_MAX_BYTES` the daemon keeps only a preview in the claim and names the
         // whole text by its hash and length, so that is what is signed (docs/st3/long-messages.md).
         let long = parameters.content.len() > INLINE_MAX_BYTES;
@@ -288,13 +382,30 @@ impl Device {
             ("title", serde_json::to_value(&parameters.title)?),
             ("to", serde_json::to_value(&parameters.to)?),
         ]);
+        self.sign_message_fields(idempotency_key, &fields, nonce, signed_at_unix_ms, key)
+    }
+
+    fn sign_message_fields(
+        &self,
+        idempotency_key: &str,
+        fields: &[(&str, serde_json::Value)],
+        nonce: &str,
+        signed_at_unix_ms: u64,
+        key: &SigningKey,
+    ) -> Result<DeviceSignature> {
+        let public = key.public_key()?;
+        let subject_hash = Sha256::digest(idempotency_key.as_bytes());
+        let subject = format!(
+            "message/{:016x}",
+            u64::from_be_bytes(subject_hash[..8].try_into()?)
+        );
         let mut lines = vec![
             "smallclaims-claim-fields-v1".to_owned(),
             subject,
             "message.sent".into(),
             self.session.person_id.clone(),
         ];
-        for (name, value) in &fields {
+        for (name, value) in fields {
             lines.push(format!("{name}={value}"));
         }
         lines.extend([
