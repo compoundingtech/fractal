@@ -702,14 +702,6 @@ impl Publisher {
             attempt,
         };
         self.failures[index] = Some(record);
-        crate::metrics::record_driver_diagnostic(
-            self.driver,
-            stage,
-            reason,
-            source,
-            self.support,
-            false,
-        );
         emit(
             self.driver,
             stage,
@@ -738,14 +730,6 @@ impl Publisher {
         let Some(cleared) = cleared else {
             return;
         };
-        crate::metrics::record_driver_diagnostic(
-            self.driver,
-            stage,
-            cleared.reason,
-            cleared.source,
-            cleared.support,
-            true,
-        );
         emit(
             self.driver,
             stage,
@@ -851,20 +835,6 @@ fn emit(
     outcome: &'static str,
     producer_version: Option<&str>,
 ) {
-    let span = crate::telemetry::tracer_export_enabled().then(|| {
-        tracing::info_span!(
-            "st.driver.diagnostic",
-            "span.label" = stage.as_str(),
-            "st.driver.name" = driver.as_str(),
-            "st.driver.stage" = stage.as_str(),
-            "st.driver.reason" = reason.as_str(),
-            "st.driver.source" = source.as_str(),
-            "st.driver.support" = support.as_str(),
-            "st.outcome" = outcome,
-            "st.driver.producer_version" = producer_version,
-        )
-    });
-    let _guard = span.as_ref().map(tracing::Span::enter);
     tracing::info!(
         driver = driver.as_str(),
         stage = stage.as_str(),
