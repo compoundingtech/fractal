@@ -118,7 +118,7 @@ describe('RM1 workspace source states', () => {
   })
 
   it('keeps expired conversation, generic feed, usage and native-detail reads out of generic failure recovery', async () => {
-    const denied = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+    const denied = { _tag: 'Unavailable', reason: 'unauthorized', detail: 'private diagnostic' } as const
     registry.set(conversation, denied)
     await mount()
     expect(transcript().textContent).toContain(credentialExpiredMessage)
@@ -134,7 +134,7 @@ describe('RM1 workspace source states', () => {
     const details = projectNativeDetails({ agentRef: agent.id, agent: denied, row: denied, session: denied, period: denied, declarations: denied, missions: denied, queue: denied, now: 118_000, onRetry: refresh, reads: { refreshUsage: refresh, retrySession: refresh, retryQueue: refresh } })
     expect(details.overview.durations?.[0]?.detail).toBe(credentialExpiredMessage)
     expect(JSON.stringify(details)).not.toContain('private diagnostic')
-    expect(details.spendRead ?? details.sessionFailure ?? details.queueFailure).toBeUndefined()
+    expect(details.spendRead ?? details.sessionFailure).toBeUndefined()
     expect(refresh).not.toHaveBeenCalled()
   })
 

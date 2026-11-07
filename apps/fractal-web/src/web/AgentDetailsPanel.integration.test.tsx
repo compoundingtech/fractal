@@ -258,7 +258,7 @@ describe('OMP subagent activity on the production inspector', () => {
   }
   it('uses the shared recovery copy for rejected supplement credentials', async () => {
     await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
-      <AgentDetailsPanel agentRef={ompAgentRef} width={320} onClose={onClose} onOpen={() => undefined} detailsSupplement={() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} />
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} detailsSupplement={() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} />
     </DataSourceProvider>))
     const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
     const { trigger, panel } = why(line, 'Why? Subagent activity')
