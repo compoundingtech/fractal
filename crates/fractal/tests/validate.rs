@@ -33,6 +33,41 @@ fn typescript_declarations_match_the_pinned_rust_fixture() {
     assert_eq!(actual.missions["docs/daily-review"].revision, PINNED_REVISION);
 }
 
+#[test]
+fn typescript_principal_and_capacity_match_current_grammar() {
+    let source = include_str!(
+        "../../../clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl"
+    );
+    let intent = fractal_store::graph::parse_intent(source, "local").unwrap();
+    let mission = &intent.missions["docs/daily-review"];
+    assert_eq!(mission.capacity.unwrap().cores, 2);
+    assert_eq!(mission.capacity.unwrap().memory, 4 << 30);
+    assert_eq!(
+        mission.steps["review"].capacity.unwrap().memory,
+        Some(8 << 30)
+    );
+    assert!(intent.subjects["agent/docs/editor"].desired["children"].as_array().unwrap()
+        .iter().any(|child| child["name"] == "principal" && child["arguments"][0] == "person/operator"));
+    for (source, code) in [
+        (
+            source.replace("person/operator", "operator"),
+            "invalid-agent-principal",
+        ),
+        (
+            source.replace("assigned-to \"agent/docs/writer\"", "agentless"),
+            "invalid-capacity",
+        ),
+    ] {
+        assert_eq!(
+            fractal_store::graph::parse_intent(&source, "local")
+                .err()
+                .unwrap()
+                .code,
+            code
+        );
+    }
+}
+
 #[tokio::test]
 async fn validate_reads_files_without_a_daemon_or_configuration() {
     let scratch = tempfile::tempdir().unwrap();

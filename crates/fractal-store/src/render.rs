@@ -45,7 +45,7 @@ pub fn apply(store: &Store, desired: &Value, workspace: &Path) -> Result<RenderR
         "render workspace {} does not exist",
         workspace.display()
     );
-    let (writes, warnings) = prepare_render(store, render, workspace)?;
+    let (writes, warnings) = prepare_render(store, render, workspace, &|_| Ok(()))?;
     commit_transaction(&writes)?;
     Ok(RenderResult {
         warnings,
@@ -64,6 +64,7 @@ pub fn prepare_render(
     store: &Store,
     render: &Value,
     workspace: &Path,
+    input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<(Vec<PlannedWrite>, Vec<String>)> {
     let mut writes = Vec::new();
     let mut warnings = Vec::new();
@@ -87,6 +88,7 @@ pub fn prepare_render(
                         .get_document(name, hash)?
                         .with_context(|| format!("render document `{source}` is missing"))?
                 } else {
+                    input(Path::new(source))?;
                     fs::read(source).with_context(|| format!("read render source {source}"))?
                 };
                 let path = arguments[1].as_str().context("destination is not text")?;
@@ -126,6 +128,7 @@ pub fn prepare_render(
                 let patch: Value = serde_json::from_str(&content)
                     .context("json-upsert content is invalid JSON")?;
                 anyhow::ensure!(patch.is_object(), "json-upsert content must be an object");
+                input(&destination)?;
                 let mut current = match fs::read_to_string(&destination) {
                     Ok(value) => serde_json::from_str(&value).with_context(|| {
                         format!("parse existing JSON {}", destination.display())
@@ -153,6 +156,7 @@ pub fn prepare_render(
                     .as_str()
                     .context("ensure-line destination is not text")?;
                 let destination = destination(workspace, path)?;
+                input(&destination)?;
                 let mut current = match fs::read_to_string(&destination) {
                     Ok(value) => value,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),

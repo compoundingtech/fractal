@@ -46,6 +46,7 @@ pub mod inventory;
 pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
+pub mod quota;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -110,6 +111,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -134,6 +136,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(agent_declaration),
         )
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
+        .route("/v1/client/agent-related-runs/{*id}", get(related_runs::get))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
         .route("/v1/client/harness-questions", get(harness_questions::list))
@@ -2711,7 +2714,7 @@ pub async fn agent_workspace(
                 return Ok(None);
             };
             if !status.conflicts.is_empty() {
-                return Err(anyhow::anyhow!(St3Error::new(
+                return Err(anyhow::anyhow!(FractalError::new(
                     "validation-failed",
                     "agent has conflicting declarations",
                 )));
@@ -2740,7 +2743,7 @@ pub async fn agent_workspace(
                     return Ok(Some((client_snapshot_at(&state, index), value)));
                 }
                 if desired.kind != "stop" || claim.predecessors.len() != 1 {
-                    return Err(anyhow::anyhow!(St3Error::new(
+                    return Err(anyhow::anyhow!(FractalError::new(
                         "validation-failed",
                         "agent has no unambiguous prior declaration",
                     )));
@@ -2790,7 +2793,7 @@ pub async fn agent_declaration(
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
-        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+        .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2823,7 +2826,7 @@ pub async fn usage_period(
         .since_ms
         .unwrap_or(until_ms.saturating_sub(86_400_000));
     if since_ms > until_ms {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -2873,7 +2876,7 @@ pub async fn subject_definition(
         require_scope(&session, "read.declarations")?;
     }
     if !query.subject.starts_with("agent/") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a definition subject must start with `agent/`; missions are published revisions \
              without a canonical declaration",
@@ -2920,7 +2923,7 @@ pub async fn subject_definition(
     if serde_json::to_vec(&value).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the applied definition exceeds the client response limit",
         )));
@@ -2946,7 +2949,7 @@ pub async fn publication_definition(
         .iter()
         .any(|prefix| query.subject.starts_with(prefix))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a publication definition subject must start with agent/, mission/, or schedule/",
         )));
@@ -2971,7 +2974,7 @@ pub async fn publication_definition(
         .len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the published definition exceeds the client response limit",
         )));
@@ -3000,6 +3003,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
         "requester".into()
     }
 }
+
 
 fn mission_visualization(
     store: &Store,
@@ -3495,7 +3499,7 @@ fn runtime_resources_for_id(
         include_owner.then_some(id),
         snapshot.store_index,
     )?;
-    let status = state.store.status_for_subject_names_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
+    let status = state.store.status_for_subject_names_for_generic_reads_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
     Ok(runtime_resources_from_status(state, snapshot, session, status)?
         .into_iter()
         .filter(|runtime| runtime["id"] == id || (include_owner && runtime["owner_id"] == id))
@@ -3625,7 +3629,7 @@ fn observer_subscription_detail_at(
         || (!id.starts_with(&format!("{kind}/"))
             && id.len() + kind.len() + 1 > MAX_DETAIL_KEY_BYTES)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "projection-detail-too-large",
             "observer/subscription detail ID exceeds the 4096 byte key budget",
         )
@@ -3668,7 +3672,7 @@ fn observer_subscription_detail_at(
         // Source bytes bound JSON decoding and rendering; escaping can enlarge the output.
         // Refuse the complete item rather than truncate any field or fall back to a list.
         if serde_json::to_vec(&value)?.len() + serde_json::to_vec(snapshot)?.len() > 512 * 1024 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "projection-detail-too-large",
                 "observer/subscription detail output exceeds the 512 KiB response budget",
             )
@@ -3689,7 +3693,7 @@ async fn observer_subscription_detail(
         state.store.clone().read_snapshot(|index| {
             use crate::store::observer_subscription_detail::{DetailBudget, MAX_DETAIL_KEY_BYTES};
             if state.node.len() > MAX_DETAIL_KEY_BYTES {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "projection-detail-too-large",
                     "observer/subscription detail host metadata exceeds the 4096 byte budget",
                 )
@@ -3707,7 +3711,7 @@ async fn observer_subscription_detail(
                 observer_subscription_detail_at(&state, kind, &id, &snapshot, &mut budget)
             })?;
             let value = value.ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "not-found",
                     format!("{kind} `{}` does not exist", client_detail_id(kind, &id)),
                 )
@@ -3864,7 +3868,7 @@ fn operation_checks(
             {
                 report.refreshing = true;
                 let state = state.clone();
-                std::thread::spawn(move || refresh_operation_report(&state, key, None));
+                std::thread::spawn(move || refresh_operation_report(&state, key));
             }
             return Ok(report.checks.clone());
         }
@@ -4069,6 +4073,7 @@ pub async fn missions(
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: after_key.clone(),
                 expires_at_unix_ms,
             })
@@ -7364,7 +7369,7 @@ fn validate_message_session(
 
 fn import_lookup_error(error: anyhow::Error) -> ApiError {
     if error.is::<crate::external_sessions::AmbiguousSession>() {
-        ApiError::bad(St3Error::new("ambiguous-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("ambiguous-import-session", error.to_string()))
     } else {
         ApiError::internal(error)
     }
@@ -7406,7 +7411,7 @@ async fn import_external_session_action(
     }
 
     let import = crate::external_sessions::import_seat(&external).map_err(|error| {
-        ApiError::bad(St3Error::new("invalid-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("invalid-import-session", error.to_string()))
     })?;
     let seat_intent = parse_intent(&import.kdl, &state.node).map_err(ApiError::bad)?;
     let seat_preview = state
@@ -7420,7 +7425,7 @@ async fn import_external_session_action(
         )
         .map_err(ApiError::bad)?;
     if !seat_preview.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-import-seat",
             seat_preview.blockers.join("; "),
         )));
@@ -8044,7 +8049,7 @@ async fn dispatch_action(
             .0;
             Ok(vec![result.subject])
         }
-        "attention.resolve" => Err(ApiError::bad(St3Error::new(
+        "attention.resolve" => Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         ))),
@@ -8080,7 +8085,7 @@ async fn dispatch_action(
                         Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
                     };
                     if let Some(refused) = refused {
-                        return Err(ApiError::bad(St3Error::new(
+                        return Err(ApiError::bad(FractalError::new(
                             "stale-fence",
                             format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
                         )));
@@ -8169,7 +8174,7 @@ async fn dispatch_action(
                             .get("evidence")
                             .map(|value| {
                                 serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "evidence must be an array of strings",
                                     ))
@@ -8183,7 +8188,7 @@ async fn dispatch_action(
                             .get("answer")
                             .map(|value| {
                                 serde_json::from_value(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "answer takes an optional id and optional text",
                                     ))
@@ -9223,7 +9228,7 @@ fn validate_action_admission(
         ));
     }
     if request.action_type == "attention.resolve" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         )));
@@ -10098,6 +10103,51 @@ mod tests {
         }).unwrap();
     }
 
+    #[test]
+    fn notice_typed_resources_and_session_lookup_exclude_reserved_actual_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let owner = "agent/notice-owner";
+        observe_published_runtime(&state, owner, "running", true);
+        observe_published_runtime(&state, "agent/visible-owner", "running", true);
+        let clean = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/operator")).unwrap();
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        // Seed an old-peer-shaped row below current custom-subject admission.
+        let hidden = state.store.connection.batched(|tx| -> anyhow::Result<_> {
+            let hidden = crate::store::append_claim_tx(
+                tx, state.store.origin(), owner, "runtime.observed", None,
+                &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret",
+                    "reason":"notice-secret","terminal":true,"status":"running"}}), &[], None,
+            )?;
+            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+            Ok(hidden)
+        }).unwrap().unwrap();
+        state.store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+        let snapshot = new_client_snapshot(&state);
+        for history in [false, true] {
+            let runtimes = runtime_resources(&state, history, &snapshot, &session).unwrap();
+            assert_eq!(runtimes.len(), 1);
+            assert_eq!(runtimes[0]["owner_id"], "agent/visible-owner");
+            assert!(runtime_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap().is_empty());
+            let terminals = terminal_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap();
+            assert_eq!(terminals.len(), 1);
+            assert!(!serde_json::to_string(&terminals).unwrap().contains("notice-secret"));
+        }
+        assert!(runtime_resources_for_id(&state, &snapshot, &session, "runtime/notice-secret", false).unwrap().is_empty());
+        let cards = crate::api::client_agent_resources(&state.store, true, &snapshot.created_at, snapshot.store_index).unwrap();
+        assert!(cards.iter().any(|card| card["id"] == owner));
+        assert!(!serde_json::to_string(&cards).unwrap().contains("notice-secret"));
+        assert!(!serde_json::to_string(&cards).unwrap().contains(&hidden.id));
+        let id = crate::api::managed_session_id(owner, "notice-secret");
+        assert!(crate::api::managed_session_owner_at(&state.store, snapshot.store_index, &id).unwrap().is_none());
+        assert!(crate::api::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, &id, owner).unwrap().is_none());
+        let (publication, _) = published_runtimes::fold(&state.store, None).unwrap().unwrap();
+        assert_eq!(publication.rows.items.len(), 1);
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        assert!(state.store.claim_by_id(&hidden.id).unwrap().is_some());
+    }
+
     fn publish_runtimes_once(state: &AppState) {
         let list = state.store.published_runtime_list();
         let _wake = list.start();
@@ -10678,7 +10728,7 @@ mission "queue-parity" state="ready" {
     #[test]
     fn terminal_contention_preserves_retryable_code_and_service_close() {
         for code in ["database-busy", "database-locked"] {
-            let envelope = terminal_stream_error(&ApiError::bad(St3Error::new(code, "fixture contention")));
+            let envelope = terminal_stream_error(&ApiError::bad(FractalError::new(code, "fixture contention")));
             assert_eq!(envelope["code"], code);
             assert_eq!(envelope["retryable"], true);
             assert_eq!(terminal_error_close_code(envelope["code"].as_str().unwrap()), 1011);
@@ -11777,8 +11827,12 @@ mission "differential" state="ready" {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abe";
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        state.store.bind_fleet(FLEET).unwrap();
+        let edge = Store::open_memory("edge").unwrap();
+        edge.bind_fleet(FLEET).unwrap();
         let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
@@ -11813,8 +11867,23 @@ mission "differential" state="ready" {
             .await.expect("the refresher publishes the asked-for cut").unwrap();
 
         // Unchanged: plain reads during the pause answer from the publication and do not cut it
-        // short, however many ask.
-        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        // short, however many ask. The change comes from a peer: a claim this node wrote would
+        // cut the pause itself.
+        edge.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "harness.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"one"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = edge
+            .export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap())
+            .unwrap();
+        state.store.receive_replication_exchange("edge", FLEET, &exchange).unwrap();
+        state.store.validate_replication_backlog().unwrap();
+        state.store.apply_replication_repairs().unwrap();
+        state.store.project_replication_backlog().unwrap();
+        let idle = state.store.index().unwrap();
+        assert!(idle > working, "the peer's claim reached this node");
         for _ in 0..3 {
             let (Extension(snapshot), Json(page)) = list(false).await.unwrap();
             assert!(snapshot.store_index < idle, "a plain read answers from the publication");
@@ -14923,8 +14992,12 @@ subscription "watch/source" {
         assert_eq!(statements(40), few.get());
     }
 
+    /// The first report since a start reads the last audit and never makes one: on a busy
+    /// host's store the audit read 335k statements in the first minute after a restart, while
+    /// every reconnecting client waited on the same disk. The daemon audits after that window,
+    /// and later reports show what it found.
     #[test]
-    fn startup_operation_audit_is_shared_and_later_reports_are_fresh() {
+    fn the_first_report_does_not_audit_and_later_reports_show_the_audit() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.append_client_claim(&ClaimInput {
@@ -14949,10 +15022,16 @@ subscription "watch/source" {
             at: Instant::now(),
             refreshing: true,
         });
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        refresh_operation_report(&state, key, Some(sender));
-        let drift = receiver.blocking_recv().unwrap().unwrap();
+        refresh_operation_report(&state, key);
+        assert!(state.store.last_operation_audit().is_none(), "the first report audited");
+        let checks = operation_checks(&state).unwrap().unwrap();
+        let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
+        assert_eq!(projection.status, "warn");
+        assert!(projection.message.starts_with("no operation audit has finished since the daemon started"), "{}", projection.message);
+
+        let drift = state.store.operation_projection_drift().unwrap();
         assert_eq!(drift.len(), 1);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
@@ -14964,7 +15043,7 @@ subscription "watch/source" {
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
         // Doctor reports the last audit and never audits inline: it still shows the drift the
-        // startup audit found until the next audit runs.
+        // audit found until the next audit runs.
         assert_eq!(projection_status(), "fail");
         assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
@@ -14972,7 +15051,7 @@ subscription "watch/source" {
         assert_eq!(projection_status(), "pass");
         assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         assert_eq!(checks.iter().find(|check| check.name == "operation-projection").unwrap().status, "fail");
     }
@@ -15003,7 +15082,7 @@ subscription "watch/source" {
         assert_eq!(pending[0]["severity"], "info");
         assert_eq!(pending[0]["state"], "running");
         assert_eq!(pending[0]["updated_at"], "2026-09-30T00:00:00Z");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let report = operation_resources(&state, "2026-09-30T00:00:00Z").unwrap();
         assert!(
             report.iter().all(|item| item["state"] != "running"),
@@ -15025,11 +15104,9 @@ subscription "watch/source" {
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
         let started = test_state(other.path());
-        let audit = start_operation_report(&started).unwrap();
-        let drift = audit.blocking_recv().unwrap().unwrap();
-        assert!(drift.is_empty());
+        assert!(start_operation_report(&started));
         crate::store::STATEMENTS_RUN.with(|run| run.set(0));
-        assert!(!started.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
+        assert!(!started.store.repair_operation_projection_drift_from_audit(&[]).unwrap());
         assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), 0);
         let deadline = Instant::now() + Duration::from_secs(30);
         while operation_checks(&started).unwrap().is_none() {
@@ -15040,7 +15117,8 @@ subscription "watch/source" {
             std::thread::sleep(Duration::from_millis(10));
         }
         let made = operation_checks(&started).unwrap().unwrap();
-        assert!(start_operation_report(&started).is_none());
+        assert!(started.store.last_operation_audit().is_none());
+        assert!(!start_operation_report(&started));
         assert!(Arc::ptr_eq(
             &made,
             &operation_checks(&started).unwrap().unwrap()
@@ -15423,7 +15501,7 @@ subscription "watch/source" {
 
     #[test]
     fn steady_errors_preserve_store_conflicts_and_distinguish_terminal_lifetime() {
-        let conflict = ApiError::internal(anyhow::Error::new(St3Error::new(
+        let conflict = ApiError::internal(anyhow::Error::new(FractalError::new(
             "stale-subject",
             "the resource changed",
         )));
@@ -15819,7 +15897,7 @@ subscription "watch/source" {
     #[test]
     fn typed_identity_conflicts_preserve_client_wire_codes() {
         for code in ["identity-cycle", "identity-occupied", "identity-retired-source"] {
-            let error = ApiError::bad(St3Error::new(code, "identity conflict"));
+            let error = ApiError::bad(FractalError::new(code, "identity conflict"));
             assert_eq!(error.status, StatusCode::CONFLICT);
             let envelope = client_error_envelope(error.status,
                 &json!({"code":error.code,"message":error.message}), "request/identity");

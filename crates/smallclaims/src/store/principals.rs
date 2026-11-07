@@ -416,7 +416,7 @@ fn attach_expected_signature_inner_tx(
                 &signature.nonce,
                 serving_legacy,
             )? {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "device-signature-replayed",
                     "another live claim already carries this signature's nonce",
                 )
@@ -1236,11 +1236,11 @@ impl Store {
         &self,
         input: &ClaimInput,
         signature: &ClaimSignature,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         let actor = input
             .actor
             .clone()
-            .ok_or_else(|| St3Error::new("invalid-signature", "a signed claim names its actor"))?;
+            .ok_or_else(|| FractalError::new("invalid-signature", "a signed claim names its actor"))?;
         let key = (input.subject.clone(), input.kind.clone(), actor);
         let text = serde_json::to_string(signature).map_err(internal)?;
         {
@@ -1278,16 +1278,16 @@ impl Store {
         person: &str,
         key: &str,
         label: &str,
-    ) -> Result<Vec<String>, St3Error> {
+    ) -> Result<Vec<String>, FractalError> {
         if Family::of(person) != Some(Family::Person) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-person",
                 "only a person enrols devices",
             ));
         }
         self.ensure_principal_key(person)?;
         let root = self.held_root(person).ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "no-person-key",
                 "this node holds no root key for the person, so it cannot enrol a device",
             )
@@ -1318,9 +1318,9 @@ impl Store {
 
     /// Public trust anchor for local pairing, from the exact root enrollment uses.
     /// Returns no key on legacy unsigned nodes. Never exposes private key material.
-    pub fn person_root_grant(&self, person: &str) -> Result<Option<(String, String)>, St3Error> {
+    pub fn person_root_grant(&self, person: &str) -> Result<Option<(String, String)>, FractalError> {
         if Family::of(person) != Some(Family::Person) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-person",
                 "only a person pairs devices",
             ));
@@ -1334,7 +1334,7 @@ impl Store {
     }
 
     /// Withdraw a device key of `person`, as the node.
-    pub fn revoke_device_key(&self, person: &str, key: &str, reason: &str) -> Result<(), St3Error> {
+    pub fn revoke_device_key(&self, person: &str, key: &str, reason: &str) -> Result<(), FractalError> {
         self.append_claim(&ClaimInput {
             subject: person.into(),
             kind: KEY_REVOKED.into(),
@@ -1409,7 +1409,7 @@ impl Store {
     /// minted, and claims stay unsigned as before. A shard mints none either: principal facts
     /// live in the default store it takes its fleet from, and a shard's envelopes are signed by
     /// the member key alone.
-    pub fn ensure_principal_key(&self, actor: &str) -> Result<(), St3Error> {
+    pub fn ensure_principal_key(&self, actor: &str) -> Result<(), FractalError> {
         if self.fleet_authority.get().is_some() {
             return Ok(());
         }
@@ -1437,7 +1437,7 @@ impl Store {
                      issuer: &str,
                      issuer_key: &str,
                      label: Option<String>|
-         -> Result<ClaimRecord, St3Error> {
+         -> Result<ClaimRecord, FractalError> {
             self.runtime
                 .append_claim(
                     self,
@@ -1522,7 +1522,7 @@ impl Store {
         role: Role,
         key: Arc<crate::fleet::MemberKey>,
         chain: Vec<String>,
-    ) -> Result<HeldKey, St3Error> {
+    ) -> Result<HeldKey, FractalError> {
         let role_name = serde_json::to_value(role)
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
@@ -2073,7 +2073,7 @@ pub fn rules_gate_tx(
         if Family::of(actor) == Some(Family::Person) {
             return Ok(());
         }
-        return Err(anyhow::Error::new(St3Error::new(
+        return Err(anyhow::Error::new(FractalError::new(
             "rule-denied",
             format!("only a person sets rules, not {actor}"),
         )));
@@ -2090,7 +2090,7 @@ pub fn rules_gate_tx(
     let rules = current_rules_tx(transaction)?;
     let decision = crate::rules::decide(&rules, actor, kind, subject);
     if let Some(denied) = decision.denied {
-        return Err(anyhow::Error::new(St3Error::new(
+        return Err(anyhow::Error::new(FractalError::new(
             "rule-denied",
             format!(
                 "rule `{}` refuses {actor} writing {kind} on {subject}{}",
@@ -2133,9 +2133,9 @@ impl Store {
         name: &str,
         rule: &crate::rules::Rule,
         person: &str,
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<ClaimRecord, FractalError> {
         if name.is_empty() || name.contains('/') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-rule-name",
                 "a rule name is one path segment",
             ));

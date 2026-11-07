@@ -20,7 +20,7 @@ pub fn short(now: u64) -> String {
     }
 }
 
-/// This build as the client header names it: `stui 0.1.0+local.ab12cd3`.
+/// This build as the client header names it: `fractal-tui 0.1.0+local.ab12cd3`.
 pub fn client_name() -> String {
     client_name_with(&|name| std::env::var(name).ok())
 }
@@ -39,8 +39,8 @@ fn client_name_labelled(label: Option<&str>) -> String {
         .map(|label| label.chars().filter(|c| c.is_ascii_graphic()).take(32).collect::<String>())
         .filter(|label| !label.is_empty());
     match label {
-        Some(label) => format!("stui {} [{label}]", shared::machine_version()),
-        None => format!("stui {}", shared::machine_version()),
+        Some(label) => format!("fractal-tui {} [{label}]", shared::machine_version()),
+        None => format!("fractal-tui {}", shared::machine_version()),
     }
 }
 

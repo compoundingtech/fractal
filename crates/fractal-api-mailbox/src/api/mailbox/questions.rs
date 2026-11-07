@@ -13,11 +13,11 @@ pub(super) struct Request {
     event: Observation,
 }
 
-fn refused(message: &str) -> St3Error {
-    St3Error::new("foreign-harness-question", message)
+fn refused(message: &str) -> FractalError {
+    FractalError::new("foreign-harness-question", message)
 }
 
-fn authorize(request: &Request, peer: Option<&NativeDeliveryPeer>) -> Result<(), St3Error> {
+fn authorize(request: &Request, peer: Option<&NativeDeliveryPeer>) -> Result<(), FractalError> {
     if !peer.is_some_and(|peer| peer.transport == "omp-channel" && peer.agent == request.agent) {
         return Err(refused("question observations require this managed OMP native driver"));
     }
@@ -32,7 +32,7 @@ pub(super) async fn ingest(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&request, peer.as_ref().map(|peer| &peer.0)).map_err(ApiError::bad)?;
     if !fractal_drivers::omp_questions::enabled() {
-        return Err(ApiError::bad(St3Error::new("unsupported-capability", "OMP question ingestion is disabled")));
+        return Err(ApiError::bad(FractalError::new("unsupported-capability", "OMP question ingestion is disabled")));
     }
     let peer = peer.expect("authorize requires the native driver").0;
     let connector = local.and_then(|local| {
@@ -58,7 +58,7 @@ pub(super) async fn ingest(
                         "runtime-authority-indeterminate" => "runtime-authority-indeterminate",
                         _ => "internal",
                     };
-                    St3Error::new(code, error.message)
+                    FractalError::new(code, error.message)
                 })?;
             let dir = authority::source_agent_dir(&checked, &fence);
             let session_dir = dir.parent().ok_or_else(|| refused("invalid provider source"))?
@@ -83,7 +83,7 @@ fn validate_native_binding(
     session_dir: &std::path::Path,
     request: &Request,
     owner_session: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let identity = request.agent.strip_prefix("agent/").unwrap_or(&request.agent);
     // NativePaths keys OMP bindings by provider identity, not the physical PTY name.
     let bound = fractal_drivers::omp_session::bound_native_session(
@@ -98,14 +98,14 @@ fn validate_native_binding(
 fn validate_connector(
     connector: &fractal_runtime::PeerProcessIdentity,
     peer: &NativeDeliveryPeer,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if connector.pid() != peer.pid {
         return Err(refused("question caller differs from the kernel connector"));
     }
     connector.validate().map_err(|_| refused("question connector generation is no longer live"))
 }
 
-fn apply(store: &Store, request: &Request, generation: &QuestionGeneration) -> Result<(String, bool), St3Error> {
+fn apply(store: &Store, request: &Request, generation: &QuestionGeneration) -> Result<(String, bool), FractalError> {
     let id = subject(&request.agent, request.event.session(), request.event.native_id());
     if generation.question != id || generation.agent != request.agent
         || generation.runtime_incarnation != request.runtime_incarnation
@@ -183,13 +183,13 @@ pub(super) mod tests {
         }
     }
 
-    fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
+    fn apply(store: &Store, request: &Request) -> Result<(String, bool), FractalError> {
         super::apply(store, request, &generation(request))
     }
 
     pub(in crate::api::mailbox) fn assert_forged_binding_cannot_write(
         peer: &NativeDeliveryPeer,
-        admit: impl Fn() -> Result<(), St3Error>,
+        admit: impl Fn() -> Result<(), FractalError>,
     ) {
         let store = Store::open_memory("forged-question-driver").unwrap();
         let mut frame = request();
