@@ -17,7 +17,7 @@ describe('expired browser credential', () => {
       await listening.promise
       const address = server.address()
       if (address === null || typeof address === 'string') throw new Error('Expected a TCP server')
-      const live = liveSource({ options: { baseUrl: `http://127.0.0.1:${address.port}` } })
+      const live = liveSource({ options: { baseUrl: `http://127.0.0.1:${address.port}`, maxFollows: 16 } })
       const release = live.registry.mount(live.source.agents)
       try {
         await expect.poll(() => live.registry.get(live.source.agents)).toMatchObject({

@@ -9,6 +9,7 @@ import type { Feed } from './source.ts'
 export type UnobservedFeed = Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
 
 const recovery = {
+  unauthorized: "This browser's access to the daemon has expired or was revoked. Pair the device again.",
   ungranted: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.',
   unsupported:
     'This gateway does not support this surface. Choose another surface; your saved work is unchanged.',
@@ -40,7 +41,7 @@ export const FeedState = ({
           : recovery[feed.reason]
       }
     />
-    {feed._tag === 'Unavailable' && (
+    {feed._tag === 'Unavailable' && feed.reason !== 'unauthorized' && (
       <details {...stylex.props(styles.diagnostic)}>
         <summary {...stylex.props(styles.summary)}>Connection details</summary>
         <p {...stylex.props(styles.detail)}>{feed.detail}</p>

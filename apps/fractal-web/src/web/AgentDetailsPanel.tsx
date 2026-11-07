@@ -72,12 +72,14 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
 
 /** Plain reasons for a refused or failed subagent-activity read; the source's own detail is diagnostic only. */
 const supplementUnavailableReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable' }>['reason'], string> = {
+  unauthorized: "This browser's access to the daemon has expired or was revoked. Pair the device again.",
   ungranted: "This device doesn't have access to subagent activity.",
   unsupported: "Subagent activity isn't reported for this session.",
   failed: "Subagent activity couldn't be loaded.",
 }
 /** Why retained subagent activity is shown instead of a newer read. */
 const supplementStaleReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable' }>['reason'], string> = {
+  unauthorized: "This browser's access to the daemon has expired or was revoked. Pair the device again.",
   ungranted: 'This device no longer has access to newer subagent activity, so earlier activity is shown.',
   unsupported: "Newer subagent activity isn't reported for this session, so earlier activity is shown.",
   failed: "The latest update couldn't be loaded, so earlier activity is shown.",
