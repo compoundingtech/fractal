@@ -241,7 +241,7 @@ test('main focus plays and new app layout policies survive tag-derived selection
     ['../../../apps/fractal-web/src/web/AlertsTab.stories.tsx', ['Served', 'BoundedScroll']],
     ['../../../apps/fractal-web/src/monitor/UsagePane.stories.tsx', ['AllStates', 'Populated']],
   ] as const) {
-    const module = storyModules[file]
+    const module = storyModules[`./${file}`]
     expect(module, file).toBeDefined()
     for (const name of names) {
       const story = module![name]
