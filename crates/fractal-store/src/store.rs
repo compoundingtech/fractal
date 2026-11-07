@@ -312,8 +312,11 @@ pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
 pub mod gate_runners;
+pub mod wake_lookup;
 #[cfg(test)]
 mod gate_runners_tests;
+#[cfg(test)]
+mod wake_lookup_tests;
 #[cfg(test)]
 mod run_eta_tests;
 #[cfg(test)]
@@ -20121,6 +20124,53 @@ enum WakeHistory {
     Deferred,
 }
 
+/// Seek the step's wake tags before fetching message bodies. During the one-time copy only
+/// the unindexed historical tail uses the recipient index; its rowid bounds precede body reads.
+pub(super) fn work_wake_history_query(complete: bool) -> String {
+    let tail = if complete { "" } else {
+        "UNION SELECT pending.id FROM claims pending INDEXED BY claims_message_to_order_index
+         WHERE pending.store_index>(SELECT cursor FROM local_work_wake_backfill WHERE singleton=1)
+           AND pending.store_index<=(SELECT ceiling FROM local_work_wake_backfill WHERE singleton=1)
+           AND pending.kind='message.sent'
+           AND json_extract(pending.body, '$.fields.to') IN (?3, ?4)"
+    };
+    canonical_sql(&format!(
+        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
+                EXISTS(SELECT 1 FROM claims consumed
+                       WHERE consumed.subject=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
+                EXISTS(SELECT 1 FROM claims delivered
+                       WHERE delivered.subject=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
+                EXISTS(SELECT 1 FROM claims staged
+                       WHERE staged.subject=claims.subject
+                         AND staged.kind='message.staged'
+                         AND staged.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_staged staged
+                       WHERE staged.message=claims.subject
+                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
+         FROM claims
+         WHERE claims.id IN (
+             SELECT claim_id FROM local_work_wake_tags
+             WHERE recipient IN (?3, ?4) AND tag>=?2 AND tag<?5
+             {tail})
+           AND claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
+           AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
+         ORDER BY CANONICAL_ASC(claims)"
+    ))
+}
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
@@ -20197,43 +20247,18 @@ fn enrich_step_wake_with(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-habf9fbe214b0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
-                EXISTS(SELECT 1 FROM claims consumed
-                       WHERE consumed.subject=claims.subject
-                         AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_marks consumed
-                       WHERE consumed.message=claims.subject
-                         AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
-                EXISTS(SELECT 1 FROM claims delivered
-                       WHERE delivered.subject=claims.subject
-                         AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_marks delivered
-                       WHERE delivered.message=claims.subject
-                         AND delivered.kind='message.delivered'
-                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
-                EXISTS(SELECT 1 FROM claims staged
-                       WHERE staged.subject=claims.subject
-                         AND staged.kind='message.staged'
-                         AND staged.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_staged staged
-                       WHERE staged.message=claims.subject
-                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
-         FROM claims INDEXED BY claims_message_to_index
-         WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
-           AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
-         ORDER BY CANONICAL_ASC(claims)",
-    ))?;
+    let (_, _, complete) = wake_lookup::status(connection)?;
+    let mut upper = wake_tag_prefix.clone();
+    upper.pop();
+    upper.push('A'); // The exclusive lexicographic successor of the final '@'.
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?;
     let rows = statement.query_map(
         params![
             snapshot_unix_ms.to_string(),
             wake_tag_prefix,
             assignee,
-            bare_assignee
+            bare_assignee,
+            upper
         ],
         |row| {
             Ok((
