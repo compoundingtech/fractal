@@ -229,6 +229,59 @@ fn a_field_read_whose_filter_differs_from_the_full_folds_is_caught() {
     assert!(differences.is_empty(), "{differences:#?}");
 }
 
+/// The notice check and the unknown-claim check read a subject's kinds with one seek per kind.
+/// At every cut, over random subjects whose kinds share prefixes and differ only in case or in
+/// a trailing character, that must be exactly the kinds a DISTINCT over every claim finds.
+#[test]
+fn a_subjects_kinds_by_seeks_equal_a_distinct_over_its_claims_at_every_cut() {
+    const KINDS: &[&str] = &[
+        "a", "a.b", "a.b.c", "ab", "a-b", "a/b", "A", "harness.turn", "harness/", "Harness.turn",
+        "attention.notice", "attention.notice-x", "attention.noticex", "custom.attention",
+        "custom.attention.x", "custom.attentionx", "runtime.observed", "runtime.observed2", "z", "é",
+    ];
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.connection.write();
+    connection
+        .execute(/* sqlite-large-value: allow-for-now lv-h06cff359fe46 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('kinds','node',9000,'fixture','1700000000000')", [])
+        .unwrap();
+    let subjects = ["agent/example/kinds-0", "agent/example/kinds-1", "agent/example/kinds-1x", "agent/example/kinds-2"];
+    let mut random = Seeded(0x5EED_0F_C1A1_u64);
+    for index in 0..1_500 {
+        // Kinds arrive in a random order, often repeated, so each kind's first claim is at a
+        // different cut on each subject.
+        let subject = subjects[random.below(subjects.len() as u64) as usize];
+        let kind = KINDS[random.below(KINDS.len() as u64) as usize];
+        connection
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h6dbcaf0dfacb owner=fractal_store::store::status_summary_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,'kinds',?2,?3,'node','{}','[]','1700000000000')",
+                rusqlite::params![format!("kinds-{index}"), subject, kind],
+            )
+            .unwrap();
+    }
+    let newest: u64 = connection.query_row("SELECT MAX(store_index) FROM claims", [], |row| row.get(0)).unwrap();
+    let first: u64 = connection.query_row("SELECT MIN(store_index) FROM claims WHERE id LIKE 'kinds-%'", [], |row| row.get(0)).unwrap();
+    let mut distinct = connection
+        .prepare("SELECT DISTINCT kind FROM claims WHERE subject=?1 AND store_index<=?2 ORDER BY kind")
+        .unwrap();
+    let mut cuts_that_hide_a_kind = 0;
+    for subject in subjects.iter().chain(&["agent/example/kinds", "agent/example/none"]) {
+        for cut in (first.saturating_sub(1)..=newest).chain([u64::MAX >> 1]) {
+            let expected = distinct
+                .query_map(rusqlite::params![subject, cut], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let sought = subject_kinds_at(&connection, subject, cut).unwrap();
+            assert_eq!(sought, expected, "{subject} at {cut}");
+            if expected.len() < subject_kinds_at(&connection, subject, newest).unwrap().len() {
+                cuts_that_hide_a_kind += 1;
+            }
+        }
+    }
+    // The cuts reach before kinds a subject gains later, so a read that ignored the cut fails.
+    assert!(cuts_that_hide_a_kind > 100, "{cuts_that_hide_a_kind}");
+}
+
 /// Times a seat's full and incarnation reductions on a store copy, read-only and unchanged:
 /// `ST_STATUS_SUMMARY_BENCH_STORE` names the file and `ST_STATUS_SUMMARY_BENCH_SEATS` the seats,
 /// comma-separated. Each seat's incarnation reduction runs first, on a cold cache.
