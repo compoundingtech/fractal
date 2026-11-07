@@ -29,7 +29,7 @@ const recover = (state: JournalState): JournalEffect[] => {
   }
 };
 /** Unwired AsyncStorage host, following LocalDrafts' injected storage precedent.
- * One instance owns one public connection/scope; close it before replacing that connection.
+ * One instance owns one public connection/scope; await close() before replacing that connection.
  * Callbacks must honor signal and must not await a nested dispatch on this serialized queue. */
 export class SidebarJournal<TState extends JournalState, TEvent> {
   private pending: Promise<unknown> = Promise.resolve();
@@ -37,11 +37,18 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
   private readonly lifetime = new AbortController();
   private queued = 0;
   private restored?: TState;
+  private storagePending: Promise<void> = Promise.resolve();
   constructor(private readonly storage: JournalStorage, private readonly scope: MembershipScope, private readonly reducer: JournalReducer<TState, TEvent>, private readonly run: (effect: 'Send' | 'ReadBase' | 'Replan', state: TState, signal: AbortSignal) => Promise<void>, private readonly limits = { maxQueued: 64, timeoutMs: 30000 }) {
     if (!Number.isSafeInteger(limits.maxQueued) || limits.maxQueued < 1 || !Number.isSafeInteger(limits.timeoutMs) || limits.timeoutMs < 1) throw new Error('Invalid sidebar journal limits');
     this.key = `st3.sidebar.journal.v1:${JSON.stringify([scope.owner, scope.container, scope.endpoint, scope.host, scope.projection])}`;
   }
-  close(): void { this.lifetime.abort(); }
+  /** Owners must await this storage barrier before creating a replacement host for this scope. */
+  close(): Promise<void> { this.lifetime.abort(); return this.storagePending; }
+  private storageOperation<TResult>(work: () => Promise<TResult>): Promise<TResult> {
+    const operation = Promise.resolve().then(() => { this.assertOpen(); return work(); });
+    this.storagePending = operation.then(() => {}, () => {});
+    return operation;
+  }
   private assertOpen(): void { if (this.lifetime.signal.aborted) throw new Error('Sidebar journal closed'); }
   private serial<TResult>(work: () => Promise<TResult>): Promise<TResult> {
     if (this.lifetime.signal.aborted) return Promise.reject(new Error('Sidebar journal closed'));
@@ -49,7 +56,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
     this.queued++;
     const next = this.pending.then(async () => {
       this.assertOpen();
-      const timer = setTimeout(() => this.close(), this.limits.timeoutMs);
+      const timer = setTimeout(() => { void this.close(); }, this.limits.timeoutMs);
       let onAbort = () => {};
       try {
         const stopped = new Promise<never>((_, reject) => {
@@ -64,7 +71,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
   }
   restore(): Promise<JournalRestore<TState>> {
     return this.serial(async () => {
-      const raw = await this.storage.getItem(this.key);
+      const raw = await this.storageOperation(() => this.storage.getItem(this.key));
       this.assertOpen();
       if (raw === null) return { empty: true };
       try {
@@ -104,17 +111,18 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
       let ack: TEvent;
       const failure = this.reducer.storageFailed(state, effect === 'PersistCompletion' ? 'Completion' : effect === 'PersistRemoval' ? 'Removal' : 'Pending');
       try {
-        if (effect === 'PersistRemoval') { await this.storage.removeItem(this.key); continue; }
+        if (effect === 'PersistRemoval') { await this.storageOperation(() => this.storage.removeItem(this.key)); if (this.lifetime.signal.aborted) return; continue; }
         // Capture bytes AND acknowledgement before yielding to the storage operation.
         const raw = JSON.stringify({ version: SIDEBAR_JOURNAL_VERSION, state: this.reducer.encode(state) });
         ack = this.reducer.persisted(state, effect === 'PersistCompletion');
-        await this.storage.setItem(this.key, raw);
-        this.assertOpen();
+        await this.storageOperation(() => this.storage.setItem(this.key, raw));
       } catch (error) {
         // Do not recursively retry persistence effects from StorageFailed or send past this barrier.
+        if (this.lifetime.signal.aborted) return;
         this.reducer.reduce(state, failure);
         throw error;
       }
+      if (this.lifetime.signal.aborted) return;
       await this.execute(state, this.reducer.reduce(state, ack));
     }
   }

@@ -52,11 +52,31 @@ test('real journal dispatch replays production idempotency and refreshes compoun
 test('connection close cancels in-flight transport and bars late storage send', async () => {
   const entered = deferred(), blocked = deferred(); let sends = 0, signal;
   const env = setup(null, async (_effect, _s, selected) => { signal = selected; entered.resolve(); await blocked.promise; });
-  const task = env.host.dispatch(state(), plan); await entered.promise; env.host.close(); await assert.rejects(task, /closed/); assert.equal(signal.aborted, true); blocked.resolve();
+  const task = env.host.dispatch(state(), plan); await entered.promise; await env.host.close(); await assert.rejects(task, /closed/); assert.equal(signal.aborted, true); blocked.resolve();
   await assert.rejects(env.host.dispatch(state(), plan), /closed/);
-  const disk = setup(null, async () => { sends++; }), writing = deferred(), release = deferred();
-  disk.storage.setItem = async () => { writing.resolve(); await release.promise; };
-  const pending = disk.host.dispatch(state(), plan); await writing.promise; disk.host.close(); await assert.rejects(pending, /closed/); release.resolve(); await new Promise(resolve => setImmediate(resolve)); assert.equal(sends, 0);
+  for (const phase of ['Pending', 'Completion', 'Removal']) {
+    const disk = setup(null, async () => { sends++; }), writing = deferred(), release = deferred(), current = state();
+    if (phase !== 'Pending') {
+      writeReducer.reduce(current, phase === 'Completion' ? { ...plan, plan: { folders: [{ op: 'folder.rename', id: 'folder/test', name: 'Test' }], memberships: members } } : plan);
+      const identity = current.request.identity;
+      writeReducer.reduce(current, { type: 'Persisted', identity }); writeReducer.reduce(current, { type: 'Observed', identity });
+      if (phase === 'Removal') writeReducer.reduce(current, { type: 'CompletionPersisted', identity });
+    }
+    const method = phase === 'Removal' ? 'removeItem' : 'setItem', persist = disk.storage[method];
+    disk.storage[method] = async (...args) => { writing.resolve(); await release.promise; await persist(...args); };
+    const pending = phase === 'Pending' ? disk.host.dispatch(current, plan) : disk.host.resume({ state: current, effects: [phase === 'Completion' ? 'PersistCompletion' : 'PersistRemoval'] });
+    await writing.promise;
+    const unchanged = structuredClone(current); let closed = false;
+    const closing = disk.host.close().then(() => { closed = true; });
+    await assert.rejects(pending, /closed/); assert.equal(closed, false);
+    release.resolve(); await closing;
+    assert.deepEqual(current, unchanged); assert.equal(sends, 0);
+    disk.storage[method] = persist;
+    const replacement = new SidebarJournal(disk.storage, scope, writeReducer, async () => {});
+    await replacement.dispatch(state(), { ...plan, membership: identity(3) });
+    const ownRecord = disk.raw(); assert.equal(JSON.parse(ownRecord).state.request.identity.action_id, 'action/3');
+    await disk.host.close(); assert.equal(disk.raw(), ownRecord); await replacement.close();
+  }
 });
 test('queue bounds and deadline stop wedged host without starting dependent work', async () => {
   const entered = deferred(), blocked = deferred();
