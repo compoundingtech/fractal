@@ -9,6 +9,7 @@ import * as Aria from 'react-aria-components'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useMissionsDecode, useNow } from '../data/react.tsx'
+import { credentialExpiredMessage } from '../data/source.ts'
 import { DecodeNotice } from '../web/LiveRoster.tsx'
 import { hiddenByDefault, missionEta, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 
@@ -59,7 +60,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
           : missions._tag === 'Unavailable' ? <SystemNotice
             kind="error"
             connection={missions.reason !== 'ungranted' && missions.reason !== 'unsupported'}
-            title={missions.reason === 'ungranted' ? 'No access to missions' : missions.reason === 'unsupported' ? 'Missions not supported' : 'Missions could not load'}
+            title={missions.reason === 'unauthorized' ? credentialExpiredMessage : missions.reason === 'ungranted' ? 'No access to missions' : missions.reason === 'unsupported' ? 'Missions not supported' : 'Missions could not load'}
             {...(missions.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : missions.reason === 'unsupported' ? { detail: 'This connection does not offer them' } : {})}
           />
             : shown.length === 0 ? <SystemNotice kind="empty" title={rows.length === 0 ? 'No missions' : 'Nothing running today'} />

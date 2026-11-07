@@ -35,6 +35,9 @@ pub enum WorkerIngressGenerationCheck {
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_source: Option<QuotaSourceConfig>,
+    /// Inactive host-envelope declaration; absent uses CONFIG/host-envelope.json if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_envelope_file: Option<PathBuf>,
     pub node: String,
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -674,6 +677,7 @@ impl Default for Config {
         let client_gateway_socket = runtime_dir.join("fractal-client.sock");
         Self {
             quota_source: None,
+            host_envelope_file: None,
             node: host_name(),
             access_mode: None,
             claude_primary_ownership: None,
@@ -768,6 +772,24 @@ impl Config {
 
     pub fn default_path() -> PathBuf {
         fractal_client::product_dirs::config_dir().join("config.toml")
+    }
+
+    /// Read and validate only: no admission policy or cgroup changes.
+    pub fn read_host_envelope(&self) -> Result<Option<fractal_runtime::host_envelope::HostEnvelope>> {
+        let default = fractal_client::product_dirs::config_dir().join("host-envelope.json");
+        let path = self.host_envelope_file.as_deref().unwrap_or(&default);
+        match fractal_runtime::host_envelope::HostEnvelope::read(path) {
+            Ok(envelope) if envelope.host != self.node => Err(
+                fractal_runtime::host_envelope::Error::HostMismatch {
+                    node: self.node.clone(),
+                    host: envelope.host,
+                }
+            ).with_context(|| format!("validate inactive host envelope {}", path.display())),
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(fractal_runtime::host_envelope::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound && self.host_envelope_file.is_none() => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("validate inactive host envelope {}", path.display())),
+        }
     }
 
     pub fn load(path: Option<&Path>) -> Result<Self> {
@@ -1259,6 +1281,38 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inactive_host_envelope_path_roundtrips_and_is_read_strictly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("envelope.json");
+        let config = super::Config {
+            host_envelope_file: Some(path.clone()),
+            node: "fixture-capped".into(),
+            ..super::Config::default()
+        };
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: super::Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.host_envelope_file, Some(path.clone()));
+        assert!(decoded.read_host_envelope().is_err());
+        std::fs::write(&path, include_bytes!("../../fractal-runtime/tests/host-envelope/capped.json")).unwrap();
+        assert_eq!(decoded.read_host_envelope().unwrap().unwrap().host, "fixture-capped");
+        let wrong_host = super::Config { node: "fixture-other".into(), ..decoded.clone() };
+        let error = wrong_host.read_host_envelope().unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<fractal_runtime::host_envelope::Error>(),
+            Some(fractal_runtime::host_envelope::Error::HostMismatch { node, host })
+                if node == "fixture-other" && host == "fixture-capped"
+        )));
+        std::fs::write(&path, br#"{"schema_version":99}"#).unwrap();
+        // An inactive declaration is inspected only by the explicit reader, never startup validation.
+        decoded.validate().unwrap();
+        let error = decoded.read_host_envelope().unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<fractal_runtime::host_envelope::Error>(),
+            Some(fractal_runtime::host_envelope::Error::UnsupportedVersion(99))
+        )));
+    }
+
     #[test]
     fn store_directory_defaults_to_state_root_and_roundtrips_explicit_configuration() {
         let state = tempfile::tempdir().unwrap();

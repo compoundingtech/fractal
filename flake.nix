@@ -625,7 +625,7 @@
           pname = "fractal-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" "--bin" "fractal-mcp" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
@@ -634,12 +634,17 @@
           postInstall = ''ln -s fractal-chatgpt "$out/bin/st-chatgpt"'';
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
           meta = {
-            description = "Standalone Fractal ChatGPT MCP adapter";
+            description = "Standalone Fractal ChatGPT and local stdio MCP adapters";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "fractal-chatgpt";
           };
         };
+
+        # Both entrypoints share one crate and build; only nix run's default differs.
+        fractalMcp = fractalChatgpt.overrideAttrs (old: {
+          meta = old.meta // { mainProgram = "fractal-mcp"; };
+        });
 
         fractalFabricAdapter = pkgs.rustPlatform.buildRustPackage {
           pname = "fractal-fabric-adapter";
@@ -861,12 +866,22 @@
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
         packages.fractal-fabric-adapter = fractalFabricAdapter;
         packages.st-fabric-adapter = fractalFabricAdapter;
+        packages.fractal-mcp = fractalMcp;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
         packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         # All four components come out of one build; the install paths are unchanged.
         packages.default = st3;
+        # A null attribute name omits this output entirely on non-Darwin systems.
+        packages.${if pkgs.stdenv.hostPlatform.isDarwin then "ios-rust-toolchain" else null} =
+          fenix.packages.${system}.combine [
+            fenix.packages.${system}.stable.cargo
+            fenix.packages.${system}.stable.rustc
+            fenix.packages.${system}.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios-sim.stable.rust-std
+          ];
 
         # `nix flake check` is the whole CI: it builds the package — which runs
         # the hermetic portion of the in-tree `cargo test` suite via doCheck —

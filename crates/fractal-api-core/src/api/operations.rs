@@ -708,11 +708,6 @@ pub async fn status(
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {
-            if !store.generic_status_subject_visible_at(subject, query.at_index.map_or_else(|| store.index(), Ok)?)? {
-                return Err(anyhow::Error::new(FractalError::new(
-                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
-                ).with_detail("reason", "notices-unavailable")));
-            }
             store.status_summary_at(subject, query.at_index)?
         } else {
             store.status_for_generic_reads(

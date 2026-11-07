@@ -12,6 +12,10 @@ The TypeScript human error helpers match Rust's explicit `human()` / `human_mess
 2. On the iPhone, connect Tailscale, enter the **paired-only gateway** URL (HTTPS; `http://100.x.y.z:port` for a paired-only listener bound to the host's Tailscale address; or `http://host.local:port` / a private LAN address for one bound to its LAN address), then enter the pairing ID and code, plus the person-root fingerprint copied separately from the trusted machine. A missing fingerprint is refused unless you deliberately choose the warned unpinned override. Never publish the privileged `st3.sock`.
 3. Open Now, Resources, Fleet and Spaces. The app shows offline/reconnect state; actions require a live connection. It does not queue offline mutations.
 
+An already paired phone can use **Fleet › this connection › re-pair this device**, including in Release, to open the form on its saved gateway. Cancel leaves the profile untouched. Replacement first confirms notification cleanup, then verifies the new grant before the single SecureStore commit; a failed replacement retains the old profile.
+Re-pairing refuses before sending the code if Fabric is connected to another member. URL gateways receive pairing directly at their saved URL, never through an unrelated Fabric bridge. A Fabric-only gateway requires the connected member's exact node and service. The replacement credential and the gateway used for that pairing are saved together.
+
+Terminal creation failures, including an answer without a terminal ID, appear in the error banner. Feed live/recovery transitions and successful background reads do not dismiss action feedback; dismiss the banner or complete a successful action to clear it.
 Alternatively, start `fractal devices pair` with its explicit `--gateway` URL and select **Scan pairing QR code** on the phone's pairing screen. Scanning only fills a candidate gateway, pairing ID and code; copy the person-root fingerprint separately, then tap **Pair this device**. A change of gateway (including its base path) requires confirmation before the form changes. Cancelling the scan or that confirmation preserves the existing draft and saved profile. The saved credential and root pin are replaced only after successful pairing. Expired or invalid QR codes are rejected without showing their contents; camera denial leaves manual entry on the same screen. QR scanning requires a fresh native build with the local `fractal-pairing-scanner` Expo module and camera permission; it does not work in Expo Go.
 
 Scanned pairings always require the independently copied fingerprint: the manual unpinned override is unavailable and refused by the store. A successful QR pairing selects the scanned gateway's saved-gateway route and clears all Fabric `device` bindings. Other members retain their independently paired profiles, but none inherits the newly scanned gateway's credential. The carrier and member bindings are committed in the same Keychain profile replacement as the bearer; startup uses that snapshot rather than stale carrier preferences. Subsequent carrier/member changes update the profile's authoritative routing snapshot. Existing profiles without a snapshot keep their saved settings until re-pairing.
@@ -272,11 +276,12 @@ never override these pins in prebuild, CocoaPods, Metro, or Xcode; the pins are
 also part of the native-generation cache key. A signed artifact is installed only if its
 key equals the observed head's key under the current inputs. A build runs only
 when no retained artifact or installed app has that key; a revert to retained
-content reuses its artifact if that does not lower the installed version.
+content reuses its artifact only if it is newer than the installed version.
 `CFBundleVersion` comes from a persisted counter, the larger of the commit
 count and the last assigned version plus one, so it never decreases across
-reviewed revert commits and forward branch switches. Every install checks it against the
-installed version; an artifact with a lower version is rebuilt instead.
+reviewed revert commits and forward branch switches. Before installing, an approved
+tick reads the device's daily bundle version and refuses any artifact at or below
+the reconciled version floor. A stale cached floor cannot authorize a downgrade.
 A pending artifact for other content is dropped, never installed.
 An unsuccessful build cannot be installed. A failed content key is retried
 after 15 minutes, then after 30, doubling up to six hours (`--build-backoff`
@@ -328,12 +333,27 @@ and removes the receipt after parsing. An exact daily bundle ID and numeric
 `bundleVersion` (not the marketing version) establish whether installation
 already completed, so launch can resume without a second install. A higher
 device version raises the version floor and refuses the older artifact.
-Query failure, malformed JSON, duplicate daily entries, or invalid versions
-defer delivery without assuming success or mutating the phone. An absent
-daily app permits retry; any previously persisted version floor is retained.
-A readback contradicting the cached installed version also invalidates the
+Query failure, malformed JSON, duplicate daily entries, invalid versions, or an
+absent daily app defer delivery without assuming success or mutating the phone.
+A readback contradicting the cached installed version invalidates the
 cached installed-content identity, while retaining the monotonic version floor.
-No device query runs under `--build-only` or without caller deploy approval.
+A contradictory readback also clears a pending artifact's installed claim,
+including an install whose launch failed. Finalizing any artifact never lowers
+the version floor, and a superseded installed claim cannot restore stale identity.
+Ordinary ticks query the device only with caller deploy approval, never under
+`--build-only`.
+
+For an initialized delivery state, run the usual configured command with
+`--reconcile-installed` to reconcile a build installed outside the updater.
+This mode makes exactly one `devicectl device info apps` query and writes an
+`installed_reconciled` outcome. It only raises `installed_version` to the maximum
+of the cached floor and the observed numeric build; it clears stale installed
+content identity using the same readback path as interrupted-install recovery.
+It never fetches, builds, installs, or launches. Deploy approval is not required:
+the device operation is read-only and the only state mutation tightens the
+version floor. Missing/unreadable bundle information fails closed without
+changing that floor. After repinning the updater, an operator can run this mode
+once before allowing scheduled delivery to resume.
 Optionally set both `--notify-from` and `--notify-to` (or
 `FRACTAL_IOS_NOTIFY_FROM`/`FRACTAL_IOS_NOTIFY_TO`) to send state changes with
 `fractal conversations send`: each newly installed commit, a new build failure,
@@ -442,6 +462,7 @@ The Debug-only fabric proof (`fabric-proof` links, the separate offline Debug ap
 Resources opens shared folders followed by Everything else, grouped by Agents, Missions,
 Terminals and Machines. Agents and Missions open their full searchable lists in one tap. The filter row stays above the person's folders. This view follows
 the optional arrangements stream; older pairings retain the grouped resource browser.
+Terminal inventories do not include display names. Terminal rows show the owner's short ID (the first eight characters for a UUID); the filter also matches the complete owner ID and runtime ID. Opening a row still uses its terminal ID, not its runtime or owner ID.
 Tap a resource to open it and a heading to collapse it. Long-press a resource for Move to;
 long-press a folder for rename or confirmed deletion. Each folder's + finds a resource to
 add; choosing it previews the move, and the Move button commits it. Drag handles reorder folders and move or reorder resources; taps never move rows.

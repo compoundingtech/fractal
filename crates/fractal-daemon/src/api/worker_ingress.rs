@@ -29,10 +29,6 @@ fn protect(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) ->
         let observe = observe.clone();
         async move {
             if worker_route(request.uri().path()) {
-                if cfg!(target_os = "macos") {
-                    eprintln!("fractal: worker authority unverified-platform {}", request.uri().path());
-                    return next.run(request).await;
-                }
                 let peer = request.extensions().get::<LocalPeer>().cloned();
                 let admitted = tokio::task::spawn_blocking(move || authorize(peer.as_ref(), &*observe)).await;
                 if !matches!(admitted, Ok(Ok(()))) {
@@ -57,24 +53,19 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
         Some(pid) => {
             anyhow::ensure!(!crate::service::daemon_is_service_managed()?,
                 "service-managed daemons cannot enroll a foreground worker");
-            #[cfg(not(target_os = "linux"))]
-            return Ok(Arc::new(move || Ok(pid)));
-            #[cfg(target_os = "linux")]
-            {
             let generation = fractal_runtime::PeerProcessIdentity::capture_pid(pid)?;
             Ok(Arc::new(move || { generation.validate()?; Ok(generation.pid()) }))
-            }
         }
         None => Ok(Arc::new(crate::service::replication_worker_pid)),
     }
 }
 
-/// On Linux observe by default; explicit enforcement refuses before body decoding.
+/// Observe by default; explicit enforcement refuses before body decoding.
 pub fn worker_authenticated(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) -> Router {
     protect(app, observe, mode)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -109,7 +100,15 @@ mod tests {
 
     #[tokio::test]
     async fn worker_ingress_refuses_unbound_before_body_and_accepts_pinned_worker() {
-        let (connector, _) = tokio::net::UnixStream::pair().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("worker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        // Darwin LOCAL_PEERPID is available on accepted connections, not socketpair.
+        let (client, accepted) = tokio::join!(
+            tokio::net::UnixStream::connect(&socket), listener.accept(),
+        );
+        let _client = client.unwrap();
+        let (connector, _) = accepted.unwrap();
         let peer = LocalPeer { pid: std::process::id(), ancestor: None,
             peer_process: Some(local_peer_process(&connector).unwrap()) };
         let observed = Arc::new(AtomicU32::new(0));

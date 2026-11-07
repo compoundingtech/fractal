@@ -38,6 +38,10 @@ after a restart the pending attempt uses its saved wall time. The result also
 records the recipient's accepted read timestamp, but does not subtract clocks
 from different machines. `delivered` without `read` never passes the probe.
 
+The probe's mail, its alerts and their clears (every tag beginning `delivery-probe`)
+stay graph `message.sent` claims with lifecycle claims, not stream items or marks,
+while other mail moves to the messages shard, so these proofs hold.
+
 The latest results and a heartbeat are replicated as immutable document versions
 under `doc/delivery-probes/NODE`. Every version is kept on every member, so the probe
 publishes one only when a route's outcome changes (overdue, a late read, an alert, a

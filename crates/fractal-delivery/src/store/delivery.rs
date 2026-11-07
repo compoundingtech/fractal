@@ -769,7 +769,7 @@ impl DeliveryStore for Store {
             through: u64,
             limit: usize,
         ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        self.messages_page_inner(Some(recipient), false, after, through, limit, true)
+        self.messages_page_for_seat(recipient, after, through, limit)
     }
 
     fn operational_messages(

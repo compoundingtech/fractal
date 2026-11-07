@@ -53,6 +53,7 @@ pub mod published_missions;
 pub mod collection_ivm;
 pub mod summary;
 pub mod assistant;
+pub mod external_grants;
 pub mod related_runs;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
@@ -680,6 +681,13 @@ pub fn forbidden(message: impl Into<String>) -> ApiError {
     }
 }
 
+fn credential_rejected(message: &str) -> ApiError {
+    ApiError {
+        details: Box::new(serde_json::Map::from_iter([("reason".into(), json!("credential-rejected"))])),
+        ..forbidden(message)
+    }
+}
+
 pub fn fabric_boundary_forbidden() -> ApiError {
     forbidden("the client gateway exposes only the authenticated client-v0 boundary")
 }
@@ -815,7 +823,7 @@ pub fn authenticate(
             == Some(digest.as_str())
     });
     let Some(paired) = paired else {
-        return Err(forbidden("the client credential is unknown or expired"));
+        return Err(credential_rejected("the client credential is unknown or expired"));
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     // Transfer artifacts contain complete batches/state, not recipient-authorized views.
@@ -867,7 +875,7 @@ pub fn paired_client_session(
     let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
     if revoked || expires_at <= client_now_ms() {
-        return Err(forbidden("the client credential was revoked or expired"));
+        return Err(credential_rejected("the client credential was revoked or expired"));
     }
     let actor = paired.body.pointer("/fields/session_actor").and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("a paired client has no derived actor"))?;

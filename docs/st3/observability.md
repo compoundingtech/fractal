@@ -649,6 +649,247 @@ Excluded from FIFO telemetry are coalesced Notify/watch states, caches,
 durable inbox and seat queues, driver-side mailbox `Subscription` queues, and
 ping sidecar queues.
 
+## Agent population (st.agents, st.attention.open)
+
+**Contract revision: AP-2026-11-07-r2 (proposed; independent reviewer GO required).**
+This is the contract for separate implementation PRs, not a claim that these
+instruments or all attribution signals already exist. Review GO names this
+revision and the exact reviewed commit. See [#1580](https://github.com/compoundingtech/fractal/issues/1580).
+
+### Instruments, ownership and closed dimensions
+
+The daemon alone exports these observable u64 gauges through its existing OTLP
+pipeline and `st3` meter, using one consistent store snapshot per host. Drivers
+publish observations to the store, never population metrics. `omp-usage` publishes
+no population series. Refresh runs off the request reactor and SDK callback;
+callbacks read only a complete aggregate, as the mailbox and delivery gauges do.
+
+| OTel instrument | Mimir name | Unit | Point attributes |
+| --- | --- | --- | --- |
+| `st.agents` | `st_agents` | `{agent}` | `st.agent.driver`, `st.agent.kind`, `st.agent.repo`, `st.agent.state`, `st.agent.reason`, `st.agent.has_work` |
+| `st.attention.open` | `st_attention_open` | `{item}` | `st.attention.kind` |
+| `st.agents.refresh.last_success` | `st_agents_refresh_last_success` | `s` (Unix epoch seconds) | None; host identity from the daemon resource only |
+
+Dots in point-attribute names likewise become underscores, for example
+`st_agent_state`. Host identity is the daemon's existing `host.name` resource
+(Mimir `host_name` when promoted), not another independently supplied `host`
+point attribute. Deployment host inventory is a closed allowlist of daemon
+origins; replication must not create another publisher for the same member.
+
+| Label | Closed value set |
+| --- | --- |
+| `st.agent.driver` | `omp`, `claude`, `codex`, `opencode`, `pi`, `unattributed` |
+| `st.agent.kind` | `root`, `mission`, `gate`, `verifier`, `subagent`, `unattributed` |
+| `st.agent.repo` | Versioned deployment allowlist R of at most eight canonical repository names, plus `unattributed`; R must be enumerated before enabling export |
+| `st.agent.state` | `faulted`, `unreachable`, `asking`, `waiting`, `working`, `idle`, `starting`, `unknown` |
+| `st.agent.reason` | Only the state-specific values in the table below |
+| `st.agent.has_work` | Boolean `true`, `false` |
+| `st.attention.kind` | `person-step`, `human-gate`, `launch-approval`, `unread-message`, `agent-request`, `revision-approval`, `harness-login`, `harness-prompt`, `fault`, `unattributed` |
+
+R is a closed registry, not a regex, workspace path, arbitrary remote URL, branch
+or dynamically discovered set. Missing, ambiguous, unapproved and unknown
+repositories map to `unattributed`; registration changes require cardinality
+review. The same rule applies to unknown driver and kind values. Agent, parent,
+session, mission, message, PR, PID and commit identifiers are never labels on
+either gauge, including resource attributes promoted to labels.
+
+Kind describes provenance, not activity. Use an explicit semantic discriminator
+for roots, mission seats, gates and verifiers; harness children always take
+`subagent`. `owner_run_id` alone cannot distinguish mission, gate and verifier,
+nor a standing root currently serving mission work. Missing provenance is
+`unattributed`, never a name-based guess. Preserve parent linkage in the store,
+not in labels.
+Current `seat_kind=standing|mission` is derived from `owner_run_id`, not explicit
+stored provenance; standing maps to root only when positively established.
+Gate/verifier kinds are reserved, not inferred from a seat's current verifying
+work or from human-gate attention. Existing gate work is not proof of a distinct
+gate/verifier agent.
+
+Repository is normalized against R at the agent resource boundary. The resource
+already has declared `checkout.repository`, but does not project the optional
+repository from `workspace.observed`; these are different facts. Project the
+current observed repository onto the agent resource so the exporter needs no
+workspace-claim join. Prefer that positively observed repository; a declared
+checkout is usable only when not contradicted by a current observation. Missing
+or conflicting evidence maps to `unattributed`. A child inherits its observed
+parent's repository unless it has its own positively observed checkout; do not
+infer one from a native session path.
+
+### Membership and exclusive classification
+
+Start with `mailbox_metrics::managed_agents_owned_by_local_host`: current declared
+agents with `member.host == store.origin()`. For population, intersect these
+members with observed live presence, including a last-live incarnation whose
+presence has gone stale but has no authoritative end. Exclude retired, removed,
+authoritatively ended and stopped incarnations; a new incarnation replaces the
+old one, never adds another seat. Declaration alone, including a never-started
+seat, is not proof of live presence. Such seats remain visible in declaration-
+based delivery gauges and fault attention, not as invented live agents.
+
+Union the live, unexpired harness subagent ledger of those members, deduplicated
+by owning seat, native session and child identity. A subagent counts as its own
+agent even though today's store represents it as a claim on its parent rather
+than a declared member. Ended and lease-expired children are excluded; current
+leases, session changes and parent teardown define their liveness. Include
+children until their own end/lease expiry, even if the parent has just ended;
+the parent's membership still determines the reporting host. A subagent's mere
+existence does not put the parent in `waiting/subagent`: the parent must actually
+be blocked on that child. Concurrent parent work remains working.
+
+Suspension is desired lifecycle, not activity. A quiescing seat still observed
+live counts; a fully stopped suspended incarnation does not. Resume counts only
+when live presence is observed again. Do not label suspension `faulted` or
+`unreachable`. `st.agent.desired=running|suspended` remains the separate
+declaration-based delivery axis, selected from authoritative suspension as
+documented below; population totals intentionally differ from that membership.
+Unmanaged direct PTY/native sessions are outside this metric. Binding such a
+session to a declared member brings it into scope; discovery alone does not.
+
+Evaluate the following rows top-down. Exactly one state/reason pair contributes
+one count per included agent. A positive blocking wait outranks a broad active
+turn envelope; asking outranks both. Health overrides activity only on positive
+fault evidence or the owning presence/freshness fold, never on silence alone.
+
+| Precedence / state | Valid reasons | Evidence required |
+| --- | --- | --- |
+| 1 `faulted` | `crash_loop`, `not_started`, `unattributed` | Current fault affecting the live incarnation; `not_started` requires a live wrapper whose harness failed to start, not a declaration with no runtime |
+| 2 `unreachable` | `stale` | Last-live member's authoritative presence/reachability is stale, without an end |
+| 3 `asking` | `question`, `permission`, `review`, `unattributed` | Current blocking human ask; unknown ask subtype uses `unattributed` |
+| 4 `waiting` | `subagent`, `background_job`, `agent_reply`, `external`, `retry`, `compaction`, `unattributed` | Positively observed blocking interval, with subtype only if observed |
+| 5 `working` | `model`, `tool`, `unattributed` | Current active work; an active turn alone does not distinguish model from tool |
+| 6 `idle` | `none` | Positive current idle/input-ready evidence, no higher-priority condition |
+| 7 `starting` | `none` | Live launch/start evidence before ready, no higher-priority condition |
+| 8 `unknown` | `unattributed` | Included live agent whose activity cannot be determined |
+
+The table reserves 21 legal pairs, including reasons unavailable from a driver
+today. `unattributed` means the state is known but its cause is not; if even the
+state is unknown use `unknown/unattributed`. Never replace missing evidence with
+idle or invent an ask, retry, model call or wait. A completed compaction counter
+or active background-job count does not establish a blocking interval. If
+multiple waits are observed concurrently without a unique blocking cause, use
+`waiting/unattributed`.
+
+Use the authoritative current-incarnation presence and harness freshness folds,
+not filesystem mtime or a new metric-only timeout. A stale idle report cannot
+remain positive idle evidence; a long active turn is not stale merely because
+it produced no new claim. Reachable presence plus missing/indeterminate activity
+is `unknown/unattributed`, not `unreachable/stale`. Daemon disappearance is an
+exporter availability failure, not zero agents. Failed refresh keeps the last
+complete snapshot and reports failure through existing diagnostics, never a
+partial count or false zero. On each complete successful snapshot, the refresher
+atomically publishes that snapshot and sets `st.agents.refresh.last_success`
+to its completion time in seconds since the Unix epoch. Failed refreshes and
+SDK collection callbacks never advance that value; before the first success
+the instrument is absent. The dotted name follows the instrument convention
+above, without a Prometheus `_seconds` suffix.
+
+Consumers alert on `st_agents_refresh_last_success`: compute snapshot age with
+`time() - st_agents_refresh_last_success` and compare it with the deployment's
+freshness deadline. An absent series for an expected host is also a failure,
+not a successful empty snapshot. This distinguishes a stuck refresher still
+exporting cached counts from a fresh zero population; host/exporter absence
+must not be hidden by the age expression's lack of a sample.
+
+### Orthogonal work and attention
+
+`has_work` is true exactly when the store's current assigned/claimed work count
+or queued work count is nonzero for that agent. It is not model activity,
+unread-mail count, or a claim that queued work is executable. A child uses work
+explicitly linked to it, not every item in its parent's queue. No linked work
+means false; a failed work read invalidates the refresh rather than guessing.
+`idle` plus `has_work=true` is idle-with-work, not another state.
+
+Attention is the count of open actionable attention items, not agents. Count
+each source, person and episode item once, using the existing attention snapshot;
+closed/expired items do not count. Its kind set includes current attention
+sources beyond the five in the original draft. Custom/unrecognized kinds use
+`unattributed`. `unread-message` is reserved: the current attention snapshot
+deliberately leaves messages in conversations, so do not manufacture attention
+items from mailbox counts. It stays zero until an approved source projection
+exists. Most operational faults remain in the separate fault snapshot; count
+only faults actually present in person attention. An open item does not
+automatically make any agent asking.
+Shard by the owning host of the source member/run/launch; message attention
+belongs to its source conversation owner. For fleet-global sources select the
+fleet's authoritative source origin, not every replica that reads the item.
+An implementation must establish that unique origin before exporting those
+items; no person, message or source identifiers become labels.
+On every successful snapshot, `st.attention.open` emits all ten closed kinds,
+including explicit zeros. A missing attention-kind series means exporter
+failure, not zero open items; use the last-success gauge to detect a stale
+snapshot whose ten cached series still export.
+
+### Cardinality budget
+
+Emit occupied population buckets only; never preallocate the Cartesian product.
+A bucket that becomes empty emits zero for a fixed ten-minute retention window
+starting at its first complete empty snapshot. That window is at least two
+export intervals (configure export intervals no longer than five minutes) and
+at least Mimir's five-minute lookback. Repeated empty snapshots do not restart
+the window. After the window, stop reporting the bucket; becoming occupied
+again cancels its empty deadline. Only live buckets and empty buckets inside
+this window count against the 256-bucket population budget.
+
+The theoretical per-host product is `6 drivers × 6 kinds × 9 repos × 21 legal
+pairs × 2 work flags = 13,608`, plus ten attention buckets and one last-success
+series. This is not an acceptable active-series allocation. Population's
+operational allocation is at most 256 live/retained buckets, plus ten attention
+buckets and one last-success series per daemon. A worked deployment bound of
+64 live seats plus 128 live children and at most 64 distinct buckets inside the
+empty retention window is `192 + 64 + 10 + 1 = 267` series per host. Each live
+agent contributes to one bucket, so simultaneous nonzero population series
+never exceed the number of included agents. Backend active-series accounting
+can outlive reporting; its additional churn cost still needs capacity review.
+
+Set the OTel SDK stream cardinality limit explicitly to 512 for each of these
+three instruments, above 266 and the combined 267-series allocation; do not
+rely on the default. This is a safety margin, not permission to exceed the
+contract's allocation. OTel Rust SDK 0.30 emits an overflow data-point series
+with the attribute `otel.metric.overflow=true`, rendered in Mimir as
+`otel_metric_overflow="true"` on the affected metric (for example,
+`st_agents{otel_metric_overflow="true"}`). Alert on the presence of that label
+for any of the three metrics: overflow is a contract violation, never a valid
+fallback bucket or silently accepted population total.
+
+This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
+another 2,000. SQL already reserves up to 1,500 series; mailbox/delivery and
+other instruments consume the remainder. Capacity and label-churn review is an
+implementation gate, not a claim of current compliance. If inventory exceeds
+the allocation, the decision owner must approve a revised budget or a lossless
+dimension policy before rollout: never truncate agents, use SDK overflow to
+silently lose the contract's labels, or discard counts to meet a budget.
+
+### Signal gaps and implementation boundary
+
+This source assessment is pinned to `bb31fd6fc90dddcf8fbabb39c315510ba1a0d993`.
+The population exporter does not exist at this revision. “Unattributed” below
+describes the required initial emission once that exporter exists, not a
+measurement already exported.
+
+| Signal / reserved reason | Initial attribution and change that closes the gap |
+| --- | --- |
+| Human asks | Existing `blocked_on` and `ask` support `asking/question`, `permission`, `review`; an absent subtype is `asking/unattributed`. Preserve that observation for every driver. |
+| `working/model`, `working/tool` | Active-turn evidence gives `working/unattributed`; forward balanced model/tool intervals into current-incarnation store observations, not only timeline/ask events. |
+| `waiting/subagent` | A child ledger proves a child exists, not parent blocking. Forward the parent's actual await/resume interval and child linkage; otherwise known waits remain `waiting/unattributed`. |
+| `waiting/background_job` | Aggregate background counts cannot prove blocking or distinguish job types. Driver must forward typed blocking job intervals. |
+| `waiting/retry` | Retry continuation is not a terminal turn but does not publish a blocking retry interval. Forward retry start/end through driver state. |
+| `waiting/compaction` | OMP context edges/counts do not prove duration or blocking; keep its known state with `reason=unattributed` until balanced blocking compaction start/end exist. Claude/Codex already publish a compaction state reason; use it only for a positively observed blocking interval, not a completed count. |
+| `waiting/agent_reply`, `waiting/external` | Mission/work waits and shell commands alone do not prove the harness is blocked. Link an observed blocking operation to the wait in the store; no heuristic classification of command text. |
+| Unknown child activity | A live child ledger supports population membership, not per-child model/tool/ask state. Emit `unknown/unattributed` until drivers forward child-scoped activity. |
+| Missing child lifecycle | The ledger currently supports Claude, Codex and current OMP, not pi/opencode; historical OMP assets still suppress children. Complete lifecycle coverage or prove that no children exist for each enabled driver before population rollout. `unattributed` cannot repair an agent that was never observed; a partial store count must not be presented as a complete population. |
+| Child parent/repository provenance | OMP forwards lifecycle today, but only child id/name, not immediate `parentId`, depth or repository. Preserve explicit child-to-parent linkage and repository attribution in driver/store observations; seat ownership alone does not express nested parentage. |
+| Repository projection | Declared checkout is on the agent resource; observed workspace repository is not. Add the normalized current repository projection instead of a metric-specific claim join. |
+| Faults / stale presence | Reuse observed fault and freshness folds; unknown fault code maps to `faulted/unattributed`. Never-started declarations remain outside live population. |
+| `st.attention.kind=unread-message` | Reserved, with no current attention-item source; emit zero, not a guessed unread-message count. Adding that source requires explicit review of attention semantics. |
+| Attention publisher ownership | Current attention views have no metric-ready unique host field. Resolve authoritative source ownership in the store before enabling export; replicated snapshots must not double-count. |
+
+All drivers must preserve totals despite attribution gaps. OMP child observation
+must stay separate from the parent channel's session ownership: forwarding child
+events must not let a child replace the seat's channel. Implementation follows
+only after independent GO on this revision, in separate exporter/store and driver
+PRs; this documentation changes no runtime behavior.
+Consumer dashboards and alerts require telemetry-registry entries before rollout.
+
 ## Per-agent delivery health
 
 The daemon's existing `st3` meter exports observable f64 gauge

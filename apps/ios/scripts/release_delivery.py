@@ -370,8 +370,8 @@ class Delivery:
     def device(self, *argv):
         return run(["xcrun", "devicectl", *argv], env=self.env)
 
-    def recover_install(self, pending):
-        """Read back an interrupted install; never infer success from an attempt."""
+    def read_installed(self, pending=None):
+        """Read the device and reconcile only the authoritative version floor."""
         receipt = self.state / "installed-apps.json"
         try:
             receipt.unlink(missing_ok=True)
@@ -385,37 +385,51 @@ class Delivery:
                    for app in apps):
                 raise ValueError("Invalid installed-app entry")
             matches = [app for app in apps if app["bundleIdentifier"] == BUNDLE_ID]
-            if len(matches) > 1:
-                raise ValueError("Ambiguous installed daily app")
+            if len(matches) != 1:
+                raise ValueError("Expected one installed daily app")
             version = matches[0].get("bundleVersion") if matches else None
             if matches and (not isinstance(version, str) or not version.isascii() or not version.isdigit()):
                 raise ValueError("Invalid installed daily build version")
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-            self.record("install_deferred", commit=pending["commit"], reason="install_readback_unavailable")
-            return False
+            self.record("install_deferred", **({"commit": pending["commit"]} if pending else {}),
+                        reason="install_readback_unavailable")
+            return None
         finally:
             receipt.unlink(missing_ok=True)
         known_version = self.data.get("installed_version")
-        if version is None or known_version is None or int(version) != int(known_version):
+        if known_version is None or int(version) != int(known_version):
             # A contradictory device observation invalidates cached content,
             # not the authoritative monotonic version floor.
             self.data.pop("installed", None)
             self.data.pop("installed_key", None)
+        self.data["installed_version"] = str(max(int(known_version or 0), int(version)))
+        current = self.data.get("pending")
+        if (current and current["installed"]
+                and int(current["build_version"]) != int(version)):
+            # A successful install followed by a failed launch is only a claim
+            # about that version, not about a later external installation.
+            current["installed"] = False
+        self.persist()
+        return version
+
+    def recover_install(self, pending):
+        """Confirm an interrupted attempt using the same installed-build readback."""
+        version = self.read_installed(pending)
+        if version is None:
+            return False
         self.data.pop("install_attempt", None)
-        if version is not None:
-            floor = max(int(known_version or 0), int(version))
-            self.data["installed_version"] = str(floor)
-            if int(pending["build_version"]) < floor:
-                self.persist()
-                self.record("install_refused", commit=pending["commit"], reason="downgrade",
-                            build_version=pending["build_version"])
-                return False
-            if int(version) == int(pending["build_version"]):
-                self.mark_installed(pending)
-                current = self.data.get("pending")
-                if (current and all(current[field] == pending[field]
-                                    for field in ("commit", "key", "build_version", "app"))):
-                    current["installed"] = True
+        floor = int(self.data["installed_version"])
+        if int(pending["build_version"]) < floor:
+            self.persist()
+            self.record("install_refused", commit=pending["commit"], reason="downgrade",
+                        build_version=pending["build_version"])
+            return False
+        if int(version) == int(pending["build_version"]):
+            self.mark_installed(pending)
+            current = self.data.get("pending")
+            if (current and all(current[field] == pending[field]
+                                for field in ("commit", "key", "build_version", "app"))):
+                current["installed"] = True
         self.persist()
         return True
 
@@ -428,6 +442,15 @@ class Delivery:
                              "with an explicitly reviewed --trusted-commit and --expected-origin")
         if self.data.get("config", config) != config:
             raise ValueError("Device/team or trust configuration changed: use a separate state directory")
+        if self.args.reconcile_installed:
+            if not self.data.get("trusted_head"):
+                raise ValueError("--reconcile-installed requires initialized delivery state")
+            version = self.read_installed()
+            if version is None:
+                raise ValueError("Installed-build readback unavailable")
+            self.record("installed_reconciled", observed_version=version,
+                        build_version=self.data["installed_version"])
+            return
         if git(self.args.repo, "remote", "get-url", "origin") != self.args.expected_origin:
             raise ValueError("Source origin does not match --expected-origin")
         repo = self.state / "checkout"
@@ -512,6 +535,13 @@ class Delivery:
             self.record("install_held", commit=pending["commit"], reason="deploy_approval_required")
             return
         if not pending["installed"]:
+            version = self.read_installed(pending)
+            if version is None:
+                return
+            if int(pending["build_version"]) <= int(self.data["installed_version"]):
+                self.record("install_refused", commit=pending["commit"], reason="downgrade",
+                            build_version=pending["build_version"])
+                return
             process_json = self.state / "processes.json"
             try:
                 self.device("device", "info", "processes", "--device", self.args.device,
@@ -562,11 +592,12 @@ class Delivery:
     def mark_installed(self, artifact):
         self.data["installed"] = artifact["commit"]
         self.data["installed_key"] = artifact["key"]
-        self.data["installed_version"] = artifact["build_version"]
+        self.data["installed_version"] = str(max(int(self.data.get("installed_version") or 0),
+                                                int(artifact["build_version"])))
 
     def downgrades(self, artifact):
         installed = self.data.get("installed_version")
-        return installed is not None and int(artifact["build_version"]) < int(installed)
+        return installed is not None and int(artifact["build_version"]) <= int(installed)
 
     def retained_artifact(self, key):
         """A successful snapshot of the same content, e.g. before a revert.
@@ -672,6 +703,8 @@ def main():
     parser.add_argument("--build-only", action="store_true",
                         default=ios_env("BUILD_ONLY") == "1",
                         help="Retain a signed artifact without touching the phone")
+    parser.add_argument("--reconcile-installed", action="store_true",
+                        help="Read the installed daily build and raise its version floor; never build or deploy")
     parser.add_argument("--build-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--commit", help=argparse.SUPPRESS)
