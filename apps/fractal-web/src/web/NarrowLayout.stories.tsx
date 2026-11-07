@@ -261,7 +261,7 @@ export const Drawers: Story = { parameters: { scenario: { _tag: 'contract-fixtur
 } }
 export const DrawersLight: Story = { ...Drawers, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Light deterministic workspace feeds pin responsive drawer routing, header controls and unavailable-terminal copy.' } }, args: { scheme: 'light' } }
 
-/** Decode evidence stays between the retained roster and footer in either real sidebar host. */
+/** Decode evidence stays after the retained roster in either real sidebar host. */
 export const DecodeStaleSidebarHosts: Story = {
   tags: ['critical', 'both-widths'],
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic stale roster decoding proves the notice remains visible in both responsive sidebar hosts.' } },
@@ -277,9 +277,7 @@ export const DecodeStaleSidebarHosts: Story = {
     await expect(notice).toHaveAttribute('data-wf-roster-decode', 'stale')
     await expect(host.querySelector('[data-wf-roster-stale]')).toHaveAttribute('data-wf-roster-stale', 'decode')
     const roster = within(host).getByRole('navigation', { name: 'Agent roster' })
-    const footer = host.querySelector('footer')!
     await expect(roster.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    await expect(notice.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await expect(within(notice).getByRole('status')).toHaveTextContent('their data does not match the expected format')
   },
 }
@@ -515,7 +513,7 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   await assertPhoneHeader(canvasElement, longName)
   await assertPhoneTabRow(canvasElement)
   await userEvent.click(longTerminal)
-  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'false'))
+  await waitFor(() => expect(longTerminal).toHaveAccessibleName('Show terminal'))
   await waitFor(() => expect(longTerminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 }) }

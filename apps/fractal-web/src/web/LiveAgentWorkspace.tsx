@@ -66,7 +66,9 @@ import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState 
 import { useAgentsLastObservedAt } from './lastObserved.tsx'
 import { ResponsiveAgentSidebar, sidebarMinimumWidth, useSidebarShortcut, useSidebarNavigation } from './ResponsiveAgentSidebar.tsx'
 import { SidebarTabs } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
-import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
+import { LiveUsageSection } from '../monitor/UsageSection.tsx'
+import { SettingsControl } from './SettingsDialog.tsx'
+import type { SettingsBuild } from './settingsModel.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 import { DecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 
@@ -349,6 +351,8 @@ interface WorkspaceProps {
   readonly navigation?: WorkspaceNavigation
   readonly persistGeometry?: boolean
   readonly workspaceLabel?: string
+  /** The running build, from the app entry: stories and the embed have no build identity. */
+  readonly build?: SettingsBuild
 }
 
 /**
@@ -365,7 +369,7 @@ export function LiveAgentWorkspace(props: WorkspaceProps) {
 }
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
-function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
+function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', build, overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
@@ -683,10 +687,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </nav>
     {fleet._tag === 'Observed' ? <DecodeNotice noun="agent" decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
     </>}
-    <SidebarChromeFooter onToggleScheme={() => setScheme(scheme === 'dark' ? 'light' : 'dark')}>
-      <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
-      <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />
-    </SidebarChromeFooter>
+    <LiveUsageSection onOpenUsage={() => { agentsDrawer.current?.close(); open({ ref: 'monitor/quota', presentation: 'detail' }) }} />
   </SidebarTabs>
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
@@ -697,14 +698,14 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {shortcutHelp}
-              {narrow ? null : <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
+              {narrow ? null : <ResponsiveAgentSidebar headerActions={sidebarHeaderActions} viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
               <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
                   <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
                 </React.Suspense>
               ) : undefined}>
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} terminalOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} terminalOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
                 <GatewayConnectionStatus />
                 {!narrow && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>

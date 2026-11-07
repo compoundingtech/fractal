@@ -245,12 +245,12 @@ describe('Alerts tab import boundary', () => {
 
 
 describe('gateway connection banner', () => {
-  it('shows nothing while live and keeps connection wording out of the footer', async () => {
+  it('shows nothing while live and keeps connection wording out of the sidebar', async () => {
     await renderShell()
     expect(container.querySelector('[data-connection-state]')).toBeNull()
-    const footer = container.querySelector('footer')
-    expect(footer?.textContent).not.toContain('Connected')
-    expect(footer?.textContent).not.toContain('alpha.example')
+    const sidebar = container.querySelector('[aria-label="Agents"]')
+    expect(sidebar?.textContent).not.toContain('Connected')
+    expect(sidebar?.textContent).not.toContain('alpha.example')
   })
 
   it('places one band under the thread header with the countdown and one reconnect action', async () => {
@@ -267,7 +267,7 @@ describe('gateway connection banner', () => {
     expect(band?.textContent).toContain('Next try in 3s · attempt 2')
     expect(band?.textContent).not.toContain('Reconnecting in')
     expect(band?.textContent).not.toContain('Private diagnostic')
-    expect(container.querySelector('footer')?.querySelector('[data-connection-state]')).toBeNull()
+    expect(container.querySelector('[aria-label="Agents"] [data-connection-state]')).toBeNull()
     const buttons = band?.querySelectorAll('button') ?? []
     expect(buttons).toHaveLength(1)
     await act(async () => (buttons[0] as HTMLButtonElement | undefined)?.click())
