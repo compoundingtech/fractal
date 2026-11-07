@@ -8,14 +8,16 @@ license = "MIT"
 [features]
 default = []
 ratatui = ["dep:ratatui"]
+client = ["dep:fractal-client"]
 
 [dependencies]
 fractal-schema = { path = "../fractal-schema" }
+fractal-client = { path = "../fractal-client", optional = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ratatui = { workspace = true, optional = true }
 
 [dev-dependencies]
-# Exercise the optional painter in ordinary workspace tests without enabling it for consumers.
-fractal_sidebar_self = { package = "fractal-sidebar", path = ".", features = ["ratatui"] }
-serde_json = "1"
+# Exercise optional adapters and painter in ordinary workspace tests, not consumer builds.
+fractal_sidebar_self = { package = "fractal-sidebar", path = ".", features = ["ratatui", "client"] }
 jsonschema = { version = "0.33", default-features = false }

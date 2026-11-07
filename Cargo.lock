@@ -2481,6 +2481,7 @@ dependencies = [
 name = "fractal-sidebar"
 version = "0.1.0"
 dependencies = [
+ "fractal-client",
  "fractal-schema",
  "fractal-sidebar",
  "jsonschema",
