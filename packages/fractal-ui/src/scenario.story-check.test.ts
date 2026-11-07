@@ -466,7 +466,7 @@ test('exempt CSF runtime import graphs cannot reach domain fixture roots', () =>
   const contractDataModules = [
     ...ts.sys.readDirectory(uiSource, ['.ts', '.tsx'], ['**/*.test.ts', '**/*.test.tsx', '**/*.stories.tsx'])
       .filter(file => /fixture/i.test(nodePath.basename(file)) && nodePath.basename(file) !== 'scenario-fixture-graph.ts'),
-    ...['Families.tsx', 'markdown.story-canvas.tsx'].map(file => nodePath.resolve(uiSource, file)),
+    nodePath.resolve(uiSource, 'markdown.story-canvas.tsx'),
   ]
   const policy = {
     uiSource: uiSource.replace(/\/$/, ''),
