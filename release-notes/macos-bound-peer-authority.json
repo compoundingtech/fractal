@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "macOS local peer attribution now walks proc_pidinfo ancestry and KERN_PROCARGS2 environments with nearest-process masking and before/after process-birth validation. A successful walk without a harness remains a person; failed inspection cannot grant person authority.",
+  "replay": { "status": "none", "detail": "No graph or claim change." },
+  "schema": { "status": "none", "detail": "No schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "No wire shape change. Failed local peer inspection denies backup/proof exports, internal routes, LOCAL_PERSON_HEADER sessions and actor/requester body impersonation, rather than all public traffic. macOS has no pidfd: before/after birth-time checks narrow but cannot eliminate the PID reuse window. Cooperative ancestry is not an isolated scratch launcher credential." },
+  "downtime": { "status": "none", "detail": "Takes effect after daemon restart with the new build." },
+  "manual": { "status": "none", "detail": "No operator step." },
+  "recovery": { "status": "none", "detail": "Revert the commit and restart the daemon." }
+}
