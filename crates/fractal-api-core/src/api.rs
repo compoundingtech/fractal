@@ -10953,6 +10953,14 @@ pub fn accept_message_receipt_with_upload_owner(
     } else {
         (receipt_recipient(&state.store, &requested_from)?.1, recipient_identity.clone())
     };
+    if request.tags.iter().any(|tag| {
+        tag.starts_with(fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG)
+    }) {
+        return Err(ApiError::bad(FractalError::new(
+            "reserved-message-tag",
+            "topic delivery tags are generated from admitted thread messages",
+        )));
+    }
     if !from.starts_with("daemon/")
         && request
             .tags
@@ -11193,6 +11201,7 @@ pub fn accept_message_receipt_with_upload_owner(
         recipient_identity,
         kind: Some(kind.into()),
         message: MessageView {
+            delivery_thread: None,
             subject,
             from,
             to,

@@ -11791,6 +11791,7 @@ pub(crate) fn message_view_from(
         status: field("status").unwrap_or_else(|| "sent".into()),
         title: field("title").or_else(|| child("title")),
         in_reply_to: field("in_reply_to").or_else(|| child("in-reply-to")),
+        delivery_thread: None,
         tags: actual
             .get("tags")
             .and_then(Value::as_array)
