@@ -192,6 +192,8 @@ let
     ProgramArguments = [ (toString targetLaunchScript) ];
     RunAtLoad = true;
     KeepAlive.SuccessfulExit = false;
+    # The stop path waits for receipts and the replication inventory save.
+    ExitTimeOut = 30;
     EnvironmentVariables = targetEnvironment;
     ProcessType = "Interactive";
     SoftResourceLimits.NumberOfFiles = 8192;
@@ -671,6 +673,8 @@ in
           ProgramArguments = [ executable ] ++ upArgs;
           RunAtLoad = true;
           KeepAlive.SuccessfulExit = false;
+          # The stop path waits for receipts and the replication inventory save.
+          ExitTimeOut = 30;
           ProcessType = "Interactive";
           SoftResourceLimits.NumberOfFiles = 8192;
           StandardOutPath = "${cfg.stateDir}/logs/st3.stdout.log";
