@@ -144,3 +144,48 @@ fn a_store_without_the_table_is_copied_after_it_opens() {
     drop(connection);
     assert_eq!(assert_kept(&store).len(), all + 1 - 2);
 }
+
+fn plan(connection: &rusqlite::Connection, sql: &str) -> Vec<String> {
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc0ab63c1e6fe owner=fractal_store::store::gate_runners_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let count = statement.parameter_count();
+    statement
+        .query_map(rusqlite::params_from_iter(std::iter::repeat_n("x", count)), |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+/// The steps of the trigger lookups that do not find their claims by subject: a scan, or a search
+/// by kind alone, reads every gate request or observation in history.
+fn unbounded(connection: &rusqlite::Connection) -> Vec<String> {
+    gate_runners::TRIGGER_LOOKUPS
+        .iter()
+        .flat_map(|sql| plan(connection, sql))
+        .filter(|step| {
+            (step.starts_with("SCAN ") && step != "SCAN CONSTANT ROW")
+                || (step.starts_with("SEARCH ") && !step.contains("(subject=?") && !step.contains("(claim_id=?"))
+        })
+        .collect()
+}
+
+#[test]
+fn the_triggers_search_an_index_without_naming_one() {
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.connection.write();
+    // A trigger that names an index fails every claim write once that index is dropped.
+    let named: Vec<String> = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'gate_runners_%' AND sql LIKE '%INDEXED BY%'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(named.is_empty(), "{named:?}");
+    // Without the hint the planner must still find each lookup's claims by subject, so a planner
+    // or index change shows up here rather than as a slower claim write.
+    assert!(unbounded(&connection).is_empty(), "{:?}", unbounded(&connection));
+    connection
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h9f0db61bdab1 owner=fractal_store::store::gate_runners_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX claims_subject_kind_index; DROP INDEX claims_subject_kind_accepted_index;")
+        .unwrap();
+    assert!(!unbounded(&connection).is_empty());
+}

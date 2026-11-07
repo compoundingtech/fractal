@@ -114,6 +114,23 @@ pub const FROM_CLAIMS: &str = concat!(
      FROM claims request WHERE ", mechanical!("request"), " AND NOT ", stopped!("request.subject")
 );
 
+/// The lookups the triggers run, with NEW and OLD as parameters, for the test that each one
+/// searches an index.
+#[cfg(test)]
+pub(crate) const TRIGGER_LOOKUPS: &[&str] = &[
+    concat!("SELECT ", stopped!("?1")),
+    "SELECT claim_id FROM local_gate_runners WHERE subject=?1",
+    "SELECT claim_id FROM local_gate_runners WHERE claim_id=?1",
+    concat!(
+        "SELECT request.id FROM claims request WHERE request.subject=?1 AND ", mechanical!("request"),
+        " AND NOT ", stopped!("?1")
+    ),
+    concat!(
+        "SELECT request.id FROM claims request WHERE request.subject IN (?1, ?2) AND ", mechanical!("request"),
+        " AND NOT ", stopped!("request.subject")
+    ),
+];
+
 /// Whether every gate request older than the triggers has been copied, so the table is the list.
 pub fn complete(connection: &Connection) -> Result<bool> {
     Ok(connection
