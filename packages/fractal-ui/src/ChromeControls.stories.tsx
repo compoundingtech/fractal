@@ -281,6 +281,20 @@ export const TooltipReleasedWithPointer: Story = { play: async ({ canvasElement 
   await userEvent.unhover(sort)
   await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   await expect(tooltips()).toEqual([])
+
+  // A tooltip its control still holds by keyboard focus outlives the pointer that also hovered it.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(filter)
+  await tooltipFor(filter, 'Filter agents · 1 active')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await tooltipFor(filter, 'Filter agents · 1 active')
+  await userEvent.unhover(filter)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).toContain('Filter agents · 1 active')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
 } }
 
 /** Losing window focus clears desktop tooltip intent; restoring focus alone must not reopen it. */

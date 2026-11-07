@@ -143,7 +143,7 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
     const request = ++reopenRequest.current
     window.setTimeout(() => { if (request === reopenRequest.current && Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onPointerLeave={() => { if (isOpen) setOpen(false) }} onFocusCapture={event => {
+  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onPointerLeave={() => { if (isOpen && !keyboardFocused()) setOpen(false) }} onFocusCapture={event => {
     const navigation = focusNavigationByDocument.get(event.currentTarget.ownerDocument)
     focusFromNavigation.current = navigation?.target === event.target && navigation.userMoved
   }} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>

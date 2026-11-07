@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Long tooltips size to their text and shift inward near the window edge, and stay closed for controls covered by a dialog",
+  "summary": "A tooltip closes when the pointer leaves its control unless that control has keyboard focus, and stays closed for controls covered by a dialog",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Reverting restores the previous tooltip layout."
+    "detail": "Reverting restores the previous tooltip open and close behaviour."
   }
 }
