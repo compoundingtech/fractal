@@ -83,9 +83,12 @@ pub struct Usage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum RefusalReason { InvalidRequest, Unfulfillable, PolicyDenied, HolderPrecondition, ExceedsClassCap }
+/// MaxHold: held tree killed at deadline. HolderLost: holder died, work emptied,
+/// then slot reclaimed. OutcomeUnwritten: holder exit 70, final outcome write failed.
+/// These are infrastructure failures, not launcher exit codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
-pub enum FailureReason { MaxHold }
+pub enum FailureReason { MaxHold, HolderLost, OutcomeUnwritten }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
 pub enum ExitOutcome { Code(i32), Signal(NonZeroU32) }
@@ -103,7 +106,7 @@ pub enum State {
 pub enum Event {
     Prepare, Prepared, LaunchIntent, Started, Recover, HostLost,
     Refuse { refusal: RefusalReason }, Withdraw, CancelRequest,
-    Exited { outcome: ExitOutcome }, WholeTreeStopped, MaxHoldTreeStopped,
+    Exited { outcome: ExitOutcome }, WholeTreeStopped, FailedTreeStopped { failure: FailureReason },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransitionError { pub state: State, pub event: Event }
@@ -133,7 +136,7 @@ pub fn transition(state: State, event: Event) -> Result<State, TransitionError> 
         (S::UnknownAfterHostLoss { cancel_requested: true }, E::Recover) => S::RecoveringCancelRequested,
         (S::Running | S::Recovering, E::Exited { outcome }) => S::Completed { outcome },
         (S::CancelRequested | S::RecoveringCancelRequested, E::WholeTreeStopped) => S::Cancelled,
-        (S::Running | S::Recovering | S::CancelRequested | S::RecoveringCancelRequested, E::MaxHoldTreeStopped) => S::Failed { failure: FailureReason::MaxHold },
+        (S::Running | S::Recovering | S::CancelRequested | S::RecoveringCancelRequested, E::FailedTreeStopped { failure }) => S::Failed { failure },
         _ => return Err(TransitionError { state, event }),
     })
 }
