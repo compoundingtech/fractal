@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "In a cancelled run's final phase, a finally step whose assigned and available agents are all missing from the desired graph, after the step's own seat declarations are materialized, ends as `cancelled` with the reason \"the mission run was cancelled and no eligible agent is present in the desired graph: ...\", and the run goes on to cleanup and ends cancelled. A run that finished its work and is in its ordinary final phase still waits for the seat with the step blocked, as before, since its cleanup can still run once the seat is declared again. Steps for agentless work, a person or a seat the step declares itself are unchanged."
+    "detail": "In a cancelled run's final phase, a finally step whose assigned and available agents are all missing from the desired graph, after the step's own seat declarations are materialized, ends as `cancelled` with the reason \"the mission run was cancelled and no eligible agent is present in the desired graph: ...\", and the run goes on to cleanup and ends cancelled. A run that finished its work and is in its ordinary final phase still waits for the seat with the step blocked, as before, since its cleanup can still run once the seat is declared again. Steps for agentless work, a person or a seat the step declares itself are unchanged. The check reads the desired graph of the host that evaluates the run: a seat missing there when the step is evaluated, for example because the source that declares it has not replicated to that host yet or is being re-applied under a new name, skips that cleanup step for good."
   },
   "compatibility": {
     "status": "none",
