@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Brings back the reconcile wake labels reverted in #5632, with the replication receive's read bounded. The launch identity measurement wake is counted as launch identity, and a waking replication receive is counted under the claim kind it brought most of. The kind is read only from the claims past the receive's cursor, so a receive's work no longer grows with the store.",
+  "replay": {"status": "none", "detail": "No replay trigger or recovery wait."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or migrations."},
+  "rules": {"status": "none", "detail": "No wake decision changes: a receive wakes the reconciler on exactly the claims it did before. The quiet-notification answer is tested against the previous query from every cursor of a mixed run."},
+  "compatibility": {"status": "none", "detail": "Mixed-version safe: no wire, client, claim or stored-format change. OpenTelemetry's closed wake registry gains launch_identity, which older daemons never emit."},
+  "downtime": {"status": "none", "detail": "No storage migration or added startup work."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Nothing is stored; rolling back removes the labels again."}
+}
