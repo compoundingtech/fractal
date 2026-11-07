@@ -30,6 +30,12 @@ preserves full immutable producer input; its recipient is the addressed person.
 Delivery/integrity use tagged states, and person controls are explicitly nullable.
 Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
 serialized claim-field budget and cross-field provenance/receipt consistency.
+Immutable source lineage authenticates the stored source creation claim and its
+reviewed manifest digest; it does not authenticate external git commits named in
+`input.source`. Execution-context provenance remains informational, not
+authenticated sender evidence. Notice finalization is SQL-free when no notice
+work is pending; touched authority or custom state still triggers revalidation.
+This is a finalization contract, not a checked performance result.
 Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
 Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
 constructors and decoding, including Unicode-scalar lengths, URI references and
