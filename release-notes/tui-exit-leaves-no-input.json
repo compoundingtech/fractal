@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal TUI: quitting no longer leaves mouse, focus and key reports in the terminal's input, so the shell no longer prints them as escape codes",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Client only. On exit the TUI asks the terminal for a status report and reads up to its answer; no daemon, client, wire or harness contract changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption. Exit waits at most 250 ms for the terminal's answer."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new swap-back restrictions."
+  }
+}
