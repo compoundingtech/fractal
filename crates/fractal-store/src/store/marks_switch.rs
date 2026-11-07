@@ -67,7 +67,7 @@ pub fn staged_blockers(connection: &Connection, origin: &str, peers: &[String]) 
 }
 
 /// The barrier for one `daemon.started` feature, read the same strict way for each.
-fn feature_blockers(connection: &Connection, origin: &str, peers: &[String], feature: &str) -> Result<Vec<String>> {
+pub fn feature_blockers(connection: &Connection, origin: &str, peers: &[String], feature: &str) -> Result<Vec<String>> {
     let membership = fleet_membership_tx(connection)?;
     let mut blockers = Vec::new();
     let mut members = BTreeSet::new();

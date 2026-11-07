@@ -375,24 +375,11 @@ impl WorkRows {
             .map(|(index, step)| (index as u32, &self.rows[step].view))
             .filter(|(_, view)| visible_to(view, viewer))
             .collect::<Vec<_>>();
-        // The direct read canonicalizes legacy agent IDs before selecting ready work and
-        // looks the queue up by the same normalized seat.
+        // Queue lookup and the shared selector use the same canonical seat identity.
         let queue = self.seat_orders.get(&viewer_seat(viewer)).map_or(&[][..], |order| order.as_slice());
         let steps = shown
             .iter()
-            .map(|(_, view)| {
-                let mut step = crate::seat_queue::SeatStep::from(&***view);
-                if super::work_actor_matches(step.assignee, viewer) {
-                    step.assignee = Some(viewer);
-                }
-                if super::work_actor_matches(step.claimant, viewer) {
-                    step.claimant = Some(viewer);
-                }
-                if super::work_actor_matches(step.carried_claimant, viewer) {
-                    step.carried_claimant = Some(viewer);
-                }
-                step
-            })
+            .map(|(_, view)| crate::seat_queue::SeatStep::from(&***view))
             .collect::<Vec<_>>();
         let ready = crate::seat_queue::select(viewer, &steps, queue)
             .ready

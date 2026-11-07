@@ -2730,8 +2730,8 @@ pub fn client_work_resources(
         // that chooses its next work and wake.
         let seat_ready = match actor {
             Some(actor) => {
-                // Match the canonical actor used by the store's work filter before selecting
-                // ready steps; a legacy slash-qualified ID is not itself a seat actor.
+                // Queue lookup uses the same canonical actor as the shared seat selector,
+                // including when persisted steps still use a legacy spelling.
                 let seat = fractal_schema::canonical_agent_actor(actor)
                     .unwrap_or(std::borrow::Cow::Borrowed(actor));
                 let order = store.seat_run_order(&seat)?;

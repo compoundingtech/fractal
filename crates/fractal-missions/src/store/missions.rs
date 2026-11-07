@@ -913,15 +913,17 @@ fn seat_order_conflict_tx(
     agent: &str,
     subject: &str,
 ) -> Result<Option<String>> {
-    let order = seat_run_orders_tx(connection, Some(agent))?
-        .remove(agent)
+    let agent = fractal_schema::canonical_agent_actor(agent)
+        .unwrap_or(std::borrow::Cow::Borrowed(agent));
+    let order = seat_run_orders_tx(connection, Some(&agent))?
+        .remove(agent.as_ref())
         .unwrap_or_default();
-    let rows = seat_step_rows_tx(connection, Some(agent))?;
+    let rows = seat_step_rows_tx(connection, Some(&agent))?;
     let steps = rows
         .iter()
         .map(RosterStepRow::seat_step)
         .collect::<Vec<_>>();
-    let selection = seat_queue::select(agent, &steps, &order);
+    let selection = seat_queue::select(&agent, &steps, &order);
     let Some(next) = selection.next() else {
         return Ok(None);
     };
@@ -6192,13 +6194,17 @@ impl MissionsStore for Store {
                 }
                 let mut lease_actor = actor.as_str();
                 // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
-                // Old fleet members compare eligibility and ownership literally. Preserve a
-                // legacy assignment's spelling until every fleet member compares canonical
-                // identities; a later contraction PR migrates the rows and removes this arm.
+                // Old validators reject raw claimants. Preserve legacy eligibility spelling only
+                // after every current member advertises the internal admission bridge; otherwise
+                // retain main's canonical claimant. A later contraction PR migrates the rows and
+                // removes this arm once every fleet member compares canonical identities.
                 if let Some(legacy) = current.assigned_to.as_deref().into_iter()
                     .chain(current.available_to.iter().map(String::as_str))
                     .find(|candidate| *candidate != actor.as_str()
                         && work_actor_matches(Some(*candidate), &actor))
+                    && fractal_store::store::marks_switch::feature_blockers(
+                        transaction, &self.origin, &[], "work-claimant-legacy-admission",
+                    ).map_err(internal)?.is_empty()
                 {
                     lease_actor = legacy;
                 }

@@ -510,6 +510,70 @@ fn ready_step_with_mail(mail: usize) -> Renewal {
 }
 
 #[test]
+fn legacy_claimant_writes_require_every_current_members_admission_capability() {
+    use fractal_store::store::directive_notes::tests_shared_delivery::{
+        FLEET, claim, enable, sync,
+    };
+    const FEATURE: &str = "work-claimant-legacy-admission";
+    for pool in [false, true] {
+        for legacy in ["node/worker", "agent/node/worker"] {
+            let step = ready_step_with_mail(0);
+            let store = &step.store;
+            let anchor = enable(store);
+            let peer_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+            claim(store, "host/peer", "fleet.member-admitted", None,
+                json!({"fleet_id": FLEET, "member_key": peer_key.public(), "via": "invite",
+                    "sponsor": "host/node", "mode": "listening"}));
+            store.replication_snapshot().unwrap();
+            let peer = Store::open_memory("peer").unwrap();
+            peer.bind_fleet(FLEET).unwrap();
+            peer.pin_fleet_anchor(anchor.public()).unwrap();
+            peer.set_member_key(Some(peer_key)).unwrap();
+            sync(store, &peer);
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hb967f9dc4fa2 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ /* sqlite-large-value: allow-for-now lv-h755979e290e9 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2,available_to=?3 WHERE subject=?1",
+                params![step.subject, (!pool).then_some(legacy),
+                    if pool { json!([legacy]).to_string() } else { "[]".into() }],
+            ).unwrap();
+            for (index, advertised) in [None, Some(1), Some(0), Some(1)].into_iter().enumerate() {
+                // A missing feature, or a restarted old build, must retain main's spelling.
+                let features = advertised.map_or_else(|| json!({}), |version| json!({FEATURE: version}));
+                claim(&peer, "daemon/peer", "daemon.started", None,
+                    json!({"status": "running", "features": features}));
+                sync(&peer, store);
+                let mut request = request(&format!("capability-claim-{index}"), Some("publish"));
+                request.actor = Some(legacy.into());
+                let action = if index == 0 { "claim" } else { "renew" };
+                let view = store.work_action(&step.subject, action, &request).unwrap();
+                let expected = if advertised == Some(1) { legacy } else { "agent/node/worker" };
+                assert_eq!(view.claimant.as_deref(), Some(expected));
+                let kind = if index == 0 { "work.claimed" } else { "work.renewed" };
+                let fact = store.claims_for(&step.subject, Some(kind)).unwrap().pop().unwrap();
+                assert_eq!(fact.body["fields"]["claimant"], json!(expected));
+                let fields: BTreeMap<String, Value> =
+                    serde_json::from_value(fact.body["fields"].clone()).unwrap();
+                let strict = fractal_schema::registry().validate_claim(&fact.subject, &fact.kind, &fields);
+                if advertised != Some(1) {
+                    assert!(strict.is_ok(), "old validators must accept the gated fact: {strict:?}");
+                    // This is the old capacity guard's literal ownership predicate, not the
+                    // new canonical read bridge. Main normalizes both inputs to this actor.
+                    let held: bool = store.readers.get().query_row(
+                        "SELECT EXISTS(SELECT 1 FROM step_runs WHERE subject=?1 AND lease_owner=?2)",
+                        params![step.subject, "agent/node/worker"], |row| row.get(0),
+                    ).unwrap();
+                    assert!(held, "an old capacity guard must still see this held lease");
+                    let mut raw = fields;
+                    raw.insert("claimant".into(), json!("node/worker"));
+                    assert!(fractal_schema::registry()
+                        .validate_claim(&fact.subject, &fact.kind, &raw).is_err(),
+                        "the pre-bridge validator rejects raw claimants");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn work_claim_preserves_assignment_spelling_for_mixed_version_ownership() {
     for (actor, assignee) in [
         ("node/worker", "agent/node/worker"),

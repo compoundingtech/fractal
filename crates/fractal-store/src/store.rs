@@ -18813,7 +18813,7 @@ impl RosterStepRow {
     }
 }
 
-/// The held and ready agent steps of seat `?1`, or of every seat when null. The unfinished-step
+/// The held and ready agent steps of seat spellings `?1`, or of every seat when null. The unfinished-step
 /// predicate, word for word that of `step_runs_open_index`, reads the fleet's open steps rather
 /// than every step the store has run.
 const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assignee, lease_owner,
@@ -18822,7 +18822,8 @@ const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assigne
      WHERE agentless=0
        AND status IN ('ready', 'claimed', 'working', 'verifying')
        AND status NOT IN ('completed','failed','cancelled')
-       AND (?1 IS NULL OR assignee=?1 OR lease_owner=?1)
+       AND (?1 IS NULL OR assignee IN (SELECT value FROM json_each(?1))
+            OR lease_owner IN (SELECT value FROM json_each(?1)))
        AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
        AND NOT ((status='ready' OR (status IN ('claimed','working','verifying')
                   AND lease_expires_at_unix_ms IS NOT NULL
@@ -18860,15 +18861,15 @@ impl SeatQueueInputs {
     }
 }
 
-/// When each seat `?1` (every seat when null) joined each open run it has a step in, and the
+/// When each seat spelling in `?1` (every seat when null) joined each open run it has a step in, and the
 /// run's status. It reads from the open runs to their steps, in that order: from the steps,
 /// SQLite reads every step any seat was ever assigned before it finds the open runs among them.
-/// Every seat's queue moves (`?2` null), or one seat's, that no repair replaced, in graph order.
+/// Every seat's queue moves (`?2` null), or one seat's spelling array, that no repair replaced, in graph order.
 pub fn seat_queue_moves_query() -> String {
     canonical_sql(
         "SELECT claims.id, claims.subject, claims.actor, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
+         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
            AND NOT EXISTS (
                SELECT 1 FROM replica_records
                WHERE replica_records.claim_id=claims.id
@@ -18881,35 +18882,30 @@ pub fn seat_queue_moves_query() -> String {
 pub fn seat_queue_joins_query() -> String {
     format!(
         "SELECT step_runs.assignee, step_runs.run_id,
-                MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
+                MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status,
+                MAX(step_runs.generation_id=mission_runs.current_generation_id)
          FROM mission_runs CROSS JOIN step_runs ON step_runs.run_id=mission_runs.id
          WHERE {OPEN_MISSION_RUN}
            AND mission_runs.phase<>'terminal'
            AND step_runs.agentless=0
            AND step_runs.assignee IS NOT NULL
-           AND (?1 IS NULL OR step_runs.assignee=?1)
+           AND (?1 IS NULL OR step_runs.assignee IN (SELECT value FROM json_each(?1)))
          GROUP BY step_runs.assignee, step_runs.run_id
-         HAVING MAX(step_runs.generation_id=mission_runs.current_generation_id)=1
          ORDER BY step_runs.assignee, step_runs.run_id"
     )
 }
 
-/// When seat `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
+/// When a seat spelling in `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
 /// run's status. `+step_runs.assignee` keeps SQLite on the run's own steps (`step_runs_run_index`):
 /// through the assignee index it read every step the seat was ever assigned, once per named run,
 /// and a seat that has moved its queue often names a hundred runs on every claim.
 pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
     "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
      FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-     WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
+     WHERE +step_runs.assignee IN (SELECT value FROM json_each(?1))
+       AND step_runs.run_id=?2 AND step_runs.agentless=0";
 
-/// Compare work actors without changing persisted rows or conflating recognized actor kinds.
-pub fn work_actor_matches(candidate: Option<&str>, actor: &str) -> bool {
-    let Some(candidate) = candidate.and_then(fractal_schema::canonical_agent_actor) else {
-        return false;
-    };
-    fractal_schema::canonical_agent_actor(actor).as_deref() == Some(candidate.as_ref())
-}
+pub use crate::seat_queue::work_actor_matches;
 
 /// Exact persisted spellings of one logical work actor, as a JSON array for indexed SQL reads.
 /// Only a prefixless name that canonicalizes back to the same actor is an alias.
@@ -18987,9 +18983,10 @@ pub fn seat_queue_inputs_of_tx(
     agent: Option<&str>,
     only: Option<&BTreeSet<String>>,
 ) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    let spellings = agent.map(work_actor_spellings_json);
     let mut seats = BTreeMap::<String, SeatQueueInputs>::new();
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd2995294a599 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_moves_query())?;
-    let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, agent], |row| {
+    let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, spellings], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -19000,6 +18997,8 @@ pub fn seat_queue_inputs_of_tx(
     })?;
     for row in rows {
         let (claim_id, subject, actor, body, accepted_at) = row?;
+        let subject = fractal_schema::canonical_agent_actor(&subject)
+            .map(std::borrow::Cow::into_owned).unwrap_or(subject);
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         let text = |name: &str| fields.get(name).and_then(Value::as_str).map(str::to_owned);
@@ -19036,24 +19035,27 @@ pub fn seat_queue_inputs_of_tx(
     drop(statement);
 
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9270afe17ad4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_joins_query())?;
-    let rows = statement.query_map(params![agent], |row| {
+    let rows = statement.query_map(params![spellings], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, bool>(4)?,
         ))
     })?;
     for row in rows {
-        let (seat, run_id, joined_at, status) = row?;
+        let (seat, run_id, joined_at, status, current) = row?;
+        let seat = fractal_schema::canonical_agent_actor(&seat)
+            .map(std::borrow::Cow::into_owned).unwrap_or(seat);
         let run = format!("mission-run/{run_id}");
         let inputs = seats.entry(seat).or_default();
-        inputs.joins.push(QueueJoin {
-            run: run.clone(),
-            at_unix_ms: u128::try_from(joined_at).unwrap_or_default(),
-        });
+        let at_unix_ms = u128::try_from(joined_at).unwrap_or_default();
+        inputs.joins.push(QueueJoin { run: run.clone(), at_unix_ms });
         inputs.statuses.insert(run.clone(), status);
-        inputs.live.insert(run);
+        if current {
+            inputs.live.insert(run);
+        }
     }
     drop(statement);
 
@@ -19061,7 +19063,17 @@ pub fn seat_queue_inputs_of_tx(
     if let Some(only) = only {
         seats.retain(|seat, _| only.contains(seat));
     }
+    seats.retain(|_, inputs| !inputs.live.is_empty() || !inputs.moves.is_empty());
     for (seat, inputs) in &mut seats {
+        inputs.joins.retain(|join| inputs.live.contains(&join.run));
+        // Mixed spellings can contribute different generations of the same run.
+        // Keep their earliest join, but only current-generation membership makes it live.
+        inputs.joins.sort_unstable_by(|left, right| {
+            left.run.cmp(&right.run).then(left.at_unix_ms.cmp(&right.at_unix_ms))
+        });
+        inputs.joins.dedup_by(|left, right| left.run == right.run);
+        inputs.statuses.retain(|run, _| inputs.live.contains(run));
+        let spellings = work_actor_spellings_json(seat);
         let moves = inputs
             .moves
             .iter()
@@ -19074,7 +19086,7 @@ pub fn seat_queue_inputs_of_tx(
             #[cfg(any(test, feature = "test-support"))]
             NAMED_RUN_PROBES.with(|probes| probes.set(probes.get() + 1));
             let joined = statement
-                .query_row(/* sqlite-large-value: allow-for-now lv-h79c5fdb57d22 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![seat, run_id], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-hf01b6d5cecf5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![spellings, run_id], |row| {
                     Ok((
                         row.get::<_, Option<i64>>(0)?,
                         row.get::<_, Option<String>>(1)?,
