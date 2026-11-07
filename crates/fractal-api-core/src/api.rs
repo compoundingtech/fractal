@@ -8181,6 +8181,23 @@ pub fn relayed_held_mail(
         .collect())
 }
 
+/// A constant-size progress read: no message history is read to report the migration.
+fn work_wake_index_check(state: &AppState) -> DoctorCheck {
+    let name = "work-wake-index".into();
+    match crate::store::wake_lookup::status(&state.store.readers.get()) {
+        Ok((cursor, ceiling, complete)) => DoctorCheck {
+            name,
+            status: "pass".into(),
+            message: format!(
+                "cursor={cursor} ceiling={ceiling} done={complete}; {}",
+                if complete { "wake lookups seek indexed tags only" }
+                else { "legacy recipient reads remain only for the unindexed historical tail" },
+            ),
+        },
+        Err(error) => DoctorCheck { name, status: "warn".into(), message: error.to_string() },
+    }
+}
+
 /// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
 /// while it does not, which members keep it writing claims. Either is healthy: the check informs.
 fn message_marks_check(state: &AppState) -> DoctorCheck {
@@ -9611,6 +9628,7 @@ fn doctor_report_within(
     checks.check("message-marks", || {
         Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
     });
+    checks.check("work-wake-index", || Ok(vec![work_wake_index_check(state)]));
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
