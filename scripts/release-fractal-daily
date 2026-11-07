@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Publish a release from the archives main already built, when main changed since the last one.
+"""Prepare a draft candidate from the archives main already built.
 
 Every main commit runs "Fractal tag release", which builds, tests and verifies both archives and
 uploads them as the `fractal-release` artifact. This takes the newest commit whose run succeeded (or
 the successful main push run selected by --run),
-re-verifies its checksums and sources, tags that exact commit and publishes the same bytes. Nothing
-is rebuilt, so a release is always an archive a main run has already proven.
+re-verifies its checksums and sources and drafts the same bytes at that exact commit. Nothing
+is rebuilt. The tag is created only at publication after an exact-SHA product release GO.
 
 Usage: scripts/release-fractal-daily [--dry-run] [--tag TAG] [--run ID]
 Environment: GH_TOKEN and GH_REPO (as for gh). Run from a full-history checkout with tags.
@@ -19,6 +19,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 
 from release_gh import gh as gh_call, missing
 from release_notes import FIELDS, ImpactError, render
@@ -76,14 +78,50 @@ def newest_verified_main_run():
     return (rows[0]['databaseId'], rows[0]['headSha']) if rows else (None, None)
 
 
-def verified_main_run(run_id):
+def verified_main_run(run_id, candidate_sha=''):
     row = json.loads(run('gh', 'run', 'view', str(run_id), '--json',
-                         'databaseId,headSha,headBranch,event,status,conclusion,workflowName'))
-    if (row['databaseId'] != run_id or row['headBranch'] != 'main' or row['event'] != 'push'
+                         'databaseId,headSha,headBranch,event,status,conclusion,workflowName,displayTitle'))
+    exact_dispatch = (candidate_sha and row['event'] == 'workflow_dispatch'
+                      and row['displayTitle'].startswith(f'Fractal candidate {candidate_sha} '))
+    if (row['databaseId'] != run_id or row['headBranch'] != 'main'
+            or (row['event'] != 'push' and not exact_dispatch)
             or row['status'] != 'completed' or row['conclusion'] != 'success'
             or row['workflowName'] != 'Fractal tag release'):
-        raise CommandFailed(f'run {run_id} is not a successful Fractal tag release push run on main')
-    return row['databaseId'], row['headSha']
+        raise CommandFailed(f'run {run_id} is not a successful Fractal tag release push run on main or exact candidate build')
+    source = candidate_sha if exact_dispatch else row['headSha']
+    if candidate_sha and source != candidate_sha:
+        raise CommandFailed('selected build run differs from requested candidate SHA')
+    return row['databaseId'], source
+
+
+def require_main_first_parent(sha, repo):
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise CommandFailed('candidate SHA must be a full lowercase 40-character SHA')
+    run('git', 'fetch', 'origin', 'main', cwd=repo)
+    if sha not in run('git', 'rev-list', '--first-parent', 'FETCH_HEAD', cwd=repo).splitlines():
+        raise CommandFailed('candidate SHA must be on main first-parent history')
+
+
+def build_exact_candidate(sha):
+    request_id = uuid.uuid4().hex
+    title = f'Fractal candidate {sha} {request_id}'
+    run('gh', 'workflow', 'run', WORKFLOW, '--ref', 'main',
+        '-f', f'sha={sha}', '-f', f'request_id={request_id}')
+    # Dispatch returns no run ID. Correlate only this unique request, never another main build.
+    for _ in range(60):
+        rows = json.loads(run('gh', 'run', 'list', '--workflow', WORKFLOW, '--event', 'workflow_dispatch',
+                             '--branch', 'main', '--limit', '100', '--json', 'databaseId,displayTitle'))
+        selected = [row for row in rows if row['displayTitle'] == title]
+        if selected:
+            run_id = selected[0]['databaseId']
+            run('gh', 'run', 'watch', str(run_id), '--exit-status', '--interval', '15')
+            row = json.loads(run('gh', 'run', 'view', str(run_id), '--json',
+                                 'status,conclusion,displayTitle'))
+            if row['status'] != 'completed' or row['conclusion'] != 'success' or row['displayTitle'] != title:
+                raise CommandFailed('exact candidate build did not succeed')
+            return run_id, sha
+        time.sleep(5)
+    raise CommandFailed('exact candidate build dispatch did not appear within five minutes')
 
 
 def gh(*args, **options):
@@ -131,11 +169,33 @@ def latest_release_tag():
     return run('python3', str(pathlib.Path(__file__).resolve().parent / 'compat-baseline-release'), 'latest')
 
 
-def next_tag():
-    versions = [tuple(map(int, m.groups())) for t in run('git', 'tag', '--list', 'v*').split()
-                if (m := SEMVER.fullmatch(t))]
+def stable_drafts():
+    repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                           f'repos/{repository}/releases?per_page=100'))
+    return [row for page in pages for row in page
+            if row['draft'] and not row['prerelease'] and SEMVER.fullmatch(row['tag_name'])]
+
+
+def next_tag(drafts):
+    tags = run('git', 'tag', '--list', 'v*').split() + [row['tag_name'] for row in drafts]
+    versions = [tuple(map(int, m.groups())) for t in tags if (m := SEMVER.fullmatch(t))]
     major, minor, patch = max(versions)
     return f'v{major}.{minor}.{patch + 1}'
+
+
+def cleanup_superseded_drafts(tag, drafts):
+    version = tuple(map(int, SEMVER.fullmatch(tag).groups()))
+    for row in drafts:
+        if ('<!-- fractal-daily-candidate -->' in (row.get('body') or '')
+                and tuple(map(int, SEMVER.fullmatch(row['tag_name']).groups())) < version):
+            repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
+            endpoint = f'repos/{repository}/releases/{row["id"]}'
+            # Re-read immediately before deleting this ID, never resolve the tag a second time.
+            state = json.loads(run('gh', 'api', endpoint))
+            if (state['draft'] and state['tag_name'] == row['tag_name']
+                    and '<!-- fractal-daily-candidate -->' in (state.get('body') or '')):
+                gh('api', '--method', 'DELETE', endpoint)
 
 
 def release_body(rendered, impact):
@@ -203,10 +263,29 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='verify and print the notes; publish nothing')
     parser.add_argument('--tag', help='release tag; default is the next patch after the highest v tag')
     parser.add_argument('--run', type=int, help='successful main tag-release run ID; default is the newest')
+    parser.add_argument('--summary', default='', help='operator-impact summary preserved in candidate and published notes')
+    parser.add_argument('--sha', default='', help='build an exact main first-parent source in an isolated run')
+    parser.add_argument('--build-only', action='store_true', help='build exact source and emit build_run, without release mutations')
     args = parser.parse_args()
     repo = pathlib.Path(__file__).resolve().parent.parent
 
-    run_id, sha = verified_main_run(args.run) if args.run is not None else newest_verified_main_run()
+    if args.build_only:
+        if not args.sha or args.dry_run or args.run is not None:
+            raise CommandFailed('--build-only requires --sha and cannot use --run or --dry-run')
+        require_main_first_parent(args.sha, repo)
+        run_id, sha = build_exact_candidate(args.sha)
+        if output := os.environ.get('GITHUB_OUTPUT'):
+            with open(output, 'a') as stream:
+                stream.write(f'build_run={run_id}\n')
+        say(f'verified build {run_id} at {sha}; no release was mutated')
+        return 0
+    if args.sha:
+        require_main_first_parent(args.sha, repo)
+        if args.run is None:
+            raise CommandFailed('--sha requires an already successful --run; use the isolated build job first')
+        run_id, sha = verified_main_run(args.run, args.sha)
+    else:
+        run_id, sha = verified_main_run(args.run) if args.run is not None else newest_verified_main_run()
     if sha is None:
         say('no successful main run to release')
         return 1
@@ -223,13 +302,20 @@ def main():
         return 0
     # The previous release must have reached main before cutting its successor.
     run('python3', str(repo / 'scripts/compat-baseline-release'), 'check', '--source', sha, '--require-latest')
-    tag = args.tag or next_tag()
+    drafts = stable_drafts()
+    tag = args.tag or next_tag(drafts)
+    if not SEMVER.fullmatch(tag):
+        raise CommandFailed('candidate tag must be vMAJOR.MINOR.PATCH')
+    if any(row['tag_name'] == tag for row in drafts):
+        raise CommandFailed(f'{tag} already has a draft; refusing to replace it')
     if subprocess.run(['git', 'rev-parse', '-q', '--verify', f'refs/tags/{tag}'], cwd=repo,
                       capture_output=True).returncode == 0:
         say(f'{tag} already exists; refusing to reuse a tag')
         return 1
     try:
         rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/fractal'), since)
+        if args.summary:
+            rendered = f'## Operator impact summary\n\n{args.summary}\n\n' + rendered
         body = release_body(rendered, impact)
     except ImpactError as error:
         say(str(error))
@@ -245,29 +331,24 @@ def main():
     notes = dist / 'RELEASE-NOTES.md'
     notes.write_text(rendered)
     body_notes = dist / 'RELEASE-BODY.md'
-    body_notes.write_text(body)
+    body_notes.write_text(body + '\n\n<!-- fractal-daily-candidate -->\n')
     (dist / 'UPGRADE-IMPACT.json').write_text(json.dumps(impact, indent=2) + '\n')
+    (dist / 'CANDIDATE.json').write_text(json.dumps({'source': sha, 'build_run': run_id}) + '\n')
     assets = sorted(str(p) for pattern in ('*.tar.gz', '*.sha256') for p in dist.glob(pattern))
-    assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json'), str(notes)]
+    assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json'),
+               str(dist / 'CANDIDATE.json'), str(notes)]
     if args.dry_run:
         print(body)
         shortened = 'shortened' if body != rendered else 'unchanged'
         say(f'dry run: release body {shortened}: {len(body)} characters '
             f'(full notes: {len(rendered)}; limit: {RELEASE_BODY_LIMIT})')
-        say(f'dry run: would publish {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
+        say(f'dry run: would draft {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
         return 0
 
-    # A draft has no tag yet. Publishing it creates the tag at exactly this commit, so a partial
-    # draft can be inspected and deleted without leaving a tag behind.
     gh('release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
        '--notes-file', str(body_notes), *assets, done=lambda: discard_partial_draft(tag))
-    gh('release', 'edit', tag, '--draft=false',
-       done=lambda: (state := release_state(tag)) is not None and not state['isDraft'])
-    tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}^{{}}', f'refs/tags/{tag}', cwd=repo).split()
-    if sha not in tagged:
-        say(f'published {tag}, but the tag does not point at {sha}: {tagged}')
-        return 1
-    say(f'published {tag} at {sha}')
+    cleanup_superseded_drafts(tag, drafts)
+    say(f'drafted {tag} at {sha}; publication requires an exact-SHA product release GO')
     return 0
 
 
