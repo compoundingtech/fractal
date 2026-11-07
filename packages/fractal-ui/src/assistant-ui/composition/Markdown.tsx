@@ -267,7 +267,17 @@ const MARKDOWN_COMPONENTS: Components = {
   th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
-const INLINE_ELEMENTS = ['strong', 'em', 'del', 'code', 'a', 'img']
+const INLINE_ELEMENTS = ['strong', 'em', 'del', 'code', 'a', 'img', 'x-text']
+/** Wraps each run of prose (not code) so a host can render it, for example to quiet ids and paths. */
+function rehypeTextRuns() {
+  type Node = { type: string; tagName?: string; children?: Node[] }
+  const visit = (parent: Node): void => {
+    if (parent.children === undefined || parent.tagName === 'code') return
+    parent.children = parent.children.map(child => child.type === 'text' ? { type: 'element', tagName: 'x-text', properties: {}, children: [child] } : (visit(child), child))
+  }
+  return (tree: Node) => visit(tree)
+}
+const TEXT_RUN_PLUGINS = [rehypeTextRuns]
 const INLINE_BASE: Components = { strong: MARKDOWN_COMPONENTS.strong, em: MARKDOWN_COMPONENTS.em, code: InlineCode, img: ({ alt }) => <>{alt}</> }
 const INLINE_COMPONENTS: Components = { ...INLINE_BASE, a: ({ children }) => <>{children}</> }
 const INLINE_ANCHOR_COMPONENTS: Components = { ...INLINE_BASE, a: MarkdownLink }
@@ -277,11 +287,15 @@ export interface InlineMarkdownProps {
   readonly links?: 'label' | 'anchor'
   /** The text was cut to a length: close whatever the cut left open. */
   readonly clipped?: boolean
+  /** Renders each run of prose; inline code is left alone. Keep it a stable function. */
+  readonly renderText?: (text: string) => React.ReactNode
 }
 /** One line of text as phrasing content, with no wrapper element, so it fits headings, table cells and clamped rows. Block syntax keeps its words only. */
-export const InlineMarkdown = React.memo(function InlineMarkdown({ text, links = 'label', clipped = false }: InlineMarkdownProps) {
+export const InlineMarkdown = React.memo(function InlineMarkdown({ text, links = 'label', clipped = false, renderText }: InlineMarkdownProps) {
   const line = text.replace(/\s*\n\s*/g, ' ')
-  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={REMARK_PLUGINS} allowedElements={INLINE_ELEMENTS} unwrapDisallowed components={links === 'anchor' ? INLINE_ANCHOR_COMPONENTS : INLINE_COMPONENTS}>{clipped ? completeStreamingTail(line) : line}</ReactMarkdown>
+  const base = links === 'anchor' ? INLINE_ANCHOR_COMPONENTS : INLINE_COMPONENTS
+  const components = React.useMemo(() => renderText === undefined ? base : { ...base, 'x-text': ({ children }: { readonly children?: React.ReactNode }) => <>{renderText(String(children ?? ''))}</> } as Components, [base, renderText])
+  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={REMARK_PLUGINS} rehypePlugins={renderText === undefined ? undefined : TEXT_RUN_PLUGINS} allowedElements={INLINE_ELEMENTS} unwrapDisallowed components={components}>{clipped ? completeStreamingTail(line) : line}</ReactMarkdown>
 })
 export function ResourceChip({ resource, onOpen }: { resource: InlineResource; onOpen?: (path?: string) => void }) {
   return <TooltipTrigger delay={300}><Button onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button><Tooltip {...stylex.props(styles.hoverCard)}><div {...stylex.props(styles.resourceTitle)}>{resource.path}<span {...stylex.props(styles.added)}>+{resource.added}</span><span {...stylex.props(styles.removed)}>−{resource.removed}</span></div>{resource.preview ? <pre {...stylex.props(styles.preview)}>{resource.preview}</pre> : null}</Tooltip></TooltipTrigger>

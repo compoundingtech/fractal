@@ -192,7 +192,7 @@ describe('what a card shows of the choices', () => {
     // Near-repeats of the heading go too, however differently worded the punctuation or order.
     expect(repeatsHeading('Delete 118 archived legacy worklog folders (mbp2025, dev4)', 'Delete 118 archived legacy worklog folders on mbp2025 (114) and dev4 (4)?')).toBe(true)
     expect(repeatsHeading('Q24: Interview on structural principles', 'Keep or drop P5?')).toBe(false)
-    expect(contextOf('**Short.**')).toEqual({ line: 'Short.', overflows: false })
+    expect(contextOf('# **Short.**')).toEqual({ line: '**Short.**', overflows: false })
     expect(contextOf('One.\nTwo.').overflows).toBe(true)
   })
 })

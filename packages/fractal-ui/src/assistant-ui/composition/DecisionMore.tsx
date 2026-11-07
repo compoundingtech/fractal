@@ -4,6 +4,7 @@ import * as Aria from 'react-aria-components'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex.ts'
 import { DecisionRef } from './DecisionCard'
 import { Icon, type IconName } from './Icons'
+import { InlineMarkdown } from './Markdown'
 import { NarrowLayoutContext } from './NarrowLayout'
 
 /**
@@ -38,7 +39,11 @@ const FULL_REF = /^(?:[\w.-]+\/){2,}[\w.-]+$|^[0-9a-f]{24,}$/
 const TOKEN = /(~?\/[\w.~-]+(?:\/[\w.~-]+)+|\b[\w.-]+(?:\/[\w.-]+){2,}\b|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b…?)/g
 
 /** A sentence with its raw ids, hashes and paths set apart: a whole long id is a chip to copy, anything shorter goes muted. */
-function QuietRefs({ text }: { readonly text: string }): React.ReactNode {
+/** Prose runs of inline Markdown quiet their ids and paths; inline code keeps its own look. */
+function QuietMarkdown({ text }: { readonly text: string }): React.ReactNode {
+  return <InlineMarkdown text={text} renderText={quietRefs} />
+}
+function quietRefs(text: string): React.ReactNode {
   return <>{text.split(TOKEN).map((part, index) => {
     if (index % 2 === 0) return part
     return part.length >= 32 && FULL_REF.test(part)
@@ -51,7 +56,7 @@ function SubjectRow({ subject }: { readonly subject: DecisionSubject }) {
   const touch = React.useContext(NarrowLayoutContext)
   const inner = <>
     <span {...stylex.props(styles.subjectIcon)}><Icon name={subject.icon} size={14} /></span>
-    <span {...stylex.props(styles.subjectLabel)}>{subject.label}</span>
+    <span {...stylex.props(styles.subjectLabel)}><InlineMarkdown text={subject.label} /></span>
     {subject.kind === undefined ? null : <span {...stylex.props(styles.subjectKind)}>{subject.kind}</span>}
   </>
   const open = <span aria-hidden="true" {...stylex.props(styles.subjectGo)}><Icon name="chevron-right" size={12} /></span>
@@ -93,9 +98,9 @@ export function DecisionMore({ context, why, evidence = [], related = [], clamp 
   return <div {...stylex.props(styles.root)}>
     <Clamp on={clamp}>
       {context === undefined ? null : <Part label="Context">{context}</Part>}
-      {why === undefined ? null : <Part label="Why you"><p {...stylex.props(styles.text)}><QuietRefs text={why} /></p></Part>}
+      {why === undefined ? null : <Part label="Why you"><p {...stylex.props(styles.text)}><QuietMarkdown text={why} /></p></Part>}
       {evidence.length === 0 ? null : <Part label="Evidence">
-        <ul {...stylex.props(styles.list)}>{evidence.map((item, index) => <li key={index} {...stylex.props(styles.item)}><QuietRefs text={item} /></li>)}</ul>
+        <ul {...stylex.props(styles.list)}>{evidence.map((item, index) => <li key={index} {...stylex.props(styles.item)}><QuietMarkdown text={item} /></li>)}</ul>
       </Part>}
       {related.length === 0 ? null : <Part label="Related">
         <div {...stylex.props(styles.subjects)}>{related.map(subject => <SubjectRow key={subject.key} subject={subject} />)}</div>

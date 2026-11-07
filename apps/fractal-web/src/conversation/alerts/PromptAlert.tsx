@@ -7,9 +7,10 @@ import { answerLabel, pendingQuestions, promptAlertKey, promptAnswers, promptCal
 import { ago } from '../../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, radiusVars as r, spaceVars as sp, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { InlineMarkdown, Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { alertFrom } from './alertChoices.ts'
-import { contextOf, useArmed } from './decisionText.ts'
+import { contextOf, firstLine, markdownLine, useArmed } from './decisionText.ts'
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
 
 type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
@@ -77,13 +78,13 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
     : undefined
   return <DecisionCard
     density={density}
-    label={alert.title}
+    label={firstLine(alert.title)}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[alertFrom(alert), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
-    heading={heading}
-    headingText={heading}
-    {...(line === '' || line === alert.title ? {} : { context: line })}
-    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}>{alert.detail}</div> } : {})}
+    heading={<InlineMarkdown text={heading} />}
+    headingText={markdownLine(heading)}
+    {...(line === '' || line === markdownLine(alert.title) ? {} : { context: line })}
+    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}><Markdown text={alert.detail ?? ''} /></div> } : {})}
     {...(body === undefined ? {} : { body })}
     options={options}
     mode={question?.multiSelect === true ? 'any' : 'one'}
@@ -106,6 +107,6 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
 }
 
 const styles = stylex.create({
-  detail: { whiteSpace: 'pre-wrap', color: c.fgSoft },
+  detail: { color: c.fgSoft },
   call: { margin: 0, padding: sp.md, borderRadius: r.sm, backgroundColor: c.codeBg, color: c.fg, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading },
 })

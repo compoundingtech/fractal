@@ -10,11 +10,11 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../../pa
 import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
 import { DecisionMore, type DecisionSubject } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionMore.tsx'
 import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
-import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
+import { InlineMarkdown, Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
-import { contextOf, firstLine, isPlainHeading, repeatsHeading, sameWords, useArmed } from './decisionText.ts'
+import { contextOf, firstLine, isPlainHeading, markdownLine, repeatsHeading, sameWords, useArmed } from './decisionText.ts'
 
 // Asks, review gates and launch approvals, in the one decision card: choosing an answer sends nothing, Send is its own
 // deliberate act, so a stray click answers nothing.
@@ -42,17 +42,17 @@ const Question = ({ text }: { readonly text: string }): React.ReactNode => {
 /** What a launch would start, as its planner previewed it: goal, steps, agents and gates. */
 const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode => {
   if (Option.isNone(alert.preview)) {
-    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? ` ${cleanMessageText(alert.detail)}` : ''}</div>
+    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? <> <InlineMarkdown text={cleanMessageText(alert.detail)} /></> : ''}</div>
   }
   const preview = alert.preview.value
   return (
     <>
-      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: {preview.request_excerpt}</div> : null}
+      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: <InlineMarkdown text={preview.request_excerpt} /></div> : null}
       {preview.steps.length > 0 ? (
         <ol {...stylex.props(styles.list)} aria-label="Steps">
           {preview.steps.map((step) => (
             <li key={step.path}>
-              {step.title}
+              <InlineMarkdown text={step.title} />
               {Option.isSome(step.assignee) ? <span {...stylex.props(styles.soft)}> · {step.assignee.value.replace(/^agent\//, '')}</span> : null}
               {step.depends.length > 0 ? <span {...stylex.props(styles.soft)}> · after {step.depends.join(', ')}</span> : null}
             </li>
@@ -93,8 +93,6 @@ const subjectRows = (alert: Native.Attention, onOpenRef: ((ref: string) => void)
     }
   })
 
-/** A heading's text with its `inline code` kept; the rest of a question's Markdown shows in its body when it has any. */
-const InlineCode = ({ text }: { readonly text: string }) => <>{text.split(/`([^`]+)`/).map((part, index) => index % 2 === 1 ? <code key={index} {...stylex.props(styles.command)}>{part}</code> : part.replace(/\*\*|__/g, ''))}</>
 
 const Command = ({ children }: { readonly children: React.ReactNode }) => <code {...stylex.props(styles.command)}>{children}</code>
 
@@ -177,7 +175,7 @@ export const AnswerAlert = ({
   const full = density === 'full'
   const contextFull = overflows ? <div {...stylex.props(styles.prose)}><Markdown text={spaced(contextSource)} /></div> : undefined
   // A differing title is context the heading does not carry. Full density shows the long context beside More's parts already.
-  const shownContext = title === undefined && (full || contextFull === undefined) ? undefined : <>{title === undefined ? null : <p {...stylex.props(styles.titleLine)}>{title}</p>}{full ? null : contextFull}</>
+  const shownContext = title === undefined && (full || contextFull === undefined) ? undefined : <>{title === undefined ? null : <p {...stylex.props(styles.titleLine)}><InlineMarkdown text={title} /></p>}{full ? null : contextFull}</>
   const more = why !== undefined || evidence.length > 0 || related.length > 0 || shownContext !== undefined
     ? <DecisionMore clamp={!full} evidence={evidence} related={related} {...(why === undefined ? {} : { why })} {...(shownContext === undefined ? {} : { context: shownContext })} />
     : undefined
@@ -195,11 +193,11 @@ export const AnswerAlert = ({
         : undefined
   return <DecisionCard
     density={density}
-    label={alert.title}
+    label={firstLine(alert.title)}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[from, KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
-    heading={plain ? <InlineCode text={question} /> : headingText}
-    headingText={plain ? firstLine(question) : headingText}
+    heading={<InlineMarkdown text={headingText} />}
+    headingText={markdownLine(headingText)}
     {...(line === '' ? {} : { context: line })}
     {...(contextFull === undefined ? {} : { contextFull })}
     {...(more === undefined ? {} : { more })}
