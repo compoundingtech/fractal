@@ -10,6 +10,7 @@ import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import type * as AlertsTabModule from './AlertsTab.tsx'
+import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
@@ -523,6 +524,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       select(request.ref)
       return
     }
+    if (isMissionRef(request.ref)) {
+      focusMission(request.ref)
+      return
+    }
     const id = `${request.ref}:${request.presentation ?? 'detail'}`
     // The terminal replaces the conversation through the header control, so it never becomes a tab.
     if (isTerminalRef(request.ref)) {
@@ -531,6 +536,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     }
     setPanes((rows) => (rows.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === id) ? rows : [...rows, { ref: request.ref, ...(request.presentation === undefined ? {} : { presentation: request.presentation }) }]))
     navigate(current, id)
+  }
+  // A mission is addressed by the URL alone, like an alert; collapsing it leaves the Missions screen open.
+  const focusMission = (ref: string | undefined) => {
+    agentsDrawer.current?.close()
+    navigate(current, ref === undefined ? `${MISSIONS_REF}:detail` : missionPaneId(ref))
+  }
+  const openAlert = (id: string) => {
+    agentsDrawer.current?.close()
+    navigate(current, alertPaneId(id))
   }
   // Stable for the memoized panes: a document named in a conversation or another document opens in a tab.
   const openLatest = React.useRef(open)
@@ -550,6 +564,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     else setCollapsed(false)
   }, [setSidebarTab, narrow, setCollapsed])
   const shortcutHelp = useSidebarNavigation(showSidebarTab)
+  const missionMarkers = useAtomValue(React.useMemo(() => missionTabMarkersAtom(folderSource), [folderSource]))
   const machineMemory = useMachineMemory()
   const asking = useAskingAgents()
   // The query is the only Show state; live gateways start from this browser's remembered machines.
@@ -888,7 +903,12 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
       )}
       {view._tag === 'Missions' ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
-          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
+          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} {...(view.mission === undefined ? {} : { focusedMission: view.mission })} {...(onFocusMission === undefined ? {} : { onFocusMission })} />
+        </React.Suspense>
+      ) : null}
+      {view._tag === 'Alert' && alertControls !== undefined ? (
+        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading alert" /></div>}>
+          <AlertDetailsPane id={view.id} {...alertControls} {...(ux === undefined ? {} : { ux })} />
         </React.Suspense>
       ) : null}
       {view._tag === 'Usage' ? (

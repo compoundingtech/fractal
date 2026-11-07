@@ -174,7 +174,7 @@ describe('sidebar split (real kit ResizableSplit)', () => {
   })
 })
 
-const NavigationFixture = ({ show }: { readonly show: (tab: 'agents' | 'alerts') => void }) => <>{useSidebarNavigation(show)}</>
+const NavigationFixture = ({ show }: { readonly show: (tab: 'agents' | 'alerts' | 'missions') => void }) => <>{useSidebarNavigation(show)}</>
 describe('sidebar navigation chords', () => {
   const press = (key: string, target: EventTarget = document) => target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   it('opens Agents on g a and lists the available chord in help', async () => {
@@ -185,6 +185,8 @@ describe('sidebar navigation chords', () => {
     expect(show).toHaveBeenLastCalledWith('agents')
     await act(async () => { press('g'); press('l') })
     expect(show).toHaveBeenLastCalledWith('alerts')
+    await act(async () => { press('g'); press('m') })
+    expect(show).toHaveBeenLastCalledWith('missions')
     await act(async () => press('?'))
     const help = within(document.body).getByRole('dialog', { name: 'Keyboard shortcuts' })
     expect(help.textContent?.toLowerCase()).toContain('g a')
