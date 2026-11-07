@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "synthetic-case-1",
+      "initial": {"arrangement": {
+        "id": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "kind": "arrangement", "owner": "person/test", "revision": "claim/test-2", "updated_at": "2026-01-01T00:00:00.000Z", "deleted": false,
+        "body": {"version": 2, "name": {"value": "Sidebar", "revision": "claim/create"}, "folders": {
+          "00000000-0000-7000-8000-00000000000a": {"name": {"value": "Synthetic Folder 1", "revision": "claim/create"}, "position": {"value": {"parent": null, "key": "a0"}, "revision": "claim/create"}, "tombstone": null},
+          "00000000-0000-7000-8000-00000000000b": {"name": {"value": "Synthetic Folder 2", "revision": "claim/create"}, "position": {"value": {"parent": "00000000-0000-7000-8000-00000000000d", "key": "a0"}, "revision": "claim/position"}, "tombstone": null},
+          "00000000-0000-7000-8000-00000000000d": {"name": {"value": "Synthetic Folder 3", "revision": "claim/create"}, "position": {"value": {"parent": "00000000-0000-7000-8000-00000000000a", "key": "a1"}, "revision": "claim/create"}, "tombstone": {"value": true, "revision": "claim/delete"}}
+        }}, "resolved": {"parents": {"00000000-0000-7000-8000-00000000000a": null, "00000000-0000-7000-8000-00000000000b": "00000000-0000-7000-8000-00000000000a"}, "folders": {}}
+      }, "memberships": [
+        {"container": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "member": "agent/test/b", "revision": "claim/test-2", "position": {"bucket": "00000000-0000-7000-8000-00000000000b", "key": "a0"}},
+        {"container": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "member": "agent/test/a", "revision": "claim/test-1", "position": {"bucket": "00000000-0000-7000-8000-00000000000b", "key": "a0"}},
+        {"container": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "member": "machine/retained", "revision": "claim/test-3", "position": {"bucket": "00000000-0000-7000-8000-00000000000a", "key": "Zz"}}
+      ], "journal": []},
+      "catalog": ["agent/test/retired"], "identities": {}, "events": [{"type": "ProjectAndPlanV2", "moves": [
+        {"node": {"_tag": "Subject", "subject": "machine/retained"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "before": {"_tag": "Subject", "subject": "agent/test/b"}}
+      ], "needsYou": ["agent/test/a", "agent/test/retired"]}],
+      "checkpoints": [{"tree": {"roots": [{"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}], "nodes": {
+        "folder:00000000-0000-7000-8000-00000000000a": {"node": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "parent": {"_tag": "Root"}, "shownUnder": {"_tag": "Root"}, "key": "a0", "revision": "claim/create", "source": "person", "children": [{"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, {"_tag": "Subject", "subject": "machine/retained"}]},
+        "folder:00000000-0000-7000-8000-00000000000b": {"node": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000d"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "key": "a0", "revision": "claim/position", "source": "person", "children": [{"_tag": "Subject", "subject": "agent/test/a"}, {"_tag": "Subject", "subject": "agent/test/b"}]},
+        "subject:agent/test/a": {"node": {"_tag": "Subject", "subject": "agent/test/a"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "key": "a0", "revision": "claim/test-1", "source": "person", "children": []},
+        "subject:agent/test/b": {"node": {"_tag": "Subject", "subject": "agent/test/b"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000b"}, "key": "a0", "revision": "claim/test-2", "source": "person", "children": []},
+        "subject:machine/retained": {"node": {"_tag": "Subject", "subject": "machine/retained"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "key": "Zz", "revision": "claim/test-3", "source": "person", "children": []}
+      }, "arrangementRevision": "claim/test-2", "deletedFolders": ["00000000-0000-7000-8000-00000000000d"]}, "moves": [
+        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "machine/retained", "bucket": "00000000-0000-7000-8000-00000000000b", "key": "aL"}, {"op": "place", "member": "agent/test/b", "bucket": "00000000-0000-7000-8000-00000000000b", "key": "af"}]}}
+      ], "rollup": {
+        "folder:00000000-0000-7000-8000-00000000000a": {"needsYou": 1, "display": "Always"}, "folder:00000000-0000-7000-8000-00000000000b": {"needsYou": 1, "display": "Always"}
+      }, "effects": [], "wireActions": []}]
+    },
+    {
+      "name": "synthetic-case-2",
+      "initial": {"arrangement": {"id": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "kind": "arrangement", "owner": "person/test", "revision": "claim/test-3", "updated_at": "2026-01-01T00:00:00.000Z", "deleted": false, "body": {"version": 2, "name": {"value": "Sidebar", "revision": "claim/create"}, "folders": {}}, "resolved": {"parents": {}, "folders": {}}}, "memberships": [], "journal": []},
+      "catalog": ["agent/test/retired"], "identities": {}, "events": [{"type": "ProjectV2", "moves": [], "needsYou": ["agent/test/retired"]}],
+      "checkpoints": [{"tree": {"roots": [], "nodes": {}, "arrangementRevision": "claim/test-3", "deletedFolders": []}, "moves": [], "rollup": {}, "effects": [], "wireActions": []}]
+    },
+    {
+      "name": "synthetic-case-3",
+      "initial": {"arrangement": {"id": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "kind": "arrangement", "owner": "person/test", "revision": "claim/test-3", "updated_at": "2026-01-01T00:00:00.000Z", "deleted": false, "body": {"version": 2, "name": {"value": "Sidebar", "revision": "claim/create"}, "folders": {
+        "00000000-0000-7000-8000-00000000000a": {"name": {"value": "Folder", "revision": "claim/name"}, "position": {"value": {"parent": null, "key": "a0"}, "revision": "claim/position"}, "tombstone": null}
+      }}, "resolved": {"parents": {"00000000-0000-7000-8000-00000000000a": null}, "folders": {}}}, "memberships": [
+        {"container": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "member": "agent/test/a", "revision": "claim/test-1", "position": {"bucket": "00000000-0000-7000-8000-00000000000a", "key": "a1"}},
+        {"container": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "member": "agent/test/z", "revision": "claim/test-2", "position": {"bucket": "00000000-0000-7000-8000-00000000000a", "key": "a0"}},
+        {"container": "arrangement/person/test/00000000-0000-7000-8000-000000000001", "member": "machine/retained", "revision": "claim/test-3", "position": {"bucket": null, "key": "Zz"}}
+      ], "journal": []}, "catalog": [], "identities": {}, "events": [{"type": "ProjectAndPlanV2", "moves": [
+        {"node": {"_tag": "Subject", "subject": "machine/retained"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "before": {"_tag": "Subject", "subject": "agent/test/a"}},
+        {"node": {"_tag": "Subject", "subject": "agent/test/a"}, "parent": {"_tag": "Root"}, "before": {"_tag": "Subject", "subject": "machine/retained"}}
+      ], "needsYou": ["agent/test/a", "agent/test/z", "machine/retained"]}],
+      "checkpoints": [{"tree": {"roots": [{"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, {"_tag": "Subject", "subject": "machine/retained"}], "nodes": {
+        "folder:00000000-0000-7000-8000-00000000000a": {"node": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "parent": {"_tag": "Root"}, "shownUnder": {"_tag": "Root"}, "key": "a0", "revision": "claim/position", "source": "person", "children": [{"_tag": "Subject", "subject": "agent/test/z"}, {"_tag": "Subject", "subject": "agent/test/a"}]},
+        "subject:agent/test/a": {"node": {"_tag": "Subject", "subject": "agent/test/a"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "key": "a1", "revision": "claim/test-1", "source": "person", "children": []},
+        "subject:agent/test/z": {"node": {"_tag": "Subject", "subject": "agent/test/z"}, "parent": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "shownUnder": {"_tag": "Folder", "id": "00000000-0000-7000-8000-00000000000a"}, "key": "a0", "revision": "claim/test-2", "source": "person", "children": []},
+        "subject:machine/retained": {"node": {"_tag": "Subject", "subject": "machine/retained"}, "parent": {"_tag": "Root"}, "shownUnder": {"_tag": "Root"}, "key": "Zz", "revision": "claim/test-3", "source": "person", "children": []}
+      }, "arrangementRevision": "claim/test-3", "deletedFolders": []}, "moves": [
+        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "machine/retained", "bucket": "00000000-0000-7000-8000-00000000000a", "key": "a0V"}]}},
+        {"_tag": "PlannedV2", "edit": {"folders": [], "memberships": [{"op": "place", "member": "agent/test/a", "bucket": null, "key": "ZU"}]}}
+      ], "rollup": {"folder:00000000-0000-7000-8000-00000000000a": {"needsYou": 2, "display": "Always"}}, "effects": [], "wireActions": []}]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 #[derive(Parser)]
+#[command(name = "fractal-chatgpt")]
 struct Args {
     #[arg(long)]
     socket: PathBuf,
@@ -15,6 +16,24 @@ struct Args {
     transport: String,
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
+}
+
+fn is_call_telemetry_target(target: &str) -> bool {
+    let permitted = target == "fractal_chatgpt::call";
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    // Deployments must enable both targets in RUST_LOG before upgrading.
+    let permitted = permitted || target == "st_chatgpt::call";
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target
+    permitted
+}
+
+#[test]
+fn call_telemetry_target_allowlist() {
+    assert!(is_call_telemetry_target("fractal_chatgpt::call"));
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    assert!(is_call_telemetry_target("st_chatgpt::call"));
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target
+    assert!(!is_call_telemetry_target("reqwest::connect"));
 }
 
 #[tokio::main]
@@ -27,7 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_ansi(false)
             .with_writer(std::io::stderr)
-            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| metadata.target() == "st_chatgpt::call"))
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                is_call_telemetry_target(metadata.target())
+            }))
             .with_filter(filter))
         .try_init()?;
     if !args.listen.ip().is_loopback() {

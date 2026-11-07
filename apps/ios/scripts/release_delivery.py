@@ -120,12 +120,44 @@ NOTIFICATION_FIELDS = ("at", "outcome", "commit", "build_version", "exit", "retr
 # build: FractalFabric.podspec reads the carrier/proof flags (Rust fabric module
 # versus the disabled stub), metro.config.js reads the offline Debug flag, and
 # app config selects the daily bundle from APP_VARIANT. Pin both naming families.
-DAILY_BUILD_ENV = {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "0", "ST3_FABRIC": "0",
+DAILY_BUILD_ENV = {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "1", "ST3_FABRIC": "1",
                    "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
                    "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"}
 
 
-def build_identity(args):
+FABRIC_FRAMEWORK = Path("apps/ios/modules/fractal-fabric/ios/build/FractalFabricRust.xcframework")
+
+
+def framework_hash(repo, *, required=True):
+    """Hash sorted relative file names and contents, never mtimes or host paths."""
+    framework = repo / FABRIC_FRAMEWORK
+    files = sorted(path for path in framework.rglob("*") if path.is_file())
+    if not framework.is_dir() or not files:
+        if required:
+            raise ValueError("Missing FractalFabricRust.xcframework; refusing to link")
+        return None
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(framework).as_posix().encode() + b"\0")
+        content = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                content.update(chunk)
+        digest.update(content.digest())
+    return digest.hexdigest()
+
+
+def verify_fabric_linkage(app, info, env):
+    # The disabled stub has the same Swift class name. Require defined Rust
+    # bridge exports in the executable, not merely FractalFabricModule metadata.
+    symbols = run(["nm", "-g", "-U", str(app / info["CFBundleExecutable"])],
+                  capture=True, env=env)
+    defined = {line.split()[-1] for line in symbols.splitlines() if line.split()}
+    if not {"_st_fabric_identity", "_st_fabric_dial"}.issubset(defined):
+        raise ValueError("Built app lacks the real Fabric bridge; refusing the disabled stub")
+
+
+def build_identity(args, *, fabric_hash=None):
     """Inputs outside the Git revision that determine the signed app.
 
     The worker derives finer cache keys from these; the reconciler compares
@@ -141,6 +173,8 @@ def build_identity(args):
                 if key.startswith("EXPO_PUBLIC_")
                 and key not in ("EXPO_PUBLIC_FRACTAL_BUILD", "EXPO_PUBLIC_ST3_BUILD")},
         "pinned": DAILY_BUILD_ENV,
+        "fabric_framework": (fabric_hash if fabric_hash is not None else
+                             framework_hash(args.state / "checkout", required=False)),
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
@@ -197,6 +231,9 @@ def build_release(args):
                             cwd=app, env=env, capture=True))
     if config["ios"]["bundleIdentifier"] != BUNDLE_ID:
         raise ValueError("Tracked ref lacks the daily app variant; refusing to replace Debug")
+    # Reuse the documented builder inside the same gated worker as Xcode.
+    run(["sh", "modules/fractal-fabric/build.sh"], cwd=app, env=env)
+    fabric_hash = framework_hash(repo)
     native_paths = ["apps/ios/app.json", "apps/ios/plugins", "apps/ios/modules",
                     "apps/ios/assets", "apps/ios/react-native.config.js"]
     native_paths.extend(str(path.relative_to(repo)) for path in app.glob("app.config.*"))
@@ -205,6 +242,7 @@ def build_release(args):
         "source": git(repo, "ls-tree", "-r", args.commit, "--", *native_paths),
         "developer_dir": args.developer_dir, "team": args.team,
         "pod": shutil.which("pod"), "env": DAILY_BUILD_ENV,
+        "fabric_framework": fabric_hash,
     }, sort_keys=True).encode()).hexdigest()
     regenerate = (inputs.get("native") != native_identity
                   or not list((app / "ios").glob("*.xcworkspace"))
@@ -238,6 +276,8 @@ def build_release(args):
         print("Resetting JS transform cache: build identity changed", flush=True)
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
+    if framework_hash(repo) != fabric_hash:
+        raise ValueError("FractalFabricRust.xcframework changed before linking")
     derived = cache / "derived"
     run(["pnpm", "run", "export:ios"], cwd=app, env=env)
     run(["xcodebuild", "-workspace", str(workspace), "-scheme", workspace.stem,
@@ -260,6 +300,7 @@ def build_release(args):
         raise ValueError("Built app has stale source identity")
     if args.commit[:12].encode() not in (apps[0] / "main.jsbundle").read_bytes():
         raise ValueError("Built app embeds a stale build stamp")
+    verify_fabric_linkage(apps[0], info, env)
     run(["codesign", "--verify", "--deep", "--strict", str(apps[0])])
     # Pending installation owns an immutable snapshot, never the next build's
     # mutable Xcode product. A failure cannot publish or replace this snapshot.
@@ -269,8 +310,12 @@ def build_release(args):
     shutil.copytree(apps[0], snapshot, symlinks=True)
     inputs["js_env"] = js_env
     save(inputs_file, inputs)
-    save(output / "success.json", {"commit": args.commit, "key": args.content_key, "app": str(snapshot),
+    final_identity = build_identity(args, fabric_hash=fabric_hash)
+    save(output / "success.json", {"commit": args.commit,
+        "key": content_key(repo, args.commit, final_identity), "app": str(snapshot),
         "build_version": build_version,
+        "fabric_framework_hash": fabric_hash,
+        "build_inputs": final_identity,
         "build_seconds": round(time.monotonic() - started, 3),
         "native_regenerated": regenerate})
 
@@ -577,11 +622,16 @@ class Delivery:
                    "taskpolicy", "-c", "utility", "nice", "-n", "19", sys.executable,
                    str(Path(__file__).resolve()), "--build-worker",
                    "--repo", str(repo), "--output", str(output),
-                   "--team", self.args.team, "--commit", commit, "--content-key", key,
+                   "--team", self.args.team, "--commit", commit,
                    "--build-version", version, "--developer-dir", self.args.developer_dir]
         with (output / "build.log").open("a") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode or not (output / "success.json").exists():
+            # A later failure may still have produced a new framework. Back off
+            # against those actual inputs rather than the pre-worker identity.
+            identity = build_identity(self.args)
+            key = content_key(repo, commit, identity)
+            self.data["observed"].update(key=key, inputs=identity)
             self.data["failed_build"] = {"key": key, "attempts": attempts, "at": time.time()}
             self.persist()
             failure = output / "failure.json"
@@ -591,9 +641,13 @@ class Delivery:
             return None
         self.data["last_build_version"] = version
         self.data.pop("failed_build", None)
+        success = json.loads((output / "success.json").read_text())
+        # The worker produces the framework after admission. Publish the final
+        # identity, not the pre-build hash (which may have been absent or stale).
+        self.data["observed"].update(key=success["key"], inputs=success["build_inputs"])
         self.persist()
         self.record("built", commit=commit, log=str(output / "build.log"))
-        return json.loads((output / "success.json").read_text())
+        return success
 
 
 def main():
@@ -621,7 +675,6 @@ def main():
     parser.add_argument("--build-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--commit", help=argparse.SUPPRESS)
-    parser.add_argument("--content-key", help=argparse.SUPPRESS)
     parser.add_argument("--build-version", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.repo = args.repo.expanduser().resolve()

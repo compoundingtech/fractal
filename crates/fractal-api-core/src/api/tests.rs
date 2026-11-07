@@ -5072,6 +5072,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     .await
     .unwrap()
     .0;
+    let appended: smallclaims::claim::ClaimRecord = serde_json::from_value(appended).unwrap();
     let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
         .await
         .expect("a stream item did not wake the waiter")
@@ -6955,6 +6956,73 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
         assert_eq!(retired_card["state"] == "retired", cut == after, "{cards:?}");
         assert_ne!(stopped_card["state"], "retired");
     }
+}
+
+/// #4500: a seat whose declaration is a stop while its process still runs says it is stopping,
+/// and once the stop is deferred, what holds it.
+#[test]
+fn a_stop_declared_seat_that_still_runs_is_stopping_and_says_what_holds_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let seat = "agent/example-held/worker";
+    let declare = parse_intent(
+        "version 2\nagent \"example-held/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&declare, "held-card-declaration").unwrap();
+    let observe = |status: &str, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: seat.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!(status)),
+                ("runtime_id".into(), json!("held-runtime")),
+                ("incarnation_id".into(), json!("held-incarnation")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    observe("running", "held-running");
+    let card = |store: &Store| {
+        client_agent_resources_uncached(store, true, store.index().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|card| card["id"] == seat)
+            .unwrap()
+    };
+    assert_eq!(card(&store)["stopping"], Value::Null, "a declared seat is not stopping");
+
+    let stop = parse_intent("version 2\nstop \"agent/example-held/worker\"\n", store.origin()).unwrap();
+    store.apply_internal(&stop, "held-card-stop").unwrap();
+    assert_eq!(card(&store)["stopping"], json!({"held": null}));
+
+    let token = store.selected_desired_token(seat).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: seat.into(),
+        kind: "harness.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("warning")),
+            ("status".into(), json!("waiting")),
+            ("code".into(), json!("stop-deferred")),
+            ("reason".into(), json!("the seat holds a message nobody has read")),
+            ("observed_since_ms".into(), json!(1)),
+            ("incarnation_id".into(), json!("held-incarnation")),
+        ]),
+        evidence: vec![token],
+        expected_subject: None,
+        idempotency_key: Some("held-diagnostic".into()),
+    }).unwrap();
+    assert_eq!(
+        card(&store)["stopping"],
+        json!({"held": "the seat holds a message nobody has read"})
+    );
+
+    observe("stopped", "held-stopped");
+    assert_eq!(card(&store)["stopping"], Value::Null, "a stopped seat is no longer stopping");
 }
 
 #[test]
@@ -13357,6 +13425,110 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
     assert_eq!(sent["recipient"], "agent/example-renamed/worker");
     assert_eq!(sent["recipient_identity"], "agent/example-original/worker");
 }
+
+/// A driver reads a seat's incarnation with `summary=true`: the declaration and the runtime's status
+/// and incarnation as a full read shows them, without the claim list a full read carries.
+#[tokio::test]
+async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    let seat = "agent/example-summary/worker";
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-summary/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "summary-declare").unwrap();
+    for index in 0..20 {
+        roster_fixture_append(&owner.store, seat, "runtime.observed", json!({
+            "status":"running", "runtime_id":seat, "host":owner.node,
+            "incarnation_id":format!("summary-incarnation-{index}")
+        }));
+    }
+    // A newer observation without an incarnation leaves the earlier one current.
+    roster_fixture_append(&owner.store, seat, "runtime.observed", json!({"status":"stopped"}));
+    let app = router(owner.clone());
+    let (status, full) = get_request(app.clone(), &format!("/v1/status?subject={seat}")).await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    let (status, summary) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true")).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let (full, summary) = (&full["subjects"][0], &summary["subjects"][0]);
+    assert!(!full["claims"].as_array().unwrap().is_empty(), "{full}");
+    assert_eq!(summary["claims"], json!([]), "{summary}");
+    assert_eq!(summary["actual"]["incarnation_id"], "summary-incarnation-19", "{summary}");
+    for field in ["incarnation_id", "status"] {
+        assert_eq!(summary["actual"][field], full["actual"][field], "{field}");
+    }
+    assert_eq!(summary["desired"], full["desired"]);
+    assert_eq!(summary["subject"], seat);
+    // Other subjects, and reads by owner, are answered in full.
+    roster_fixture_append(&owner.store, "exec/example-summary", "runtime.observed", json!({"status":"running", "incarnation_id":"exec-incarnation"}));
+    let (_, host) = get_request(app.clone(), "/v1/status?subject=exec/example-summary&summary=true").await;
+    assert!(!host["subjects"][0]["claims"].as_array().unwrap().is_empty(), "{host}");
+    // A read by owner keeps its filter: this seat belongs to no run, so it is left out.
+    let (status, owned) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true&owner_run=mission-run/example-other")).await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    assert_eq!(owned["subjects"], json!([]), "{owned}");
+    // A seat carrying a reserved notice fact is refused, as the full read refuses it.
+    owner.store.connection.write().execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-h18ab046ede43 owner=fractal_api_core::api::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('summary-notice','node',9000,'fixture','1700000000000');
+         INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+         VALUES ('summary-notice-claim','summary-notice','{seat}','attention.notice','node','{{\"fields\":{{}}}}','[]','1700000000000');"
+    )).unwrap();
+    for path in [format!("/v1/status?subject={seat}"), format!("/v1/status?subject={seat}&summary=true")] {
+        let (status, refused) = get_request(app.clone(), &path).await;
+        assert_ne!(status, StatusCode::OK, "{path}: {refused}");
+        assert!(refused.to_string().contains("notices-unavailable"), "{path}: {refused}");
+    }
+}
+
+#[tokio::test]
+async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot_pin() {
+    for exact in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let owner = state(root.path());
+        let store = owner.store.clone();
+        let subject = "agent/example-owner/worker";
+        for incarnation in ["before", "after"] {
+            roster_fixture_append(&store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":owner.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let through = store.index().unwrap();
+        let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+            .subjects.remove(0).actual_claim.unwrap();
+        assert_eq!(store.conversation_owners_at(through).unwrap()[subject].incarnation.as_deref(), Some("after"));
+        let repair_store = store.clone();
+        MANAGED_OWNER_AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    // Repair changes retained-prefix meaning without advancing its claim cut.
+                    repair_store.connection.write().execute(
+                        /* sqlite-large-value: allow-for-now lv-h7dc166900806 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
+                        [&repaired],
+                    ).unwrap();
+                    smallclaims::Runtime::forget_views(repair_store.fractal.as_ref());
+                    let rebuilt = repair_store.conversation_owners_at(through).unwrap();
+                    assert_eq!(rebuilt[subject].incarnation.as_deref(), Some("before"));
+                }).join().unwrap();
+            }));
+        });
+        let session = managed_session_id(subject, "after");
+        let found = if exact {
+            managed_session_owner_for_subject_at(&store, through, &session, subject)
+        } else {
+            managed_session_owner_at(&store, through, &session)
+        }.unwrap().expect("the pinned prefix still contains the unrepaired incarnation");
+        assert!(MANAGED_OWNER_AFTER_PIN.with(|hook| hook.borrow().is_none()));
+        assert_eq!(found.1.as_deref(), Some("after"));
+        assert!(managed_session_owner_at(&store, through, &session).unwrap().is_none());
+        assert!(managed_session_owner_for_subject_at(&store, through, &session, subject).unwrap().is_none());
+    }
+}
+
 
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {

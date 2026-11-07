@@ -1528,6 +1528,7 @@ dependencies = [
  "pty-client",
  "pty-core",
  "pty-terminal",
+ "qrcode",
  "reqwest",
  "resvg",
  "ring",
@@ -1964,10 +1965,6 @@ dependencies = [
  "kdl",
  "libc",
  "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1977,7 +1974,6 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "tungstenite 0.30.0",
  "wat",
@@ -2481,8 +2477,11 @@ dependencies = [
 name = "fractal-sidebar"
 version = "0.1.0"
 dependencies = [
+ "fractal-client",
  "fractal-schema",
+ "fractal-sidebar",
  "jsonschema",
+ "ratatui",
  "serde",
  "serde_json",
 ]
@@ -2627,6 +2626,7 @@ dependencies = [
  "fractal-feed",
  "fractal-mission-ui",
  "fractal-schema",
+ "fractal-sidebar",
  "fractal-terminal-direct",
  "fractal-ui-model",
  "image",
@@ -4776,6 +4776,12 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quantette"

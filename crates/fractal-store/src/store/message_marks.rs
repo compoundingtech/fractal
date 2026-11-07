@@ -204,7 +204,11 @@ pub fn record_tx(
         }
     } else {
         // The client selectors fold their dirty headers at the end of a write, as a claim's
-        // commit does: a closed mark closes the message's current header.
+        // commit does: a closed mark closes the message's current header. It closes it at once
+        // first, since the fold can leave it behind other headers.
+        if kind == "message.closed" {
+            super::client_messages::close_marked(transaction, message).map_err(internal)?;
+        }
         super::client_messages::finalize_commit(transaction).map_err(internal)?;
     }
     Ok((receipt, inserted > 0))

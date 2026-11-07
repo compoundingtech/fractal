@@ -30,6 +30,21 @@ preserves full immutable producer input; its recipient is the addressed person.
 Delivery/integrity use tagged states, and person controls are explicitly nullable.
 Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
 serialized claim-field budget and cross-field provenance/receipt consistency.
+Immutable source lineage authenticates the stored source creation claim and its
+reviewed manifest digest; it does not authenticate external git commits named in
+`input.source`. Execution-context provenance remains informational, not
+authenticated sender evidence. Notice finalization is SQL-free when no notice
+work is pending; touched authority or custom state still triggers revalidation.
+This is a finalization contract, not a checked performance result.
+Generic seat-summary visibility and reduction use one pinned read snapshot and
+effective claim cut. Exact incarnation summaries neither use nor advance the shared
+subject cache; unrelated claim backlogs do not trigger its maintenance. The reduction
+independently excludes reserved notice kinds from actual fields and source attribution.
+Managed-session owner
+visibility and identity selection also share one read snapshot and read routing
+identities uncached on its connection; a shared map keyed only by the numeric
+claim cut cannot pin mutable identity and repair state.
+
 Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
 Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
 constructors and decoding, including Unicode-scalar lengths, URI references and
@@ -1883,9 +1898,9 @@ frontend-auth boundary and does not alter tool arguments or daemon grants. No ge
 runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 405; unknown
 paths return an empty 404.
 
-The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
-Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
+The flake's `packages.fractal-chatgpt` builds only the adapter executable with the shared locked
+Cargo dependencies. Run `nix build .#fractal-chatgpt` from a checkout, or
+`nix build github:compoundingtech/fractal/<commit>#fractal-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):

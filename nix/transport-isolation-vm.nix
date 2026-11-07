@@ -1,4 +1,4 @@
-# Runs the four current-runtime scope controls in a VM with a real
+# Runs the five current-runtime scope controls in a VM with a real
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
@@ -18,6 +18,12 @@ let
       binary = "scope_cascade";
       kind = "test";
       name = "exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops";
+    }
+    {
+      package = "fractal-runtime";
+      binary = "scope_cascade";
+      kind = "test";
+      name = "exec_survives_a_parent_service_sigkill_as_soon_as_spawn_returns";
     }
     {
       package = "fractal-runtime";
@@ -183,7 +189,7 @@ pkgs.testers.runNixOSTest {
     )
     test_seconds = time.monotonic() - started
     print(output)
-    assert re.search(r"\b4 tests run: 4 passed\b", output), "all four explicitly selected systemd-scope cases must run and pass"
+    assert re.search(r"\b5 tests run: 5 passed\b", output), "all five explicitly selected systemd-scope cases must run and pass"
 
     # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:
