@@ -168,8 +168,8 @@ installing files.
 
 Every commit on `main`, PRs changing release files and manual **Run workflow** invocations run both native builds,
 archive extraction, a temporary-directory installation, CLI help checks, the TUI PTY smoke suite,
-and combined checksum/source validation. They upload `fractal-release` as an Actions artifact
-(kept 7 days) and never publish a GitHub release, so release breakage fails on `main` and not at tag
+and combined checksum/source validation. They upload `fractal-release-attempt-N` as an Actions artifact
+(where N is `github.run_attempt`, kept 7 days) and never publish a GitHub release, so release breakage fails on `main` and not at tag
 time. Each native job also uploads its own archive and checksum as `release-<target>`, for example
 `release-x86_64-unknown-linux-gnu`; once a main commit's run has succeeded,
 `gh run download RUN_ID --repo compoundingtech/fractal --name release-x86_64-unknown-linux-gnu`
@@ -203,7 +203,7 @@ The native runtime suite and documentation tests remain covered.
 
 After a `main` run of **Fractal tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
-one release per commit. It builds nothing: it takes the run's `fractal-release` artifact, re-checks the
+one release per commit. It builds nothing: it takes the run's `fractal-release-attempt-N` artifact, re-checks the
 checksums and the source recorded in each archive, then replaces the assets (both target archives and
 their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
 source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
@@ -224,9 +224,11 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 **Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch
 with `mode=candidate` (the default). It takes the newest `main` commit whose release run
-succeeded, re-checks the checksums and sources of its `fractal-release` artifact, selects the
-next patch version, and uploads those same bytes as a **draft** targeting the exact full
-source SHA, without creating a Git tag. The tag is created only when publishing.
+succeeded, reads that exact attempt's metadata, and re-checks the checksums and sources of its
+`fractal-release-attempt-N` artifact. It selects the next patch version and uploads those same
+bytes as a **draft** targeting the exact full source SHA, without creating a Git tag. The tag
+is created only when publishing. Immediately before creating the draft, it rechecks that the
+run's current attempt is still the verified attempt; a rerun invalidates that selection.
 The scheduled path rebuilds nothing. Dispatch with `tag` or `run` to select a candidate
 version or successful main push build explicitly. To build a chosen SHA independently
 of busy main-push concurrency, dispatch:
@@ -297,6 +299,12 @@ gh workflow run release-daily.yml --repo compoundingtech/fractal --ref main \
   -f go_ref='URL_OR_MESSAGE_ID_OF_PRODUCT_RELEASE_GO'
 ```
 
+Before dispatching publication, select a candidate built with attempt-qualified artifacts
+and its recorded source SHA. If its build has been rerun, create a fresh candidate from
+the new successful attempt and review that candidate before publishing; do not reuse the
+previous attempt's draft. Drafts using the old proof format must also be recreated from
+a new attempt-qualified build, never repaired by hand-editing `CANDIDATE.json` or assets.
+
 The optional `allow_superseded` dispatch input defaults to empty. Publication refuses a
 selected candidate if a newer semantic-version draft exists. To deliberately publish an
 older candidate, append `-f allow_superseded=vX.Y.Z` to the command above, using the
@@ -310,14 +318,21 @@ for the exact full source SHA. Automation does not verify the referenced message
 contents. No human-only environment review is required.
 The publisher refuses a non-draft or prerelease, a SHA that differs from the draft target,
 an existing immutable tag, or `RELEASE.json`, incomplete notes, or invalid
-checksums/archive sources. `CANDIDATE.json` binds the exact source, build run and build
-attempt to the canonical workflow's numeric ID and path (`.github/workflows/release-fractal.yml`),
-resolved through the GitHub API, not its display name. Publication requires that exact
-attempt to have succeeded, then downloads its original `fractal-release` artifact and
-checks source, checksums and equality with the candidate archives. Rerunning the build
-requires a fresh candidate; a later attempt cannot stand in for the recorded proof.
-Missing or expired artifacts and unsuccessful or mismatched workflow/run/attempt proof
-fail closed. Publish within the artifact's seven-day retention, or build a fresh candidate.
+checksums/archive sources. `CANDIDATE.json` records the exact full source SHA, build run ID,
+build attempt number, and immutable numeric Actions artifact ID (`build_artifact`).
+The publisher also validates the canonical workflow numeric ID and path
+(`.github/workflows/release-fractal.yml`) through the GitHub API, not its display name.
+Both candidate creation and publication read metadata from `/actions/runs/RUN_ID/attempts/N`, requiring
+the recorded source and workflow/run/attempt identity and a successful completed attempt.
+Candidate creation requires exactly one unexpired artifact named `fractal-release-attempt-N`;
+publication requires that same artifact name and immutable ID and downloads by ID, not by
+a run-wide name lookup. It verifies archive source SHAs and checksums and requires the
+candidate archive bytes and checksums to match that artifact. Immediately before publishing
+with `gh release edit`, it rechecks `/actions/runs/RUN_ID` and rejects a changed current
+`run_attempt`, even if all earlier proof checks passed. A later attempt cannot stand in
+for the recorded proof. Missing or expired artifacts, old-format proof, and unsuccessful
+or mismatched workflow/run/attempt/artifact proof fail closed. Publish within the artifact's
+seven-day retention, or build a fresh candidate.
 It creates the selected tag at the exact approved source SHA if absent, publishes the
 existing bytes and notes, and proposes compatibility baselines.
 Candidate runs never advance baselines. Consumers must pin only published release tags,
@@ -325,10 +340,6 @@ not draft candidate version names. Drafts are private and are not available thro
 published-release download URLs; stable latest discovery excludes drafts and prereleases.
 Rolling `edge` and source-addressed `embed-*` prereleases remain independent development
 channels, not stable releases.
-
-The downloader prefers `fractal-release` and also accepts `smalltalk-release` from older
-successful runs until those 7-day artifacts expire
-(`arn:lmig:smalltalk:2026-10-26-release-artifact-name`, sunset 2026-11-01).
 
 Daily and on-demand candidates use the same source-pinned **Upgrade impact**
 section before the change list, and attach `UPGRADE-IMPACT.json`. It describes replay,
