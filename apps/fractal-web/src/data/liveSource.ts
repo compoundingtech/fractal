@@ -43,6 +43,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { readAuthorization } from './readAuthorization.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
@@ -133,11 +134,6 @@ const terminalUnavailable = (error: AttachFailure): Feed<never> => {
 }
 
 
-const credentialRejection = Schema.Struct({
-  code: Schema.Literal('forbidden'),
-  details: Schema.Struct({ reason: Schema.Literal('credential-rejected') }),
-})
-
 /** Connect retained workbench projections through one SDK runtime and frame writer. */
 export const liveSource = ({
   options,
@@ -166,7 +162,7 @@ export const liveSource = ({
       if (method.toUpperCase() === 'GET' && url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/v1/client/') &&
         response.status === 403) {
         const body: unknown = await response.clone().json().catch(() => undefined)
-        if (Option.isSome(Schema.decodeUnknownOption(credentialRejection)(body))) {
+        if (readAuthorization({ status: response.status, response: body }) === 'unauthorized') {
           credentialExpired = true
           readRejection = 'Browser credential expired or revoked'
           registry.set(readRefusal, readRejection)

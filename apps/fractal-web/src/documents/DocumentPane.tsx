@@ -50,7 +50,7 @@ export const DocumentPane = ({
       <header {...stylex.props(styles.header)}>
         <strong {...stylex.props(styles.name)}>{shown.name}</strong>
         {shown.version ? <span {...stylex.props(styles.meta)} title={state._tag === 'Text' || state._tag === 'Binary' ? state.reference : undefined}>version {shown.version}</span> : null}
-        <Aria.Button onPress={() => setAttempt((value) => value + 1)} isDisabled={state._tag === 'Reading'} {...stylex.props(styles.button)}>
+        <Aria.Button onPress={() => setAttempt((value) => value + 1)} isDisabled={state._tag === 'Reading' || (state._tag === 'Unavailable' && state.reason === 'unauthorized')} {...stylex.props(styles.button)}>
           {documentVersion(name).version ? 'Read again' : 'Read the newest'}
         </Aria.Button>
       </header>

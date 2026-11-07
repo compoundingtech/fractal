@@ -7,6 +7,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import type { Feed } from '../../data/source.ts'
 import { observed, unavailable, waiting } from '../../data/source.ts'
 import { resourceTitle, sortResources, type ResourcePage } from './model.ts'
+import { clientReadAuthorization } from '../../data/readAuthorization.ts'
 
 /** Observed agent resources, paging controls and cached file-subject lookup. */
 export interface AgentResourceSource {
@@ -41,7 +42,7 @@ export const decodeResourcePage = (response: unknown): ResourcePage => {
 
 class ResourceReadError extends Schema.TaggedError<ResourceReadError>()('ResourceReadError', {
   message: Schema.String,
-  reason: Schema.Literals(['ungranted', 'failed']),
+  reason: Schema.Literals(['unauthorized', 'ungranted', 'failed']),
 }) {}
 
 /** Collection socket has no resource subscription yet. Each mounted reader owns its scoped poll. */
@@ -109,7 +110,7 @@ export const gatewayResources = ({
         catch: (error) =>
           new ResourceReadError({
             message: error instanceof Error ? error.message : 'Could not load resources.',
-            reason: error instanceof ClientError && error.status === 403 ? 'ungranted' : 'failed',
+            reason: clientReadAuthorization(error) ?? 'failed',
           }),
       }),
   )
@@ -194,7 +195,7 @@ export const gatewayResources = ({
                   ),
                   Effect.catch((error) =>
                     Effect.sync(() => {
-                      if (previous !== undefined)
+                      if (previous !== undefined && error.reason === 'failed')
                         publish({
                           _tag: 'Observed',
                           value: { ...previous, loadingMore: false, pagingError: error.message },
@@ -255,7 +256,7 @@ export const gatewayResources = ({
               Effect.catch((error) =>
                 Effect.sync(() =>
                   publish(
-                    latest._tag === 'Observed'
+                    latest._tag === 'Observed' && error.reason === 'failed'
                       ? {
                           _tag: 'Observed',
                           value: latest.value,

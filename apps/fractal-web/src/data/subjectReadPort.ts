@@ -15,6 +15,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import type { Feed } from './source.ts'
 import { observed, unavailable, waiting } from './source.ts'
 import { redactPublicationDefinition, type MissionDeclarationValue } from '../declarations/model.ts'
+import { clientReadAuthorization } from './readAuthorization.ts'
 
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
@@ -348,7 +349,7 @@ export const gatewaySubjectReads = ({
           catch: (cause) =>
             new SubjectReadFailure({
               ref,
-              reason: cause instanceof ClientError && cause.status === 403 ? 'ungranted' : cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed',
+              reason: clientReadAuthorization(cause) ?? (cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed'),
               detail: cause instanceof Error ? cause.message : String(cause),
             }),
         }),

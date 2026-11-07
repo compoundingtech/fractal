@@ -4,6 +4,7 @@ import { Effect, Fiber } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { unavailable, waiting, type Feed } from './source.ts'
+import { clientReadAuthorization } from './readAuthorization.ts'
 
 /** Member-owned native reads; no client-generated tones, forecasts or history samples. */
 export interface ObjectivesSource {
@@ -34,13 +35,12 @@ export const gatewayObjectives = ({ options, discovery, registry, now }: {
           return value
         },
         catch: error => unavailable({
-          reason: error instanceof ClientError && error.status === 403 ? 'ungranted'
-            : error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed',
+          reason: clientReadAuthorization(error) ?? (error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed'),
           detail: 'Could not read objectives and budgets.',
         }),
       }).pipe(Effect.match({
         onSuccess: (value): Feed<T> => ({ _tag: 'Observed', value, freshness: 'live', readAt: now() }),
-        onFailure: (failure): Feed<T> => previous._tag === 'Observed' && failure._tag === 'Unavailable' && failure.reason !== 'ungranted'
+        onFailure: (failure): Feed<T> => previous._tag === 'Observed' && failure._tag === 'Unavailable' && failure.reason !== 'ungranted' && failure.reason !== 'unauthorized'
           ? { ...previous, freshness: 'stale', error: { reason: failure.reason, detail: failure.detail } } : failure,
       }), Effect.tap(value => Effect.sync(() => { previous = value; get.setSelf(value) }))))
       get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
