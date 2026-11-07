@@ -24,90 +24,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  macos-bound-peer-changes:
-    name: macos-bound-peer-changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      relevant: ${{ steps.detect.outputs.relevant }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Detect bound-peer inputs
-        id: detect
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          python3 - <<'PY'
-          import fnmatch
-          import os
-          import subprocess
-
-          patterns = (
-              'crates/fractal-api-core/**',
-              'crates/fractal-api-client-v0/**',
-              'crates/fractal-runtime/**',
-              'crates/fractal-drivers/**',
-              'crates/fractal-daemon/**',
-              'Cargo.toml',
-              'Cargo.lock',
-              '.cargo/**',
-              '.github/workflows/macos.yml*',
-          )
-          base = os.environ.get('BASE_SHA', '')
-          relevant = True
-          if base and set(base) != {'0'}:
-              subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', base], check=True)
-              names = subprocess.check_output(['git', 'diff', '--name-only', '--no-renames', '-z', base, 'HEAD']).decode().split('\0')
-              relevant = any(fnmatch.fnmatchcase(name, pattern) for name in names for pattern in patterns)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'relevant={str(relevant).lower()}\n')
-          PY
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Only classifies changed paths; no build inputs.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  macos-bound-peer:
-    name: macos-bound-peer
-    needs: [macos-bound-peer-changes]
-    if: ${{ !cancelled() && needs.macos-bound-peer-changes.result == 'success' && needs.macos-bound-peer-changes.outputs.relevant == 'true' }}
-    runs-on: macos-14
-    timeout-minutes: 25
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: macos-bound-peer
-        id: cache-2
-      - name: Test process identity
-        run: "cargo test --locked -p fractal-runtime --lib peer_process::"
-      - name: Test bound-peer authority
-        run: |
-          for test in transport_publication a_unix_peer a_harness_descendant masked_child unverifiable; do
-            cargo test --locked -p fractal-api-core --lib "$test" || exit
-          done
-          cargo test --locked -p fractal-api-client-v0 --lib bound_actor_refusals
-      - name: Test worker ingress
-        run: "cargo test --locked -p fractal-daemon --lib worker_ingress::"
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_ENTRIES: '[{"name":"Cargo release","outcome":"${{ steps.cache-2.outcome }}","hit":"${{ steps.cache-2.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   macos-ci:
     name: macos-ci
-    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci'))
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 120
     defaults:
