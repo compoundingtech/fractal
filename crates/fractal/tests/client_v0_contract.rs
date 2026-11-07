@@ -3575,7 +3575,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
     ];
     let steps = states
         .iter()
-        .map(|(internal, _)| format!("step {internal:?} {{ assigned-to \"agent/builder\" }}"))
+        .map(|(internal, _)| format!("step {internal:?} {{ assigned-to \"agent/client-v0-baseline.builder\" }}"))
         .collect::<Vec<_>>()
         .join("\n");
     let source = format!(
@@ -3667,6 +3667,18 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap();
         }
     }
+    // Older stores can retain slash-qualified assignees without the actor prefix.
+    let legacy_step = run.steps.iter().find(|step| step.step == "ready").unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("claims.sqlite3")).unwrap();
+    smallclaims::store::projection_digest::register(&connection).unwrap();
+    assert_eq!(
+        connection.execute(
+            "UPDATE step_runs SET assignee = ?1 WHERE subject = ?2",
+            rusqlite::params!["legacy/builder", legacy_step.subject],
+        ).unwrap(),
+        1
+    );
+    drop(connection);
     let app = fractal_daemon::api::router(state);
     for path in ["/v1/client/missions", "/v1/client/missions/state-contract"] {
         let (status, response) = client_json(app.clone(), path).await;
@@ -3692,6 +3704,30 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap()
                 .iter()
                 .any(|step| step["state"] == "claimed")
+        );
+        // Use the same presentation emitter as the published mission cards, not a hand-built
+        // presentation fixture, and validate the enclosing resource including /presentation.
+        let mut card = mission.clone();
+        fractal_daemon::api::published_lists::present(&mut card, &[], Some(&Default::default()));
+        assert!(card["presentation"].is_object(), "{card}");
+        assert_conforms(&contract_validator("Mission"), path, &card);
+        let presented_steps = card["presentation"]["steps"].as_array().unwrap();
+        assert_eq!(presented_steps.len(), states.len());
+        for step in presented_steps {
+            assert_eq!(step["owner"]["kind"], "agent", "{step}");
+            assert_conforms(
+                &contract_validator("AgentId"),
+                "/presentation/steps/*/owner/agent",
+                &step["owner"]["agent"],
+            );
+        }
+        let legacy = presented_steps.iter().find(|step| step["path"] == "ready").unwrap();
+        assert_eq!(legacy["owner"]["agent"], "agent/legacy/builder");
+        let mut invalid = card.clone();
+        invalid["presentation"]["steps"][0]["owner"]["agent"] = serde_json::json!("legacy/builder");
+        assert!(
+            !contract_validator("Mission").is_valid(&invalid),
+            "strict /presentation AgentId contract must reject an unprefixed actor"
         );
     }
     let (status, response) = client_json(app.clone(), "/v1/client/work?history=true").await;
@@ -3734,7 +3770,7 @@ version 2
 agent "ios-owner" { workspace "/tmp"; command "true" }
 mission "ios-proof" state="ready" {
   goal "Run the physical simulator proof."
-  step "automated-proof" { assigned-to "agent/ios-owner" }
+  step "automated-proof" { assigned-to "agent/client-v0-baseline.ios-owner" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -3848,7 +3884,7 @@ version 2
 agent "release-owner" { workspace "/tmp"; command "true" }
 mission "release-proof" state="ready" {
   goal "Publish the release."
-  step "tag-proof" { assigned-to "agent/release-owner"; goal "Prove the published tag builds." }
+  step "tag-proof" { assigned-to "agent/client-v0-baseline.release-owner"; goal "Prove the published tag builds." }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -4015,7 +4051,7 @@ agent "queue-seat" { workspace "/tmp"; command "true" }
 mission "queued-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step in each run."
-  step "work" { assigned-to "agent/queue-seat" }
+  step "work" { assigned-to "agent/client-v0-baseline.queue-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();

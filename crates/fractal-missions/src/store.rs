@@ -824,7 +824,7 @@ fn agent_working_since_at(
     Ok(since.and_then(|time| time.parse().ok()))
 }
 
-/// The current generation's steps of actor `?1` (every actor when null), with finished and
+/// The current generation's steps of actor spelling JSON `?1` (every actor when null), with finished and
 /// pending ones when `?2`, and agentless ones when `?3` and no actor is named. With `open_only`
 /// the finished steps are left out in SQL, word for word the predicate of
 /// `step_runs_open_index`, so the read covers the fleet's open steps and not every step it ran.
@@ -850,9 +850,9 @@ fn work_at_snapshot_query_of(open_only: bool, selected: &str) -> String {
          WHERE {selected} (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
            AND (?1 IS NULL
-                OR assignee=?1
-                OR lease_owner=?1
-                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1))
+                OR assignee IN (SELECT value FROM json_each(?1))
+                OR lease_owner IN (SELECT value FROM json_each(?1))
+                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1))))
            AND (?2 OR status NOT IN ('pending','completed','failed','cancelled'))
            {open}
          ORDER BY created_at_unix_ms, step_path"
