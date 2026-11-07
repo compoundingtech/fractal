@@ -336,6 +336,44 @@ pub(crate) fn joined(unit: &str, pid: u32) -> bool {
     })
 }
 
+/// How long `systemd-run --scope` gets to join its scope. Its request to start the scope gives up
+/// sooner, at the bus's 25s method timeout, but its wait for the start job to run has no limit.
+pub(crate) const SCOPE_JOIN_LIMIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Join {
+    Joined,
+    Exited,
+    TimedOut,
+}
+
+/// Waits until `pid` has joined the scope `unit`, or `alive` says it has exited, for up to `limit`.
+/// Until it joins, `systemd-run` is in the cgroup of the process that started it, and a kill of
+/// that cgroup ends it.
+pub(crate) fn await_join(
+    unit: &str,
+    pid: u32,
+    limit: Duration,
+    alive: impl Fn() -> Result<bool>,
+) -> Result<Join> {
+    let started = Instant::now();
+    // A join usually takes a few milliseconds, so look often at first.
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if joined(unit, pid) {
+            return Ok(Join::Joined);
+        }
+        if !alive()? {
+            return Ok(Join::Exited);
+        }
+        if started.elapsed() >= limit {
+            return Ok(Join::TimedOut);
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(10));
+    }
+}
+
 /// Whether this process has seen the work scope `unit` empty.
 pub(crate) fn has_ended(unit: &str) -> bool {
     ENDED

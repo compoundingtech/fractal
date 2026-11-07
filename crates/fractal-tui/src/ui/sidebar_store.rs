@@ -2,7 +2,7 @@
 //! authenticated as the staged actor. Endpoint identities must be credential-free.
 use fractal_sidebar::{client, edits::{Edits, Effect, Event, Persistence}, paging::Scope};
 use fractal_client::{ActionRequest, ActionResult, ClientError, Envelope};
-use std::{collections::VecDeque, fs, io::{self, Write}, os::unix::fs::OpenOptionsExt, path::PathBuf};
+use std::{collections::VecDeque, fs, io::{self, Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, path::PathBuf};
 
 /// Dedicated live-loop inputs, not resource-window updates. Tokens reject obsolete reads.
 pub enum LiveEvent {
@@ -12,7 +12,7 @@ pub enum LiveEvent {
 #[derive(Debug)]
 pub enum Error {
     Storage(io::Error), Codec(serde_json::Error), Restore(fractal_sidebar::edits::RestoreError),
-    NoStateDirectory, ActorMismatch, ScopeMismatch,
+    NoStateDirectory, ActorMismatch, ScopeMismatch, MissingRequest, InsecureJournal, EndpointCredentials, InvalidEndpoint,
 }
 pub struct Store { path: PathBuf, scope: Scope, pub edits: Edits, blocked: bool }
 impl Store {
@@ -21,6 +21,7 @@ impl Store {
         Ok(dir.join(Self::filename(scope)?))
     }
     fn filename(scope: &Scope) -> Result<String, Error> {
+        validate_endpoint(scope)?;
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(serde_json::to_vec(scope).map_err(Error::Codec)?);
         Ok(format!("sidebar-journal-v1-{digest:x}.json"))
@@ -28,15 +29,27 @@ impl Store {
     pub fn new(path: PathBuf, edits: Edits) -> Self { Self { path, scope: edits.scope().clone(), edits, blocked: false } }
     /// Missing means no pending edit; every other read/restore failure is explicit.
     pub fn restore(path: PathBuf, scope: &Scope) -> Result<Option<(Self, Vec<Effect>)>, Error> {
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
+        validate_endpoint(scope)?;
+        let file = match fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(Error::Storage(error)),
         };
+        let metadata = file.metadata().map_err(Error::Storage)?;
+        // SAFETY: geteuid has no preconditions; mirror requests::mine's ownership check.
+        if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(Error::InsecureJournal);
+        }
+        let mut bytes = Vec::new();
+        file.take(fractal_sidebar::edits::MAX_JOURNAL_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(Error::Storage)?;
+        if bytes.len() > fractal_sidebar::edits::MAX_JOURNAL_BYTES {
+            return Err(Error::Restore(fractal_sidebar::edits::RestoreError::InvalidRecord(<serde_json::Error as serde::de::Error>::custom("journal exceeds size limit"))));
+        }
         let (edits, effects) = Edits::restore(&bytes, scope).map_err(Error::Restore)?;
         Ok(Some((Self::new(path, edits), effects)))
     }
     fn persist(&self) -> Result<(), Error> {
+        validate_endpoint(&self.scope)?;
         let bytes = self.edits.journal().map_err(Error::Codec)?;
         let parent = self.path.parent().ok_or_else(|| Error::Storage(io::Error::other("journal has no parent")))?;
         // Sync each new directory and its parent before acknowledging the record below.
@@ -69,6 +82,7 @@ impl Store {
         let mut external = Vec::new();
         while let Some(effect) = queue.pop_front() {
             if selected() != self.scope { return Err(Error::ScopeMismatch); }
+            validate_endpoint(&self.scope)?;
             let result = match effect {
                 Effect::PersistPending | Effect::PersistCompletion => self.persist(),
                 Effect::PersistRemoval => self.remove(),
@@ -90,7 +104,7 @@ impl Store {
                     }).unwrap_or_default()
                 }
                 Effect::Send(delivery) => {
-                    let request = self.edits.request().expect("Send has a staged request");
+                    let request = self.edits.request().ok_or(Error::MissingRequest)?;
                     if request.identity.actor != actor { return Err(Error::ActorMismatch); }
                     let wire = client::write_request(request).map_err(Error::Codec)?;
                     let event = client::write_result(request, delivery, send(wire).await);
@@ -105,8 +119,23 @@ impl Store {
     }
 }
 
+fn validate_endpoint(scope: &Scope) -> Result<(), Error> {
+    // reqwest reexports url::Url: use the transport's normalization, not an authority split.
+    if let Ok(url) = reqwest::Url::parse(&scope.endpoint)
+        && matches!(url.scheme(), "http" | "https") {
+        return if url.username().is_empty() && url.password().is_none() { Ok(()) } else { Err(Error::EndpointCredentials) };
+    }
+    if scope.endpoint.split_once(':').is_some_and(|(scheme, _)| scheme.trim().eq_ignore_ascii_case("http") || scheme.trim().eq_ignore_ascii_case("https")) {
+        return Err(Error::InvalidEndpoint);
+    }
+    let authority = scope.endpoint.split_once("://").map_or(scope.endpoint.as_str(), |(_, rest)| rest)
+        .trim_start_matches("//").split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') { return Err(Error::EndpointCredentials); }
+    Ok(())
+}
+
 fn durable_directory(path: &std::path::Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
     // Include existing ancestors: a prior failed sync may have left a visible but
     // non-durable directory. Reopening after failure must repair that barrier too.
     for ancestor in path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
@@ -294,6 +323,9 @@ mod tests {
         let exact = store.edits.request().cloned().unwrap();
         store.execute(effects, scope, "person/test", |wire| {
             assert!(parent.is_dir());
+            for directory in [parent.as_path(), parent.parent().unwrap(), parent.parent().unwrap().parent().unwrap()] {
+                assert_eq!(fs::metadata(directory).unwrap().permissions().mode() & 0o777, 0o700);
+            }
             let (restored, _) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
             assert_eq!(restored.edits.request(), Some(&exact)); lost(wire)
         }).await.unwrap();
@@ -303,5 +335,49 @@ mod tests {
         let scope = Scope { owner: "owner/test".into(), container: "container/test".into(), endpoint: "endpoint/test".into(), host: "host/test".into(), projection: "1".into() };
         assert_eq!(Store::filename(&scope).unwrap(),
             "sidebar-journal-v1-b0811e24e3c295beee364ec8f1d7475b415a8eb5e61ce603b3467ad639b24cbf.json");
+    }
+    #[test]
+    fn sidebar_store_restore_bounds_and_checks_private_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pending.json");
+        let file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+        file.set_len(fractal_sidebar::edits::MAX_JOURNAL_BYTES as u64 + 1).unwrap();
+        assert!(matches!(Store::restore(path.clone(), &scope()), Err(Error::Restore(_))));
+        fs::write(&path, b"corrupt").unwrap();
+        assert!(matches!(Store::restore(path.clone(), &scope()), Err(Error::Restore(_))));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(Store::restore(path, &scope()), Err(Error::InsecureJournal)));
+    }
+    #[tokio::test]
+    async fn sidebar_store_rejects_credential_endpoints_and_missing_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pending.json");
+        let (mut store, _) = staged(path.clone(), false);
+        let intent = store.edits.intent().unwrap().clone();
+        store.edits = Edits::new(scope(), intent);
+        assert!(matches!(store.execute(vec![Effect::Send(Delivery::First)], scope, "person/test", |_| async { panic!("missing request sent") }).await, Err(Error::MissingRequest)));
+        for endpoint in ["https://person:example@example.invalid", "//person@example.invalid", "person@example.invalid"] {
+            let mut selected = scope(); selected.endpoint = endpoint.into();
+            assert!(matches!(Store::filename(&selected), Err(Error::EndpointCredentials)));
+            assert!(matches!(Store::restore(path.clone(), &selected), Err(Error::EndpointCredentials)));
+            store.scope = selected.clone();
+            assert!(matches!(store.execute(vec![Effect::PersistPending], || selected.clone(), "person/test", |_| async { panic!("credential scope sent") }).await, Err(Error::EndpointCredentials)));
+            assert!(!path.exists());
+        }
+    }
+    #[test]
+    fn sidebar_store_http_userinfo_is_checked_after_url_normalization() {
+        for endpoint in [
+            ["https:///user", "example@example.invalid"].join(":"),
+            ["https:", r"\\user@example.invalid"].concat(),
+            "HtTpS://user@example.invalid".into(),
+        ] {
+            let mut selected = scope(); selected.endpoint = endpoint;
+            assert!(matches!(Store::filename(&selected), Err(Error::EndpointCredentials)));
+        }
+        for endpoint in ["https://example.invalid/path", "HtTpS://example.invalid", "endpoint/test", "unix:/run/example.sock"] {
+            let mut selected = scope(); selected.endpoint = endpoint.into();
+            assert!(Store::filename(&selected).is_ok());
+        }
     }
 }
