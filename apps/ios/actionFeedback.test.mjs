@@ -46,10 +46,22 @@ test('successful terminal create preserves the terminal navigation ID and clears
   assert.equal(success.error(), '');
 });
 
-test('feed live and recovery callbacks never dismiss action feedback', () => {
-  const connection = source.slice(source.indexOf('      onConnection:'), source.indexOf('      onWindowError:'));
-  assert.doesNotMatch(connection, /setError\(/);
-  assert.match(source, /await retryTransient\(8, action, retryable\); setError\(''\)/);
+test('action error survives actual feed reconnecting and live transitions', () => {
+  const callback = slice('      onConnection:', '      onWindowError:', true);
+  let error = 'Could not create terminal: not allowed';
+  const statuses = [];
+  const dependencies = {
+    current: () => true, proofRef: { current: { record: () => {} } },
+    setStatus: value => statuses.push(value), setConnectionIssue: () => {},
+    setError: value => { error = value; }, capsClient: { current: null }, setCaps: () => {},
+    routeRef: { current: { kind: 'tailscale' } }, loadCapabilities: async () => {},
+    carrier: { feedLive: () => {} }, feedMisses: { current: 0 },
+  };
+  const transition = new Function(...Object.keys(dependencies), `let connection = 0; return ${callback}.onConnection;`)(...Object.values(dependencies));
+  transition('reconnecting');
+  transition('live');
+  assert.deepEqual(statuses, ['offline', 'online']);
+  assert.equal(error, 'Could not create terminal: not allowed');
 });
 
 test('Release re-pair opens a blank form on the saved gateway without discarding credentials', () => {
@@ -61,8 +73,35 @@ test('Release re-pair opens a blank form on the saved gateway without discarding
   const fleet = readFileSync(new URL('./screens/Fleet.tsx', import.meta.url), 'utf8');
   assert.match(fleet, /label="re-pair this device" onPress=\{actions.repairDevice\}/);
   assert.match(fleet, /const submit = .*actions.pair\(id, code, fingerprint, unpinned\)/);
-  const pairing = source.slice(source.indexOf('  async function completePairing('), source.indexOf('  const actions ='));
-  const cleanup = pairing.indexOf('await push.forgetIssuer(profileKey)'), verify = pairing.indexOf('await verifyPairing('), commit = pairing.indexOf('await SecureStore.setItemAsync(profileKey');
-  assert.ok(cleanup >= 0 && verify > cleanup && commit > verify);
-  assert.doesNotMatch(pairing.slice(0, commit), /setCredential\(|deleteItemAsync\(profileKey/);
+});
+
+test('failed replacement verification preserves the old secure profile and key', async () => {
+  const pairingSource = slice('  async function completePairing(', '  /** Forget this phone');
+  const oldProfile = JSON.stringify({ url: 'https://gateway.example', credential: 'old bearer', signing: { handle: 'old-key' } });
+  const profiles = new Map([['profile', oldProfile]]);
+  const events = [];
+  const dependencies = {
+    proof: undefined, validatePairingTrust: () => 'trusted fingerprint', canVerifyPairing: () => true,
+    PROFILE_KEY: 'profile',
+    SecureStore: {
+      getItemAsync: async key => profiles.get(key),
+      setItemAsync: async (key, value) => { events.push('commit'); profiles.set(key, value); },
+    },
+    gatewayFetch: () => async () => ({ ok: true, text: async () => JSON.stringify({ api_version: 'test', capabilities: [{ id: 'device-key-proofs', version: 1, state: 'granted' }] }) }),
+    fabricBuilt: false, isFabricGatewayId: () => false, API_VERSION: 'test',
+    pairingFabricNode: () => ({}), createDeviceKey: async () => ({ key: 'new-public-key', handle: 'new-key', storage: 'secure' }),
+    push: { forgetIssuer: async () => { events.push('cleanup'); return true; }, releaseIssuer: () => events.push('release') },
+    FractalClient: class {
+      async completePairing() { events.push('complete'); return { value: { kind: 'paired-session', device_id: 'device/0123456789abcdef01234567' } }; }
+    },
+    clientName: () => 'test', app: { expo: { version: 'test' } },
+    verifyPairing: async () => { events.push('verify'); throw new Error('proof verification failed'); },
+    verifyGrantSignature: () => {}, Crypto: {},
+    removeDeviceKey: async handle => events.push(`remove:${handle}`),
+    errorText: error => error.message,
+  };
+  const complete = new Function(...Object.keys(dependencies), `${pairingSource}; return completePairing;`)(...Object.values(dependencies));
+  await assert.rejects(complete('pair/1', 'code', 'fingerprint', false, 'https://gateway.example'), /proof verification failed.*previous profile was retained/i);
+  assert.equal(profiles.get('profile'), oldProfile);
+  assert.deepEqual(events, ['cleanup', 'complete', 'verify', 'remove:new-key', 'release']);
 });

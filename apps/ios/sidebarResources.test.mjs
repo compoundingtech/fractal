@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { resourceRow, readSidebarResources, subjectToFile, terminalResourceRow } from './sidebarResources.ts';
-import { sidebarGroups, rememberResources } from './sidebarView.ts';
+import { sidebarGroups, rememberResources, sidebarResourceMatches } from './sidebarView.ts';
 const observation = (id, kind, facts = {}) => ({ id, kind, facts, observed_at: '2026-10-11T00:00:00Z', opened_by: null, opened_by_run: null });
 const pull = observation('resource/github/acme/garden/issue/9', 'vcs.pull-request', { title: 'Build garden', number: 9 });
 const repo = observation('resource/github/acme/garden', 'vcs.repository', { url: 'https://github.com/acme/garden' });
@@ -52,6 +52,7 @@ assert.equal(terminal.target, 'terminal/pty/person/avery/a2186f3b-1234-7000-8000
 const terminals = rememberResources(new Map(), [terminal]);
 for (const query of ['a2186f3b', 'PERSON/AVERY', terminal.searchText, 'physical-1']) {
   assert.equal(sidebarGroups([], terminals, {}, query).groups[0].resources[0].id, terminal.id);
+  assert.equal(sidebarResourceMatches(terminal, query), true, 'the folder picker uses the same owner-ID search as the browser');
 }
 assert.equal(sidebarGroups([], terminals, {}, 'not-this-terminal').groups[0].resources.length, 0);
 assert.equal(terminalResourceRow({ id: 'runtime/2', owner_id: 'agent/example/worker', terminal_id: 'terminal/2' }).title, 'worker');
