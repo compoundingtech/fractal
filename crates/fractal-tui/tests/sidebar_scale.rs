@@ -46,9 +46,14 @@ async fn socket_load(count: usize, sustained: bool) {
         fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None,
         assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default() };
     let path = socket.clone();
-    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
-    for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
-    assert!(socket.exists(), "private scale daemon failed to listen");
+    let (ready, listening) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix_with_ready(&path, fractal_daemon::api::router(state), || { let _ = ready.send(()); }).await
+    });
+    if listening.await.is_err() {
+        server.await.expect("private scale daemon task failed").expect("private scale daemon startup failed");
+        panic!("private scale daemon exited without signaling readiness");
+    }
     let http = reqwest::Client::builder().unix_socket(socket).build().unwrap();
     let (person, uuid) = CONTAINER.strip_prefix("arrangement/person/").unwrap().split_once('/').unwrap();
     let memberships_url = format!("http://localhost/v1/client/arrangements/{person}/{uuid}/memberships");
