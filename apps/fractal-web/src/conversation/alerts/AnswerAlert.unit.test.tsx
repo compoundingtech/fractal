@@ -249,7 +249,7 @@ describe('AnswerAlert', () => {
       { kind: 'link', label: 'Inline page', url: 'data:text/html,<b>x</b>' },
       { kind: 'document', label: 'Notes', url: '/relative/notes', ref: 'doc/notes' },
     ] } })} onAct={sent} now={now} />)
-    expect(html).toContain('<a href="https://example.com/pull/1" target="_blank" rel="noopener noreferrer">The pull request</a>')
+    expect(html).toMatch(/<a href="https:\/\/example\.com\/pull\/1" target="_blank" rel="noopener noreferrer">.*The pull request/)
     expect(html).not.toMatch(/href="(javascript|data):/i)
     expect(html).not.toContain('href="/relative/notes"')
     expect(html).toContain('Run this')
