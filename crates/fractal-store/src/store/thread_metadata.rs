@@ -396,16 +396,42 @@ pub struct Summary {
 pub fn summary(store: &Store, person: &str, subject: &str) -> Result<Summary, FractalError> {
     store
         .graph
-        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject)))
+        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject, None)))
         .map_err(internal)?
+}
+
+/// Select an exact conversation before evaluating lifecycle claims. An ambiguous
+/// creation cannot establish membership in that conversation.
+pub fn summary_for_conversation(
+    store: &Store,
+    person: &str,
+    agent: &str,
+    subject: &str,
+) -> Result<Summary, FractalError> {
+    store.graph.read_snapshot_unindexed(|| {
+        Ok(summary_conn(&store.readers.get(), person, subject, Some(agent)))
+    }).map_err(internal)?
 }
 
 fn summary_conn(
     connection: &Connection,
     person: &str,
     subject: &str,
+    selected_agent: Option<&str>,
 ) -> Result<Summary, FractalError> {
-    let creation = owned_creation(connection, subject, person, false)?.ok_or_else(unavailable)?;
+    let creation = owned_creation(connection, subject, person, false)
+        .map_err(|error| {
+            if selected_agent.is_some() && error.code == "idempotency-conflict" {
+                unavailable()
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(unavailable)?;
+    let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
+    if selected_agent.is_some_and(|selected| selected != agent) {
+        return Err(unavailable());
+    }
     let state = match latest_applied_claim(connection, subject, "thread.state-set")?
         .as_ref()
         .and_then(|claim| claim.body["fields"]["state"].as_str())
@@ -430,10 +456,7 @@ fn summary_conn(
         .map_err(internal)?;
     Ok(Summary {
         id: subject.into(),
-        agent_id: creation.body["fields"]["agent"]
-            .as_str()
-            .ok_or_else(unavailable)?
-            .into(),
+        agent_id: agent.into(),
         title: title.body["fields"]["title"]
             .as_str()
             .ok_or_else(unavailable)?
@@ -486,11 +509,7 @@ pub fn list_conversation(
         subjects.truncate(limit);
         let next_cursor = subjects.last().filter(|_| has_more).map(|subject| format!("{scope}:{subject}"));
         let items = subjects.into_iter().map(|subject| {
-            let summary = summary_conn(&connection, &person, &subject)?;
-            if summary.agent_id != agent {
-                return Err(unavailable());
-            }
-            Ok(summary)
+            summary_conn(&connection, &person, &subject, Some(&agent))
         }).collect::<Result<Vec<_>, FractalError>>()?;
         Ok(SummaryPage { items, next_cursor })
     })())).map_err(internal)?

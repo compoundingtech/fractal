@@ -119,10 +119,8 @@ async fn thread_read(
                     cursor.map(|cursor| conversation_reads::bind_cursor(cursor, &collection)).transpose()
                 };
                 let value = if let Some(id) = id.as_deref() {
-                    let summary = thread_metadata::summary(&state.store, &person, id).map_err(store_error)?;
-                    if summary.agent_id != agent {
-                        return Err(unavailable());
-                    }
+                    let summary = thread_metadata::summary_for_conversation(&state.store, &person, &agent, id)
+                        .map_err(store_error)?;
                     if timeline {
                         let page = thread_metadata::history(&state.store, &person, id, cursor.as_deref(), limit)
                             .map_err(store_error)?;

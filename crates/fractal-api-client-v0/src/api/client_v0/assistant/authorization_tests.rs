@@ -530,10 +530,30 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
             Edit::Create { agent, title: "Private subject" },
         ).unwrap();
     }
+    let (foreign, _) = thread_metadata::apply(
+        &allowed.state.store, "person/other", "thread/foreign-conflict", "foreign-conflict",
+        Edit::Create { agent: "agent/reads-codex", title: "Private foreign title" },
+    ).unwrap();
+    let (elsewhere, _) = thread_metadata::apply(
+        &allowed.state.store, OWNER, "thread/elsewhere-conflict", "elsewhere-create",
+        Edit::Create { agent: "agent/unobserved", title: "Private elsewhere title" },
+    ).unwrap();
+    let (rename, _) = thread_metadata::apply(
+        &allowed.state.store, OWNER, &elsewhere.subject, "elsewhere-rename",
+        Edit::Rename { title: "Private rename", title_revision: &elsewhere.id, revision: &elsewhere.id },
+    ).unwrap();
+    for operation in [foreign.operation_id.unwrap(), rename.operation_id.unwrap()] {
+        allowed.state.store.connection.write().execute(
+            "UPDATE operations SET state='conflict' WHERE id=?1", [operation],
+        ).unwrap();
+    }
     for (id, expected) in [
         ("owned", StatusCode::OK),
         ("other", StatusCode::NOT_FOUND),
         ("no-conversation", StatusCode::NOT_FOUND),
+        ("foreign-conflict", StatusCode::NOT_FOUND),
+        ("elsewhere-conflict", StatusCode::NOT_FOUND),
+        ("unknown", StatusCode::NOT_FOUND),
     ] {
         let query = format!("?{selection}&thread_id=thread%2F{id}&max_response_bytes=16384");
         let payload = allowed.payload("thread-detail", &query);
