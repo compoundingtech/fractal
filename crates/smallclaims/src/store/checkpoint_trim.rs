@@ -1266,7 +1266,9 @@ impl Store {
                     break;
                 };
                 body_bytes += claim_body_bytes(&transaction, &envelope_claims)?;
-                delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)?;
+                self.runtime.delete_trimmed_claims_tx(&transaction, &envelope_claims, &mut || {
+                    delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)
+                })?;
                 self.pause_for_trim_row_cost();
                 envelopes.extend(envelope);
                 claims.extend(envelope_claims);
@@ -1282,7 +1284,9 @@ impl Store {
                 let after = graph_digest(&transaction)?;
                 transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcad476fc11b6 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "ROLLBACK TO trim_chunk")?;
                 let before = graph_digest(&transaction)?;
-                delete_dropped_rows_tx(&transaction, &envelopes, &claims)?;
+                self.runtime.delete_trimmed_claims_tx(&transaction, &claims, &mut || {
+                    delete_dropped_rows_tx(&transaction, &envelopes, &claims)
+                })?;
                 before != after || graph_digest(&transaction)? != before
             };
             transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4f653c779b09 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "RELEASE trim_chunk")?;
@@ -1572,14 +1576,14 @@ fn next_trim_rows(
             }
             let claims = transaction
                 .prepare_cached(
-                    "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
+                    "SELECT tombstone.id, tombstone.operation_id, tombstone.subject, tombstone.kind FROM checkpoint_claims AS tombstone
                      WHERE tombstone.writer=?1 AND tombstone.sequence=?2
                        AND tombstone.envelope_hash=?3
                        AND EXISTS (SELECT 1 FROM claims WHERE claims.id=tombstone.id)",
                 )?
                 .query_map(
                     params![envelope.writer, envelope.sequence, envelope.envelope_hash],
-                    |row| Ok(deletable_claim(row.get(0)?, row.get(1)?)),
+                    |row| Ok(deletable_claim(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             return Ok(Some((Some(envelope), claims)));
@@ -1591,12 +1595,12 @@ fn next_trim_rows(
         None => {
             let claim = transaction
                 .prepare_cached(
-                    "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
+                    "SELECT tombstone.id, tombstone.operation_id, tombstone.subject, tombstone.kind FROM checkpoint_claims AS tombstone
                      WHERE tombstone.id > ?1
                      ORDER BY tombstone.id LIMIT 1",
                 )?
-                .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
-                    Ok(deletable_claim(row.get(0)?, row.get(1)?))
+                .query_row(/* sqlite-large-value: allow-for-now lv-h71bb2b8a8c50 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
+                    Ok(deletable_claim(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })
                 .optional()?;
             if let Some(claim) = &claim {
@@ -1642,27 +1646,28 @@ fn next_local_envelope(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> R
 fn next_local_claim(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> Result<Option<ClaimTombstone>> {
     let next = transaction
         .prepare_cached(
-            "SELECT rowid, id, operation_id FROM checkpoint_claims
+            "SELECT rowid, id, operation_id, subject, kind FROM checkpoint_claims
              WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h42e6c69fa763 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.claim, walk.checkpoint], |row| {
-            Ok((row.get::<_, i64>(0)?, deletable_claim(row.get(1)?, row.get(2)?)))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h74964d9b8b2a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.claim, walk.checkpoint], |row| {
+            Ok((row.get::<_, i64>(0)?, deletable_claim(row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
         })
         .optional()?;
     walk.claim = next.as_ref().map_or(i64::MAX, |(rowid, _)| *rowid);
     Ok(next.map(|(_, claim)| claim))
 }
 
-/// What `delete_dropped_rows_tx` needs of a claim it deletes.
-fn deletable_claim(id: String, operation_id: Option<String>) -> ClaimTombstone {
+/// What `delete_dropped_rows_tx` needs of a claim it deletes, and the subject and kind
+/// `Runtime::delete_trimmed_claims_tx` reads.
+fn deletable_claim(id: String, operation_id: Option<String>, subject: String, kind: String) -> ClaimTombstone {
     ClaimTombstone {
         id,
         operation_id,
         writer: String::new(),
         sequence: 0,
         envelope_hash: String::new(),
-        subject: String::new(),
-        kind: String::new(),
+        subject,
+        kind,
         actor: None,
         predecessors: Vec::new(),
         request_digest: None,

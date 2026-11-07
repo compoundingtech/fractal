@@ -1,4 +1,4 @@
-//! Folder-only sidebar projection and intent validation, without rendering or wire writes.
+//! Sidebar projection and intent validation, without rendering or wire writes.
 //!
 //! Resolved maps are authoritative; inventory adds known subjects but never hides placements.
 //! Revisions remain opaque. Ordering is ordinal, with separate folder/placed/unplaced domains.
@@ -6,74 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use fractal_client::Arrangement;
+use crate::model::*;
 
-/// A stable folder or subject identity; prefixes keep their key domains disjoint.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "_tag")]
-pub enum NodeRef {
-    Folder { id: String },
-    Subject { subject: String },
-}
-
-/// Subjects are accepted in intents only so the planner can explicitly refuse them.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "_tag")]
-pub enum Parent {
-    Root {},
-    Folder { id: String },
-    Subject { subject: String },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Source {
-    Person,
-    Fallback,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectedNode {
-    pub node: NodeRef,
-    /// The raw register parent, even when resolved placement lifts it elsewhere.
-    pub parent: Parent,
-    /// The authoritative resolved parent used for display and ancestry.
-    pub shown_under: Parent,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    /// Registers are person-owned, including lifted ones; inventory-only nodes are fallback.
-    pub source: Source,
-    pub children: Vec<NodeRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SidebarTree {
-    pub roots: Vec<NodeRef>,
-    pub nodes: BTreeMap<String, ProjectedNode>,
-    pub arrangement_revision: String,
-    pub deleted_folders: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag")]
-pub enum ProjectionError {
-    NotReady,
-    ArrangementUnavailable,
-    Unsupported { required: u8, advertised: u8 },
-    InvalidResolution,
-}
-
-/// Stable, injective keys. Identity strings are not parsed or normalized.
-pub fn node_key(node: &NodeRef) -> String {
-    match node {
-        NodeRef::Folder { id } => format!("folder:{id}"),
-        NodeRef::Subject { subject } => format!("subject:{subject}"),
-    }
-}
 
 fn folder_parent(id: &Option<String>) -> Parent {
     match id {
@@ -85,20 +19,62 @@ fn folder_parent(id: &Option<String>) -> Parent {
 /// Build only from a live v1 arrangement with complete, acyclic resolved maps.
 /// Tombstones are omitted, and every placement survives regardless of inventory membership.
 pub fn build(
-    arrangement: &Arrangement,
+    arrangement: &ArrangementInput,
     inventory: &[String],
 ) -> Result<SidebarTree, ProjectionError> {
+    require_complete(build_available(arrangement, inventory)?)
+}
+
+/// Project a complete live v2 membership set, never catalog-only remembered resources.
+/// As in the server's live view, member positions are effective, not raw LWW registers.
+pub fn build_v2(
+    arrangement: &ArrangementInput,
+    memberships: &[MembershipInput],
+) -> Result<SidebarTree, ProjectionError> {
+    require_complete(build_input(arrangement, &[], Some(memberships))?)
+}
+
+fn require_complete(projected: AvailableProjection) -> Result<SidebarTree, ProjectionError> {
+    // Completeness precedes ancestry validation, independent of identity ordering.
+    if projected.unavailable.values().any(|error| *error == ProjectionError::NotReady) {
+        return Err(ProjectionError::NotReady);
+    }
+    if let Some(error) = projected.unavailable.into_values().next() {
+        return Err(error);
+    }
+    Ok(projected.tree)
+}
+
+/// Read-only projection: invalid entries and their dependants are omitted, never guessed.
+/// Use `build`, not this partial tree, when validating edits against a complete arrangement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailableProjection {
+    pub tree: SidebarTree,
+    pub unavailable: BTreeMap<String, ProjectionError>,
+}
+
+/// Keep unrelated valid entries visible; whole-arrangement refusal still returns `Err`.
+pub fn build_available(
+    arrangement: &ArrangementInput,
+    inventory: &[String],
+) -> Result<AvailableProjection, ProjectionError> {
+    build_input(arrangement, inventory, None)
+}
+
+fn build_input(
+    arrangement: &ArrangementInput,
+    inventory: &[String],
+    memberships: Option<&[MembershipInput]>,
+) -> Result<AvailableProjection, ProjectionError> {
     if arrangement.deleted {
         return Err(ProjectionError::ArrangementUnavailable);
     }
-    let body = match &arrangement.body {
-        fractal_schema::arrangements::VersionedBody::V1(body) => body,
-        other => {
-            return Err(ProjectionError::Unsupported {
-                required: 1,
-                advertised: other.version(),
-            });
-        }
+    use fractal_schema::arrangements::VersionedBody;
+    let (folders, placements) = match (&arrangement.body, memberships) {
+        (VersionedBody::V1(body), None) => (&body.folders, Some(&body.placements)),
+        (VersionedBody::V2(body), Some(_)) => (&body.folders, None),
+        (VersionedBody::V1(_), Some(_)) => return Err(ProjectionError::Unsupported { required: 2, advertised: 1 }),
+        (VersionedBody::V2(_), None) => return Err(ProjectionError::Unsupported { required: 1, advertised: 2 }),
     };
     let resolved = arrangement
         .resolved
@@ -107,15 +83,19 @@ pub fn build(
     let mut tree = SidebarTree {
         roots: Vec::new(),
         nodes: BTreeMap::new(),
-        arrangement_revision: arrangement.header.revision.clone(),
+        arrangement_revision: arrangement.revision.clone(),
         deleted_folders: Vec::new(),
     };
-    for (id, folder) in &body.folders {
+    let mut unavailable = BTreeMap::new();
+    for (id, folder) in folders {
         if folder.tombstone.is_some() {
             tree.deleted_folders.push(id.clone());
             continue;
         }
-        let shown_under = resolved.parents.get(id).ok_or(ProjectionError::NotReady)?;
+        let Some(shown_under) = resolved.parents.get(id) else {
+            unavailable.insert(format!("folder:{id}"), ProjectionError::NotReady);
+            continue;
+        };
         let node = NodeRef::Folder { id: id.clone() };
         tree.nodes.insert(
             node_key(&node),
@@ -130,11 +110,11 @@ pub fn build(
             },
         );
     }
-    for (subject, register) in &body.placements {
-        let shown_under = resolved
-            .folders
-            .get(subject)
-            .ok_or(ProjectionError::NotReady)?;
+    for (subject, register) in placements.into_iter().flatten() {
+        let Some(shown_under) = resolved.folders.get(subject) else {
+            unavailable.insert(format!("subject:{subject}"), ProjectionError::NotReady);
+            continue;
+        };
         let node = NodeRef::Subject {
             subject: subject.clone(),
         };
@@ -151,7 +131,26 @@ pub fn build(
             },
         );
     }
+    for membership in memberships.into_iter().flatten() {
+        let node = NodeRef::Subject { subject: membership.member.clone() };
+        let key = node_key(&node);
+        if membership.container != arrangement.subject || tree.nodes.contains_key(&key) {
+            return Err(ProjectionError::InvalidResolution);
+        }
+        tree.nodes.insert(key, ProjectedNode {
+            node,
+            parent: folder_parent(&membership.position.bucket),
+            shown_under: folder_parent(&membership.position.bucket),
+            key: Some(membership.position.key.clone()),
+            revision: Some(membership.revision.clone()),
+            source: Source::Person,
+            children: Vec::new(),
+        });
+    }
     for subject in inventory {
+        if unavailable.contains_key(&format!("subject:{subject}")) {
+            continue;
+        }
         tree.nodes
             .entry(format!("subject:{subject}"))
             .or_insert_with(|| ProjectedNode {
@@ -166,37 +165,54 @@ pub fn build(
                 children: Vec::new(),
             });
     }
+    unavailable.extend(invalid_ancestry(&tree));
+    tree.nodes.retain(|key, _| !unavailable.contains_key(key));
+    order_rows(&mut tree);
+    Ok(AvailableProjection { tree, unavailable })
+}
+pub(crate) fn invalid_ancestry(tree: &SidebarTree) -> BTreeMap<String, ProjectionError> {
+    let mut unavailable = BTreeMap::new();
     // Walk each ancestry once. A visiting state detects cycles without recursive stack growth.
-    let mut states = BTreeMap::<&str, bool>::new();
+    let mut states = BTreeMap::<&str, Option<bool>>::new();
     let mut path = Vec::new();
     for key in tree.nodes.keys() {
         path.clear();
         let mut cursor = key.as_str();
-        loop {
+        let valid = loop {
             match states.get(cursor) {
-                Some(true) => break,
-                Some(false) => return Err(ProjectionError::InvalidResolution),
+                Some(Some(valid)) => break *valid,
+                Some(None) => break false,
                 None => {}
             }
-            states.insert(cursor, false);
+            states.insert(cursor, None);
             path.push(cursor);
             match &tree.nodes[cursor].shown_under {
-                Parent::Root {} => break,
+                Parent::Root {} => break true,
                 Parent::Folder { id } => {
                     // Borrow the stored key for the next iteration, avoiding owned ancestry copies.
                     let parent_key = format!("folder:{id}");
                     let Some((key, _)) = tree.nodes.get_key_value(&parent_key) else {
-                        return Err(ProjectionError::InvalidResolution);
+                        break false;
                     };
                     cursor = key;
                 }
-                Parent::Subject { .. } => return Err(ProjectionError::InvalidResolution),
+                Parent::Subject { .. } => break false,
             }
-        }
+        };
         for key in &path {
-            states.insert(*key, true);
+            states.insert(*key, Some(valid));
         }
     }
+    for (key, valid) in states {
+        if valid == Some(false) {
+            unavailable.insert(key.to_owned(), ProjectionError::InvalidResolution);
+        }
+    }
+    unavailable
+}
+/// Rebuild visible child lists after validated projected position changes.
+pub(crate) fn order_rows(tree: &mut SidebarTree) {
+    for node in tree.nodes.values_mut() { node.children.clear(); }
     let mut ordered: Vec<_> = tree.nodes.values().collect();
     ordered.sort_by(|a, b| {
         fn rank(node: &ProjectedNode) -> u8 {
@@ -227,182 +243,8 @@ pub fn build(
                 .children = children;
         }
     }
-    Ok(tree)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MoveIntent {
-    pub node: NodeRef,
-    pub parent: Parent,
-    pub before: Option<NodeRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CycleStep {
-    pub node: NodeRef,
-    pub source: Source,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ParentMissingCause {
-    Unknown,
-    FolderDeleted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ParentNotAllowedCause {
-    SubjectParentUnsupported,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all_fields = "camelCase")]
-pub enum MoveRefusal {
-    NodeMissing {
-        node: NodeRef,
-    },
-    ParentNotAllowed {
-        parent: Parent,
-        cause: ParentNotAllowedCause,
-    },
-    #[serde(rename = "Self")]
-    SelfMove {
-        node: NodeRef,
-    },
-    ParentMissing {
-        parent: Parent,
-        cause: ParentMissingCause,
-    },
-    Cycle {
-        node: NodeRef,
-        parent: Parent,
-        path: Vec<CycleStep>,
-    },
-    AnchorMoved {
-        before: NodeRef,
-        parent: Parent,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        found_under: Option<Parent>,
-    },
-    NoChange {
-        node: NodeRef,
-        parent: Parent,
-    },
-}
-
-fn same_kind(a: &NodeRef, b: &NodeRef) -> bool {
-    matches!(
-        (a, b),
-        (NodeRef::Folder { .. }, NodeRef::Folder { .. })
-            | (NodeRef::Subject { .. }, NodeRef::Subject { .. })
-    )
-}
-
-/// Validate without generating ordering keys or changing the tree.
-/// Cycle paths run moved node → proposed parent → ancestors → moved node; each step
-/// carries that projected node's own source. No-change requires raw and shown parents to agree.
-pub fn plan_move(tree: &SidebarTree, intent: &MoveIntent) -> Result<MoveIntent, MoveRefusal> {
-    validate_move(tree, intent)?;
-    Ok(intent.clone())
-}
-
-fn validate_move(tree: &SidebarTree, intent: &MoveIntent) -> Result<(), MoveRefusal> {
-    let Some(node) = tree.nodes.get(&node_key(&intent.node)) else {
-        return Err(MoveRefusal::NodeMissing {
-            node: intent.node.clone(),
-        });
-    };
-    if matches!(intent.parent, Parent::Subject { .. }) {
-        return Err(MoveRefusal::ParentNotAllowed {
-            parent: intent.parent.clone(),
-            cause: ParentNotAllowedCause::SubjectParentUnsupported,
-        });
-    }
-    if let (NodeRef::Folder { id: node_id }, Parent::Folder { id: parent_id }) =
-        (&intent.node, &intent.parent)
-        && node_id == parent_id
-    {
-        return Err(MoveRefusal::SelfMove {
-            node: intent.node.clone(),
-        });
-    }
-    let parent = if let Parent::Folder { id } = &intent.parent {
-        let Some(parent) = tree.nodes.get(&format!("folder:{id}")) else {
-            return Err(MoveRefusal::ParentMissing {
-                parent: intent.parent.clone(),
-                cause: if tree.deleted_folders.binary_search(id).is_ok() {
-                    ParentMissingCause::FolderDeleted
-                } else {
-                    ParentMissingCause::Unknown
-                },
-            });
-        };
-        Some(parent)
-    } else {
-        None
-    };
-    if matches!(intent.node, NodeRef::Folder { .. }) {
-        let ancestors = || {
-            std::iter::successors(parent, |ancestor| match &ancestor.shown_under {
-                Parent::Folder { id } => tree.nodes.get(&format!("folder:{id}")),
-                _ => None,
-            })
-        };
-        if ancestors().any(|ancestor| ancestor.node == intent.node) {
-            // Materialize diagnostic identities only for an actual cycle refusal.
-            let mut path = vec![CycleStep {
-                node: node.node.clone(),
-                source: node.source,
-            }];
-            for ancestor in ancestors() {
-                path.push(CycleStep {
-                    node: ancestor.node.clone(),
-                    source: ancestor.source,
-                });
-                if ancestor.node == intent.node {
-                    break;
-                }
-            }
-            return Err(MoveRefusal::Cycle {
-                node: intent.node.clone(),
-                parent: intent.parent.clone(),
-                path,
-            });
-        }
-    }
-    if let Some(before) = &intent.before {
-        let anchor = tree.nodes.get(&node_key(before));
-        if before == &intent.node
-            || !same_kind(before, &intent.node)
-            || anchor.is_none_or(|anchor| anchor.shown_under != intent.parent)
-        {
-            return Err(MoveRefusal::AnchorMoved {
-                before: before.clone(),
-                parent: intent.parent.clone(),
-                found_under: anchor.map(|anchor| anchor.shown_under.clone()),
-            });
-        }
-    }
-    if node.parent == intent.parent && node.shown_under == intent.parent {
-        let siblings = parent.map_or(tree.roots.as_slice(), |parent| parent.children.as_slice());
-        let mut following = siblings
-            .iter()
-            .skip_while(|sibling| *sibling != &intent.node)
-            .skip(1);
-        let next = following.find(|sibling| same_kind(sibling, &intent.node));
-        if next == intent.before.as_ref() {
-            return Err(MoveRefusal::NoChange {
-                node: intent.node.clone(),
-                parent: intent.parent.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// The same checks, precedence, and no-change semantics as [`plan_move`].
-pub fn can_place(tree: &SidebarTree, intent: &MoveIntent) -> Result<(), MoveRefusal> {
-    validate_move(tree, intent)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RollupDisplay {
@@ -452,7 +294,8 @@ pub fn rollup(tree: &SidebarTree, needs_you: &BTreeSet<String>) -> BTreeMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use crate::plan::*;
+    use serde_json::json;
 
     fn folder(id: &str) -> NodeRef {
         NodeRef::Folder { id: id.into() }
@@ -470,7 +313,7 @@ mod tests {
         fn v1(&mut self) -> &mut fractal_schema::arrangements::Body;
     }
 
-    impl V1Body for Arrangement {
+    impl V1Body for ArrangementInput {
         fn v1(&mut self) -> &mut fractal_schema::arrangements::Body {
             match &mut self.body {
                 fractal_schema::arrangements::VersionedBody::V1(body) => body,
@@ -486,10 +329,10 @@ mod tests {
         })
     }
 
-    fn arrangement() -> Arrangement {
+    fn arrangement() -> ArrangementInput {
         serde_json::from_value(json!({
-            "id": "arrangement/person/test/id", "kind": "arrangement",
-            "revision": "opaque/head", "updated_at": "", "owner": "person/test",
+            "subject": "arrangement/person/test/id",
+            "revision": "opaque/head", "owner": "person/test",
             "deleted": false,
             "body": {
                 "version": 1, "name": {"value": "Sidebar", "revision": "opaque/name"},
@@ -500,7 +343,7 @@ mod tests {
         .unwrap()
     }
 
-    fn add_folder(arrangement: &mut Arrangement, id: &str, parent: Option<&str>, key: &str) {
+    fn add_folder(arrangement: &mut ArrangementInput, id: &str, parent: Option<&str>, key: &str) {
         arrangement.v1().folders.insert(
             id.into(),
             serde_json::from_value(json!({
@@ -520,7 +363,7 @@ mod tests {
             .insert(id.into(), parent.map(str::to_owned));
     }
 
-    fn place(arrangement: &mut Arrangement, id: &str, parent: Option<&str>, key: &str) {
+    fn place(arrangement: &mut ArrangementInput, id: &str, parent: Option<&str>, key: &str) {
         arrangement.v1().placements.insert(
             id.into(),
             serde_json::from_value(json!({
@@ -537,85 +380,62 @@ mod tests {
     }
 
     #[test]
-    fn shared_vectors() {
-        let vectors = behavior_vectors();
-        for case in vectors["cases"].as_array().unwrap() {
-            let arrangement = serde_json::from_value(case["initial"]["arrangement"].clone()).unwrap();
-            let inventory: Vec<String> = serde_json::from_value(case["catalog"].clone()).unwrap();
-            let event = &case["events"][0];
-            let checkpoint = &case["checkpoints"][0];
-            let tree = build(&arrangement, &inventory).unwrap();
-            assert_eq!(
-                serde_json::to_value(&tree).unwrap(),
-                checkpoint["tree"],
-                "{}",
-                case["name"]
-            );
-            assert_eq!(event["moves"].as_array().unwrap().len(), checkpoint["moves"].as_array().unwrap().len());
-            for (intent, expected) in event["moves"].as_array().unwrap().iter().zip(checkpoint["moves"].as_array().unwrap()) {
-                let intent: MoveIntent = serde_json::from_value(intent.clone()).unwrap();
-                let result = plan_move(&tree, &intent);
-                assert_eq!(can_place(&tree, &intent), result.clone().map(|_| ()));
-                let serialized = match result {
-                    Ok(intent) => json!({"_tag": "Planned", "intent": intent}),
-                    Err(refusal) => json!({"_tag": "Refused", "refusal": refusal}),
-                };
-                assert_eq!(serialized, *expected, "{}: {intent:?}", case["name"]);
-            }
-            let needs_you: BTreeSet<String> =
-                serde_json::from_value(event["needsYou"].clone()).unwrap();
-            assert_eq!(
-                serde_json::to_value(rollup(&tree, &needs_you)).unwrap(),
-                checkpoint["rollup"],
-                "{}",
-                case["name"]
-            );
-        }
-    }
-
-    fn behavior_vectors() -> Value {
-        let schema: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/clients/sidebar/behavior.schema.json"
-        )).unwrap();
-        let vectors: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/clients/sidebar/behavior-v1.json"
-        )).unwrap();
-        let validator = jsonschema::validator_for(&schema).unwrap();
-        let errors: Vec<_> = validator.iter_errors(&vectors).map(|e| e.to_string()).collect();
-        assert!(errors.is_empty(), "{errors:#?}");
-        vectors
+    fn partial_projection_contains_missing_resolution_without_inventory_resurrection() {
+        let mut a = arrangement();
+        add_folder(&mut a, "good", None, "a0");
+        add_folder(&mut a, "bad", None, "a1");
+        add_folder(&mut a, "child", Some("bad"), "a0");
+        place(&mut a, "mission/good", Some("good"), "a0");
+        place(&mut a, "mission/bad", Some("bad"), "a0");
+        place(&mut a, "mission/missing", None, "a0");
+        a.resolved.as_mut().unwrap().parents.remove("bad");
+        a.resolved.as_mut().unwrap().folders.remove("mission/missing");
+        let projected = build_available(&a, &["mission/missing".into(), "mission/unfiled".into()]).unwrap();
+        assert_eq!(projected.tree.roots, [folder("good"), subject("mission/unfiled")]);
+        assert_eq!(projected.tree.nodes["folder:good"].children, [subject("mission/good")]);
+        assert_eq!(projected.tree.nodes.len(), 3);
+        assert_eq!(projected.unavailable, BTreeMap::from([
+            ("folder:bad".into(), ProjectionError::NotReady),
+            ("folder:child".into(), ProjectionError::InvalidResolution),
+            ("subject:mission/bad".into(), ProjectionError::InvalidResolution),
+            ("subject:mission/missing".into(), ProjectionError::NotReady),
+        ]));
+        assert!(build(&a, &[]).is_err(), "partial display must not enable complete-tree planning");
     }
 
     #[test]
-    fn behavior_schema_round_trip_and_rejects_unknown_fields() {
-        let vectors = behavior_vectors();
-        let encoded = serde_json::to_string(&vectors).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), vectors);
-        assert_eq!(vectors["cases"].as_array().unwrap().len(), 5);
-        assert_eq!(vectors["cases"].as_array().unwrap().iter()
-            .map(|case| case["events"][0]["moves"].as_array().unwrap().len()).sum::<usize>(), 10);
-        let schema: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/clients/sidebar/behavior.schema.json"
-        )).unwrap();
-        let validator = jsonschema::validator_for(&schema).unwrap();
-        for pointer in ["", "/cases/0", "/cases/0/initial", "/cases/0/initial/arrangement",
-            "/cases/0/initial/arrangement/body", "/cases/0/events/0",
-            "/cases/0/identities", "/cases/0/checkpoints/0",
-            "/cases/1/checkpoints/0/tree/nodes/folder:00000000-0000-7000-8000-00000000000a",
-            "/cases/1/checkpoints/0/moves/1/refusal/path/0"] {
-            let mut invalid = vectors.clone();
-            invalid.pointer_mut(pointer).unwrap()["unknown"] = json!(true);
-            assert!(!validator.is_valid(&invalid), "{pointer}");
-        }
-        for (pointer, value) in [("/schemaVersion", json!(2)),
-            ("/cases/0/initial/arrangement/body/version", json!(2)),
-            ("/cases/0/events/0/type", json!("Unknown")),
-            ("/cases/0/checkpoints/0/wireActions", json!([{}]))] {
-            let mut invalid = vectors.clone();
-            *invalid.pointer_mut(pointer).unwrap() = value;
-            assert!(!validator.is_valid(&invalid), "{pointer}");
+    fn strict_completeness_precedes_invalid_ancestry_in_both_identity_orders() {
+        for (missing, invalid) in [("a", "z"), ("z", "a")] {
+            let mut a = arrangement();
+            add_folder(&mut a, missing, None, "a0");
+            add_folder(&mut a, invalid, Some(invalid), "a1");
+            a.resolved.as_mut().unwrap().parents.remove(missing);
+            assert_eq!(build(&a, &[]), Err(ProjectionError::NotReady));
+            let projected = build_available(&a, &[]).unwrap();
+            assert_eq!(projected.unavailable[&format!("folder:{missing}")], ProjectionError::NotReady);
+            assert_eq!(projected.unavailable[&format!("folder:{invalid}")], ProjectionError::InvalidResolution);
         }
     }
+
+    #[test]
+    fn partial_projection_contains_cycles_unknown_parents_and_their_dependants() {
+        for bad_parent in ["bad", "missing"] {
+            let mut a = arrangement();
+            add_folder(&mut a, "good", None, "a0");
+            add_folder(&mut a, "bad", Some(bad_parent), "a1");
+            add_folder(&mut a, "child", Some("bad"), "a0");
+            place(&mut a, "mission/good", Some("good"), "a0");
+            place(&mut a, "mission/bad", Some("child"), "a0");
+            let projected = build_available(&a, &[]).unwrap();
+            assert_eq!(projected.tree.roots, [folder("good")]);
+            assert_eq!(projected.tree.nodes.len(), 2);
+            assert_eq!(projected.unavailable.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["folder:bad", "folder:child", "subject:mission/bad"]);
+            assert!(projected.unavailable.values().all(|e| *e == ProjectionError::InvalidResolution));
+            assert_eq!(build(&a, &[]), Err(ProjectionError::InvalidResolution));
+        }
+    }
+
 
     #[test]
     fn rejects_unavailable_unsupported_and_incomplete_projection() {
@@ -638,7 +458,7 @@ mod tests {
         );
         arrangement.body = original;
         assert_eq!(build(&arrangement, &[]), Err(ProjectionError::NotReady));
-        arrangement.resolved = Some(fractal_client::ArrangementResolved {
+        arrangement.resolved = Some(ResolvedInput {
             parents: BTreeMap::new(),
             folders: BTreeMap::new(),
         });
@@ -681,7 +501,7 @@ mod tests {
             .parents
             .insert("a".into(), None);
         arrangement.v1().folders.get_mut("a").unwrap().tombstone =
-            Some(fractal_client::ArrangementRegister {
+            Some(fractal_schema::arrangements::Register {
                 value: true,
                 revision: "opaque/delete".into(),
             });
@@ -843,7 +663,7 @@ mod tests {
         let mut arrangement = arrangement();
         add_folder(&mut arrangement, "gone", None, "a0");
         arrangement.v1().folders.get_mut("gone").unwrap().tombstone =
-            Some(fractal_client::ArrangementRegister {
+            Some(fractal_schema::arrangements::Register {
                 value: false,
                 revision: "opaque/delete".into(),
             });

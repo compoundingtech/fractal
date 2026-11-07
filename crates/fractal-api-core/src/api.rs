@@ -17,6 +17,7 @@ use crate::SeatStatusStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::SubagentsStore;
+use crate::StopDeferralStore;
 use crate::EvidenceStore;
 use crate::OwnedSetsStore;
 use crate::PublicationFactsStore;
@@ -90,6 +91,7 @@ use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, Pe
 #[cfg(test)]
 use crate::model::IntentInput;
 use crate::store::Store;
+use crate::store::local_commits;
 
 pub mod wire_names;
 pub mod seat_freshness;
@@ -362,6 +364,10 @@ pub struct ClientPageCursor {
     pub items_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_index: Option<u64>,
+    /// The stream items the first page could see: the shard index the stream mirror had passed
+    /// (fractal-store stream_mirror.rs), as `before_index` is for graph messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_stream_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_key: Option<(u128, String)>,
     pub expires_at_unix_ms: u128,
@@ -444,6 +450,8 @@ pub fn signal_visible_change(state: &AppState) {
 
 #[cfg(test)]
 mod storage_contention_response_tests;
+#[cfg(test)]
+mod replication_wake_tests;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -2387,6 +2395,7 @@ fn client_page_read_projected(
                 native_only: query.native_only,
                 items_digest: items_digest.clone(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })?)
@@ -3948,6 +3957,20 @@ fn client_agent_cards_presented(
             let state = if terminal_subjects.contains(&subject.subject) {
                 "retired"
             } else { state };
+            // A stop is declared but the process still runs: it ends once the mail and other
+            // runs' work it held at the stop are gone (#4500). Say why it is still running.
+            let stopping = (subject.kind.as_deref() == Some("stop")
+                && matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| -> anyhow::Result<Value> {
+                let incarnation = fields.and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+                let held = store.latest_stop_deferral(&subject.subject)?.filter(|diagnostic| {
+                    diagnostic.body["fields"]["code"] == "stop-deferred"
+                        && diagnostic.body["evidence"][0].as_str() == subject.desired_token.as_deref()
+                        && diagnostic.body["fields"]["incarnation_id"].as_str() == incarnation
+                }).and_then(|diagnostic| diagnostic.body["fields"]["reason"].as_str().map(str::to_owned));
+                Ok(json!({"held": held}))
+            })
+            .transpose()?;
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -4063,6 +4086,7 @@ fn client_agent_cards_presented(
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
+                "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
                     crate::rollout::status(store, &subject.subject)?
                 } else {
@@ -4860,10 +4884,14 @@ pub async fn relay_client_message_items(
             let Some(message) = store.message(&id)? else {
                 continue;
             };
-            let sent_at = store
-                .latest_claim(&id, Some("message.sent"))?
-                .map(|claim| claim.accepted_at_unix_ms)
-                .unwrap_or_default();
+            let sent_at = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+                stream_sent_at(&store, &id)?
+            } else {
+                store
+                    .latest_claim(&id, Some("message.sent"))?
+                    .map(|claim| claim.accepted_at_unix_ms)
+                    .unwrap_or_default()
+            };
             views.push((message, sent_at));
         }
         Ok(views)
@@ -4874,6 +4902,14 @@ pub async fn relay_client_message_items(
         items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
     }
     Ok(())
+}
+
+/// A stream item's sent time, as its client metadata reads it.
+fn stream_sent_at(store: &Store, subject: &str) -> anyhow::Result<u128> {
+    Ok(store
+        .stream_message_metadata(subject)?
+        .and_then(|metadata| metadata["sent_at"].as_str().and_then(|at| at.parse().ok()))
+        .unwrap_or_default())
 }
 
 pub fn client_message_resources(
@@ -4907,32 +4943,43 @@ fn client_message_resources_at(
         if peer.is_some_and(|peer| message.from != peer && message.to != peer) {
             continue;
         }
-        let claims = store.claims_for(&message.subject, None)?;
-        let first = claims.first();
-        let last = claims.last();
-        let sent_at = first
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        let mut updated_at = last
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or(sent_at);
-        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
-        // A seat this member hosts moves its message by a local mark, which no claim records.
-        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
-            && at >= updated_at
-        {
-            (revision, updated_at) = (receipt, at);
-        }
-        let session_id = first
-            .and_then(|claim| {
-                claim
-                    .body
-                    .get("fields")
-                    .unwrap_or(&claim.body)
-                    .get("session_id")
-            })
-            .cloned()
-            .unwrap_or(Value::Null);
+        let (sent_at, updated_at, revision, session_id) = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+            // A stream item has no graph claims: the mirror and the shard carry what they would.
+            let Some(metadata) = store.stream_message_metadata(&message.subject)? else {
+                continue;
+            };
+            let at = |field: &str| metadata[field].as_str().unwrap_or("0").parse::<u128>();
+            (at("sent_at")?, at("updated_at")?, metadata["revision"].as_str().unwrap_or("message/unknown").to_owned(),
+             metadata["session_id"].clone())
+        } else {
+            let claims = store.claims_for(&message.subject, None)?;
+            let first = claims.first();
+            let last = claims.last();
+            let sent_at = first
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let mut updated_at = last
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or(sent_at);
+            let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+            // A seat this member hosts moves its message by a local mark, which no claim records.
+            if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+                && at >= updated_at
+            {
+                (revision, updated_at) = (receipt, at);
+            }
+            let session_id = first
+                .and_then(|claim| {
+                    claim
+                        .body
+                        .get("fields")
+                        .unwrap_or(&claim.body)
+                        .get("session_id")
+                })
+                .cloned()
+                .unwrap_or(Value::Null);
+            (sent_at, updated_at, revision, session_id)
+        };
         let mut reasons = Vec::new();
         if message.status == "closed"
             || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
@@ -5847,6 +5894,7 @@ fn published_work_cursor(
         native_only: query.native_only,
         items_digest,
         before_index: None,
+        before_stream_index: None,
         after_key: None,
         expires_at_unix_ms,
     }
@@ -6599,11 +6647,9 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
 /// request path. Until it is made, the collection says so instead of making a read wait for it.
-/// A newly started report returns its operation audit for the delayed startup repair to consume;
-/// later doctor calls and diagnostic refreshes always audit the current store themselves.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// The report reads the last operation audit; the daemon makes its first audit only after the
+/// reconnect window. Return whether this call started the report.
+pub fn start_operation_report(state: &AppState) -> bool {
     client_v0::start_operation_report(state)
 }
 
@@ -6617,14 +6663,21 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster, or a claim this node commits, cuts it short to the
-/// refresh's own length.
+/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
+/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster, or a claim this node commits, can cut
-/// the refresher's pause to, so that a very cheap fold cannot turn fresh reads or a burst of
-/// local writes into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
+/// a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
+const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
@@ -6642,17 +6695,12 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
-        // The writer's callback only wakes this task; whether the commit holds a claim this
-        // node wrote is read here, off the writer.
-        let commits = Arc::new(tokio::sync::Notify::new());
-        let _observer = {
-            let commits = Arc::clone(&commits);
-            store.observe_commits(move |_| commits.notify_one())
-        };
+        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
+        // the writer, once for every refresher that pauses on it.
+        let mut local = agent_roster_local_commits(&store);
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
-        let mut look = AgentRosterLook::default();
         loop {
             let started = tokio::time::Instant::now();
             // Every claim at or before this index is in the fold below or an earlier one.
@@ -6667,7 +6715,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            agent_roster_pause(&store, &commits, &mut look, started.elapsed(), folded_through).await;
+            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
             if store.agent_roster_refresh_failed() {
@@ -6679,102 +6727,44 @@ pub fn start_agent_roster(state: &AppState) {
 }
 
 /// Why the refresher's pause between two refreshes ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentRosterPauseEnd {
-    Full,
-    FreshRead,
-    LocalClaim,
+type AgentRosterPauseEnd = local_commits::PauseEnd;
+
+/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
+/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
+/// roster's incremental fold reads).
+fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
 }
 
-/// The most claims one look for a claim this node wrote reads. A longer run, as through a
-/// replication catch-up, is read a run of this many at a time, each on its own blocking task,
-/// so no read grows with the catch-up and none of it is skipped. There is no index by origin.
-const AGENT_ROSTER_LOCAL_SCAN: u64 = 10_000;
-
-/// The refresher's one look for a claim this node wrote, kept from one pause to the next: a
-/// pause that ends while a look is queued or running leaves it here, and the next pause waits
-/// on it rather than start another, so a congested blocking pool never holds more than one.
-#[derive(Default)]
-struct AgentRosterLook {
-    running: Option<tokio::task::JoinHandle<anyhow::Result<(u64, bool, bool)>>>,
-    /// How many looks have started, for tests.
-    started: u64,
-}
+/// The name the roster's check has on the scanner.
+const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
 
 /// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
-/// however often readers ask or this node writes, and at least the minimum pause; then the rest
-/// of the full pause, unless a reader waits for a fresh roster or this node commits a claim after
+/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
+/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
 /// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
-/// one more fold at the minimum pause, never a missed one). Either then waits for one fold, not
-/// the rest of the pause: a person waiting to see their own write is not left waiting up to a
-/// second for the next timed fold. Commits that hold only claims other nodes wrote keep the full
-/// pause, so a busy replication stream does not fold the roster any more often.
+/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
+/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
+/// fold, so a person waiting to see their own write is not left waiting up to a second for the
+/// next timed fold, while a stream of local writes folds no more than about twice a second and
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often. See
+/// [`local_commits::pause_after_fold`].
 async fn agent_roster_pause(
     store: &Arc<Store>,
-    commits: &tokio::sync::Notify,
-    look: &mut AgentRosterLook,
+    local: &mut local_commits::LocalCommits,
     folded: Duration,
     through: u64,
 ) -> AgentRosterPauseEnd {
-    agent_roster_pause_scanning(store, commits, look, folded, through, AGENT_ROSTER_LOCAL_SCAN).await
-}
-
-/// [`agent_roster_pause`], reading at most `scan` claims per look. `commits` is woken by every
-/// commit; a wake starts one look on the blocking pool, and at most one runs at a time, in this
-/// pause or carried over from an earlier one. The timer and fresh reads are still served while it
-/// runs, so a busy pool or a slow read never holds the pause past its end. Wakes during a look
-/// leave their permit for the next one.
-async fn agent_roster_pause_scanning(
-    store: &Arc<Store>,
-    commits: &tokio::sync::Notify,
-    look: &mut AgentRosterLook,
-    folded: Duration,
-    mut through: u64,
-    scan: u64,
-) -> AgentRosterPauseEnd {
-    let start = |look: &mut AgentRosterLook, through: u64| {
-        let reader = Arc::clone(store);
-        look.started += 1;
-        look.running = Some(tokio::task::spawn_blocking(move || {
-            let index = reader.index()?;
-            let upto = index.min(through.saturating_add(scan));
-            if upto <= through {
-                return anyhow::Ok((through, false, false));
-            }
-            Ok((upto, reader.first_local_commit_after(through, upto)?.is_some(), upto < index))
-        }));
+    let pace = local_commits::Pace {
+        floor: AGENT_ROSTER_FRESH_PAUSE,
+        local: AGENT_ROSTER_LOCAL_PAUSE,
+        full: AGENT_ROSTER_REFRESH_PAUSE,
     };
-    let pause = folded.max(AGENT_ROSTER_FRESH_PAUSE);
-    tokio::time::sleep(pause).await;
-    let rest = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause));
-    tokio::pin!(rest);
-    loop {
-        tokio::select! {
-            () = &mut rest => return AgentRosterPauseEnd::Full,
-            () = store.fresh_agent_roster_wanted() => return AgentRosterPauseEnd::FreshRead,
-            // A commit during the refresh or the minimum pause left its wake: it is read here.
-            () = commits.notified(), if look.running.is_none() => start(look, through),
-            read = async { look.running.as_mut().expect("polled only while looking").await },
-                if look.running.is_some() => {
-                look.running = None;
-                match read {
-                    // A look carried over from an earlier pause may end at or before `through`:
-                    // what it found, the refresh since has folded.
-                    Ok(Ok((upto, true, _))) if upto > through => return AgentRosterPauseEnd::LocalClaim,
-                    Ok(Ok((upto, _, more))) if upto > through => {
-                        through = upto;
-                        // The rest of a long run is read at once, with no commit to wait for.
-                        if more {
-                            start(look, through);
-                        }
-                    }
-                    Ok(Ok(_)) => {}
-                    // The full pause still ends this one; a failed read costs only the shortcut.
-                    Ok(Err(_)) | Err(_) => {}
-                }
-            }
-        }
-    }
+    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -8128,8 +8118,10 @@ pub fn relayed_held_mail(
             .get()
             .prepare_cached(
                 "SELECT held.subject, held.sent_ms FROM coordination_sends held
-                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
-                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
                  LIMIT ?3",
             )?
             .query_map(
@@ -8779,7 +8771,8 @@ pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
 }
 
 /// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
-/// every operation, about 14 s on a 56 GB store. The daemon audits at startup and then every
+/// every operation, about 14 s on a 56 GB store. The daemon audits
+/// [`crate::store::STARTUP_MAINTENANCE_DELAY`] after it starts and then every
 /// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
 pub(crate) fn operation_projection_check(
     audit: Option<crate::store::OperationAuditRecord>,
@@ -8793,7 +8786,8 @@ pub(crate) fn operation_projection_check(
     };
     let Some(audit) = audit else {
         return check("warn", format!(
-            "no operation audit has finished since the daemon started; it audits at startup and then every {} min",
+            "no operation audit has finished since the daemon started; it audits {} min after it starts and then every {} min",
+            crate::store::STARTUP_MAINTENANCE_DELAY.as_secs() / 60,
             period.as_secs() / 60
         ));
     };

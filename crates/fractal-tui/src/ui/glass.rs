@@ -5050,6 +5050,82 @@ fn stale_word(stale: &[String]) -> String {
 mod tests {
     use super::*;
 
+    // Generate only from the pre-extraction renderer; later widgets must match this baseline.
+    #[test]
+    fn sidebar_golden_buffer_and_stable_hits() {
+        use resource_sidebar::Row;
+        use serde_json::{Value, json};
+        let row_id = |row: &Row| match row {
+            Row::Group { id, .. } => id.strip_prefix("folder/").map_or_else(
+                || format!("group:{id}"), |id| format!("folder:{id}")),
+            Row::Resource(row) => format!("subject:{}", row.id),
+            Row::Welcome => "welcome".into(),
+            Row::Notice(message) => format!("notice:{message}"),
+        };
+        let rect = |r: Rect| json!([r.x, r.y, r.width, r.height]);
+        let mut cases = Vec::new();
+        for state in ["reserved", "legacy", "retired", "unfocused", "fold", "search",
+            "scroll", "narrow", "zero-width", "zero-height", "zero"] {
+            let mut ui = glass();
+            ui.resource_sidebar = resource_sidebar::golden_sidebar(state);
+            ui.glasses.sidebar.focused = false;
+            let (width, height) = match state {
+                "scroll" => (38, 4),
+                "narrow" => (7, 6), "zero-width" => (0, 10),
+                "zero-height" => (38, 0), "zero" => (0, 0), _ => (38, 10),
+            };
+            let area = Rect::new(2, 1, width, height);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 44, 14));
+            ui.draw_sidebar(&mut buffer, area, &ui.glasses.sidebar);
+            let rows = ui.resource_sidebar.rows();
+            let selected = rows.get(ui.resource_sidebar.selected).map(&row_id);
+            let frame = ui.frame.borrow();
+            let hits: Vec<_> = frame.hits.iter().map(|(r, hit)| {
+                let (action, id) = match hit {
+                    Hit::ResourceFilter => ("filter", None),
+                    Hit::ResourceNewFolder => ("new", None),
+                    Hit::ResourceRow(index) => ("row", Some(row_id(&rows[*index]))),
+                    Hit::ResourceAdd(id) => ("add", Some(format!("folder:{id}"))),
+                    Hit::ResourceFolderMenu(id) => ("menu", Some(format!("folder:{id}"))),
+                    Hit::ResourceFolderDrag(id) => ("drag", Some(format!("folder:{id}"))),
+                    other => panic!("unexpected sidebar hit: {other:?}"),
+                };
+                json!([rect(*r), action, id])
+            }).collect();
+            let contexts: Vec<_> = frame.context_rows.iter()
+                .map(|(r, id, layer)| json!([rect(*r), format!("subject:{id}"), layer])).collect();
+            // Lossless row-major RLE: symbols and complete cell metadata, including styles.
+            let mut cells: Vec<Value> = Vec::new();
+            for cell in &buffer.content {
+                let value = json!([cell.symbol(), format!("{cell:?}")]);
+                if cells.last().is_some_and(|run| run[1] == value) {
+                    let run = cells.last_mut().unwrap();
+                    run[0] = json!(run[0].as_u64().unwrap() + 1);
+                } else { cells.push(json!([1, value])); }
+            }
+            let chosen = ui.resource_sidebar.arrangement().map(|a| a.header.id.as_str());
+            let expected = match state {
+                "retired" => None,
+                "legacy" => Some("arrangement/person/test/00000000-0000-7000-8000-000000000002"),
+                _ => Some("arrangement/person/test/00000000-0000-7000-8000-000000000001"),
+            };
+            assert_eq!(chosen, expected, "{state}");
+            cases.push(json!({"state": state, "area": rect(area), "arrangement": chosen,
+                "selected": selected, "rows": rows.iter().map(&row_id).collect::<Vec<_>>(),
+                "cells": cells, "hits": hits, "contexts": contexts}));
+        }
+        let actual = json!({"format": "tui-sidebar-v1", "size": [44, 14],
+            "generatedBy": "STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --features fractal-daemon/test-support sidebar_golden",
+            "cases": cases});
+        let path = test_env!("CARGO_MANIFEST_DIR", "/../../fixtures/clients/sidebar/tui-v1.snapshot");
+        if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+        } else {
+            let expected: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
     #[test]
     fn sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys() {
         use resource_sidebar::PaletteMode as Mode;
@@ -5082,6 +5158,7 @@ mod tests {
         let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
         ui.resource_sidebar.arrangements.push(serde_json::from_value(serde_json::json!({
             "id": format!("arrangement/{}/{}", ui.world.person, uuid::Uuid::now_v7()), "revision":"claim/test", "updated_at":"2026-10-11T00:00:00Z", "owner":ui.world.person, "deleted":false,
+            "resolved":{"parents":{first.clone():null,second.clone():null},"folders":{}},
             "body":{"version":1,"name":{"value":"Sidebar","revision":"claim/test"},"folders":{
                 first.clone():{"name":{"value":"First","revision":"claim/test"},"position":{"value":{"key":"a0","parent":null},"revision":"claim/test"},"tombstone":null},
                 second.clone():{"name":{"value":"Second","revision":"claim/test"},"position":{"value":{"key":"a1","parent":null},"revision":"claim/test"},"tombstone":null}

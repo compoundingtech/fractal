@@ -33,6 +33,11 @@ pub mod declarations;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
+// Prepared internally; no accepted gate kind or production caller dispatches here.
+#[allow(dead_code)]
+pub(crate) mod agent_review_answer;
+#[allow(dead_code)]
+pub(crate) mod agent_review_decode;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
@@ -91,9 +96,11 @@ pub mod rollouts;
 pub mod refresh_intake;
 pub mod refresh;
 pub mod publication;
+pub mod local_commits;
 pub mod publication_facts;
 pub mod seat_status;
 pub mod stop_deferral;
+pub mod stopping_seat;
 pub mod card_fold;
 #[cfg(test)]
 pub mod card_fold_tests;
@@ -256,6 +263,11 @@ mod message_outbox_tests;
 pub mod relayed_closes;
 #[cfg(test)]
 mod relayed_closes_tests;
+pub mod stream_mirror;
+#[cfg(test)]
+mod stream_mirror_tests;
+#[cfg(test)]
+mod stream_selector_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -296,6 +308,9 @@ pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
+pub mod gate_runners;
+#[cfg(test)]
+mod gate_runners_tests;
 #[cfg(test)]
 mod run_eta_tests;
 #[cfg(test)]
@@ -2258,6 +2273,12 @@ pub struct Store {
 /// How often the daemon audits the operation projection against the claim log and counts the
 /// fleet admission residue. Doctor calls a result older than two periods stale.
 pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// How long after it starts the daemon defers whole-store maintenance reads: its first
+/// operation audit and the sealing frontier's recovery search. Every client and peer reconnects
+/// in the first minute after a restart, and those reads (66 s of SQL and a 14 s batch walk on a
+/// busy host's store) made each of their requests wait on the same disk.
+pub const STARTUP_MAINTENANCE_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// One finished background audit: when it finished, how long it took and what it found.
 #[derive(Clone, Debug)]
@@ -13611,7 +13632,10 @@ pub fn human_review_currency(
 /// the gate both read answers by this rule, so a review the list no longer offers is always one
 /// whose answer the gate acts on.
 fn reviewer_answer_sql(result: &str) -> String {
-    let reviewer = human_review_reassignment::reviewer_sql("request", Some(result));
+    let reviewer = human_review_reassignment::assignment_sql(
+        "request",
+        human_review_reassignment::AssignmentMoment::BeforeAnswer { answer: result },
+    );
     format!(
         "{result}.subject=request.subject
          AND {result}.kind='gate.result'
@@ -13647,9 +13671,12 @@ pub fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<
 
 const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
 
+/// Graph mail in canonical order, then stream items in shard order
+/// ([`messages_shard::mailbox_reads::mail_order`]): a stream item has no graph claim to key it.
 pub fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::<String, canonical::ClaimKey>::new();
-    for chunk in messages.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
+    let graph = messages.iter().filter(|message| !messages_shard::mailbox_reads::is_stream_item(message)).collect::<Vec<_>>();
+    for chunk in graph.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
         let subjects = serde_json::to_string(
             &chunk.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
         )?;
@@ -13672,7 +13699,7 @@ pub fn sort_messages_canonically(connection: &Connection, messages: &mut [Messag
         anyhow::ensure!(rows.next()?.is_none(), "duplicate canonical message key row");
     }
     // Gather every key successfully before changing the caller's message vector.
-    messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
+    messages.sort_by(|left, right| messages_shard::mailbox_reads::mail_order(&keys, left, right));
     Ok(())
 }
 
@@ -18696,8 +18723,9 @@ pub struct RecordedSeatMove {
     pub view: SeatQueueMoveView,
 }
 
-/// The durable facts that order one seat's queue: when each run joined, every
-/// recorded move in graph order, and which joined runs are still live.
+/// The durable facts that order one seat's queue: when each live run and each
+/// finished run the live order depends on joined, every recorded move in graph
+/// order, and which joined runs are still live.
 #[derive(Default)]
 pub struct SeatQueueInputs {
     pub joins: Vec<QueueJoin>,
@@ -18794,8 +18822,9 @@ pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
 /// Read seat-queue inputs for one seat or the whole roster. A live run is queued
 /// while its current generation has a step for the seat, and it keeps the join
 /// time of its first such step in any generation. Runs that are no longer
-/// queued are read only when a move names them, because a run that never
-/// anchors or receives a move cannot change the relative order of the others.
+/// queued are read only when the live order can depend on them
+/// ([`seat_queue::order_anchors`]): a seat that has moved its queue a thousand
+/// times names hundreds of finished runs, and a claim reads this under the writer.
 pub fn seat_queue_inputs_tx(
     connection: &Connection,
     agent: Option<&str>,
@@ -18816,7 +18845,7 @@ pub fn named_run_probes() -> usize {
 }
 
 /// [`seat_queue_inputs_tx`], keeping only `seats` when given: every move and join is still read
-/// in one pass, but only those seats' named runs are probed, one query each.
+/// in one pass, but only those seats' order anchors are probed, one query each.
 pub fn seat_queue_inputs_of_tx(
     connection: &Connection,
     agent: Option<&str>,
@@ -18897,16 +18926,12 @@ pub fn seat_queue_inputs_of_tx(
         seats.retain(|seat, _| only.contains(seat));
     }
     for (seat, inputs) in &mut seats {
-        let named = inputs
+        let moves = inputs
             .moves
             .iter()
-            .flat_map(|recorded| {
-                std::iter::once(recorded.movement.run.clone())
-                    .chain(recorded.movement.anchor.clone())
-            })
-            .filter(|run| !inputs.live.contains(run))
-            .collect::<BTreeSet<_>>();
-        for run in named {
+            .map(|recorded| recorded.movement.clone())
+            .collect::<Vec<_>>();
+        for run in seat_queue::order_anchors(&moves, &inputs.live) {
             let Some(run_id) = run.strip_prefix("mission-run/") else {
                 continue;
             };

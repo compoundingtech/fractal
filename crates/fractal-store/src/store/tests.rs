@@ -11153,6 +11153,72 @@ fn a_subagents_prompt_is_answered_only_with_deny() {
     );
 }
 
+/// A subagent's prompt that st's hook denied, because nobody answered it in time, leaves the
+/// person's home as soon as the subagent moves on: its next tool event or its stop closes the
+/// prompt (`fractal_drivers::claude_prompts`), and the seat's next observation no longer waits on a
+/// person.
+#[test]
+fn a_subagents_prompt_leaves_the_persons_home_once_the_subagent_moves_on() {
+    let store = Store::open_memory("node").unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+        workspace.path().display().to_string()
+    );
+    let intent = parse_intent(&source, "node").unwrap();
+    let preview = store
+        .mission(
+            &intent,
+            IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .unwrap();
+    store
+        .apply_as(&intent, &preview.subject_tokens, "subagent-seat", Some("person/avery"))
+        .unwrap();
+    let seat = "agent/node.worker";
+    let append = |kind: &str, fields: Value| {
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: kind.into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let prompts = |store: &Store| {
+        store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == "harness-prompt")
+            .count()
+    };
+    append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+    append(
+        "harness.observed",
+        json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"subagent:Bash",
+            "ownership_sequence":1, "transition_sequence":3}),
+    );
+    assert_eq!(prompts(&store), 1);
+    // The hook denied it and the subagent moved on: the seat's own state again, as the closing
+    // event writes it.
+    append(
+        "harness.observed",
+        json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"none", "ownership_sequence":1, "transition_sequence":4}),
+    );
+    assert_eq!(prompts(&store), 0, "the denied prompt still waits on the person's home");
+    assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
+}
+
 /// A prompt names the exact call it asks about, as its hook published it for that very
 /// observation; a later prompt's call is never an earlier one's, and an unnamed call is none.
 #[test]

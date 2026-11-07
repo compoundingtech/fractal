@@ -123,7 +123,7 @@ pub fn page(
                 history: false, person: query.person.clone(), actor: query.actor.clone(),
                 owner_run: query.owner_run.clone(), status: query.status.clone(),
                 owner: None, state: None, native_only: query.native_only,
-                items_digest: publication.rows.digest.clone(), before_index: None,
+                items_digest: publication.rows.digest.clone(), before_index: None, before_stream_index: None,
                 after_key: None, expires_at_unix_ms,
             })?)
         } else { None };

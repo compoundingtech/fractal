@@ -4,18 +4,57 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { behaviorSchema, checkEnvelope, checkFixture, checkFixtures, checkSchema, scrub } from './check-sidebar-fixtures.mjs';
+import { behaviorSchema, checkEnvelope, checkFixture, checkFixtures, checkGolden, checkSchema, scrub } from './check-sidebar-fixtures.mjs';
 
 const fixtures = JSON.parse(readFileSync(new URL('../fixtures/clients/sidebar/behavior-v1.json', import.meta.url), 'utf8'));
 const mutate = change => { const value = structuredClone(fixtures); change(value); return value; };
 const folder = '00000000-0000-7000-8000-00000000000a';
 
 test('real sidebar fixtures pass the CLI and the shared schema/public policy', () => {
-  assert.equal(checkFixtures(), 1);
+  assert.equal(checkFixtures(), 3);
   const result = spawnSync(process.execPath, [new URL('./check-sidebar-fixtures.mjs', import.meta.url).pathname], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Sidebar fixture gate passed/);
   assert.doesNotThrow(() => checkFixture(fixtures));
+});
+
+test('v2 live memberships enforce their body/event variant and public identities', () => {
+  const v2 = JSON.parse(readFileSync(new URL('../fixtures/clients/sidebar/behavior-v2.json', import.meta.url), 'utf8'));
+  assert.doesNotThrow(() => checkFixture(v2));
+  for (const change of [
+    value => { value.cases[0].events[0].type = 'ProjectAndPlanV1'; },
+    value => { value.cases[0].initial.memberships[0].position.bucket = 'private-folder'; },
+    value => { value.cases[0].initial.memberships[0].member = ['person', 'private'].join('/'); },
+    value => { value.cases[0].initial.memberships[0].unknown = true; },
+    value => { value.cases[0].initial.memberships[0].position.unknown = true; },
+    value => { value.cases[0].checkpoints[0].moves[0].edit.memberships[0].op = 'subject.place'; },
+    value => { value.cases[0].checkpoints[0].moves[0].edit.memberships[0].unknown = true; },
+  ]) {
+    const value = structuredClone(v2); change(value);
+    assert.throws(() => checkFixture(value));
+  }
+});
+
+test('generated sidebar buffers and stable hit identities are scrubbed', () => {
+  const golden = JSON.parse(readFileSync(new URL('../fixtures/clients/sidebar/tui-v1.snapshot', import.meta.url), 'utf8'));
+  assert.doesNotThrow(() => checkGolden(golden));
+  for (const change of [
+    value => { value.cases[0].selected = ['subject:person', 'private'].join('/'); },
+    value => { value.cases[0].hits[0][2] = 'subject:agent/private'; },
+    value => { value.cases[0].contexts[0][1] = 'subject:host/private'; },
+    value => { value.cases[0].unknown = true; },
+    value => { value.cases[0].cells[0][0] = 0; },
+    value => { value.cases[0].cells[0][1][1] = ['person', 'private'].join('/'); },
+  ]) {
+    const value = structuredClone(golden); change(value);
+    assert.throws(() => checkGolden(value));
+  }
+  for (const text of [['', 'home', 'private', 'project'].join('/'), 'node.internal', 'Bearer private-value', ['person', 'private'].join('/')]) {
+    const value = structuredClone(golden);
+    value.cases[0].cells = [...text].map(symbol => [1, [symbol, '']]);
+    value.cases[0].cells.push([616 - text.length, [' ', '']]);
+    assert.throws(() => checkGolden(value), text);
+  }
 });
 
 const forbidden = {

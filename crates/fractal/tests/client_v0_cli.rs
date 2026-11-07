@@ -582,6 +582,83 @@ async fn agent_burst_cli_renews_as_held_and_says_lost_gives_back_and_fails_once_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_burst_cli_s_held_renewal_reaches_a_restarted_daemon_well_inside_the_lease_and_a_failed_one_is_retried_soon() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    // Each daemon records when each ask reached it. The first grants with a 30 s lease (a renewal
+    // every 10 s); the one after the restart fails the first renewal it hears and grants the next.
+    type Asks = Arc<Mutex<Vec<(Instant, Value)>>>;
+    let daemon = |asks: Asks, released: Arc<Mutex<u32>>, fail_first: bool| {
+        axum::Router::new().route("/v1/agents/lane/burst", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let asks = asks.clone();
+            async move {
+                let mut asks = asks.lock().unwrap();
+                asks.push((Instant::now(), body));
+                if fail_first && asks.len() == 1 {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"code": "fixture-starting", "message": "the daemon is still starting"})));
+                }
+                (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"api_version": "st3.v1",
+                    "value": {"state": "granted", "lease_secs": 30}})))
+            }
+        }).delete(move || {
+            let released = released.clone();
+            async move {
+                *released.lock().unwrap() += 1;
+                axum::Json(serde_json::json!({"api_version": "st3.v1", "value": {"released": true}}))
+            }
+        }))
+    };
+    let (before, after) = (Asks::default(), Asks::default());
+    let released = Arc::new(Mutex::new(0));
+    let first = serve_for_test(&socket, daemon(before.clone(), released.clone(), false)).await;
+    let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+        .arg("--endpoint").arg(&socket)
+        .args(["agents", "burst", "garden/builder", "--cores", "8", "--memory", "24G", "--reason", "st-test", "--as", "agent/garden/builder"])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let stdin = child.stdin.take();
+    let until = |asks: Asks, count: usize| async move {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while asks.lock().unwrap().len() < count {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the holder asks");
+    };
+    until(before.clone(), 1).await;
+    let granted_at = before.lock().unwrap()[0].0;
+    // The daemon restarts: its socket goes away before the holder's first renewal is due and is
+    // back two seconds after it, so that renewal meets a missing socket.
+    first.abort();
+    let _ = std::fs::remove_file(&socket);
+    tokio::time::sleep((granted_at + Duration::from_secs(12)).saturating_duration_since(Instant::now())).await;
+    let second = serve_for_test(&socket, daemon(after.clone(), released.clone(), true)).await;
+    let listening = Instant::now();
+    until(after.clone(), 2).await;
+    drop(stdin);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()).await.unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "granted 8 24G\n", "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("WARN renewing the lane burst"), "{output:?}");
+    assert_eq!(before.lock().unwrap().len(), 1, "the first daemon heard only the ask");
+    let after = after.lock().unwrap();
+    assert!(after.iter().all(|(_, ask)| ask["held"] == Value::Bool(true)), "{after:?}");
+    // The renewal that met the missing socket waits for it and reaches the new daemon at once.
+    let reconnect = after[0].0.saturating_duration_since(listening);
+    assert!(reconnect < Duration::from_secs(3), "the renewal reached the restarted daemon {reconnect:?} after it listened");
+    // The failed renewal is tried again after the 5 s poll, not a whole 10 s renewal later.
+    let retry = after[1].0 - after[0].0;
+    assert!(retry < Duration::from_secs(8), "a failed held renewal was retried after {retry:?}");
+    // Both land far inside the lease a restarted daemon keeps a raise found at start for.
+    assert!(after[1].0 - listening < Duration::from_secs(30), "{:?}", after[1].0 - listening);
+    assert_eq!(*released.lock().unwrap(), 1);
+    second.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_workspace_cli_and_client_read_the_same_declaration_even_after_retirement() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");

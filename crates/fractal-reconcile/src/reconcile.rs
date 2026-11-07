@@ -11228,13 +11228,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .map(|agent| format!("`{agent}`"))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            changed |= self.store.set_step_state(
-                                &view.subject,
-                                "blocked",
-                                Some(&format!(
-                                    "no eligible agent is present in the desired graph: {eligible}"
-                                )),
-                            )?;
+                            // A cancelled run does not wait for a seat that is known to be gone:
+                            // every named agent is stopped or retired, which both select a stop.
+                            // A seat this host has not seen yet may still replicate, so its step
+                            // keeps waiting.
+                            let mut agents = view.assigned_to.iter().chain(view.available_to.iter()).peekable();
+                            let mut gone = agents.peek().is_some();
+                            for agent in agents {
+                                gone &= self.store.selected_desired_kind(agent)?.as_deref() == Some("stop");
+                            }
+                            let (status, reason) = if run.phase == "final-cancelled" && gone {
+                                (
+                                    "cancelled",
+                                    format!(
+                                        "the mission run was cancelled and every eligible agent is stopped or retired: {eligible}"
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "blocked",
+                                    format!(
+                                        "no eligible agent is present in the desired graph: {eligible}"
+                                    ),
+                                )
+                            };
+                            changed |=
+                                self.store.set_step_state(&view.subject, status, Some(&reason))?;
                             return Ok(changed);
                         }
                         // A step that raises its seat's lane is delivered only once the raised lane
@@ -11473,7 +11492,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Cleanup may have selected a stop while a seat still owns ready work in another run.
-    /// Keep that existing queue alive until ordinary seat retention lets the runtime end.
+    /// Keep that existing queue alive until ordinary seat retention lets the runtime end. Work in
+    /// a run recorded after the stop is not the seat's to finish, so its binding is missing.
     fn ready_step_binding_missing(&self, run: &MissionRunView, step: &StepRunView) -> Result<bool> {
         for name in step.assigned_to.iter().chain(step.available_to.iter()) {
             let kind = self.store.selected_desired_kind(name)?;
@@ -11481,11 +11501,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(false);
             }
             if kind.as_deref() == Some("stop")
-                && let Some(owner) = self.store.selected_stop_owner_run(name)?
+                && let Some((Some(owner), cut)) = self.store.seat_stop_cut(name)?
                 && owner != run.subject
                 && self
                     .store
-                    .seat_work_in_other_runs(name, &owner)?
+                    .seat_work_in_other_runs(name, &owner, Some(cut))?
                     .contains(&step.subject)
             {
                 return Ok(false);
@@ -15373,8 +15393,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
-    /// run other than the one that is ending. The stop declaration stays, so the seat stops once
-    /// both are gone. The answer is read again only when something it read changed: a seat with
+    /// run other than the one that is ending, that this host recorded before the stop. Later mail
+    /// and work never extend the hold, so a seat that keeps being sent mail still drains. The stop
+    /// declaration stays, so the seat stops once both are gone. The answer is read again only when something it read changed: a seat with
     /// thousands of messages costs a view of each one, so a held seat's 60 s recheck only wakes the
     /// pass that notices a change.
     fn seat_retention(&self, seat: &str, owner_run: &str) -> Result<Option<String>> {
@@ -15417,12 +15438,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         #[cfg(test)]
         SEAT_RETENTION_READS.with(|count| count.set(count.get() + 1));
         let (reason, reads) = smallclaims::touched::record(|| -> Result<Option<String>> {
+            // Only what the seat held when its stop was declared here can keep it running.
+            let cut = self.store.seat_stop_cut(seat)?.map(|(_, index)| index);
             let unread = self
                 .store
                 .messages(Some(seat), false)?
                 .into_iter()
                 .any(|message| {
-                    matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+                    cut.is_none_or(|cut| message.created_index < cut)
+                        && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
                         // Held mail waits for the seat's next turn, not for this seat.
                         && !crate::silent::waits_for_turn(&message)
                         && !message.tags.iter().any(|tag| {
@@ -15434,7 +15458,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some("the seat holds a message nobody has read".to_owned())
             } else if !self
                 .store
-                .seat_work_in_other_runs(seat, owner_run)?
+                .seat_work_in_other_runs(seat, owner_run, cut)?
                 .is_empty()
             {
                 Some("the seat holds work for another run".to_owned())
@@ -19001,6 +19025,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Wake reconciliation when a background identity measurement completes, counted as a
+    /// launch identity wake.
+    fn launch_input_wake(&self) -> &Arc<dyn Fn() + Send + Sync> {
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::LaunchIdentity, None);
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        })
+    }
+
     fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
         let item = format!("launch-inputs:{}", subject.subject);
         if !self.incremental.needs(&item, now_ms()) {
@@ -19009,18 +19051,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
-        self.launch_input_wake.get_or_init(|| {
-            let incremental = self.incremental.clone();
-            let notify = self.notify.clone();
-            let revision = self.file_watch_revision.clone();
-            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                incremental.touch("launch-identity");
-                notify.notify_one();
-            });
-            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
-            wake
-        });
+        self.launch_input_wake();
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
         let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
         let (result, reads) = smallclaims::touched::record(|| {
@@ -20917,6 +20948,7 @@ pub mod tests {
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
     mod final_cancel_gate_exit;
+    mod final_cancel_missing_assignee;
     mod gate_on_demand;
     mod github_watch_selection;
     mod standing_observer_stop;
@@ -26990,6 +27022,29 @@ agent "import/omp/fixture" {{
     }
 
     #[tokio::test]
+    async fn a_completed_identity_measurement_is_counted_as_a_launch_identity_wake() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let wakes = || smallclaims::performance::snapshot()["reconciler_wakes"].as_array().unwrap().iter()
+            .find(|row| row["cause"] == "launch identity").map_or(0, |row| row["count"].as_u64().unwrap());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        reconciler.launch_input_wake();
+        let root = tempfile::tempdir().unwrap();
+        let provider = root.path().join("provider");
+        std::fs::write(&provider, "provider bytes").unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = wakes();
+        // An unmeasured executable is measured in the background, and its completion is the wake.
+        assert!(fractal_drivers::harness_admission::executable_identity_ready_with(&provider, &|_| unreachable!())
+            .unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await
+            .expect("a completed measurement must wake reconciliation");
+        fractal_drivers::harness_admission::identity_measurements_settled();
+        assert!(wakes() > before, "the measurement's wake was not counted as a launch identity wake");
+    }
+
+    #[tokio::test]
     async fn launch_input_watchers_follow_recursive_rules_and_missing_inputs() {
         let root = tempfile::tempdir().unwrap();
         let notify = Arc::new(Notify::new());
@@ -27094,6 +27149,40 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("the replacement's subsequent mutations must remain watched");
+
+        // The old inner-directory lease is still held when both acquisitions run.
+        std::fs::remove_dir_all(root.path().join("outer")).unwrap();
+        let independent = tempfile::tempdir().unwrap();
+        reconciler
+            .ensure_file_watch("independent", &independent.path().join("gate.txt"))
+            .unwrap();
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        assert_eq!(
+            reconciler.file_watchers.lock().unwrap()[&subject].directory,
+            root.path().canonicalize().unwrap()
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("recreating a removed parent must wake reconciliation");
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::write(&path, "recreated").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the recreated target must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "recreated"
+        );
     }
 
     #[tokio::test]
@@ -34706,6 +34795,153 @@ version 2
     }
 
     #[test]
+    fn nested_loops_keep_round_results_and_feedback_separate() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "left-result" { kind "custom.test.loop-result"; }
+resource "right-result" { kind "custom.test.loop-result"; }
+mission "collision" state="ready" {
+  goal "Keep nested histories separate."
+  completion { when "all-steps-exhausted"; }
+  step "left" { mission "left-inner" { goal "Left."; completion { when "all-steps-exhausted"; };
+    loop "repeat" { max-rounds 2; until { gate "left-ready" { field "state" "resource/left-result" is "ready"; }; }
+      round { completion { when "all-steps-exhausted"; }; step "work" { agentless; goal "Left round."; }; }
+    }
+  }; }
+  step "right" { mission "right-inner" { goal "Right."; completion { when "all-steps-exhausted"; };
+    loop "repeat" { max-rounds 2; until { gate "right-ready" { field "state" "resource/right-result" is "ready"; }; }
+      round { completion { when "all-steps-exhausted"; }; step "work" { agentless; goal "Right round."; }; }
+    }
+  }; }
+}"#,
+            "nested-loop-collision",
+        );
+        let mut request = MissionRunRequest {
+            mission: "collision".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "nested-loop-collision-run".into(),
+        };
+        let run = store.create_mission_run(&request).unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..24 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let generation = run.generation.strip_prefix("run-generation/").unwrap();
+        let mut feedbacks = Vec::new();
+        for (path, own_gate, other_gate) in [
+            ("left/left-inner/repeat", "left-ready", "right-ready"),
+            ("right/right-inner/repeat", "right-ready", "left-ready"),
+        ] {
+            let subject = format!("loop-run/{generation}/{path}");
+            let results = store
+                .claims_for(&subject, Some("loop.round-result"))
+                .unwrap();
+            let first = results
+                .iter()
+                .find(|claim| claim.body.pointer("/fields/round") == Some(&Value::from(1)))
+                .expect("each nested loop records its own first-round result");
+            let [child, second] = [1, 2].map(|round| {
+                store
+                    .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
+                        "loop-round:step-run/{generation}/{path}:{round}"
+                    )))
+                    .unwrap()
+                    .unwrap()
+            });
+            assert_eq!(
+                first
+                    .body
+                    .pointer("/fields/mission_run")
+                    .and_then(Value::as_str),
+                Some(child.subject.as_str())
+            );
+            let feedback = &second.inputs[LOOP_FEEDBACK_INPUT].value;
+            let (name, hash) = feedback.rsplit_once('@').unwrap();
+            let document = store.get_document(name, hash).unwrap().unwrap();
+            let body = String::from_utf8(document).unwrap();
+            assert!(body.contains(own_gate), "{body}");
+            assert!(!body.contains(other_gate), "{body}");
+            assert_eq!(
+                name,
+                format!("doc/loop-feedback/{generation}/{path}/1/outcome")
+            );
+            feedbacks.push(feedback.clone());
+        }
+        assert_ne!(feedbacks[0], feedbacks[1]);
+        let old_subject = format!("loop-run/{generation}/repeat");
+        assert!(
+            store
+                .claims_for(&old_subject, Some("loop.round-result"))
+                .unwrap()
+                .is_empty()
+        );
+        let id = "x".repeat(150);
+        let leaf = "y".repeat(62);
+        let source = format!(
+            r#"version 2
+mission "long" state="ready" {{ goal "Long.";
+  step "{id}" {{ mission "a" {{ goal "A.";
+    step "{id}" {{ mission "b" {{ goal "B.";
+      step "{leaf}" {{ mission "c" {{ goal "C.";
+        loop "repeat" {{ max-rounds 1; round {{ completion {{ when "all-steps-exhausted"; }}; }}; }}
+      }}; }}; }}; }}; }}; }}
+}}"#
+        );
+        apply_source(&store, &source, "long-loop");
+        request.mission = "long".into();
+        request.idempotency_key = "long-loop-run".into();
+        let long = store.create_mission_run(&request).unwrap();
+        for _ in 0..16 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let generation = long.generation.strip_prefix("run-generation/").unwrap();
+        // The unchanged legacy writer admits both the name and its boundary name@hash reference.
+        let name =
+            format!("doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/1/outcome");
+        let hash = store.latest_document_hash(&name).unwrap().unwrap();
+        assert!(format!("{name}@{hash}").len() < 512);
+        let subject = format!("loop-run/{generation}/{id}/a/{id}/b/{leaf}/c/repeat");
+        assert!(
+            !store
+                .claims_for(&subject, Some("loop.round-result"))
+                .unwrap()
+                .is_empty()
+        );
+        // Every retry fits, including the full u32 attempt width beyond max-rounds.
+        let name = format!(
+            "doc/loop-feedback/{generation}/{id}/a/{id}/b/{leaf}/c/repeat/{}/outcome",
+            u32::MAX
+        );
+        let document = store
+            .put_document(&name, b"{}", &None, "max-attempt-outcome")
+            .unwrap();
+        let reference = format!("{}@{}", document.name, document.hash);
+        assert_eq!(reference.len(), 512);
+        reconciler
+            .record_once(
+                &subject,
+                "loop.state",
+                BTreeMap::from([
+                    ("status".into(), Value::String("failed".into())),
+                    ("round".into(), Value::from(u32::MAX)),
+                    ("feedback".into(), Value::String(reference)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn a_first_class_loop_runs_bounded_child_missions_until_its_gate_passes() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let source = r#"
@@ -34789,6 +35025,10 @@ mission "loop" state="ready" {
         assert_eq!(completed.loops[0].status, "completed");
         assert_eq!(completed.loops[0].round, 2);
         assert_eq!(completed.loops[0].results.len(), 2);
+        let reference = completed.loops[0].results[0].feedback.as_ref().unwrap();
+        let (name, _) = reference.rsplit_once('@').unwrap();
+        let generation = run.generation.strip_prefix("run-generation/").unwrap();
+        assert_eq!(name, format!("doc/loop-feedback/{generation}/improve/1"));
     }
 
     #[test]
@@ -37626,7 +37866,7 @@ version 2
 
         // The other run's work ends, and the stop goes ahead.
         let elsewhere = store
-            .seat_work_in_other_runs(&format!("agent/{run_id}/worker"), &run_id)
+            .seat_work_in_other_runs(&format!("agent/{run_id}/worker"), &run_id, None)
             .unwrap();
         assert_eq!(elsewhere.len(), 1);
         store
@@ -37635,6 +37875,244 @@ version 2
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
         assert!(store.fault_items(None).unwrap().is_empty());
+    }
+
+    /// #4500: only what a seat held when its stop was declared keeps it running. Mail that keeps
+    /// arriving, and work in a run started after the stop, neither extend the hold nor can be
+    /// claimed, so the seat stops once its earlier mail and work are done. The later mail stays in
+    /// its mailbox, unread, for the seat's next incarnation.
+    #[test]
+    fn a_seat_that_keeps_getting_mail_after_its_stop_stops_once_its_earlier_holdings_drain() {
+        use crate::AdhocWorkStore;
+        let send = |store: &Store, seat: &str, name: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("message/{name}"),
+                    kind: "message.sent".into(),
+                    actor: Some("agent/sender".into()),
+                    fields: BTreeMap::from([
+                        ("from".into(), Value::String("agent/sender".into())),
+                        ("to".into(), Value::String(seat.into())),
+                        ("content".into(), Value::String(format!("{name}: one more unit"))),
+                        ("status".into(), Value::String("sent".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("send-{name}")),
+                })
+                .unwrap();
+        };
+        let start_run = |store: &Store, seat: &str, mission: &str| {
+            apply_source(
+                store,
+                &format!(
+                    r#"
+version 2
+
+  mission "{mission}" state="ready" {{
+    goal "Give the seat work in another run."
+    step "unit" {{ assigned-to "{seat}"; title "Work in another run" }}
+  }}
+
+"#
+                ),
+                &format!("publish-{mission}"),
+            );
+            let run = store
+                .create_mission_run(&MissionRunRequest {
+                    mission: mission.into(),
+                    revision: None,
+                    workspace: "/tmp".into(),
+                    requester: Some("person/test".into()),
+                    mode: None,
+                    inputs: BTreeMap::new(),
+                    idempotency_key: format!("run-{mission}"),
+                })
+                .unwrap();
+            store.mission_run(&run.id).unwrap().unwrap().steps[0].subject.clone()
+        };
+        let earlier_unit = std::cell::RefCell::new(String::new());
+        let (store, runtime, reconciler, run_id, runtime_id) =
+            finished_run_with_a_live_seat(|store, seat| {
+                send(store, seat, "early");
+                *earlier_unit.borrow_mut() = start_run(store, seat, "earlier");
+            });
+        let seat = format!("agent/{run_id}/worker");
+        let gate = store
+            .mission_run(&run_id)
+            .unwrap()
+            .unwrap()
+            .steps
+            .into_iter()
+            .find(|step| step.step == "gate")
+            .unwrap();
+        store.set_step_state(&gate.subject, "completed", None).unwrap();
+        for _ in 0..10 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert!(store.desired_subjects().unwrap().iter().any(|desired| {
+            desired.subject == seat && desired.kind == "stop"
+        }));
+        assert!(runtime.stops.lock().unwrap().is_empty(), "the seat holds its earlier mail");
+
+        // After the stop: more mail, and a run that assigns the seat new work.
+        let later_unit = start_run(&store, &seat, "later");
+        for round in 0..3 {
+            send(&store, &seat, &format!("late-{round}"));
+            reconciler.reconcile_once().unwrap();
+        }
+        let cut = store.seat_stop_cut(&seat).unwrap().map(|(_, index)| index);
+        assert!(cut.is_some());
+        assert_eq!(
+            store.seat_work_in_other_runs(&seat, &run_id, cut).unwrap(),
+            vec![earlier_unit.borrow().clone()],
+            "only the run that existed at the stop holds the seat"
+        );
+        let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
+            actor: Some(seat.clone()),
+            incarnation: Some("retained-incarnation".into()),
+            summary: None,
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: key.into(),
+        };
+        let refused = store
+            .work_action(&later_unit, "claim", &request("claim-later"))
+            .unwrap_err();
+        assert_eq!(refused.code, "seat-stopping", "{refused:?}");
+        let refused = store
+            .start_work(&crate::model::WorkStartRequest {
+                actor: seat.clone(),
+                title: "One more unit".into(),
+                idempotency_key: "start-after-stop".into(),
+            })
+            .unwrap_err();
+        assert_eq!(refused.code, "seat-stopping", "{refused:?}");
+
+        // The earlier holdings drain: the earlier mail is read and the earlier work is finished.
+        for (kind, status) in [
+            ("message.staged", "staged"),
+            ("message.delivered", "delivered"),
+            ("message.read", "read"),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "message/early".into(),
+                    kind: kind.into(),
+                    actor: Some(seat.clone()),
+                    fields: BTreeMap::from([("status".into(), Value::String(status.into()))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("early-{status}")),
+                })
+                .unwrap();
+        }
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty(), "the seat holds its earlier work");
+        store
+            .work_action(&earlier_unit.borrow(), "claim", &request("claim-earlier"))
+            .unwrap();
+        store
+            .set_step_state(&earlier_unit.borrow(), "completed", None)
+            .unwrap();
+        send(&store, &seat, "late-final");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
+
+        // The later mail is still there, unread, for whichever incarnation comes next.
+        let kept = store
+            .messages(Some(&seat), false)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.status == "sent")
+            .map(|message| message.subject)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            kept,
+            ["late-0", "late-1", "late-2", "late-final"]
+                .map(|name| format!("message/{name}"))
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// A stop that a person declares has no run to finish work for: the seat can claim nothing,
+    /// but work it had already claimed can still report and complete.
+    #[test]
+    fn a_seat_a_person_stopped_claims_no_work_but_finishes_what_it_holds() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+
+  agent "example/worker" { workspace "/tmp"; command "true"; restart "never" }
+  mission "pair" state="ready" {
+    goal "Two units for one seat."
+    step "first" { assigned-to "agent/example/worker"; title "Claimed before the stop" }
+    step "second" { assigned-to "agent/example/worker"; title "Not yet claimed" }
+  }
+
+"#,
+            "publish-pair",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "pair".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-pair".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let member = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|desired| desired.subject == "agent/example/worker")
+            .and_then(|desired| desired.member)
+            .unwrap();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: member.runtime_id,
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("pair-incarnation".into()),
+        });
+        reconciler.reconcile_once().unwrap();
+        let steps = store.mission_run(&run.id).unwrap().unwrap().steps;
+        let step = |name: &str| steps.iter().find(|step| step.step == name).unwrap().subject.clone();
+        let seat = "agent/example/worker";
+        let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
+            actor: Some(seat.into()),
+            incarnation: Some("pair-incarnation".into()),
+            summary: Some("done".into()),
+            reason: None,
+            evidence: vec!["doc/example/result".into()],
+            idempotency_key: key.into(),
+        };
+        store.work_action(&step("first"), "claim", &request("claim-first")).unwrap();
+        apply_source(&store, "version 2\nstop \"agent/example/worker\"\n", "stop-worker");
+        assert_eq!(store.seat_stop_cut(seat).unwrap().map(|(owner, _)| owner), Some(None));
+
+        let refused = store
+            .work_action(&step("second"), "claim", &request("claim-second"))
+            .unwrap_err();
+        assert_eq!(refused.code, "seat-stopping", "{refused:?}");
+        store.work_action(&step("first"), "progress", &request("progress-first")).unwrap();
+        store.work_action(&step("first"), "complete", &request("complete-first")).unwrap();
     }
 
     /// A run whose final step stops a seat that holds an unread message, with the seat live.

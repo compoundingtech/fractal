@@ -202,17 +202,19 @@ mod tests {
     #[test]
     fn launch_inputs_cover_missing_imports_render_sources_and_rules() {
         let root = tempfile::tempdir().unwrap();
+        // Imported files are resolved canonically; use the same spelling for the fixture.
+        let workspace = root.path().canonicalize().unwrap();
         let store = Store::open_memory("node").unwrap();
-        let mut desired = declaration(root.path());
-        let source = root.path().join("source.md");
-        let imported = root.path().join("imported.md");
+        let mut desired = declaration(&workspace);
+        let source = workspace.join("source.md");
+        let imported = workspace.join("imported.md");
         std::fs::write(&source, "@imported.md @absent.md").unwrap();
         std::fs::write(&imported, "@deeper.md").unwrap();
-        std::fs::create_dir_all(root.path().join(".claude/rules/nested")).unwrap();
+        std::fs::create_dir_all(workspace.join(".claude/rules/nested")).unwrap();
         render(&mut desired, &source, "AGENTS.md");
         let (_, inputs) = capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), false).unwrap();
-        for path in [&source, &imported, &root.path().join("absent.md"), &root.path().join("deeper.md"),
-            &root.path().join("CLAUDE.local.md"), &root.path().join(".claude/rules/nested")] {
+        for path in [&source, &imported, &workspace.join("absent.md"), &workspace.join("deeper.md"),
+            &workspace.join("CLAUDE.local.md"), &workspace.join(".claude/rules/nested")] {
             assert!(inputs.contains(path), "missing dependency {}", path.display());
         }
         std::fs::remove_file(&source).unwrap();
@@ -220,6 +222,26 @@ mod tests {
         assert!(capture_effective_observed(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), false,
             &|path| { seen.borrow_mut().insert(path.to_owned()); Ok(()) }).is_err());
         assert!(seen.into_inner().contains(&source), "failed render input must remain watched");
+    }
+
+    #[test]
+    fn imports_below_a_symlinked_workspace_watch_missing_transitive_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&workspace).unwrap();
+        std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "@imported.md").unwrap();
+        std::fs::write(workspace.join("imported.md"), "@deeper.md").unwrap();
+        let store = Store::open_memory("node").unwrap();
+        let desired = declaration(&alias);
+        let (before, inputs) =
+            capture_effective(&store, &desired, &BTreeMap::new(), &BTreeMap::new(), false).unwrap();
+        let deeper = workspace.canonicalize().unwrap().join("deeper.md");
+        assert!(inputs.contains(&deeper), "missing transitive import must remain watched");
+        std::fs::write(deeper, "new instructions").unwrap();
+        let after = capture(&store, &desired, &BTreeMap::new()).unwrap();
+        assert_eq!(after.drift(&before), Some(Drift { prompt: true, binary: false }));
     }
 
 

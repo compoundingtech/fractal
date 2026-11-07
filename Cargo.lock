@@ -1964,10 +1964,6 @@ dependencies = [
  "kdl",
  "libc",
  "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1977,7 +1973,6 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "tungstenite 0.30.0",
  "wat",
@@ -2478,6 +2473,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-sidebar"
+version = "0.1.0"
+dependencies = [
+ "fractal-client",
+ "fractal-schema",
+ "fractal-sidebar",
+ "jsonschema",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fractal-socket-discovery"
 version = "0.1.0"
 dependencies = [
@@ -2617,6 +2625,7 @@ dependencies = [
  "fractal-feed",
  "fractal-mission-ui",
  "fractal-schema",
+ "fractal-sidebar",
  "fractal-terminal-direct",
  "fractal-ui-model",
  "image",
@@ -2646,7 +2655,6 @@ version = "0.1.0"
 dependencies = [
  "fractal-client",
  "fractal-schema",
- "jsonschema",
  "serde",
  "serde_json",
 ]

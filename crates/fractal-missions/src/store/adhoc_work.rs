@@ -28,6 +28,9 @@ pub fn validate_recipient(
     if input.to.starts_with("agent/")
         && !person_work::declaration_live(tx, &input.to).map_err(internal)?
     {
+        if super::stop_intake::stop_cut(tx, &input.to).map_err(internal)?.is_some() {
+            return Err(super::stop_intake::stopping(&input.to));
+        }
         return Err(FractalError::new(
             "missing-handoff-recipient",
             "the recipient seat needs a live declaration",
@@ -339,6 +342,9 @@ impl AdhocWorkStore for Store {
                 return person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the work is no longer retained"));
             }
             if !person_work::declaration_live(tx, &input.actor).map_err(internal)? {
+                if super::stop_intake::stop_cut(tx, &input.actor).map_err(internal)?.is_some() {
+                    return Err(super::stop_intake::stopping(&input.actor));
+                }
                 return Err(FractalError::new("missing-work-actor", "the calling seat needs a live declaration"));
             }
             let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner=?1 AND status IN ('claimed','working','verifying','blocked') AND CAST(lease_expires_at_unix_ms AS INTEGER)>?2)", params![input.actor, now_ms() as i64], |row| row.get(0)).map_err(internal)?;

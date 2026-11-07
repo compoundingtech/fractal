@@ -10,11 +10,9 @@
 //! provider wrapper supplies terminal fencing. The wrapper omits catalog status transport and
 //! removes inherited catalog environment values before launching the provider.
 //!
-//! The fork between the two harnesses is a [`HarnessKind`] descriptor, mirroring the
-//! [`crate::pi_channel::ChannelKind`] fork the family's channel side already uses: the same fork
-//! solved the same way twice rather than two different ways. What stays in each harness module is
-//! what is genuinely per-harness — its module doc, its extension asset, its channel env NAMES (the
-//! whole point of two sets is that an omp seat can never adopt a stray pi configuration), and, for
+//! The fork between the two harnesses is a [`HarnessKind`] descriptor. What stays in each harness
+//! module is what is genuinely per-harness — its module doc, its extension asset, its channel env
+//! NAMES (the whole point of two sets is that an omp seat can never adopt a stray pi configuration), and, for
 //! omp, its version gate.
 
 use std::path::Path;

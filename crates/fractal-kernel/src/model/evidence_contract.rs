@@ -55,8 +55,16 @@ impl EvidenceType {
 
 impl EvidenceContract {
     pub fn new(fields: impl IntoIterator<Item = (String, EvidenceSpec)>) -> Result<Self, FractalError> {
+        Self::try_new(fields.into_iter().map(Ok))
+    }
+
+    /// Decode and validate fields in one pass, without an intermediate collection.
+    pub fn try_new(
+        fields: impl IntoIterator<Item = Result<(String, EvidenceSpec), FractalError>>,
+    ) -> Result<Self, FractalError> {
         let mut evidence_contract = BTreeMap::new();
-        for (name, spec) in fields {
+        for field in fields {
+            let (name, spec) = field?;
             if !valid_word(&name) {
                 return Err(invalid(format!("invalid evidence field name `{name}`")));
             }

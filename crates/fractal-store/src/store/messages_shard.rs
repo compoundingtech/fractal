@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 pub mod mailbox_reads;
 pub mod stream_reads;
+pub mod stream_operations;
 
 /// The shard's ID, its directory under the store root and its name on the replication wire.
 pub const SHARD_ID: &str = "messages";
@@ -655,6 +656,7 @@ impl Runtime for MessagesRuntime {
     fn create_schema(&self, connection: &Connection) -> anyhow::Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbed1ce264b3a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_operations::LOCAL_SCHEMA)?;
         Ok(())
     }
 
@@ -694,11 +696,19 @@ impl Runtime for MessagesRuntime {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
         validate_input(input)?;
+        // An idempotency key replays as it does in the graph: the same request returns the claim it
+        // wrote, and another request under the key is refused.
+        let operation = smallclaims::store::claim_operation(input)?;
         let body = json!({ "fields": input.fields, "evidence": input.evidence });
         store
             .connection
             .batched(|transaction| {
-                append_claim_record_tx(
+                if let Some((operation_id, request_digest)) = &operation
+                    && let Some(claim) = stream_operations::replay_tx(transaction, operation_id, request_digest)?
+                {
+                    return Ok((claim, false));
+                }
+                let claim = append_claim_record_tx(
                     transaction,
                     &store.origin,
                     &input.subject,
@@ -708,8 +718,12 @@ impl Runtime for MessagesRuntime {
                     &[],
                     None,
                 )
-                .map(|claim| (claim, true))
-                .map_err(smallclaims::error::typed)
+                .map_err(smallclaims::error::typed)?;
+                if let Some((operation_id, request_digest)) = &operation {
+                    stream_operations::record_tx(transaction, operation_id, request_digest, &claim.id)
+                        .map_err(smallclaims::error::typed)?;
+                }
+                Ok((claim, true))
             })
             .map_err(|error| FractalError::new("internal", error))?
     }
@@ -1240,9 +1254,13 @@ mod tests {
         assert_eq!(page.len(), 3);
         assert_eq!(next, None);
 
-        // The unpaged and delivery readers stay on the graph until they learn stream items.
+        // The unpaged reader lists the stream items after the graph's mail; the delivery reader
+        // stays on the graph (mailbox_reads.rs delivers stream mail).
         let unpaged = graph.messages_through(Some("agent/cedar"), false, through).unwrap();
-        assert_eq!(unpaged.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["message/00000000000000a1"]);
+        assert_eq!(
+            unpaged.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(),
+            ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2"]
+        );
         let delivered = graph.messages_through_inner(Some("agent/cedar"), false, through, true).unwrap();
         assert_eq!(delivered.len(), 1);
 

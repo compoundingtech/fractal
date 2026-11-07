@@ -7053,6 +7053,28 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Search once for batches an older writer left behind the sealing frontier, in the graph and
+/// its messages shard, and seal what it finds. Exchanges seal only after the frontier and never
+/// wait for this walk of every batch; a skipped batch is offered from the next exchange on.
+async fn recover_sealing_frontier(store: &Arc<Store>) {
+    let recovering = store.clone();
+    let recovered = store.connection.write_workers().spawn_blocking(move || {
+        fractal_daemon::task_cpu::profiled_blocking("replication.sealing_recovery", || {
+            recovering.seal_local_batches()?;
+            if let Some(shard) = fractal_store::store::messages_shard::shard(&recovering) {
+                shard.seal_local_batches()?;
+            }
+            anyhow::Ok(())
+        })
+    })
+    .await;
+    match recovered {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => stderr_message("fractal", format_args!("sealing frontier recovery failed: {error:#}")),
+        Err(error) => stderr_message("fractal", format_args!("sealing frontier recovery stopped: {error}")),
+    }
+}
+
 /// Audit the operation projection on a blocking thread. The audit reads in pages of at most
 /// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
 /// run and never delays a WAL restart for long. The store keeps the result for doctor.
@@ -7358,7 +7380,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
-                    "messages_stream": u8::from(messages_shard.is_ok())}),
+                    "messages_stream": u8::from(messages_shard.is_ok()),
+                    // Counts its stream mail in its idle, unread, held and usage indexes. It
+                    // says nothing about routing: `messages_stream_inbox` will (4c-2a-3).
+                    "messages_stream_mirror": u8::from(messages_shard.is_ok()),
+                    // Lists its stream mail in client message pages (GET /v1/client/messages)
+                    // and its other mail lists. Informational too.
+                    "messages_stream_selectors": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -7484,6 +7512,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.gate_runner_history", copy_gate_runner_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
         std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
@@ -7492,6 +7521,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
+    spawn_stream_mirror(store.clone(), event_notify.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -7545,9 +7575,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }));
     // Doctor reports the envelopes admitted before this node knew better from this count, made
     // at startup and then every period, and again when doctor finds membership moved since.
-    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
-    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
-    // often doctor runs while fleet rows replicate.
+    // The first count waits 30 s, unless doctor asks for it sooner. Counts doctor asks for come
+    // at most once a minute, however often doctor runs while fleet rows replicate.
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
@@ -7568,17 +7597,18 @@ async fn run_up(args: UpArgs) -> Result<()> {
             }
         }));
     }
-    // The first diagnostic report and delayed repair share one operation audit. After it the
-    // daemon audits again every period, and after any repair, so doctor reports a recent audit
-    // instead of reading every operation itself. No request waits for an audit.
-    if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
+    // The first diagnostic report reads the last audit and never makes one. After the reconnect
+    // window the daemon searches once for batches older writers left unsealed, then audits the
+    // operation projection, one after the other, and audits again every period and after any
+    // repair, so doctor reports a recent audit instead of reading every operation itself. No
+    // request waits for either.
+    fractal_daemon::api::start_operation_report(&state);
+    {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            let mut audit = match audit.await {
-                Ok(audit) => audit,
-                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
-            };
+            tokio::time::sleep(fractal_daemon::store::STARTUP_MAINTENANCE_DELAY).await;
+            recover_sealing_frontier(&store).await;
+            let mut audit = audit_operations(&store).await;
             loop {
                 if repair_operation_drift(&store, audit).await {
                     // Audit once more at once, so doctor reports what the repair left; anything
@@ -7734,10 +7764,38 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    // Leave the replication inventory for the next start, which extends it instead of reading
+    // every envelope while its peers reconnect. A second stop signal skips it.
+    let saving = store.clone();
+    tokio::select! {
+        saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
+            stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
+        },
+        _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
+        _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
+    }
     telemetry.shutdown();
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
+    }
+}
+
+/// Save the graph's replication inventory and its messages shard's, each when nothing but
+/// appends changed it since this start; a store that cannot is read in full by the next start.
+fn save_replication_inventories(store: &Arc<Store>) {
+    let said = |name: &str, saved: anyhow::Result<smallclaims::store::saved_inventory::InventorySave>| match saved {
+        Ok(smallclaims::store::saved_inventory::InventorySave::Saved) => {
+            stderr_message("fractal", format_args!("saved the {name}'s replication inventory for the next start"));
+        }
+        Ok(smallclaims::store::saved_inventory::InventorySave::Skipped(reason)) => {
+            stderr_message("fractal", format_args!("the {name}'s replication inventory was not saved, so the next start reads it from the store: {reason}"));
+        }
+        Err(error) => stderr_message("fractal", format_args!("saving the {name}'s replication inventory failed: {error:#}")),
+    };
+    said("graph", store.save_replication_inventory());
+    if let Some(shard) = fractal_store::store::messages_shard::shard(store) {
+        said("messages shard", shard.save_replication_inventory());
     }
 }
 
@@ -14181,9 +14239,15 @@ fn render_client_agent(
         Some(since) => {
             let _ = writeln!(output, "STATE        down · no session since {since}");
         }
-        None => {
-            let _ = writeln!(output, "STATE        {}", agent.state);
-        }
+        None => match agent.stopping.as_ref() {
+            Some(stopping) => {
+                let held = stopping.held.as_deref().map(|held| format!(" · held: {held}")).unwrap_or_default();
+                let _ = writeln!(output, "STATE        stopping{held}");
+            }
+            None => {
+                let _ = writeln!(output, "STATE        {}", agent.state);
+            }
+        },
     }
     if let Some(admission) = agent.extra.get("seat_admission") {
         let _ = writeln!(output, "ADMISSION    {}", agents_cli::admission_start_message(&agent.header.id, admission));
@@ -14541,7 +14605,11 @@ fn render_client_agents(
                 } else {
                     "├─"
                 };
-                let state = agent.harness_state.as_deref().unwrap_or(&agent.state);
+                let state = if agent.stopping.is_some() {
+                    "stopping"
+                } else {
+                    agent.harness_state.as_deref().unwrap_or(&agent.state)
+                };
                 let name = agent
                     .header
                     .id
@@ -20811,6 +20879,30 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
     }
 }
 
+/// Copy the gate requests older than the live gate-runner triggers, a page per writer loan with
+/// a pause between, after the API serves. Until it completes, the reconciler lists gate runners
+/// from the claims.
+async fn copy_gate_runner_history(store: Arc<Store>) {
+    tokio::time::sleep(fractal_daemon::store::gate_runners::BACKFILL_DELAY).await;
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.gate_runner_history", || {
+                page_store.advance_gate_runner_backfill()
+            })
+        })
+        .await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(50)).await,
+            error => {
+                stderr_message("fractal", format_args!("gate runner history copy failed: {error:?}"));
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
 /// One paced scan of the claims that predate the stop-deferral trigger, read on a reader
 /// connection. Until it commits, retained-stop reads look those claims up directly.
 async fn copy_stop_deferral_history(store: Arc<Store>) {
@@ -20874,6 +20966,57 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                     stderr_message("fractal", format_args!("publication evidence status failed: {error:?}"));
                     return;
                 }
+            }
+        }
+    }));
+}
+
+/// Mirror the messages shard into the graph's mail indexes (store/stream_mirror.rs): once at
+/// start, which catches up on what a crash left unmirrored, then after each shard commit. A
+/// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
+/// after a pause; the cursors keep what it already mirrored.
+fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
+    const RETRY: Duration = Duration::from_secs(30);
+    let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
+        return;
+    };
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = shard.observe_commits(move |_| {
+        changed.send_replace(());
+    });
+    tokio::spawn(fractal_daemon::task_cpu::account("messages.stream_mirror", async move {
+        let _observer = observer;
+        loop {
+            receiver.borrow_and_update();
+            let mirror_store = store.clone();
+            let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {
+                    fractal_store::store::stream_mirror::mirror(&mirror_store)
+                })
+            })
+            .await;
+            let failed = match mirrored {
+                // The shard's own wake (stream_admitted) can reach a waiter before this commit, so
+                // a reader it woke may have missed the item's selectors: wake waiters again.
+                Ok(Ok(added)) => {
+                    if added > 0 {
+                        event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+                    }
+                    false
+                }
+                Ok(Err(error)) => {
+                    stderr_message("fractal", format_args!("mirroring the messages stream failed: {error:#}"));
+                    true
+                }
+                Err(error) => {
+                    stderr_message("fractal", format_args!("mirroring the messages stream stopped: {error}"));
+                    true
+                }
+            };
+            if failed {
+                tokio::time::sleep(RETRY).await;
+            } else if receiver.changed().await.is_err() {
+                return;
             }
         }
     }));

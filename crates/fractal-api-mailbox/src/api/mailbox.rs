@@ -479,8 +479,12 @@ impl MailboxOrder {
     }
 }
 
-/// The seat's rollout intake hold, read at most once per update; `None` until first needed.
-type IntakeHold = Option<Option<crate::rollout::Operation>>;
+/// The seat's intake holds, read at most once per update; `None` until first needed: a draining
+/// rollout's operation, and the store index of the stop the seat's run declared. A seat still
+/// running past that stop reads only the graph mail sent before it; later mail waits for the
+/// seat's next incarnation (`stopping_seat`). A stream item's index is past every graph index, so
+/// stream items wait too; no stream item holds a stopping seat either.
+type IntakeHold = Option<(Option<crate::rollout::Operation>, Option<u64>)>;
 
 type SnapshotUpdate = (crate::store::MailboxWatermark, Snapshot, bool, MaintenanceIds);
 
@@ -526,7 +530,8 @@ fn raw_snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
             .next();
         let messages = if binding.component == "delivery" {
             // The graph's mail is pinned at `through`; the seat's open stream items follow it.
-            let mut messages = store.messages_for_delivery_through(&binding.subject, through)?;
+            // Read mail is never offered, so its views are not built.
+            let mut messages = store.offerable_messages_for_delivery_through(&binding.subject, through)?;
             messages.extend(crate::store::messages_shard::mailbox_reads::delivery_items(
                 store,
                 &binding.subject,
@@ -580,9 +585,16 @@ fn filter_messages(
         // Every message here is to this seat, so one hold read serves the whole update.
         if message.status != "sent" || {
             if hold.is_none() {
-                *hold = Some(store.rollout_intake_hold(&binding.subject)?);
+                *hold = Some((
+                    store.rollout_intake_hold(&binding.subject)?,
+                    store.stopping_seat_cut(&binding.subject)?,
+                ));
             }
-            store.rollout_message_allowed_under(hold.as_ref().and_then(Option::as_ref), &message)?
+            let (operation, stop) = hold.as_ref().map_or((None, None), |(operation, stop)| {
+                (operation.as_ref(), *stop)
+            });
+            stop.is_none_or(|cut| message.created_index < cut)
+                && store.rollout_message_allowed_under(operation, &message)?
         } {
             allowed.push(message);
         } else {
@@ -3806,6 +3818,77 @@ mod tests {
     #[tokio::test]
     async fn argv_desired_change_wakes_and_fences_bound_stream() {
         argv_changed_stream_control(false).await;
+    }
+
+    /// A seat its run's end stopped, held by mail sent before the stop, keeps its stream: it is
+    /// offered that mail, and not mail sent after the stop, which waits for its next incarnation.
+    #[tokio::test]
+    async fn a_stopping_seat_reads_its_earlier_mail_and_is_not_offered_later_mail() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.store = Arc::new(Store::open_memory("node").unwrap());
+        let name = "eval.stopping-reader";
+        let subject = format!("agent/{name}");
+        let declared = format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; argv \"python3\" \"probe\"; }}");
+        let intent = crate::graph::parse_intent(&declared, "node").unwrap();
+        state.store.apply_internal(&intent, "stopping-reader-declared").unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "runtime.observed".into(), actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([("status".into(), json!("running")), ("incarnation_id".into(), json!("current")),
+                ("runtime_id".into(), json!("stopping-reader")), ("host".into(), json!("node"))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let member = state.store.desired_subjects_named(std::slice::from_ref(&subject)).unwrap().remove(0).member.unwrap();
+        let fence = state.store.bind_argv_mailbox_checked(&Fence::new(&subject, "current", "delivery"), &member, &|| Ok(())).unwrap();
+        let mut stream = controlled_stream(state.clone(), &fence, &root.path().join("stopping.sock")).await;
+        let claim = |message: &str, kind: &str, actor: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: format!("message/{message}"), kind: kind.into(), actor: Some(actor.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            signal_changed(&state);
+        };
+        let send = |message: &str| claim(message, "message.sent", "person/fixture", json!({
+            "status": "sent", "from": "person/fixture", "to": subject, "content": "Fixture mail."}));
+        // The next mailbox the stream offers that equals `expected`; a fence or later mail fails.
+        async fn offered(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>, expected: &[&str]) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match next(socket).await {
+                        Frame::Mailbox { messages } => {
+                            let subjects = messages.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>();
+                            assert!(!subjects.contains(&"message/after-stop"), "later mail was offered: {subjects:?}");
+                            if subjects == expected { return; }
+                        }
+                        Frame::Fenced { reason } => panic!("the stopping seat's stream was fenced: {reason}"),
+                        _ => {}
+                    }
+                }
+            }).await.expect("the stream did not offer the expected mailbox");
+        }
+        send("before-stop");
+        offered(&mut stream.socket, &["message/before-stop"]).await;
+        let mut stop = crate::graph::parse_intent(&format!("version 2\nstop {subject:?}"), "node").unwrap();
+        for stop in stop.subjects.values_mut() {
+            stop.owner_run = Some("mission-run/ended-run".into());
+        }
+        state.store.apply_internal(&stop, "stopping-reader-stopped").unwrap();
+        signal_changed(&state);
+        send("after-stop");
+        // The full snapshot applies the stream's own filter: only the earlier mail is offered.
+        let (_, mut messages) = raw_snapshot(&state.store, &fence).unwrap();
+        filter_messages(&state.store, &fence, &mut messages, &mut Default::default(), &mut None).unwrap();
+        assert_eq!(messages.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(), ["message/before-stop"]);
+        // Reading it drains the hold; the stream stays open and still offers nothing later.
+        claim("before-stop", "message.delivered", &subject, json!({"status": "delivered"}));
+        claim("before-stop", "message.read", &subject, json!({"status": "read"}));
+        offered(&mut stream.socket, &[]).await;
+        assert_eq!(
+            state.store.message("message/after-stop").unwrap().unwrap().status,
+            "sent",
+            "later mail waits for the seat's next incarnation"
+        );
     }
 
     async fn argv_changed_stream_control(hold_dirty: bool) {

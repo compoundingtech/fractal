@@ -792,6 +792,18 @@ def prepare_targets(target, owned=False):
         trim(path, owned=owned and in_pool(path), used_gb=used)
 
 
+def build_beside(environment, target, directory):
+    """Point a check that builds at `target` (when st-test chose one) and keep cargo's intermediates there too. A host whose cargo
+    config sets build-dir (for example /srv/build/cargo/{workspace-path-hash}) puts every unit's rmeta and dep-info outside the
+    target. Nothing holds that directory for the run: it was removed between a run's clippy build and its dep-info check, so the
+    check found no dep-info and linux-clippy was refused (2026-11-06). Beside the target, the intermediates are under the tree's lock
+    and the pool's cap, as on a host without build-dir. A build-dir the caller set is replaced: what the checks read must be where
+    they built."""
+    if target:
+        environment['CARGO_TARGET_DIR'] = str(target)
+    environment['CARGO_BUILD_BUILD_DIR'] = environment.get('CARGO_TARGET_DIR') or str(Path(directory) / 'target')
+
+
 def shared_target(tree_target=None):
     """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
 
@@ -2949,8 +2961,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
         environment.pop('BUILD_ADMISSION_CLASS', None)  # it builds: never a light start
-        if target:
-            environment['CARGO_TARGET_DIR'] = str(target)
+        build_beside(environment, target, directory)
         started = time.monotonic()
         limit = Limit(args.time_limit, Path(scratch) / 'rust-tests.queue', args.queue_limit)
         environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
@@ -3785,8 +3796,8 @@ def run_main(argv, cleanup):
                     if shell_report is not None:
                         environment['CI_WEB_SHELL_DIAGNOSTICS'] = str(shell_report)
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
-                    if target and name in BUILDS:
-                        environment['CARGO_TARGET_DIR'] = str(target)
+                    if name in BUILDS:
+                        build_beside(environment, target, directory)
                     if args.keep and name == WEB:
                         # scripts/ci-local-web removes its scratch (the kit play receipts, browser traces and screenshots) when it ends
                         # unless CI_LOCAL_KEEP is set, and writes where it is to that file: the run's end names it (run_tmpdir). It stays
