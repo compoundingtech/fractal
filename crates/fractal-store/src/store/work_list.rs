@@ -357,10 +357,11 @@ impl WorkRows {
     }
 
     /// The rows `actor` sees, as indexes into `order`, in the order the direct read gives it:
-    /// its ready work by its seat queue at this publication's own cut. Built on the actor's
-    /// first read of this publication; says whether this read built it.
+    /// its ready work by its seat queue at this publication's own cut. Legacy slash-qualified
+    /// agent IDs share the canonical actor's memo. Says whether this read built it.
     pub fn actor_rows(&self, actor: &str) -> (Arc<Vec<u32>>, bool) {
-        let viewer = smallclaims::store::normalize_actor(actor, "agent");
+        let viewer = fractal_schema::canonical_agent_actor(actor)
+            .unwrap_or(std::borrow::Cow::Borrowed(actor));
         self.actors.get_or_build(&viewer, || self.actor_order(&viewer))
     }
 
@@ -374,8 +375,8 @@ impl WorkRows {
             .map(|(index, step)| (index as u32, &self.rows[step].view))
             .filter(|(_, view)| visible_to(view, viewer))
             .collect::<Vec<_>>();
-        // The direct read hands `select` its own seat string (the actor if it names a kind, else
-        // `agent/ACTOR`, which is `viewer`) and looks the queue up by the normalized seat.
+        // The direct read canonicalizes legacy agent IDs before selecting ready work and
+        // looks the queue up by the same normalized seat.
         let queue = self.seat_orders.get(&viewer_seat(viewer)).map_or(&[][..], |order| order.as_slice());
         let steps = shown
             .iter()

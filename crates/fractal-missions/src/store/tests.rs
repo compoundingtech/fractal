@@ -5096,7 +5096,7 @@ version 2
   mission "execution-timing" state="ready" {
     goal "Measure only active worker execution."
     step "work" timeout="1h" {
-      assigned-to "agent/worker"
+      assigned-to "agent/source.worker"
       retry { attempts 2 }
     }
   }
@@ -5210,7 +5210,7 @@ version 2
 
 mission "external-blocker" state="ready" {
   goal "Wait truthfully for the external host repair."
-  step "automated-proof" { assigned-to "agent/ios-owner" }
+  step "automated-proof" { assigned-to "agent/source.ios-owner" }
 }
 "#;
     let intent = crate::graph::parse_test_intent(source, "source").unwrap();
@@ -6422,7 +6422,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "nested-work" state="ready" {
   goal "Complete nested work."
   step "outer" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     mission "work" {
       goal "Complete the child work."
       step "first" { }
@@ -7060,7 +7060,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "retry" state="ready" {
   goal "Retry failed work."
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     retry { attempts 3 }
     gate "the result is ready" { exists "resource/result" }
   }

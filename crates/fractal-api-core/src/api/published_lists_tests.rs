@@ -287,6 +287,10 @@ fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
             }
         }
     }
+    let (legacy, _) = publication.rows.actor_rows("garden/birch");
+    let (canonical, built) = publication.rows.actor_rows("agent/garden/birch");
+    assert!(!built, "a canonical actor reuses its legacy filter's order");
+    assert!(Arc::ptr_eq(&legacy, &canonical), "both spellings share one actor order");
     (publication, changed)
 }
 

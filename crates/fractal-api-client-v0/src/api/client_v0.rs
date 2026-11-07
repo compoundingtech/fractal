@@ -16635,7 +16635,7 @@ mission "example/looped" state="ready" {
             let root = tempfile::tempdir().unwrap();
             let state = test_state_named(root.path(), "live-run-node");
             let steps = (0..24).map(|i| format!(
-                "  step \"step-{i:02}\" {{ assigned-to \"agent/worker-{i:02}\" }}\n"
+                "  step \"step-{i:02}\" {{ assigned-to \"agent/live-run-node.worker-{i:02}\" }}\n"
             )).collect::<String>();
             let source = format!(
                 "version 2\nmission \"example/live\" state=\"ready\" {{\n  goal \"Keep live metadata.\"\n  concurrent-runs max=10\n{steps}}}"
