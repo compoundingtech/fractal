@@ -531,7 +531,7 @@ fn legacy_claimant_writes_require_every_current_members_admission_capability() {
             peer.set_member_key(Some(peer_key)).unwrap();
             sync(store, &peer);
             store.connection.write().execute(
-                /* sqlite-large-value: allow-for-now lv-hb967f9dc4fa2 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ /* sqlite-large-value: allow-for-now lv-h755979e290e9 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2,available_to=?3 WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-hb967f9dc4fa2 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2,available_to=?3 WHERE subject=?1",
                 params![step.subject, (!pool).then_some(legacy),
                     if pool { json!([legacy]).to_string() } else { "[]".into() }],
             ).unwrap();

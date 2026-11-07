@@ -703,8 +703,13 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
+        // json_each walks only the bound actor spelling array (at most canonical + legacy),
+        // not a stored table. Keep rejecting scans of the mission and step projections.
         for line in &plan {
-            if line.starts_with("SCAN ") && !line.starts_with("SCAN CONSTANT") {
+            if line.starts_with("SCAN ")
+                && !line.starts_with("SCAN CONSTANT")
+                && !line.starts_with("SCAN json_each VIRTUAL TABLE INDEX ")
+            {
                 assert!(line.contains("USING "), "a bare table scan:\n{}", plan.join("\n"));
             }
         }
