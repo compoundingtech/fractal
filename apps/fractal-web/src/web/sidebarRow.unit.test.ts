@@ -341,6 +341,26 @@ describe('retained mission row context', () => {
   })
 })
 
+it('titles missions for readers: never a content hash, the work title before its goal', () => {
+  const hash = 'd45524b5ff5388299cd145fd8bef8c7e'
+  const work = { id: 'work/current', missionId: `mission/person-ask/${hash}`, runId: 'run', path: 'ask', goal: 'Ask about the release', state: 'claimed' }
+  const queued = (id: string, fields: { readonly title?: string; readonly goal?: string }) => ({ ...work, ...fields, id: `work/${id}`, missionId: `mission/${id}`, goal: fields.goal as string })
+  const context = sidebarRow({ stale: false, agent: { ...agent, currentWork: [work], upcomingWork: [
+    queued(`person-ask/${hash}0`, { title: 'Named step', goal: 'A goal' }),
+    queued(`spontaneous-work/${hash}1`, { goal: 'Only a goal' }),
+    queued(`person-update/${hash}2`, {}),
+    queued('example/standing', { title: 'A step', goal: 'A goal' }),
+  ] } }).missionContext
+  expect(context).toMatchObject({ title: 'Ask about the release', step: { _tag: 'Step', name: 'Ask about the release' } })
+  expect(context?._tag === 'Mission' && context.queued.map(mission => mission.title)).toEqual(['Named step', 'Only a goal', 'Untitled mission', 'example/standing'])
+})
+
+it('lists further current missions with their own step and excludes them from the queue', () => {
+  const current = (name: string) => ({ id: `work/${name}`, missionId: `mission/example/${name}`, runId: `run/${name}`, path: 'work', title: `${name} step`, state: 'claimed' })
+  const context = sidebarRow({ stale: false, agent: { ...agent, currentWork: [current('one'), current('two')], upcomingWork: [current('two'), current('three')] } }).missionContext
+  expect(context).toMatchObject({ alsoCurrent: [{ slug: 'two', step: { _tag: 'Step', name: 'two step' }, progress: { _tag: 'Unknown' } }], queued: [{ slug: 'three' }] })
+})
+
 it('queued mission projection preserves first occurrence order for arbitrary bounded windows', () => {
   fc.assert(fc.property(fc.array(fc.constantFrom('current', 'alpha', 'beta')), names => {
     const currentWork = [{ id: 'work/example/current', missionId: 'mission/example/current',

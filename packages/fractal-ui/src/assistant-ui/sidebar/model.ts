@@ -13,9 +13,13 @@ export type SidebarContext = { readonly _tag: 'Known'; readonly usedTokens?: num
 export type SidebarMissionProgress = { readonly _tag: 'Known'; readonly done: number; readonly total: number } | { readonly _tag: 'Unknown' }
 /** The agent's current step: its name, a question waiting on you (with its decision handle when the bridge reports one), or Unknown. */
 export type SidebarMissionStep = { readonly _tag: 'Step'; readonly name: string } | { readonly _tag: 'Waiting'; readonly question: string; readonly handle?: string } | { readonly _tag: 'Unknown' }
+/** A mission behind the current one. `title` is human text; `slug` is the fallback when no title was reported. */
+export type SidebarQueuedMission = { readonly id: string; readonly slug: string; readonly title?: string }
+/** A further mission the agent holds current work on, after the first. */
+export type SidebarOtherMission = SidebarQueuedMission & { readonly progress: SidebarMissionProgress; readonly step: SidebarMissionStep }
 /** The mission the agent currently works on, plus missions queued behind it; None when the agent has no current mission. */
 export type SidebarMissionContext =
-  | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly progress: SidebarMissionProgress; readonly eta?: MissionEta | null; readonly step: SidebarMissionStep; readonly queued: readonly { readonly id: string; readonly slug: string }[] }
+  | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly title?: string; readonly progress: SidebarMissionProgress; readonly eta?: MissionEta | null; readonly step: SidebarMissionStep; readonly alsoCurrent?: readonly SidebarOtherMission[]; readonly queued: readonly SidebarQueuedMission[] }
   | { readonly _tag: 'Unavailable' }
   | { readonly _tag: 'None' }
 /**

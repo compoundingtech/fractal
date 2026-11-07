@@ -1,29 +1,39 @@
 import { ShowMenu, type ShowMenuProps } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarShowMenu.tsx'
 
-import { askingToken, parseSidebarQuery, printSidebarQuery } from './filter.ts'
-import { machineKey, selectedShowKeys, showCounts, showMachines, withShowKeys, type ShowRow } from './show.ts'
+import { askingToken, parseSidebarQuery } from './filter.ts'
+import { activeFilterCount, machineKey, selectedFilterKeys, showCounts, showEndedKey, showMachines, showRetiredKey, statusKey, withFilterKeys, type ShowRow } from './show.ts'
+import { defaultFilters, type SidebarFilters } from './state.ts'
+import { statuses, type AgentStatus } from './StatusIcon.tsx'
 
-/** The sidebar's Show menu: state is read from and written to the search query, never held separately. */
+/** Statuses an operator filters by every day; the rest fold behind More. */
+const commonStatuses: readonly AgentStatus[] = ['working', 'waiting', 'idle', 'failed']
+const rareStatuses = (Object.keys(statuses) as AgentStatus[]).filter((status) => !commonStatuses.includes(status))
+
+/** The sidebar's one Filter menu. Query choices are read from and written to the search query, never held separately. */
 export const SidebarShowMenu = ({
-  query,
-  onQueryChange,
+  filters,
+  update,
   rows,
   hosts,
   popoverTheme,
 }: {
-  readonly query: string
-  readonly onQueryChange: (query: string) => void
+  readonly filters: SidebarFilters
+  readonly update: (value: SidebarFilters) => void
   readonly rows: readonly ShowRow[]
   readonly hosts: readonly string[]
   readonly popoverTheme?: ShowMenuProps['popoverTheme']
 }) => {
-  const parsedQuery = parseSidebarQuery(query)
+  const parsedQuery = parseSidebarQuery(filters.query)
   const machines = showMachines({ hosts, parsedQuery })
-  const counts = showCounts({ rows, parsedQuery, machines: machines.map((machine) => machine.value) })
+  const counts = showCounts({ rows, parsedQuery, machines: machines.map((machine) => machine.value), filters, statuses: Object.keys(statuses) })
+  const statusEntry = (status: AgentStatus) => ({ id: statusKey(status), label: statuses[status].label, count: counts.statuses.get(status) ?? 0 })
+  const active = activeFilterCount(filters, parsedQuery)
   return (
     <ShowMenu
+      label="Filter"
+      activeCount={active}
       groups={[
-        { id: 'agents', title: 'Agents', entries: [{ id: askingToken, label: 'Waiting for answer', count: counts.asking }] },
+        { id: 'attention', title: 'Attention', entries: [{ id: askingToken, label: 'Waiting for answer', count: counts.asking }] },
         ...(machines.length === 0
           ? []
           : [{
@@ -35,9 +45,24 @@ export const SidebarShowMenu = ({
                 count: counts.machines.get(machine.value) ?? 0,
               })),
             }]),
+        { id: 'status', title: 'Status', entries: commonStatuses.map(statusEntry), more: rareStatuses.map(statusEntry) },
+        {
+          id: 'finished',
+          title: 'Finished',
+          entries: [
+            { id: showEndedKey, label: 'Show ended', count: counts.ended },
+            { id: showRetiredKey, label: 'Show retired', count: counts.retired },
+          ],
+        },
       ]}
-      selectedKeys={selectedShowKeys(parsedQuery)}
-      onSelectionChange={(keys) => onQueryChange(printSidebarQuery(withShowKeys({ parsedQuery, keys })))}
+      actions={[{
+        id: 'reset',
+        label: 'Reset filters',
+        isDisabled: active === 0,
+        onAction: () => update({ ...defaultFilters, query: parsedQuery.text, sort: filters.sort }),
+      }]}
+      selectedKeys={selectedFilterKeys(filters, parsedQuery)}
+      onSelectionChange={(keys) => update(withFilterKeys({ filters, keys }))}
       {...(popoverTheme === undefined ? {} : { popoverTheme })}
     />
   )
