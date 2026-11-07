@@ -5,7 +5,7 @@ fn folder(id: &str) -> NodeRef { NodeRef::Folder { id: id.into() } }
 fn subject(id: &str) -> NodeRef { NodeRef::Subject { subject: id.into() } }
 fn parent(id: &str) -> Parent { Parent::Folder { id: id.into() } }
 fn scope() -> Scope { Scope { owner: "owner-a".into(), container: "container-a".into(), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
-fn base(n: u64) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot-{n}"), host_id: "host-a".into(), store_index: n, projection_version: "1".into(), created_at: "created".into(), expires_at: "expires".into() }, revision: format!("revision-{n}"), ready: true } }
+fn base(n: u64) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot-{n}"), host_id: "host-a".into(), store_index: n, projection_version: "1".into(), created_at: "created".into(), published_at: None }, revision: format!("revision-{n}"), ready: true } }
 fn identity(n: u64) -> Identity { Identity { actor: "actor-a".into(), action_id: format!("action-{n}"), idempotency_key: format!("key-{n}") } }
 fn inputs() -> (ArrangementInput, Vec<MembershipInput>) {
     let folders = ["folder-a", "folder-b"].into_iter().map(|id| (id.into(), arrangements::Folder {
