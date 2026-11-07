@@ -670,6 +670,10 @@ def program_signals():
         master, slave = pty.openpty()
         program = subprocess.Popen([sys.executable, str(HERE / "copper_probe.py"), directory],
                                    stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        # Only the program holds the terminal, and input never blocks: a program that exited
+        # leaves its input unread, and this check must then fail rather than wait on it.
+        os.close(slave)
+        os.set_blocking(master, False)
         output = bytearray()
         stopping = threading.Event()
 
@@ -678,6 +682,8 @@ def program_signals():
                 if select.select([master], [], [], 0.05)[0]:
                     try:
                         output.extend(os.read(master, 65536))
+                    except BlockingIOError:
+                        continue
                     except OSError:
                         return
 
@@ -695,7 +701,10 @@ def program_signals():
                 requests += 1
                 (root / "request.new").write_text(json.dumps({"id": requests, "hex": b"x".hex()}))
                 (root / "request.new").replace(root / "request.json")
-                os.write(master, b"copper")
+                try:
+                    os.write(master, b"copper")
+                except BlockingIOError:
+                    pass
             exited = program.poll()
             assert exited is None, (
                 f"copper_probe.py exited ({exited}) after {requests} requests under SIGWINCH:\n"
@@ -714,7 +723,6 @@ def program_signals():
                 program.kill()
                 program.wait()
             os.close(master)
-            os.close(slave)
     print(f"terminal tab: the program ran on through SIGWINCH for {requests} requests")
 
 
