@@ -41,6 +41,80 @@ fn decision_inputs_require_recipient_authority_in_immutable_registration() {
         .contains("only from the addressed recipient"));
 }
 
+fn decision_inputs_limit_fixture() -> (Store, ClaimRecord, u64) {
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: decision_tree(), actor: SEAT.into(),
+    }).unwrap();
+    let opened = tree_claim(&store, TREE, "opened", SEAT, json!({
+        "seat":SEAT, "recipient":DECIDER
+    })).unwrap();
+    let bytes = store.readers.get().query_row(
+        "SELECT length(CAST(body AS BLOB)) FROM claims WHERE id=?1",
+        [&opened.id], |row| row.get(0),
+    ).unwrap();
+    (store, opened, bytes)
+}
+
+#[test]
+fn decision_inputs_claim_limit_refuses_instead_of_truncating() {
+    let (store, opened, bytes) = decision_inputs_limit_fixture();
+    let error = store.decision_inputs_with_limits(TREE, 0, bytes).unwrap_err();
+    assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    let snapshot = store.decision_inputs_with_limits(TREE, 1, bytes).unwrap();
+    assert_eq!(snapshot.claims.len(), 1);
+    assert_eq!(snapshot.claims[0].id, opened.id);
+}
+
+#[test]
+fn decision_inputs_body_byte_limit_refuses_instead_of_truncating() {
+    let (store, opened, bytes) = decision_inputs_limit_fixture();
+    let error = store.decision_inputs_with_limits(TREE, 1, bytes - 1).unwrap_err();
+    assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    let snapshot = store.decision_inputs_with_limits(TREE, 1, bytes).unwrap();
+    assert_eq!(snapshot.claims.len(), 1);
+    assert_eq!(snapshot.claims[0].id, opened.id);
+}
+
+#[test]
+fn decision_inputs_limits_exclude_repaired_history() {
+    let (store, opened, bytes) = decision_inputs_limit_fixture();
+    let repaired = tree_claim(&store, TREE, "answered", DECIDER, json!({
+        "question":"ship", "answer":"yes"
+    })).unwrap();
+    store.seal_local_batches().unwrap();
+    store.connection.batched(|tx| -> Result<()> {
+        let changed = tx.execute(
+            "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+            [&repaired.id],
+        )?;
+        assert!(changed > 0);
+        Ok(())
+    }).unwrap().unwrap();
+    let snapshot = store.decision_inputs_with_limits(TREE, 1, bytes).unwrap();
+    assert_eq!(snapshot.claims.len(), 1);
+    assert_eq!(snapshot.claims[0].id, opened.id);
+}
+
+#[test]
+fn decision_inputs_limits_count_all_claims_and_sum_utf8_body_bytes() {
+    let (store, _, opened_bytes) = decision_inputs_limit_fixture();
+    let answered = tree_claim(&store, TREE, "answered", DECIDER, json!({
+        "question":"ship", "answer":"✓"
+    })).unwrap();
+    let (answer_bytes, answer_chars): (u64, u64) = store.readers.get().query_row(
+        "SELECT length(CAST(body AS BLOB)),length(body) FROM claims WHERE id=?1",
+        [&answered.id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert!(answer_bytes > answer_chars);
+    let total = opened_bytes + answer_bytes;
+    let count_error = store.decision_inputs_with_limits(TREE, 1, total).unwrap_err();
+    assert_eq!(count_error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    let byte_error = store.decision_inputs_with_limits(TREE, 2, total - 1).unwrap_err();
+    assert_eq!(byte_error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    assert_eq!(store.decision_inputs_with_limits(TREE, 2, total).unwrap().claims.len(), 2);
+}
+
 fn audit_custom_dirty(store: &Store) {
     store.connection.write().execute_batch(
         /* sqlite-large-value: allow-for-now lv-h4094ac3a489b owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE custom_dirty_audit(subject TEXT);

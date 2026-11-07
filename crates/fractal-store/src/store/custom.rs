@@ -3,6 +3,10 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
 
+/// Whole-history admission limits: decision snapshots are refused, never truncated.
+pub const DECISION_INPUTS_MAX_CLAIMS: u64 = 10_000;
+pub const DECISION_INPUTS_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
+
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h30131c291680 owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS custom_registrations (
@@ -900,6 +904,19 @@ impl Store {
     /// Read the same repaired-filtered canonical inputs as the basis, never raw log pages.
     /// Invalid or unavailable authority rejects the entire read rather than granting approval.
     pub fn decision_inputs(&self, subject: &str) -> Result<DecisionInputs> {
+        self.decision_inputs_with_limits(
+            subject,
+            DECISION_INPUTS_MAX_CLAIMS,
+            DECISION_INPUTS_MAX_BODY_BYTES,
+        )
+    }
+
+    fn decision_inputs_with_limits(
+        &self,
+        subject: &str,
+        max_claims: u64,
+        max_body_bytes: u64,
+    ) -> Result<DecisionInputs> {
         let version = if subject.starts_with("custom/decision/tree/v1/") {
             1
         } else if subject.starts_with("custom/decision/tree/v2/") {
@@ -935,6 +952,24 @@ impl Store {
             "decision source authority is not ready");
         let source_body = source(&snapshot, subject)?
             .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
+        // Match claims()'s effective canonical history, including repaired exclusion.
+        // Count in the same read transaction before allocating or parsing claim bodies.
+        let (claim_count, body_bytes): (u64, u64) = snapshot.query_row(
+            "SELECT count(*),coalesce(sum(length(CAST(claims.body AS BLOB))),0)
+             FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.subject=?1
+             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if claim_count > max_claims || body_bytes > max_body_bytes {
+            return Err(FractalError::new(
+                "decision-inputs-too-large",
+                format!(
+                    "decision history has {claim_count} claims and {body_bytes} body bytes; \
+                     limits are {max_claims} claims and {max_body_bytes} body bytes"
+                ),
+            ).into());
+        }
         let history = claims(&snapshot, subject)?;
         anyhow::ensure!(
             history.iter().all(|claim| fields(claim).get("_registration") == Some(&json!(hash))),

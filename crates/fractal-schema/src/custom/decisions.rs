@@ -77,19 +77,19 @@ pub fn approval_gate(answer: &Claim, claims: &[Claim]) -> bool {
 #[must_use]
 pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a> {
     let requests: Vec<_> = claims.iter().filter(|c| c.is("requested")).collect();
-    let provenance: BTreeMap<_, _> = claims.iter().filter(|c| c.is("provenance"))
-        .filter_map(|c| c.text("target").map(|target| (target, c))).collect();
-    let scope = |c: &'a Claim| provenance.get(c.id.as_str())
-        .and_then(|p| p.text("source_scope")).unwrap_or(subject);
     let mut defects = Vec::new();
     let mut source_times = BTreeMap::new();
-    for p in provenance.values() {
+    for p in claims.iter().filter(|claim| claim.is("provenance")) {
         match provenance_time(p, claims) {
             Ok(Some(time)) => { source_times.insert(p.id.as_str(), time); }
             Ok(None) => {}
             Err(reason) => defects.push(format!("invalid provenance time: {}: {reason}", p.id)),
         }
     }
+    let provenance: BTreeMap<_, _> = claims.iter().filter(|c| c.is("provenance"))
+        .filter_map(|c| c.text("target").map(|target| (target, c))).collect();
+    let scope = |c: &'a Claim| provenance.get(c.id.as_str())
+        .and_then(|p| p.text("source_scope")).unwrap_or(subject);
     let mut keys = BTreeSet::new();
     for request in &requests {
         if let Some(q) = request.fields.get("q").and_then(Value::as_i64)

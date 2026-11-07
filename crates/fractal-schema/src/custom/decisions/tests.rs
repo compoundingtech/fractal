@@ -186,3 +186,20 @@ fn legacy_unproven_trees_report_open_requests_without_proposing_asks() {
         assert_eq!(folded.requests[0].needs_ask, needs_ask);
     }
 }
+
+#[test]
+fn duplicate_target_cannot_hide_invalid_provenance_time() {
+    let mut claims = vec![request("r", 1),
+        claim("a", "answered", 2, json!({"request":"r","selection":["yes"]})),
+        claim("invalid", "provenance", 3, json!({
+            "target":"a","written_ms":{"unknown":"not a damaged target"},
+            "legacy_id":"a","source_scope":"same"})),
+        claim("valid", "provenance", 4, json!({
+            "target":"a","written_ms":{"known":100},"legacy_id":"a","source_scope":"same"}))];
+    for reverse in [false, true] {
+        if reverse { claims.reverse(); }
+        let folded = result(&claims);
+        assert!(folded.defects.iter().any(|d| d.contains("invalid provenance time: invalid")));
+        assert!(!folded.requests[0].approval_gate);
+    }
+}

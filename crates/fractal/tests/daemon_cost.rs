@@ -140,7 +140,7 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/custom/decision-inputs",
-        "returns and validates the complete canonical effective history of one registered decision tree with its atomic basis; work and response size intentionally grow with that tree's history, not a bounded latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis, refusing above 10,000 claims or 32 MiB of stored bodies before materialization; within those caps work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint",
     ),
     (
         "POST /v1/fleet/admission-override",

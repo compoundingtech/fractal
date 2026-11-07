@@ -257,6 +257,8 @@ existence checks alone do not establish the target kind or same-tree membership.
 same-tree `damaged` claim, never a request or response. The manifest admits an object;
 the fold rejects malformed tags and unknown times on non-damaged targets as defects.
 Unknown time is never converted to zero or used for chronological ordering.
+Every provenance fact's time is validated before indexing by target, so a second provenance
+claim for the same target cannot hide an invalid or unauthorized unknown time.
 
 `ask_linked` records a relationship to an existing native work ask and its activation. It does
 not open, complete, cancel, approve, or delegate that ask. A decision answer, capture,
@@ -280,9 +282,12 @@ status-driven attention contract; it is not a substitute for folding all request
 verbatim provenance `body.fields`, in canonical effective-history order; repaired originals
 are excluded. `basis` is the existing subject/kinds/revision token for those inputs. No
 client-side pagination or before/after token race is needed for this snapshot read.
-This complete-history endpoint intentionally has work and response size proportional to the
-selected tree's history; it is not a bounded latest-state page. The route-cost inventory
-records that explicit contract rather than imposing a constant-history budget.
+Before materializing history, the same snapshot counts effective claims and sums stored body
+bytes. More than 10,000 claims or 32 MiB (33,554,432 bytes) of bodies is refused with
+`decision-inputs-too-large`; history is never silently truncated. The decision reader defines
+`DECISION_INPUTS_MAX_CLAIMS` and `DECISION_INPUTS_MAX_BODY_BYTES` together.
+Within those bounds, work and response size scale with the selected tree's history, not a
+constant latest-state page. The route-cost inventory records that explicit bounded contract.
 The reader requires a ready matching registration, matching registration pins, a valid
 creation and source, and exact addressed-recipient answer authority. Invalid, conflicting,
 or unregistered histories are rejected rather than classified as approval evidence.
