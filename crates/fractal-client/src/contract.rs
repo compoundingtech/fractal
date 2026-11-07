@@ -53,6 +53,8 @@ pub const ACTION_NAMES: &[&str] = &[
     "thread.close",
     "thread.rename",
     "thread.reopen",
+    "thread.reply",
+    "thread.start",
     "work.ask",
     "work.cancel-ask",
     "work.claim",

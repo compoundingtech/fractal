@@ -3,6 +3,8 @@
 // the caller's platform key store; everything here is plain data, checked by
 // tests/deviceSigning.test.mjs against fixtures/clients/device-signing-v1.json.
 import type { DeviceSignature } from '@fractal/client';
+import { utf8Bytes } from './utf8.ts';
+export { utf8Bytes } from './utf8.ts';
 
 export const SIGNED_FIELDS = ['content', 'from', 'in_reply_to', 'session_id', 'tags', 'title', 'to'] as const;
 
@@ -41,16 +43,6 @@ export type DeviceKey = { key: string; storage: 'secure-enclave' | 'software'; p
  */
 export function canonical(value: string | number | null | string[]): string {
   return JSON.stringify(value);
-}
-
-/** A string's length in UTF-8 bytes; a lone surrogate counts as the three bytes of U+FFFD. */
-export function utf8Bytes(text: string): number {
-  let bytes = 0;
-  for (const character of text) {
-    const code = character.codePointAt(0)!;
-    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-  }
-  return bytes;
 }
 
 /** Whether the text is past what the claim keeps whole, so a device signs its preview and hash. */

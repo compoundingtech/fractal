@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Publish typed client APIs for thread metadata",
+  "summary": "Publish typed client APIs for Fractal thread conversations",
   "replay": {
     "status": "none",
     "detail": "No runtime replay change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The SDK adds explicit reads and writes for thread metadata. Existing SDK calls keep their existing paths. Applications should use capability discovery before issuing the new calls."
+    "detail": "The SDK adds explicit reads, writes, and shared-connection follows for thread contexts, timelines, and lifecycle. Existing SDK calls keep their existing paths. Applications should discover the thread capability before using the new calls."
   },
   "downtime": {
     "status": "none",

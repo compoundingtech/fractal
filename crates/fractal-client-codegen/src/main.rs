@@ -245,7 +245,19 @@ fn rust_operation_methods(
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
         if id == "thread.list" {
-            writeln!(out, r#"    pub async fn thread_list(&self, agent_id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{ let mut path = format!("/v1/client/threads?agent_id={{}}", percent_encode(agent_id)); if let Some(cursor) = cursor {{ path.push_str(&format!("&cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }} self.get(&path).await }}"#)?;
+            writeln!(out, r#"    pub async fn thread_list(&self, agent_id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{ self.thread_list_in(ThreadListScope::Agent(agent_id), cursor, limit).await }}
+    pub async fn thread_list_in(&self, scope: ThreadListScope<'_>, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{
+        let selection = match scope {{
+            ThreadListScope::Agent(id) => format!("agent_id={{}}", percent_encode(id)),
+            ThreadListScope::Ask {{ id, episode }} => format!("origin_ask={{}}&origin_ask_episode={{}}", percent_encode(id), percent_encode(episode)),
+            ThreadListScope::Mission(id) => format!("mission_id={{}}", percent_encode(id)),
+            ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
+        }};
+        let mut path = format!("/v1/client/threads?{{selection}}");
+        if let Some(cursor) = cursor {{ path.push_str(&format!("&cursor={{}}", percent_encode(cursor))); }}
+        if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }}
+        self.get(&path).await
+    }}"#)?;
             continue;
         }
         if id == "thread.get" {
@@ -448,6 +460,16 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && let Some(device) = &self.signing_device {{ parameters.signature = Some(device.sign_message(&idempotency_key, &parameters).map_err(|error| ClientError::Protocol(error.to_string()))?); }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
             )?;
+        } else if action == "thread.start" || action == "thread.reply" {
+            let (recipient, sign) = if action == "thread.start" {
+                ("", "device.sign_thread_start(&idempotency_key, &parameters)")
+            } else {
+                ("let agent_id = self.thread_get(&parameters.target_id).await?.value.agent_id;", "device.sign_thread_reply(&idempotency_key, &agent_id, &parameters)")
+            };
+            writeln!(
+                out,
+                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && let Some(device) = &self.signing_device {{ {recipient} parameters.signature = Some({sign}.map_err(|error| ClientError::Protocol(error.to_string()))?); }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
+            )?;
         } else {
             writeln!(
                 out,
@@ -468,7 +490,19 @@ fn swift_operation_methods(
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
         if id == "thread.list" {
-            writeln!(out, r#"    public func threadList(agentID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {{ var query: [URLQueryItem] = [.init(name: "agent_id", value: agentID)]; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads", query: query) }}"#)?;
+            writeln!(out, r#"    public func threadList(agentID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {{ try await threadList(in: .agent(agentID), cursor: cursor, limit: limit) }}
+    public func threadList(in scope: ThreadListScope, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadSummaryPage> {{
+        var query: [URLQueryItem]
+        switch scope {{
+        case .agent(let id): query = [.init(name: "agent_id", value: id)]
+        case .ask(let id, let episode): query = [.init(name: "origin_ask", value: id), .init(name: "origin_ask_episode", value: episode)]
+        case .mission(let id): query = [.init(name: "mission_id", value: id)]
+        case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
+        }}
+        if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}
+        if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}
+        return try await get("v1/client/threads", query: query)
+    }}"#)?;
             continue;
         }
         if id == "thread.get" {
@@ -865,6 +899,8 @@ fn validate_surfaces(
         "ThreadTimelinePage",
         "ThreadTargetParameters",
         "ThreadRenameParameters",
+        "ThreadStartParameters",
+        "ThreadReplyParameters",
         "AgentWorkspace",
         "StatusHistory",
         "StatusTransition",
@@ -1682,7 +1718,7 @@ fn typescript_operation_methods(
             path.to_owned()
         };
         if id == "thread.list" {
-            writeln!(out, "    async threadList(options: {{ agent_id: string; cursor?: string; limit?: number }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummaryPage>> {{ return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }}")?;
+            writeln!(out, "    async threadList(options: ThreadListQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummaryPage>> {{ return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "thread.get" {
