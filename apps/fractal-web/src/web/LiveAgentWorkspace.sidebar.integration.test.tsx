@@ -99,6 +99,17 @@ it('connects the responsive drawer toggle to its dialog while retaining narrow a
   expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
 })
 
+it('draws one panel icon on the sidebar control in the thread header and the sidebar header', async () => {
+  registry.set(agents, observed({ value: [agent] }))
+  await mount(800)
+  const panelDivider = 'svg path[d="M6 3v10"]'
+  const opener = within(host).getByRole('button', { name: 'Expand sidebar' })
+  expect(opener.querySelector(panelDivider)).not.toBeNull()
+  await act(async () => opener.click())
+  const close = within(within(host).getByRole('dialog', { name: 'Agents' })).getByRole('button', { name: 'Close agents' })
+  expect(close.querySelector(panelDivider)).not.toBeNull()
+})
+
 it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
   (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
 ('retains $family freshness and distinguishes missing mission info at $width $scheme', async ({ family, width, scheme }) => {
