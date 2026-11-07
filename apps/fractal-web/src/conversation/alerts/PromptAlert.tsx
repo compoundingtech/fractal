@@ -10,6 +10,7 @@ import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../..
 import { InlineMarkdown, Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { alertFrom } from './alertChoices.ts'
+import { AlertNames } from './alertNames.ts'
 import { contextOf, firstLine, markdownLine, useArmed } from './decisionText.ts'
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
 
@@ -32,6 +33,7 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
   readonly focusRef?: React.Ref<HTMLElement>
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
+  const nameOf = React.useContext(AlertNames)
   const prompt = promptAnswers(alert)
   // A new prompt or revision behind the same alert starts with nothing chosen.
   const asked = { id: alert.id, revision: promptAlertKey(alert) }
@@ -80,7 +82,7 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
     density={density}
     label={firstLine(alert.title)}
     data={{ 'data-alert-kind': alert.attention_kind }}
-    meta={[alertFrom(alert), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
+    meta={[alertFrom(alert, nameOf), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
     heading={<InlineMarkdown text={heading} />}
     headingText={markdownLine(heading)}
     {...(line === '' || line === markdownLine(alert.title) ? {} : { context: line })}
