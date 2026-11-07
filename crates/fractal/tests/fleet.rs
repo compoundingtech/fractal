@@ -8814,6 +8814,14 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
+    // No routed message went to the graph instead, which this build counts and the release,
+    // which does not count fallbacks, leaves out of its status.
+    for node in [&a, &b] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["stream_fallbacks"], json!({}), "{}: {status}", node.name);
+        assert!(node.st_ok(&["replication", "status"]).contains("\nstream-fallbacks\tnone since start\n"));
+    }
+    assert!(o.st_json(&["replication", "status"]).get("stream_fallbacks").is_none());
 }
 
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.

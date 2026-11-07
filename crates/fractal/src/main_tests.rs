@@ -9579,3 +9579,17 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
         "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
     assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
 }
+
+#[test]
+fn replication_status_names_stream_fallbacks_since_start_by_code() {
+    assert_eq!(render_stream_fallbacks(&BTreeMap::new()), "none since start");
+    let counts = BTreeMap::from([("internal".to_owned(), 1), ("graph-closed".to_owned(), 2)]);
+    assert_eq!(render_stream_fallbacks(&counts), "graph-closed=2 internal=1 since start");
+    // A daemon from before the count sends no field, which reads as unknown, not as none.
+    let earlier: ReplicationStatus = serde_json::from_value(serde_json::to_value(ReplicationStatus::default()).unwrap()).unwrap();
+    assert_eq!(earlier.stream_fallbacks, None);
+    let mut current = ReplicationStatus::default();
+    current.stream_fallbacks = Some(BTreeMap::new());
+    let value = serde_json::to_value(&current).unwrap();
+    assert_eq!(value["stream_fallbacks"], serde_json::json!({}));
+}

@@ -71,6 +71,9 @@ pub(super) async fn run_replication(
                 timings.commits,
                 timings.commit_ms
             );
+            if let Some(fallbacks) = &status.stream_fallbacks {
+                println!("stream-fallbacks\t{}", render_stream_fallbacks(fallbacks));
+            }
             print!(
                 "{}",
                 render_replication_peers(&status.peers, &status.graph_digest, now_ms())

@@ -203,3 +203,62 @@ fn a_seat_polling_its_own_mail_finds_mail_routed_to_the_stream() {
     let subjects = page.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>();
     assert_eq!(subjects, [legacy.subject.as_str(), routed.subject.as_str()]);
 }
+
+/// Refuse every append to `store`'s shard, as a broken stream path would.
+fn break_shard(store: &Store) {
+    messages_shard::shard(store)
+        .unwrap()
+        .connection
+        .write()
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h59b44db7cbc4 owner=fractal_store::store::message_routing_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER refuse_appends BEFORE INSERT ON claims BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;")
+        .unwrap();
+}
+
+fn counted(store: &Store) -> Vec<(String, u64)> {
+    message_routing::fallbacks(store).into_iter().collect()
+}
+
+#[test]
+fn a_send_the_stream_fails_goes_to_the_graph_and_is_counted_by_its_code() {
+    let Fleet { alder, .. } = &fleet();
+    assert!(counted(alder).is_empty());
+    break_shard(alder);
+    let input = message("message/route-fallback", &seat(alder, "here"));
+    assert_eq!(message_routing::legacy_reason(alder, &input).unwrap(), None);
+    let (claim, appended) = message_routing::send_message(alder, &input).unwrap();
+    assert!(appended);
+    assert_eq!((shard_items(alder, &input.subject), graph_items(alder, &input.subject)), (0, 1));
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+    // A retry replays the graph claim, and is no second fallback.
+    let (again, appended) = message_routing::send_message(alder, &input).unwrap();
+    assert!(!appended);
+    assert_eq!(again.id, claim.id);
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+    // A code outside the fixed list counts as `other`, so a label never takes an arbitrary value.
+    message_routing::record_fallback(alder, "send", "message/route-unlisted", "an-unlisted-code", "detail");
+    assert_eq!(counted(alder), [("internal".to_owned(), 1), ("other".to_owned(), 1)]);
+}
+
+#[test]
+fn a_queued_message_the_shard_keeps_refusing_goes_to_the_graph_and_is_counted_once() {
+    let Fleet { alder, .. } = &fleet();
+    break_shard(alder);
+    let input = message("message/route-fallback-queued", &seat(alder, "here"));
+    {
+        let mut connection = alder.connection.write();
+        let transaction = connection.transaction().unwrap();
+        assert!(message_routing::send_message_tx(&transaction, "alder", &input, None).unwrap());
+        transaction.commit().unwrap();
+    }
+    // Each refusal keeps the row and counts nothing: the message has not gone anywhere yet.
+    for _ in 0..message_outbox::ATTEMPTS {
+        assert_eq!(message_outbox::drain(alder).unwrap(), 0);
+        assert!(counted(alder).is_empty());
+    }
+    // Its retries spent, the graph takes it, counted under the shard's last refusal.
+    assert_eq!(message_outbox::drain(alder).unwrap(), 1);
+    assert_eq!((shard_items(alder, &input.subject), graph_items(alder, &input.subject)), (0, 1));
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+    assert_eq!(message_outbox::drain(alder).unwrap(), 0);
+    assert_eq!(counted(alder), [("internal".to_owned(), 1)]);
+}

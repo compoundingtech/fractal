@@ -76,11 +76,50 @@ pub fn send_message(store: &Store, input: &ClaimInput) -> Result<(ClaimRecord, b
     let routed = legacy_reason(store, input).map_err(internal)?.is_none();
     if routed && let Some(shard) = messages_shard::shard(store) {
         match shard.append_claim_outcome(input) {
-            Err(error) if error.code != "idempotency-mismatch" => {}
+            Err(error) if error.code != "idempotency-mismatch" => {
+                let sent = store.append_claim_outcome(input)?;
+                record_fallback(store, "send", &input.subject, error.code, &error.message);
+                return Ok(sent);
+            }
             sent => return sent,
         }
     }
     store.append_claim_outcome(input)
+}
+
+/// The codes a failed stream append is counted under; any other counts as `other`, so a label
+/// never takes an arbitrary value. The log line names the exact code and message.
+const FALLBACK_CODES: &[&str] = &[
+    "graph-closed",
+    "internal",
+    "invalid-message-transition",
+    "invalid-subject-reference",
+    "missing-message",
+    "missing-message-actor",
+    "shard-kind-refused",
+];
+
+/// Messages routed to the stream that this process appended to the graph instead since it
+/// started, by [`FALLBACK_CODES`] code.
+#[derive(Default)]
+struct StreamFallbacks(Mutex<BTreeMap<&'static str, u64>>);
+
+/// Count and log a routed message the graph took because the shard did not:
+/// `site` is `send` for a send whose stream append failed, `outbox` for a queued message the
+/// shard refused until its retries ran out. A fallback is never an error for the sender, so
+/// without this a broken stream path would go unseen.
+pub(crate) fn record_fallback(store: &Store, site: &'static str, subject: &str, code: &str, message: &str) {
+    let label = FALLBACK_CODES.iter().copied().find(|known| *known == code).unwrap_or("other");
+    *store.extension::<StreamFallbacks>().0.lock().unwrap_or_else(PoisonError::into_inner).entry(label).or_default() += 1;
+    fractal_telemetry::otel::record_stream_append_fallback(site, label);
+    tracing::warn!(site, subject, code, message, "a message routed to the stream went to the graph instead");
+}
+
+/// [`record_fallback`]'s counts since this process started, by code.
+pub fn fallbacks(store: &Store) -> BTreeMap<String, u64> {
+    let counts = store.extension::<StreamFallbacks>();
+    let counts = counts.0.lock().unwrap_or_else(PoisonError::into_inner);
+    counts.iter().map(|(code, count)| ((*code).to_owned(), *count)).collect()
 }
 
 /// [`send_message`], answering the claim it wrote or replayed, as [`Store::append_claim`] does.

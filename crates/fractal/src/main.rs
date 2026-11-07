@@ -12385,6 +12385,15 @@ fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue
     })
 }
 
+/// The messages routed to the stream that went to the graph since the daemon started, by code.
+fn render_stream_fallbacks(fallbacks: &BTreeMap<String, u64>) -> String {
+    if fallbacks.is_empty() {
+        return "none since start".into();
+    }
+    let counts = fallbacks.iter().map(|(code, count)| format!("{code}={count}")).collect::<Vec<_>>();
+    format!("{} since start", counts.join(" "))
+}
+
 /// This node's first sync in one line.
 fn render_first_sync(first: &fractal_daemon::model::ReplicationFirstSync, now: u128) -> String {
     let peer = first.peer.as_deref().unwrap_or("its peer");

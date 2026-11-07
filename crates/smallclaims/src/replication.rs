@@ -350,6 +350,10 @@ pub struct ReplicationStatus {
     /// A member refused this node as removed or left, so it no longer syncs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<crate::fleet::RemovalNotice>,
+    /// Messages routed to the messages shard that this process appended to the graph instead
+    /// since it started, by error code. Absent from a daemon that does not count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_fallbacks: Option<BTreeMap<String, u64>>,
 }
 
 /// Cumulative replication time in one daemon process since it started, split by stage, for

@@ -12,6 +12,7 @@ pub async fn replication_status(
     blocking_store(move || {
         let mut status = store.replication_status_sealed(configured, fleet.as_deref(), &peers)?;
         status.removed = crate::fleet::file::RemovalNotice::load(&state_dir);
+        status.stream_fallbacks = Some(crate::store::message_routing::fallbacks(&store));
         Ok(status)
     })
     .await
