@@ -917,7 +917,8 @@ class LaneBurstTest(unittest.TestCase):
             '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
             '  mv "$1.tmp.$$" "$1"\n'
             ')\n'
-            f'append_record {self.calls} "$*"\n{body}\ncat > /dev/null\nappend_record {self.released} released\n')
+            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
+            f'append_record {shlex.quote(str(self.released))} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 
@@ -5040,7 +5041,8 @@ class BurstAtTheTree(unittest.TestCase):
             '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
             '  mv "$1.tmp.$$" "$1"\n'
             ')\n'
-            f'append_record {self.calls} "$*"\n{body}\ncat > /dev/null\nappend_record {self.released} released\n')
+            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
+            f'append_record {shlex.quote(str(self.released))} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 
