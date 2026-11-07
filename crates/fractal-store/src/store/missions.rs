@@ -451,7 +451,15 @@ impl Store {
         for (step, selector, constraints) in flat {
             let (assignee, available_to, agentless) = interpolate_selector(&selector, &variables)?;
             let storage_party = |party: String| {
-                identities::resolve_reference_conn(&transaction, &party)
+                let canonical = |id: &str| {
+                    fractal_schema::canonical_agent_actor(id)
+                        .map(std::borrow::Cow::into_owned)
+                        .ok_or_else(|| FractalError::new(
+                            "invalid-work-actor", format!("invalid agent actor `{id}`"),
+                        ))
+                };
+                let party = canonical(&party)?;
+                canonical(&identities::resolve_reference_conn(&transaction, &party)?)
             };
             let assignee = assignee.map(storage_party).transpose()?;
             let available_to = available_to.into_iter().map(storage_party)

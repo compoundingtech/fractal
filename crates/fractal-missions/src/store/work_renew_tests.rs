@@ -509,6 +509,50 @@ fn ready_step_with_mail(mail: usize) -> Renewal {
 }
 
 #[test]
+fn work_claim_canonicalizes_legacy_actor_and_stored_assignee() {
+    for (actor, assignee) in [
+        ("node/worker", "agent/node/worker"),
+        ("agent/node/worker", "node/worker"),
+    ] {
+        let step = ready_step_with_mail(0);
+        // Model both current rows and persisted rows predating actor canonicalization.
+        step.store.connection.write().execute(
+            "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+            params![step.subject, assignee],
+        ).unwrap();
+        assert_eq!(
+            step.store.step_run(&step.subject).unwrap().unwrap().assigned_to.as_deref(),
+            Some(assignee),
+        );
+        let mut claim_request = request("canonical-actor-claim", None);
+        claim_request.actor = Some(actor.into());
+        let claimed = step.store.work_action(&step.subject, "claim", &claim_request).unwrap();
+        assert_eq!(claimed.claimant.as_deref(), Some("agent/node/worker"));
+        let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+        assert_eq!(persisted.claimant.as_deref(), Some("agent/node/worker"));
+        let claims = step.store.claims_for(&step.subject, Some("work.claimed")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/node/worker"));
+        assert_eq!(claims[0].body["fields"]["claimant"], json!("agent/node/worker"));
+    }
+}
+
+#[test]
+fn work_claim_rejects_malformed_actor_without_claiming_work() {
+    let step = ready_step_with_mail(0);
+    for (index, actor) in ["", "worker", "agent/", "/worker", "node/worker name"].iter().enumerate() {
+        let mut claim_request = request(&format!("malformed-actor-claim-{index}"), None);
+        claim_request.actor = Some((*actor).into());
+        let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();
+        assert_eq!(error.code, "invalid-work-actor", "{actor:?}");
+        let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+        assert_eq!(persisted.status, "ready");
+        assert!(persisted.claimant.is_none());
+        assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+    }
+}
+
+#[test]
 fn a_claim_and_a_completion_hold_the_writer_for_the_same_work_whatever_the_assignees_mail() {
     let mut costs = Vec::new();
     for mail in [0, 400] {

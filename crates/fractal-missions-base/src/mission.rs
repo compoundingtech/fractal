@@ -368,10 +368,10 @@ fn parse_mission(
                         format!("mission `{id}` repeats `assigned-to`"),
                     ));
                 }
-                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host));
+                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host)?);
             }
             "available-to" => {
-                let agent = normalize_assignee(&first_string(child)?, default_host);
+                let agent = normalize_assignee(&first_string(child)?, default_host)?;
                 if available_to.contains(&agent) {
                     return Err(FractalError::new(
                         "duplicate-work-agent",
@@ -1378,10 +1378,10 @@ fn parse_step(
                     baselines.push(baseline);
                 }
                 "assigned-to" => {
-                    assigned_to = Some(normalize_assignee(&first_string(child)?, default_host))
+                    assigned_to = Some(normalize_assignee(&first_string(child)?, default_host)?)
                 }
                 "available-to" => {
-                    let agent = normalize_assignee(&first_string(child)?, default_host);
+                    let agent = normalize_assignee(&first_string(child)?, default_host)?;
                     if available_to.contains(&agent) {
                         return Err(FractalError::new(
                             "duplicate-work-agent",
@@ -1569,10 +1569,10 @@ fn parse_queue(
                         format!("queue `{id}` repeats `assigned-to`"),
                     ));
                 }
-                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host));
+                assigned_to = Some(normalize_assignee(&first_string(child)?, default_host)?);
             }
             "available-to" => {
-                let agent = normalize_assignee(&first_string(child)?, default_host);
+                let agent = normalize_assignee(&first_string(child)?, default_host)?;
                 if available_to.contains(&agent) {
                     return Err(FractalError::new(
                         "duplicate-work-agent",
@@ -2684,18 +2684,17 @@ fn normalize_subject(value: &str, kind: &str) -> String {
     }
 }
 
-fn normalize_assignee(value: &str, default_host: &str) -> String {
-    if value.starts_with("person/") {
-        return value.to_owned();
-    }
-    let identity = value.strip_prefix("agent/").unwrap_or(value);
-    if identity.contains('.') || identity.contains("${") {
-        format!("agent/{identity}")
-    } else if identity.contains('/') {
-        value.to_owned()
+fn normalize_assignee(value: &str, default_host: &str) -> Result<String, FractalError> {
+    let qualified = if value.contains('/') {
+        std::borrow::Cow::Borrowed(value)
+    } else if value.contains('.') || value.contains("${") {
+        std::borrow::Cow::Owned(format!("agent/{value}"))
     } else {
-        format!("agent/{default_host}.{identity}")
-    }
+        std::borrow::Cow::Owned(format!("agent/{default_host}.{value}"))
+    };
+    fractal_schema::canonical_agent_actor(&qualified)
+        .map(std::borrow::Cow::into_owned)
+        .ok_or_else(|| FractalError::new("invalid-assignee", format!("invalid agent actor `{value}`")))
 }
 
 fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
@@ -3129,6 +3128,20 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn assignees_canonicalize_legacy_slash_ids() {
+        for (input, expected) in [
+            ("fleet/worker", "agent/fleet/worker"),
+            ("agent/fleet/worker", "agent/fleet/worker"),
+            ("person/reviewer", "person/reviewer"),
+            ("daemon/scheduler", "daemon/scheduler"),
+            ("worker", "agent/host.worker"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host").unwrap(), expected);
+        }
+        assert!(super::normalize_assignee("fleet/worker name", "host").is_err());
+    }
+
     #[test]
     fn nested_loop_paths_follow_their_distinct_owning_steps() {
         let source = r#"mission "collision" state="ready" { goal "Keep nested histories separate.";
