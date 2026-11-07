@@ -2,7 +2,8 @@ import type { MembershipScope } from './sidebarMemberships';
 
 export const SIDEBAR_JOURNAL_VERSION = 1;
 export type JournalStatus = 'Intent' | 'AwaitingPersistence' | 'Sending' | 'UnknownDelivery' | 'AwaitingObservation' | 'AwaitingCompletionPersistence' | 'AwaitingFreshBase' | 'Observed' | 'Refused' | 'PartiallyApplied';
-export type JournalEffect = 'PersistPending' | 'Send' | 'ReadBase' | 'PersistCompletion' | 'PersistRemoval' | 'Replan';
+export type WriteDelivery = 'First' | 'Replay';
+export type JournalEffect = 'PersistPending' | { type: 'Send'; delivery: WriteDelivery } | 'ReadBase' | 'PersistCompletion' | 'PersistRemoval' | 'Replan';
 export type JournalPersistence = 'Pending' | 'Completion' | 'Removal';
 export type JournalState = { scope: MembershipScope; status: JournalStatus; request: { fence: { scope: MembershipScope } } | null };
 export type JournalStorage = { getItem(key: string): Promise<string | null>; setItem(key: string, value: string): Promise<void>; removeItem(key: string): Promise<void> };
@@ -38,7 +39,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
   private queued = 0;
   private restored?: TState;
   private storagePending: Promise<void> = Promise.resolve();
-  constructor(private readonly storage: JournalStorage, private readonly scope: MembershipScope, private readonly reducer: JournalReducer<TState, TEvent>, private readonly run: (effect: 'Send' | 'ReadBase' | 'Replan', state: TState, signal: AbortSignal) => Promise<void>, private readonly limits = { maxQueued: 64, timeoutMs: 30000 }) {
+  constructor(private readonly storage: JournalStorage, private readonly scope: MembershipScope, private readonly reducer: JournalReducer<TState, TEvent>, private readonly run: (effect: Extract<JournalEffect, { type: 'Send' }> | 'ReadBase' | 'Replan', state: TState, signal: AbortSignal) => Promise<void>, private readonly limits = { maxQueued: 64, timeoutMs: 30000 }) {
     if (!Number.isSafeInteger(limits.maxQueued) || limits.maxQueued < 1 || !Number.isSafeInteger(limits.timeoutMs) || limits.timeoutMs < 1) throw new Error('Invalid sidebar journal limits');
     this.key = `st3.sidebar.journal.v1:${JSON.stringify([scope.owner, scope.container, scope.endpoint, scope.host, scope.projection])}`;
   }
@@ -107,7 +108,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
     for (const effect of effects) {
       this.assertOpen();
       if (!sameScope(state.scope, this.scope) || state.request && !sameScope(state.request.fence.scope, this.scope)) throw new Error('Sidebar journal scope mismatch');
-      if (effect === 'Send' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state, this.lifetime.signal); this.assertOpen(); continue; }
+      if (typeof effect === 'object' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state, this.lifetime.signal); this.assertOpen(); continue; }
       let ack: TEvent;
       const failure = this.reducer.storageFailed(state, effect === 'PersistCompletion' ? 'Completion' : effect === 'PersistRemoval' ? 'Removal' : 'Pending');
       try {
