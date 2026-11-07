@@ -1,6 +1,10 @@
 //! External assistants have their own versioned claims, never a delegated person chain.
 use super::*;
-pub use super::external_grants::*;
+pub use super::external_grants::{
+    BEGUN, GRANTED, MCP_PRINCIPAL, POLICY, PRINCIPAL, REVOKED, ROUTES, SCOPES, TRANSITIONS,
+    Profile, append, audit, authenticate, authorize_route, effective, fields, latest,
+    owning_person, principal, projection, session, subject, trusted_issuer,
+};
 pub mod authorization;
 pub mod reads;
 pub mod receipts;
