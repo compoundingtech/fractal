@@ -708,6 +708,18 @@ impl WatchesStore for Store {
             if self.github_post_agent(&locator, &kind, id)?.as_deref() != Some(agent) {
                 continue;
             }
+            // A stream item's close is this member's shard record, not a claim.
+            if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+                crate::store::messages_shard::record_lifecycle(
+                    self,
+                    &message.subject,
+                    "message.closed",
+                    Some("daemon/runtime"),
+                    &BTreeMap::from([("status".into(), Value::String("closed".into()))]),
+                )?;
+                closed.push(message.subject);
+                continue;
+            }
             self.append_claim(&ClaimInput {
                 subject: message.subject.clone(),
                 kind: "message.closed".into(),

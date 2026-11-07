@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Defer the sealing frontier's recovery search and the first operation audit past the reconnect window, and stop exchanges waiting for the search",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes. The once-per-open search for batches an older writer left behind the sealing frontier still runs every open, now 10 minutes after start or first in a checkpoint, backup or proof; a skipped batch is offered from the next exchange after it. Only after a downgrade left such a batch: until the search runs, its claims are in this node's graph digests but not its inventory, so a peer at an equal inventory may record a graph difference for up to 10 minutes that clears on its own; replication itself is unaffected."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes. Mixed-version safe: the change is local to one daemon's startup order and its exchange path; peers on older or newer builds exchange as before, and nothing new crosses the wire."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Doctor's operation-projection check reports no audit for the first 10 minutes after a start (warn, 'it audits 10 min after it starts'), where it used to have one within about a minute. Its staleness thresholds and the 30 s operations refresh are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Less work in the first minute after a restart: replication export and receive no longer wait for the 14 s recovery search (on two busy members' latest restarts four exchanges took 19.6-20.5 s and 53-54 s), and the 66 s-of-SQL operation audit no longer runs beside the reconnect storm. Restart-to-API is unchanged."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes; identity and stored state are preserved."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes; swapping back to an older build restores the old startup order."
+  }
+}

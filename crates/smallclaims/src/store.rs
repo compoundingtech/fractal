@@ -85,6 +85,9 @@ mod binary_payloads;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
+pub mod saved_inventory;
+#[cfg(test)]
+mod saved_inventory_tests;
 mod checkpoint_capture_epoch;
 mod checkpoint_space;
 pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
@@ -845,7 +848,9 @@ pub struct Store {
     pub readers: ReadPool,
     pub committed_index: Arc<AtomicU64>,
     pub seeded_batch_rowid: AtomicI64,
-    /// Check older writers' skipped batches once per open, before the first sealing pass.
+    /// Check older writers' skipped batches once per open. Exchanges do not wait for it: the
+    /// daemon runs it after the reconnect window, and checkpoints, backups and proofs before
+    /// they read.
     sealing_recovery: tokio::sync::Mutex<bool>,
     pub replica_generation: AtomicU64,
     pub replication_snapshot: Mutex<Option<Arc<ReplicationSnapshot>>>,
@@ -1208,7 +1213,8 @@ impl Store {
         install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
-            inventory_generation::initialize(connection)
+            inventory_generation::initialize(connection)?;
+            saved_inventory::initialize(connection)
         })?;
         principals::initialize_schema(connection)?;
         principals::initialize_held_index(connection, fresh)?;
@@ -1255,8 +1261,9 @@ impl Store {
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
-        // Preserve the sealing cursor here. With keys loaded, the first sealing pass searches
-        // for retained claims older writers skipped and rewinds only if recovery is necessary.
+        // Preserve the sealing cursor here. With keys loaded, the first full sealing pass
+        // (`seal_local_batches`) searches for retained claims older writers skipped and rewinds
+        // only if recovery is necessary.
         let max_rowid = max_batch_rowid(&connection)?;
         let stored_cursor: i64 = connection
             .query_row(
@@ -1413,6 +1420,9 @@ pub struct ReplicationSnapshot {
     pub envelope_rows: usize,
     /// Changes to an existing inventory prefix or its checkpoint tombstones.
     pub inventory_generation: i64,
+    /// The count of changes other than appends this inventory takes in (`saved_inventory`):
+    /// `None` once one landed that it does not, so a stop does not save it.
+    pub inventory_changes: Option<i64>,
     pub inventory: CompactReplicationInventory,
     pub buckets: Vec<ReplicationInventoryBucket>,
     /// The inventory digest state before each range in `buckets`, then its terminal state.
@@ -7044,8 +7054,12 @@ impl Store {
         Ok(self.replication_snapshot()?.inventory.public())
     }
 
-    /// The replication snapshot with every local batch sealed into a signed envelope first. The
-    /// exchange paths use it; they must offer peers everything this node wrote.
+    /// The replication snapshot with every local batch after the sealing frontier sealed into a
+    /// signed envelope first. The exchange paths use it; they must offer peers everything this
+    /// node wrote since. A batch an older binary left behind the frontier is offered once the
+    /// once-per-open recovery search seals it: that search walks every batch, fourteen seconds
+    /// on a busy host's store, and no exchange waits for it. The daemon runs it after the
+    /// reconnect window.
     pub fn replication_snapshot(&self) -> Result<Arc<ReplicationSnapshot>> {
         // A write that lands between sealing and reading would be counted by the projection
         // digests but not by the inventory, and a peer comparing graphs at equal inventories
@@ -7054,7 +7068,7 @@ impl Store {
         let mut snapshot;
         let mut attempts = 0;
         loop {
-            self.seal_local_batches()?;
+            self.seal_local_batches_after_frontier()?;
             snapshot = self.sealed_replication_snapshot()?;
             attempts += 1;
             if !snapshot.unsealed || attempts == 8 {
@@ -7067,7 +7081,8 @@ impl Store {
         Ok(snapshot)
     }
 
-    /// Seal this node's batches that have no envelope yet, and sign them. Only this takes the
+    /// Seal this node's batches that have no envelope yet, and sign them, first searching once
+    /// per open for batches older writers skipped behind the frontier. Only this takes the
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
         self.recover_sealing_frontier()?;
@@ -7075,8 +7090,8 @@ impl Store {
     }
 
     /// Seal the batches written after the sealing frontier, without the once-per-process search
-    /// for batches skipped behind it. That search walks every batch; whoever seals for a
-    /// snapshot runs it, and lowering the frontier then seals what it found.
+    /// for batches skipped behind it. That search walks every batch; `seal_local_batches` runs
+    /// it, and lowering the frontier then seals what it found.
     fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
@@ -7239,6 +7254,16 @@ impl Store {
     ) -> Result<Arc<ReplicationSnapshot>> {
         let reading = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotInventory);
         let previous = crate::read_budget::lock_sync(&self.replication_snapshot)?.take();
+        let changes = saved_inventory::changes(connection)?;
+        // A full read takes in every change; an extension only appends, so it keeps the count
+        // only when no other change landed since the snapshot it extends.
+        let mut counted = Some(changes);
+        // A fresh process extends the inventory its last clean shutdown saved, when that still
+        // describes this store, instead of reading every envelope again.
+        let previous = match previous {
+            Some(previous) => Some(previous),
+            None => self.saved_replication_snapshot(connection, changes)?.map(Arc::new),
+        };
         // The six-table digest stays on the legacy peer wire format. Its generation lets us
         // retain compatibility without rescanning those tables for unrelated source changes.
         let graph_generation = graph_generation(connection)?;
@@ -7282,6 +7307,7 @@ impl Store {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             if inventory_generation == previous.inventory_generation {
+                counted = previous.inventory_changes.filter(|previous| *previous == changes);
                 let envelope_rows = previous.envelope_rows + additions.len();
                 let mut max_rowid = previous.max_envelope_rowid;
                 // Most snapshots are owned only by this cache. Move their inventory
@@ -7370,6 +7396,7 @@ impl Store {
             max_envelope_rowid,
             envelope_rows: envelope_count,
             inventory_generation,
+            inventory_changes: counted,
             inventory,
             buckets,
             digest_prefixes,
@@ -8150,7 +8177,8 @@ impl Store {
     ) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
-        // envelope, and the daemon runs this before it serves. The first export builds it.
+        // envelope, and the daemon runs this before it serves. The first export builds it, and
+        // neither waits for the recovery search.
         self.seal_local_batches_after_frontier()?;
         self.judge_claims_slice(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
