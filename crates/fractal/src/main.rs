@@ -11463,7 +11463,7 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             let mut inputs = Vec::new();
             loop {
                 let page: ClaimsPage = client.get(&format!(
-                    "/v1/claims?subject={}&after_index={after}&order=asc&limit=1000",
+                    "/v1/claims?subject={}&after_index={after}&order=asc&limit=500",
                     urlencoding::encode(&subject))).await?;
                 if page.claims.is_empty() { break; }
                 for claim in page.claims {
