@@ -61,7 +61,7 @@ function SubjectRow({ subject, compact }: { readonly subject: DecisionSubject; r
   const row = stylex.props(styles.subject, compact && styles.subjectCompact, touch && styles.subjectTouch, (subject.href !== undefined || subject.onOpen !== undefined) && styles.subjectOpens)
   if (subject.href !== undefined) return <a href={subject.href} target="_blank" rel="noopener noreferrer" {...row}>{inner}{compact ? null : open}</a>
   if (subject.onOpen !== undefined) return <Aria.Button onPress={subject.onOpen} {...row}>{inner}{compact ? null : open}</Aria.Button>
-  return <div {...row}>{inner}{subject.rawRef === undefined ? null : <DecisionRef value={subject.rawRef} />}</div>
+  return <div {...row}>{inner}{subject.rawRef === undefined ? null : <span {...stylex.props(styles.subjectRef)}><DecisionRef value={subject.rawRef} /></span>}</div>
 }
 
 function Part({ layout, label, children }: { readonly layout: DecisionMoreLayout; readonly label: string; readonly children: React.ReactNode }) {
@@ -118,7 +118,7 @@ export function DecisionMore({ layout = 'sections', context, why, evidence = [],
 const narrow = '@container decision-more (max-width: 520px)'
 
 const styles = stylex.create({
-  root: { containerType: 'inline-size', containerName: 'decision-more', minWidth: 0, display: 'flex', flexDirection: 'column', gap: s.xs, color: c.fgSoft, fontSize: t.metaSize, lineHeight: '18px' },
+  root: { containerType: 'inline-size', containerName: 'decision-more', minWidth: 0, display: 'flex', flexDirection: 'column', gap: s.xs, color: c.fgSoft, fontSize: t.uiSize, lineHeight: t.uiLeading },
   stack: { display: 'flex', flexDirection: 'column', gap: s.lg, minWidth: 0 },
   clamped: { maxHeight: g.previewMax, overflow: 'hidden' },
   fade: { maskImage: 'linear-gradient(to bottom, black calc(100% - 40px), transparent)' },
@@ -134,15 +134,16 @@ const styles = stylex.create({
   listRuled: { paddingInlineStart: 0, listStyleType: 'none', gap: 0 },
   item: { paddingInlineStart: s.xs2, '::marker': { color: c.fgMuted } },
   itemRuled: { paddingInlineStart: 0, paddingBlock: s.sm, borderBlockEndWidth: g.hairline, borderBlockEndStyle: 'solid', borderBlockEndColor: c.border },
-  quiet: { color: c.fgMuted, fontFamily: t.fontMono, fontSize: t.denseSize },
+  quiet: { color: c.fgMuted, fontFamily: t.fontMono, fontSize: t.metaSize },
   subjects: { display: 'flex', flexDirection: 'column', gap: s.xs2, marginInlineStart: `calc(-1 * ${s.sm})` },
   subjectsCompact: { flexDirection: 'row', flexWrap: 'wrap', gap: s.xs, marginInlineStart: 0 },
-  subject: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', boxSizing: 'border-box', minHeight: g.controlMd, paddingBlock: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'start', textDecoration: 'none' },
+  subject: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', boxSizing: 'border-box', minHeight: g.controlMd, paddingBlock: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', textDecoration: 'none' },
   subjectCompact: { width: 'auto', borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, minHeight: g.controlSm },
   subjectTouch: { minHeight: g.touchTarget },
   subjectOpens: { cursor: 'pointer', ':hover': { backgroundColor: c.rowHover } },
   subjectIcon: { flexShrink: 0, display: 'inline-flex', color: c.fgMuted },
-  subjectLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  subjectLabel: { flexShrink: 0, maxWidth: '70%', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   subjectKind: { flexShrink: 0, color: c.fgMuted, fontSize: t.denseSize },
+  subjectRef: { minWidth: 0, display: 'inline-flex', marginInlineStart: 'auto' },
   subjectGo: { flexShrink: 0, marginInlineStart: 'auto', display: 'inline-flex', color: c.fgMuted },
 })
