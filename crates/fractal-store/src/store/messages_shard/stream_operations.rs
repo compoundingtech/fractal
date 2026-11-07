@@ -6,7 +6,7 @@
 
 use rusqlite::{OptionalExtension as _, Transaction};
 use smallclaims::claim::ClaimRecord;
-use smallclaims::error::Error as St3Error;
+use smallclaims::error::Error as FractalError;
 
 pub(super) const LOCAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3d8e836b84c4 owner=fractal_store::store::messages_shard::stream_operations TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_operations (
@@ -22,7 +22,7 @@ pub(super) fn replay_tx(
     transaction: &Transaction<'_>,
     operation_id: &str,
     request_digest: &str,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     let stored: Option<(String, String)> = transaction
         .query_row(
             "SELECT request_digest, claim_id FROM stream_operations WHERE id=?1",
@@ -35,7 +35,7 @@ pub(super) fn replay_tx(
         return Ok(None);
     };
     if stored_digest != request_digest {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "idempotency-mismatch",
             "the idempotency key already identifies a different request",
         )
@@ -46,7 +46,7 @@ pub(super) fn replay_tx(
     crate::store::claim_by_id_tx(transaction, &claim_id)
         .map_err(smallclaims::error::internal)?
         .map(Some)
-        .ok_or_else(|| St3Error::new("internal", "the stream operation's item is missing"))
+        .ok_or_else(|| FractalError::new("internal", "the stream operation's item is missing"))
 }
 
 /// Remember that `claim_id` is the item `operation_id` wrote.
