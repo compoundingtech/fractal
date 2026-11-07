@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Publish a complete draft candidate only with a product GO for its exact source SHA."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
+
+
+def publish(tag, sha, go_ref):
+    if not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
+        raise ValueError('candidate tag must be a stable vMAJOR.MINOR.PATCH tag')
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('GO requires the full, lowercase 40-character candidate SHA')
+    if not go_ref.strip() or '\n' in go_ref or '\r' in go_ref:
+        raise ValueError('GO reference must be a nonempty, single-line PR/comment/message identifier')
+    state = json.loads(run('gh', 'release', 'view', tag, '--json',
+                           'isDraft,isPrerelease,targetCommitish,body'))
+    if not state['isDraft'] or state['isPrerelease']:
+        raise ValueError('only an unpublished stable draft candidate can be published')
+    if state['targetCommitish'] != sha:
+        raise ValueError('GO SHA differs from the candidate target SHA')
+    tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}').splitlines()
+    refs = dict(line.split()[::-1] for line in tagged)
+    if refs.get(f'refs/tags/{tag}^{{}}', refs.get(f'refs/tags/{tag}')) != sha:
+        raise ValueError('GO SHA differs from the candidate tag SHA')
+    with tempfile.TemporaryDirectory(prefix='fractal-publish-') as directory:
+        dist = Path(directory)
+        run('gh', 'release', 'download', tag, '--dir', directory)
+        if json.loads((dist / 'RELEASE.json').read_text())['source'] != sha:
+            raise ValueError('GO SHA differs from the candidate artifact source SHA')
+        for required in ('RELEASE-NOTES.md', 'UPGRADE-IMPACT.json'):
+            if not (dist / required).is_file():
+                raise ValueError(f'incomplete candidate: missing {required}')
+        run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
+        run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=dist)
+        actor = os.environ.get('GITHUB_ACTOR', 'local operator')
+        audit_run = os.environ.get('GITHUB_RUN_ID', 'local invocation')
+        receipt = f'\n\n## Product release GO\n\n- Source: `{sha}`\n- GO reference: {go_ref}\n- Publisher: {actor}\n- Workflow run: {audit_run}\n'
+        notes = dist / 'PUBLISH-NOTES.md'
+        notes.write_text(state['body'] + receipt)
+        run('gh', 'release', 'edit', tag, '--notes-file', str(notes), '--draft=false', '--latest')
+    print(f'Published {tag} at {sha}; product GO: {go_ref}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tag', required=True)
+    parser.add_argument('--sha', required=True)
+    parser.add_argument('--go-ref', required=True)
+    args = parser.parse_args()
+    try:
+        publish(args.tag, args.sha, args.go_ref)
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f'release-fractal-publish: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

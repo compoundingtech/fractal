@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Publish a release from the archives main already built, when main changed since the last one.
+"""Prepare a draft candidate from the archives main already built.
 
 Every main commit runs "Fractal tag release", which builds, tests and verifies both archives and
 uploads them as the `fractal-release` artifact. This takes the newest commit whose run succeeded (or
 the successful main push run selected by --run),
-re-verifies its checksums and sources, tags that exact commit and publishes the same bytes. Nothing
-is rebuilt, so a release is always an archive a main run has already proven.
+re-verifies its checksums and sources, tags that exact commit and drafts the same bytes. Nothing
+is rebuilt. Publication requires a separate exact-SHA product release GO.
 
 Usage: scripts/release-fractal-daily [--dry-run] [--tag TAG] [--run ID]
 Environment: GH_TOKEN and GH_REPO (as for gh). Run from a full-history checkout with tags.
@@ -254,20 +254,14 @@ def main():
         shortened = 'shortened' if body != rendered else 'unchanged'
         say(f'dry run: release body {shortened}: {len(body)} characters '
             f'(full notes: {len(rendered)}; limit: {RELEASE_BODY_LIMIT})')
-        say(f'dry run: would publish {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
+        say(f'dry run: would draft {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
         return 0
 
-    # A draft has no tag yet. Publishing it creates the tag at exactly this commit, so a partial
-    # draft can be inspected and deleted without leaving a tag behind.
-    gh('release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
+    # Reserve the immutable candidate tag before creating its private release.
+    run('git', 'push', 'origin', f'{sha}:refs/tags/{tag}', cwd=repo)
+    gh('release', 'create', tag, '--target', sha, '--verify-tag', '--draft', '--title', f'Fractal {tag}',
        '--notes-file', str(body_notes), *assets, done=lambda: discard_partial_draft(tag))
-    gh('release', 'edit', tag, '--draft=false',
-       done=lambda: (state := release_state(tag)) is not None and not state['isDraft'])
-    tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}^{{}}', f'refs/tags/{tag}', cwd=repo).split()
-    if sha not in tagged:
-        say(f'published {tag}, but the tag does not point at {sha}: {tagged}')
-        return 1
-    say(f'published {tag} at {sha}')
+    say(f'drafted {tag} at {sha}; publication requires an exact-SHA product release GO')
     return 0
 
 

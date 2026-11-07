@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stable releases publish only after the product release GO. The daily schedule and tag builds prepare draft candidates; a separate manual publish dispatch requires the exact candidate source SHA and a recorded GO reference.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No product schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or retention changes."},
+  "compatibility": {"status": "none", "detail": "No binary or wire changes; stable consumers continue to use published releases only."},
+  "downtime": {"status": "none", "detail": "No runtime deployment occurs when creating a candidate."},
+  "manual": {"status": "changed", "detail": "After the product release owner records GO for the full candidate SHA, dispatch release-daily.yml on main with mode=publish, tag, sha and go_ref. Candidate creation alone no longer publishes or advances compatibility baselines. See docs/st3/binary-releases.md."},
+  "recovery": {"status": "changed", "detail": "A rejected publish leaves the candidate unpublished. Correct the SHA or GO reference and dispatch again; never move a candidate or published tag."}
+}

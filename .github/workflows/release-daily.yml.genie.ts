@@ -2,23 +2,40 @@ import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
-// Publishes once a day, only when main changed since the last release. It builds nothing: it
-// takes the archives that the newest successful main run of release-fractal.yml uploaded.
+// Prepares a daily draft candidate only when main changed, reusing verified main archives.
+// Stable publication requires an explicit dispatch with the exact candidate tag, SHA and product GO.
 // Tags made with this workflow's token do not start the tag workflow, so there is no second build.
 export default githubWorkflow(auditCaches({
   actionlint: linuxActionlintConfig,
-  name: 'Fractal daily release',
+  name: 'Fractal release candidates and publication',
   on: {
     schedule: [{ cron: '17 5 * * *' }],
     workflow_dispatch: {
       inputs: {
+        mode: {
+          description: 'Prepare a draft candidate or publish an explicitly approved candidate',
+          required: true,
+          type: 'choice',
+          options: ['candidate', 'publish'],
+          default: 'candidate',
+        },
         tag: {
-          description: 'Release tag; default is the next patch after the highest v tag',
+          description: 'Candidate tag; required for publication, otherwise defaults to the next patch',
           required: false,
           type: 'string',
         },
         run: {
           description: 'Successful main tag-release run ID; default is the newest',
+          required: false,
+          type: 'string',
+        },
+        sha: {
+          description: 'Exact candidate source SHA approved for publication',
+          required: false,
+          type: 'string',
+        },
+        go_ref: {
+          description: 'Product GO evidence reference approving this exact SHA',
           required: false,
           type: 'string',
         },
@@ -29,7 +46,8 @@ export default githubWorkflow(auditCaches({
   concurrency: { group: 'fractal-daily-release', 'cancel-in-progress': false },
   jobs: {
     release: {
-      name: 'daily-release',
+      name: 'daily-release-candidate',
+      if: "inputs.mode != 'publish'",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       permissions: { contents: 'write', actions: 'read' },
@@ -42,28 +60,50 @@ export default githubWorkflow(auditCaches({
       steps: [
         ...fullHistoryCheckoutSteps(),
         {
-          name: 'Publish the verified archives of main when it changed',
+          name: 'Prepare a draft candidate from the verified archives of main',
           run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"}',
+        },
+      ],
+    },
+    publish: {
+      name: 'publish-approved-release',
+      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && github.ref == 'refs/heads/main'",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 20,
+      permissions: { contents: 'write' },
+      env: {
+        GH_TOKEN: '${{ github.token }}',
+        GH_REPO: '${{ github.repository }}',
+        TAG: '${{ inputs.tag }}',
+        SOURCE_SHA: '${{ inputs.sha }}',
+        GO_REF: '${{ inputs.go_ref }}',
+      },
+      steps: [
+        ...fullHistoryCheckoutSteps(),
+        {
+          name: 'Publish only the exact candidate approved by product GO',
+          run: 'python3 scripts/release-fractal-publish --tag "$TAG" --sha "$SOURCE_SHA" --go-ref "$GO_REF"',
         },
       ],
     },
     advance: {
       name: 'advance-compatibility-baselines',
-      needs: 'release',
+      needs: 'publish',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },
       env: {
         GH_TOKEN: '${{ github.token }}',
         GH_REPO: '${{ github.repository }}',
+        TAG: '${{ inputs.tag }}',
       },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         {
-          name: 'Propose baselines for the latest published stable release',
-          run: 'set -euo pipefail\nTAG=$(python3 scripts/compat-baseline-release latest)\npython3 scripts/compat-baseline-release advance "$TAG"\n',
+          name: 'Propose baselines for the explicitly published release',
+          run: 'python3 scripts/compat-baseline-release advance "$TAG"',
         },
       ],
     },
   },
-}, {"release": "Reuses verified main release artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))
+}, {"release": "Prepares draft candidates from verified main release artifacts; builds nothing.", "publish": "Publishes an exact draft candidate only with explicit product GO; builds nothing.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."}))

@@ -8,11 +8,11 @@ import { readFileSync } from 'node:fs'
 
 const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-version', import.meta.url), 'utf8').trim()
 
-// Preserve release triggers, source verification and publishing permissions. Every commit on main
-// also builds and verifies both archives and keeps them as short-lived artifacts, so release
-// breakage fails on main instead of at tag time (the daily release publishes those artifacts).
+// Preserve release triggers and source verification; tag builds prepare draft candidates only.
+// Every commit on main also builds and verifies both archives and keeps short-lived artifacts,
+// so release breakage fails on main instead of at tag time (daily candidates reuse those artifacts).
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
-// the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
+// the tag trigger below. Stable publication requires the daily workflow's explicit product GO gate.
 export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Fractal tag release",
@@ -96,7 +96,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         },
         {
           "name": "Test release names, install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-publish-embed-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-publish-embed-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/release-fractal-publish-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
           "name": "Test the daily release failure path",
@@ -305,8 +305,8 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         }
       ]
     },
-    "publish": {
-      "name": "release-publish",
+    "candidate": {
+      "name": "release-draft-candidate",
       "if": "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
       "needs": "assemble",
       "runs-on": "ubuntu-latest",
@@ -329,30 +329,10 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           }
         },
         {
-          "name": "Publish the verified tag artifacts",
-          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json\ngh release edit \"$TAG\" --draft=false\n"
+          "name": "Prepare the verified tag artifacts as a draft candidate",
+          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --target \"$SOURCE_SHA\" --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json RELEASE-NOTES.md\n"
         }
       ]
-    },
-    advance: {
-      name: 'advance-compatibility-baselines',
-      if: "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
-      needs: 'publish',
-      'runs-on': 'ubuntu-latest',
-      'timeout-minutes': 20,
-      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },
-      env: {
-        GH_TOKEN: '${{ github.token }}',
-        GH_REPO: '${{ github.repository }}',
-        TAG: '${{ github.ref_name }}',
-      },
-      steps: [
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
-        {
-          name: 'Propose compatibility baselines after publication',
-          run: 'python3 scripts/compat-baseline-release advance "$TAG"',
-        },
-      ],
     }
   }
-}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))))
+}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "candidate": "Prepares verified assembled artifacts as a draft candidate without stable publication; builds nothing."}))))

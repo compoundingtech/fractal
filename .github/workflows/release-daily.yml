@@ -1,19 +1,33 @@
 # Generated file - DO NOT EDIT
 # Source: release-daily.yml.genie.ts
 
-name: Fractal daily release
+name: Fractal release candidates and publication
 
 on:
   schedule:
     - cron: 17 5 * * *
   workflow_dispatch:
     inputs:
+      mode:
+        description: Prepare a draft candidate or publish an explicitly approved candidate
+        required: true
+        type: choice
+        options: [candidate, publish]
+        default: candidate
       tag:
-        description: Release tag; default is the next patch after the highest v tag
+        description: Candidate tag; required for publication, otherwise defaults to the next patch
         required: false
         type: string
       run:
         description: Successful main tag-release run ID; default is the newest
+        required: false
+        type: string
+      sha:
+        description: Exact candidate source SHA approved for publication
+        required: false
+        type: string
+      go_ref:
+        description: Product GO evidence reference approving this exact SHA
         required: false
         type: string
 
@@ -26,7 +40,8 @@ concurrency:
 
 jobs:
   release:
-    name: daily-release
+    name: daily-release-candidate
+    if: inputs.mode != 'publish'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -67,17 +82,68 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
-      - name: Publish the verified archives of main when it changed
+      - name: Prepare a draft candidate from the verified archives of main
         run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"}'
       - name: Report job cache coverage
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Reuses verified main release artifacts; builds nothing.
+          CACHE_REASON: Prepares draft candidates from verified main release artifacts; builds nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  publish:
+    name: publish-approved-release
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      SOURCE_SHA: ${{ inputs.sha }}
+      GO_REF: ${{ inputs.go_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Publish only the exact candidate approved by product GO
+        run: python3 scripts/release-fractal-publish --tag "$TAG" --sha "$SOURCE_SHA" --go-ref "$GO_REF"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Publishes an exact draft candidate only with explicit product GO; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   advance:
     name: advance-compatibility-baselines
-    needs: release
+    needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -87,19 +153,16 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Propose baselines for the latest published stable release
-        run: |
-          set -euo pipefail
-          TAG=$(python3 scripts/compat-baseline-release latest)
-          python3 scripts/compat-baseline-release advance "$TAG"
-
+      - name: Propose baselines for the explicitly published release
+        run: python3 scripts/compat-baseline-release advance "$TAG"
       - name: Report job cache coverage
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Verifies published archives and proposes the baseline maintenance PR; builds nothing.
+          CACHE_REASON: Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

@@ -174,9 +174,9 @@ time. Each native job also uploads its own archive and checksum as `release-<tar
 `gh run download RUN_ID --repo compoundingtech/fractal --name release-x86_64-unknown-linux-gnu`
 fetches that commit's Linux archive without building it (find RUN_ID with
 `gh run list --workflow release-fractal.yml --branch main --commit SHA`). Tag pushes use the same jobs, then verify that the tag still
-points at the built commit, upload a draft, and publish it only after every asset is present.
-Existing releases are not overwritten. If publication fails leaving a draft, inspect and remove
-that draft before rerunning the publish job; never move a published tag.
+points at the built commit and upload a draft candidate with its exact source SHA as the target.
+Neither a tag push nor the daily schedule publishes a stable release. Existing releases are not
+overwritten; never move a candidate or published tag.
 
 Native builds restore Cargo dependencies and Zig's cache on both platforms; the pinned PTY
 runtime uses the same cached Cargo target directory. Generated `target`, `.zig-cache`, and `dist`
@@ -221,15 +221,37 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 ## Daily releases
 
-**Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
-newest `main` commit whose release run succeeded; if that commit is not already in the latest
-release, it re-checks the checksums and sources of that run's `fractal-release` artifact, publishes
-those same bytes under the next patch tag (the highest `vX.Y.Z` tag plus one; dispatch with `tag` to
-choose another), and lists the merged pull request titles since the previous release in the notes.
-Nothing is rebuilt, and the tag is created at that exact commit with the workflow's own token, so it
-does not start a second tag build. There are no version-bump commits. Archives from these releases
-carry no tag in `BUILD.json`; `source` identifies the commit. `scripts/release-fractal-daily
---dry-run` prints what would be published without publishing.
+**Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch
+with `mode=candidate` (the default). It takes the newest `main` commit whose release run
+succeeded, re-checks the checksums and sources of its `fractal-release` artifact, reserves the
+next patch tag, and uploads those same bytes as a **draft**. Nothing is rebuilt and the
+workflow token's tag does not start a second build. Dispatch with `tag` or `run` to select
+a tag or successful main build explicitly. `scripts/release-fractal-daily --dry-run`
+prints the candidate notes without creating a tag or draft.
+
+Publication waits for an explicit product release GO on that **exact full source SHA**.
+After the Fractal Product Lead records the GO in a PR, comment, or message, the release
+owner (including an agent) publishes with:
+
+```sh
+gh workflow run release-daily.yml --repo compoundingtech/fractal --ref main \
+  -f mode=publish -f tag=vX.Y.Z -f sha=FULL_40_CHARACTER_SOURCE_SHA \
+  -f go_ref='URL_OR_MESSAGE_ID_OF_PRODUCT_RELEASE_GO'
+```
+
+The dispatch requires a nonempty GO reference; it records the reference, SHA, publisher,
+and workflow run in the published release notes. The reference is an auditable owner
+attestation, not an automated check of the referenced message's contents. No human-only
+environment review is required. The publisher refuses a non-draft or prerelease, a SHA
+that differs from the draft target, immutable tag, or `RELEASE.json`, incomplete notes,
+or invalid checksums/archive sources. It then publishes the existing bytes and proposes
+compatibility baselines. Candidate runs never advance baselines. Drafts are private and
+are not available through published-release download URLs; stable latest discovery
+excludes drafts and prereleases. Rolling `edge` and source-addressed `embed-*`
+prereleases remain independent development channels, not stable releases.
+
+If candidate creation fails after reserving a tag, inspect the draft and tag. Do not
+move the tag; a subsequent daily candidate uses the next unused patch tag.
 
 The downloader prefers `fractal-release` and also accepts `smalltalk-release` from older
 successful runs until those 7-day artifacts expire

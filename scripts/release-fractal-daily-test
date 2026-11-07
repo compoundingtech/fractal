@@ -43,6 +43,7 @@ elif args[:2] == ['run', 'download']:
     for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
         shutil.copy(item, destination / item.name)
 elif args[:2] == ['release', 'create']:
+    assert '--draft' in args and '--verify-tag' in args, args
     body_path = pathlib.Path(args[args.index('--notes-file') + 1])
     assets = args[args.index('--notes-file') + 2:]
     pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
@@ -52,7 +53,7 @@ elif args[:2] == ['release', 'create']:
     }))
     lines = os.environ['FAKE_FAILURE'].split('|')
     print('\n'.join(lines), file=sys.stderr)
-    sys.exit(1)
+    sys.exit(1 if os.environ['FAKE_FAILURE'] else 0)
 else:
     print('unexpected gh call: %r' % args, file=sys.stderr); sys.exit(9)
 '''
@@ -139,6 +140,8 @@ with tempfile.TemporaryDirectory() as temporary:
         shas.append(sh('git', 'rev-parse', 'HEAD', cwd=checkout))
         if index == 0:
             sh('git', 'tag', 'v0.3.17', cwd=checkout)
+    sh('git', 'init', '--bare', '-q', str(root / 'origin.git'), cwd=root)
+    sh('git', 'remote', 'add', 'origin', str(root / 'origin.git'), cwd=checkout)
     tools = root / 'tools'
     tools.mkdir()
     (tools / 'gh').write_text(FAKE_GH)
@@ -167,7 +170,7 @@ with tempfile.TemporaryDirectory() as temporary:
     for artifact in ('fractal-release', 'smalltalk-release'):
         done = daily(dry_run=True, artifact=artifact)
         assert done.returncode == 0 and 'Validated both release targets' in done.stdout, done
-        assert 'would publish v0.3.18' in done.stdout, done
+        assert 'would draft v0.3.18' in done.stdout, done
 
     # An explicitly selected older run wins over the newer run returned by `run list`.
     done = daily(dry_run=True, run_id=6)
@@ -204,6 +207,7 @@ with tempfile.TemporaryDirectory() as temporary:
 
     # The body and uploaded asset use separate files, even when no shortening is needed.
     done = daily(notes='notes\n')
+    assert done.returncode == 0 and 'drafted v0.3.18' in done.stdout, done
     published = json.loads(receipt.read_text())
     assert published == {'body': 'notes\n', 'assets': {'RELEASE-NOTES.md': 'notes\n'}}, published
     done = daily(dry_run=True)
@@ -278,9 +282,8 @@ else:
     raise AssertionError('a failing command must raise')
 
 # Exercise the real retry helper with stateful GitHub responses, including partially applied calls.
-def retry_publish(create_failures=1, partial=False, edit_failure=False, permanent=False,
-                  view_failure=False):
-    state = {'draft': None, 'calls': [], 'creates': 0, 'edits': 0}
+def retry_candidate(create_failures=1, partial=False, permanent=False, view_failure=False):
+    state = {'draft': None, 'calls': [], 'creates': 0}
 
     def github(cmd, **kwargs):
         args = cmd[1:]
@@ -305,12 +308,6 @@ def retry_publish(create_failures=1, partial=False, edit_failure=False, permanen
         elif args[:2] == ['release', 'delete']:
             assert state['draft'] is True
             state['draft'] = None
-        elif args[:2] == ['release', 'edit']:
-            state['edits'] += 1
-            assert state['draft'] is not None
-            state['draft'] = False
-            if edit_failure:
-                code, error = 1, 'HTTP 502: bad gateway'
         else:
             raise AssertionError(args)
         return subprocess.CompletedProcess(cmd, code, out, error)
@@ -319,24 +316,22 @@ def retry_publish(create_failures=1, partial=False, edit_failure=False, permanen
             mock.patch.object(release_gh.subprocess, 'run', side_effect=github):
         try:
             module.gh('release', 'create', 'v0.3.18', done=lambda: module.discard_partial_draft('v0.3.18'))
-            module.gh('release', 'edit', 'v0.3.18', '--draft=false',
-                      done=lambda: (result := module.release_state('v0.3.18')) is not None and not result['isDraft'])
         except module.CommandFailed:
             state['failed'] = True
     return state
 
 
 for partial in (False, True):
-    state = retry_publish(partial=partial, edit_failure=True)
-    assert state['draft'] is False and state['creates'] == 2 and state['edits'] == 1, state
+    state = retry_candidate(partial=partial)
+    assert state['draft'] is True and state['creates'] == 2, state
     assert state['calls'].count(['release', 'delete']) == int(partial), state
-state = retry_publish(create_failures=3, partial=True)
-assert state['draft'] is False and state['creates'] == 4, state
-state = retry_publish(create_failures=99, partial=True)
+state = retry_candidate(create_failures=3, partial=True)
+assert state['draft'] is True and state['creates'] == 4, state
+state = retry_candidate(create_failures=99, partial=True)
 assert state['failed'] and state['creates'] == 4 and state['draft'] is None, state
-state = retry_publish(permanent=True)
+state = retry_candidate(permanent=True)
 assert state['failed'] and state['creates'] == 1 and state['calls'] == [['release', 'create']], state
-state = retry_publish(partial=True, view_failure=True)
+state = retry_candidate(partial=True, view_failure=True)
 assert state['failed'] and state['creates'] == 1 and ['release', 'delete'] not in state['calls'], state
-print('PASS: daily release retries reconcile drafts and publication; --run selects only verified main push runs')
+print('PASS: daily release retries reconcile drafts without publication; --run selects only verified main push runs')
 print('Daily release bodies are bounded, full notes are attached, and failures are credential-safe')
