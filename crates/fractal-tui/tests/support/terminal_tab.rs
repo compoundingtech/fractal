@@ -25,6 +25,11 @@ fn terminal_tab_action_publication() {
     check_terminal_tab_probe(&["--check-action-publication"]);
 }
 
+#[test]
+fn terminal_tab_program_runs_on_through_resize_signals() {
+    check_terminal_tab_probe(&["--check-program-signals"]);
+}
+
 fn check_terminal_tab_probe(check: &[&str]) {
     let output = std::process::Command::new("python3")
         .arg(test_env!(
