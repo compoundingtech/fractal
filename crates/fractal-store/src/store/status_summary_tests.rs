@@ -38,18 +38,18 @@ fn work(read: impl FnOnce() -> StatusResponse) -> (smallclaims::sqlite::work::Sq
     (scope.finish(), status)
 }
 #[test]
-fn generic_status_summary_avoids_the_full_claim_vector_at_current_and_historical_cuts() {
+fn generic_status_fields_avoid_the_full_claim_vector_at_current_and_historical_cuts() {
     let store = seat_with(3_000);
     let cut = store.index().unwrap();
     for at in [None, Some(cut)] {
         let (summary_work, summary) = work(|| store.status_for_generic_reads(
-            Some(SEAT), None, at, false, ClaimsReduction::Summary,
+            Some(SEAT), None, at, false, ClaimsReduction::Fields,
         ).unwrap());
         let (full_work, full) = work(|| store.status_for_generic_reads(
             Some(SEAT), None, at, false, ClaimsReduction::Full,
         ).unwrap());
         assert!(summary.subjects[0].claims.is_empty(), "hot path enumerated claim ids");
-        assert_eq!(summary.subjects[0].claims_summary.count, 3_000);
+        assert_eq!(summary.subjects[0].claims_summary.count, 0);
         assert_eq!(full.subjects[0].claims.len(), 3_000);
         assert!(summary_work.vm_steps < full_work.vm_steps,
             "summary={summary_work:?}, full={full_work:?}");

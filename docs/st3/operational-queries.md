@@ -2,17 +2,17 @@
 
 ## Single-subject status reads
 
-`GET /v1/status?subject=SUBJECT&claims_summary=true` preserves the desired record, actual
-state, harness, conflicts, pending actions and snapshot cut, but replaces each subject's full
-canonical `claims` ID vector with an empty vector and `claims_summary` (count, first/latest
-canonical IDs and session boundary). `fractal show`/inspect and the CLI's other single-subject
+`GET /v1/status?subject=SUBJECT&omit_claims=true` preserves the desired record, actual
+state, harness, conflicts, pending actions and snapshot cut, but omits claim provenance:
+`claims` is empty and `claims_summary` remains its empty/default value. No claim count or
+canonical session-boundary query runs. `fractal show`/inspect and the CLI's other single-subject
 status consumers request this representation; recent claim bodies remain a separate bounded
 claim-page read. Owned-set member status reads also use this reduction internally without
 changing their response shape. The default HTTP status representation remains unchanged.
 
 This avoids enumerating and canonicalizing every claim ID under the status read snapshot.
-It does not make actual-state or harness folding independent of history, and the summary count
-still reads a covering index. A desired-only caller should use `GET /v1/desired/SUBJECT`,
+It does not make actual-state or harness folding independent of history.
+A desired-only caller should use `GET /v1/desired/SUBJECT`,
 which reads the desired record without reducing actual state or claims.
 
 ## Published operational lists

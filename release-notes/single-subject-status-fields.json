@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No graph replay."},
   "schema": {"status": "none", "detail": "No database or claim schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},
-  "compatibility": {"status": "changed", "detail": "GET /v1/status accepts optional claims_summary=true. Its default remains unchanged. CLI show/inspect and other single-subject status consumers request empty claims plus the existing claims_summary instead of all canonical claim IDs. Desired, actual, harness, conflicts and pending actions are unchanged. Owned-set response shapes are unchanged. Older daemons ignore the query and return the full vector."},
+  "compatibility": {"status": "changed", "detail": "GET /v1/status accepts optional omit_claims=true. Its default remains unchanged. CLI show/inspect and other single-subject status consumers omit claim provenance (empty claims and default claims_summary); no claim counts or boundary queries run. Desired, actual, harness, conflicts and pending actions are unchanged. Owned-set response shapes are unchanged. Older daemons ignore the query and return the full vector."},
   "downtime": {"status": "none", "detail": "None."},
   "manual": {"status": "none", "detail": "None."},
   "recovery": {"status": "none", "detail": "Nothing stored changes; reverting restores full claim ID enumeration."}
