@@ -12,6 +12,7 @@ pub mod glasses;
 pub mod lifecycle;
 pub mod notice;
 pub mod notice_owner;
+pub mod notice_owner_ack;
 pub mod notice_receipt;
 pub mod ordered_membership;
 pub mod harness_questions;
@@ -735,6 +736,9 @@ impl Registry {
         deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
+        }
+        if kind == notice_owner_ack::KIND {
+            notice_owner_ack::Acknowledgement::from_fields(fields)?;
         }
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
@@ -1482,6 +1486,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
 
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
+        (
+            notice_owner_ack::KIND,
+            &["notice-owner"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
         (
             "person.delegation-set",
             &["person"],
@@ -3033,6 +3046,12 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        notice_owner_ack::KIND => &[
+            ("owner_binding", required_string()),
+            ("previous_ack", FieldSpec { required: true, nullable: true, ..string() }),
+            ("status", required_enum(&["active", "ended"])),
+            ("runtime_binding", FieldSpec { required: true, nullable: true, ..string() }),
+        ],
         "deploy.go" => &[
             ("version", required_integer()),
             ("host", required_string()),
