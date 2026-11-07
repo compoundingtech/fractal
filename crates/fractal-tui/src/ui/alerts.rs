@@ -2174,6 +2174,38 @@ mod tests {
             }
         }
         assert!(drawn > 0, "no height drew the band");
+        // So too with a title long enough to wrap, and over the seat's attached terminal.
+        let mut world = questions_world(4, 4);
+        if let Load::Ready(items) = &mut world.attention {
+            items[0].title = "builder is waiting for permission to plant every bed in the north garden before the frost".into();
+        }
+        let mut ui = in_conversation(world);
+        ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
+        for attached in [false, true] {
+            if attached {
+                ui.open_in_glass(Pane::Terminal(SEAT.into()), Open::Tab);
+                ui.attach_terminal(SEAT);
+                ui.terminal = Some(TerminalView {
+                    agent: SEAT.into(),
+                    title: "builder".into(),
+                    name: "builder".into(),
+                    lines: Vec::new(),
+                    cursor: None,
+                    stale: None,
+                    ended: None,
+                    native: None,
+                });
+            }
+            let mut drawn = 0;
+            for height in 10..=24 {
+                let shown = render(&ui, 60, height);
+                if shown.contains("▾ fold") {
+                    drawn += 1;
+                    assert!(ui.frame.borrow().hits.iter().any(|(_, hit)| *hit == open), "attached {attached}, height {height}:\n{shown}");
+                }
+            }
+            assert!(drawn > 0, "attached {attached}: no height drew the band");
+        }
         // With room, the whole form shows in place.
         let mut ui = in_conversation(questions_world(4, 4));
         ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
