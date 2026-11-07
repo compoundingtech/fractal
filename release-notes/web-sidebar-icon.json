@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Collapsing and expanding the sidebar use one panel icon in the sidebar and thread headers",
+  "summary": "Shell chrome polish: one panel icon for the sidebar controls, a cog for settings, and folder layout state as one quiet line",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Reverting restores the previous icons."
+    "detail": "Reverting restores the previous icons and folder notices."
   }
 }
