@@ -7,7 +7,7 @@ use std::{collections::VecDeque, fs, io::{self, Write}, os::unix::fs::OpenOption
 /// Dedicated live-loop inputs, not resource-window updates. Tokens reject obsolete reads.
 pub enum LiveEvent {
     Membership(fractal_sidebar::paging::Event),
-    Edit { scope: Scope, event: Event },
+    Edit { scope: Scope, event: Box<Event> },
 }
 #[derive(Debug)]
 pub enum Error {
@@ -200,7 +200,7 @@ mod tests {
             let mut sends = 0;
             let external = restored.execute(effects, scope, "actor/test", |wire| { sends += 1; lost(wire) }).await.unwrap();
             assert_eq!(sends, usize::from(matches!(stage, 0 | 1 | 2 | 6)));
-            if matches!(stage, 3 | 4 | 5) { assert!(external.contains(&Effect::ReadBase)); }
+            if matches!(stage, 3..=5) { assert!(external.contains(&Effect::ReadBase)); }
         }
         let effects = store.edits.reduce(Event::Refused(id(2), fractal_sidebar::edits::Refusal::Unauthorized));
         // First acknowledge sending, then refuse the dependent step.
