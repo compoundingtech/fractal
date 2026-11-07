@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""scripts/ci-cargo-cache-trim: a cached target keeps what a build reuses and drops only its linked executables."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('ci_cargo_cache_trim', str(ROOT / 'scripts/ci-cargo-cache-trim'))
+trim = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(trim)
+
+
+class Trim(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.target = Path(self.tmp.name) / 'target'
+
+    def file(self, relative, size=10, executable=False):
+        path = self.target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'x' * size)
+        path.chmod(0o755 if executable else 0o644)
+        return path
+
+    def test_linked_executables_go_and_what_a_build_reuses_stays(self):
+        kept = [self.file('debug/deps/libfractal_core-0123.rlib', 100), self.file('debug/deps/libfractal_core-0123.rmeta'),
+                self.file('debug/deps/fractal_core-0123.d'), self.file('debug/deps/libproc_macro-77.so', executable=True),
+                self.file('debug/build/ring-55/build-script-build', executable=True), self.file('debug/build/ring-55/out/libring.a'),
+                self.file('debug/.fingerprint/fractal-0123/lib-fractal'), self.file('debug/fractal.d'),
+                self.file('x86_64-unknown-linux-gnu/debug/deps/libwasm-9.rlib'), self.file('CACHEDIR.TAG')]
+        gone = [self.file('debug/deps/fractal_core-0123', 1000, executable=True), self.file('debug/deps/integration-4567', 2000, executable=True),
+                self.file('debug/examples/demo-89', 300, executable=True), self.file('debug/examples/libdemo-89.rlib'),
+                self.file('debug/fractal', 500, executable=True), self.file('x86_64-unknown-linux-gnu/debug/deps/wasm_test-9', executable=True)]
+        removed, freed, left = trim.trim(self.target)
+        self.assertEqual([path for path in kept if not path.exists()], [], 'libraries, build scripts and fingerprints stay')
+        self.assertEqual([path for path in gone if path.exists()], [], 'test binaries, examples and binaries go, under every profile')
+        self.assertEqual((removed, freed), (len(gone), 1000 + 2000 + 300 + 10 + 500 + 10))
+        self.assertEqual(left, sum(path.stat().st_size for path in kept))
+
+    def test_a_file_that_is_not_executable_or_has_an_extension_stays_in_deps(self):
+        kept = [self.file('debug/deps/notes-1'), self.file('debug/deps/tool-2.sh', executable=True)]
+        trim.trim(self.target)
+        self.assertTrue(all(path.exists() for path in kept))
+
+    def test_the_command_says_what_it_did_and_a_missing_target_is_nothing_to_trim(self):
+        self.file('debug/deps/x-1', 2_000_000, executable=True)
+        self.file('debug/deps/libx-1.rlib', 1_000_000)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-cargo-cache-trim'), str(self.target)], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('removed 1 linked executables (0.00 GB)', done.stdout)
+        self.assertIn('0.00 GB left to cache', done.stdout)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-cargo-cache-trim'), str(Path(self.tmp.name) / 'none')], capture_output=True, text=True)
+        self.assertEqual((done.returncode, 'nothing to trim' in done.stdout), (0, True))
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-cargo-cache-trim')], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 2)
+
+    def test_a_symlink_is_never_followed_out_of_the_target(self):
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir()
+        (outside / 'precious').write_bytes(b'keep')
+        (outside / 'precious').chmod(0o755)
+        self.file('debug/deps/libx-1.rlib')
+        (self.target / 'debug/examples').mkdir(parents=True)
+        (self.target / 'debug/examples/link').symlink_to(outside)
+        (self.target / 'linked-profile').symlink_to(outside)
+        trim.trim(self.target)
+        self.assertTrue((outside / 'precious').exists(), 'a symlink in examples is removed as a link, never walked')
+        self.assertFalse((self.target / 'debug/examples/link').exists())
+
+    def test_a_symlinked_deps_examples_profile_or_target_is_never_walked(self):
+        outside = Path(self.tmp.name) / 'outside'
+        (outside / 'sub').mkdir(parents=True)
+        precious = [outside / 'tool', outside / 'sub' / 'file']
+        for path in precious:
+            path.write_bytes(b'keep')
+            path.chmod(0o755)
+        self.file('debug/deps/x-1', executable=True)
+        (self.target / 'debug/examples').symlink_to(outside)
+        (self.target / 'release').mkdir()
+        (self.target / 'release/deps').symlink_to(outside)
+        (self.target / 'wasm32').mkdir()
+        (self.target / 'wasm32/debug').symlink_to(outside)
+        removed, _, _ = trim.trim(self.target)
+        self.assertEqual(removed, 1, 'only the real profile\'s executable')
+        self.assertTrue(all(path.exists() for path in precious), 'nothing outside the target is removed')
+        linked = Path(self.tmp.name) / 'linked-target'
+        linked.symlink_to(self.target)
+        self.file('debug/deps/y-2', executable=True)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-cargo-cache-trim'), str(linked)], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('is a symlink; not trimming', done.stdout)
+        self.assertTrue((self.target / 'debug/deps/y-2').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()
