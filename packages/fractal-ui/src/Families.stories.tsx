@@ -1,14 +1,23 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
-import { Families } from './Families'
+import { Families, type FamiliesProps } from './Families'
 import type { Theme } from './kit'
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Component families',
   component: Families,
-  args: { direction: 'folio', scheme: 'light', density: 'comfortable' },
-  parameters: { scenario: { _tag: 'contract-fixture', reason: "Families owns authored changed-file, worktree and actor-state examples without a domain-data props seam; these fixed examples compare component tokens and density. Conversion requires exposing that seam." },
+  args: { direction: 'folio', scheme: 'light', density: 'comfortable',
+    changedFiles: [
+      { id: 'one', path: 'src/one.ts', added: 4, removed: 1, status: { state: 'ready', label: 'Ready' } },
+      { id: 'two', path: 'src/long-filename-that-truncates-in-narrow-panes.test.ts', added: 12, removed: 0, status: { state: 'building', label: 'Checking' } },
+      { id: 'three', path: 'src/three.ts', added: 0, removed: 8, status: { state: 'error', label: 'Failed' } },
+    ],
+    worktree: 'isolated/example',
+    actors: [{ name: 'Atlas', detail: 'review lane · 2 files' }, { name: 'Birch', detail: 'idle · waiting for input', tone: 'warning' }],
+    actorStates: [{ state: 'ready' }, { state: 'building' }, { state: 'queued' }, { state: 'error' }, { state: 'canceled' }],
+  },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Story-local authored changed-file, worktree and actor-state defaults compare component tokens and density; scenario conversion is separate." },
     a11y: {
       options: {
         rules: {
@@ -27,7 +36,7 @@ const meta = {
     density: { control: 'radio', options: ['compact', 'comfortable'] },
     onThemeChange: { table: { disable: true } },
   },
-  render: function Render(args: Theme & { onThemeChange?: (change: Partial<Theme>) => void }) {
+  render: function Render(args: FamiliesProps) {
     const [, updateArgs] = useArgs()
     return <Families {...args} onThemeChange={(change: Partial<Theme>) => updateArgs(change)} />
   },

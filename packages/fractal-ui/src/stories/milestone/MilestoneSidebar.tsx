@@ -8,7 +8,7 @@ import { MilestoneAgentRow } from '../../assistant-ui/sidebar/MilestoneAgentRow'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
-import type { RosterFolder } from './milestone-fixtures'
+export interface RosterFolder { readonly id: string; readonly label: string; readonly rows: readonly Row[] }
 
 export type RosterState = 'ready' | 'loading' | 'empty' | 'error' | 'stale'
 export interface MilestoneSidebarProps {
