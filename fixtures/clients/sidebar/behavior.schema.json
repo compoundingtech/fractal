@@ -20,14 +20,14 @@
         "checkpoints": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/checkpoint"}}
       },
       "oneOf": [
-        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 1}}}}}, "memberships": {"$ref": "#/$defs/empty"}}}, "events": {"items": {"properties": {"type": {"const": "ProjectAndPlanV1"}}}}}},
-        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 2}}}}}}}, "events": {"items": {"properties": {"type": {"const": "ProjectV2"}, "moves": {"$ref": "#/$defs/empty"}}}}, "checkpoints": {"items": {"properties": {"moves": {"$ref": "#/$defs/empty"}}}}}}
+        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 1}}}}}, "memberships": {"$ref": "#/$defs/empty"}}}, "events": {"items": {"properties": {"type": {"const": "ProjectAndPlanV1"}}}}, "checkpoints": {"items": {"properties": {"moves": {"items": {"$ref": "#/$defs/v1Result"}}}}}}},
+        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 2}}}}}}}, "events": {"items": {"oneOf": [{"properties": {"type": {"const": "ProjectV2"}, "moves": {"$ref": "#/$defs/empty"}}}, {"properties": {"type": {"const": "ProjectAndPlanV2"}}}]}}, "checkpoints": {"items": {"properties": {"moves": {"items": {"$ref": "#/$defs/v2Result"}}}}}}}
       ]
     },
     "event": {
-      "description": "Pure v1 projection and move plans, or v2 complete live membership projection, then rollup; neither dispatches effects or wire actions.",
+      "description": "Pure v1/v2 projection and optional move plans, then rollup; neither dispatches effects or wire actions.",
       "type": "object", "additionalProperties": false, "required": ["type", "moves", "needsYou"],
-      "properties": {"type": {"enum": ["ProjectAndPlanV1", "ProjectV2"]}, "moves": {"type": "array", "items": {"$ref": "#/$defs/intent"}}, "needsYou": {"$ref": "#/$defs/strings"}}
+      "properties": {"type": {"enum": ["ProjectAndPlanV1", "ProjectV2", "ProjectAndPlanV2"]}, "moves": {"type": "array", "items": {"$ref": "#/$defs/intent"}}, "needsYou": {"$ref": "#/$defs/strings"}}
     },
     "checkpoint": {
       "type": "object", "additionalProperties": false, "required": ["tree", "moves", "rollup", "effects", "wireActions"],
@@ -59,7 +59,12 @@
     "tree": {"type": "object", "additionalProperties": false, "required": ["roots", "nodes", "arrangementRevision", "deletedFolders"], "properties": {"roots": {"type": "array", "items": {"$ref": "#/$defs/node"}}, "nodes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/treeNode"}}, "arrangementRevision": {"$ref": "#/$defs/string"}, "deletedFolders": {"$ref": "#/$defs/strings"}}},
     "treeNode": {"type": "object", "additionalProperties": false, "required": ["node", "parent", "shownUnder", "source", "children"], "properties": {"node": {"$ref": "#/$defs/node"}, "parent": {"$ref": "#/$defs/parent"}, "shownUnder": {"$ref": "#/$defs/parent"}, "source": {"$ref": "#/$defs/source"}, "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}, "key": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}}},
     "rollup": {"type": "object", "additionalProperties": false, "required": ["needsYou", "display"], "properties": {"needsYou": {"type": "integer", "minimum": 0}, "display": {"const": "Always"}}},
-    "result": {"oneOf": [
+    "v2Result": {"type": "object", "additionalProperties": false, "required": ["_tag", "edit"], "properties": {"_tag": {"const": "PlannedV2"}, "edit": {"type": "object", "additionalProperties": false, "required": ["folders", "memberships"], "properties": {
+      "folders": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["op", "id", "parent", "key"], "properties": {"op": {"const": "folder.move"}, "id": {"$ref": "#/$defs/string"}, "parent": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}},
+      "memberships": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["op", "member", "bucket", "key"], "properties": {"op": {"const": "place"}, "member": {"$ref": "#/$defs/string"}, "bucket": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}}
+    }}}},
+    "result": {"oneOf": [{"$ref": "#/$defs/v1Result"}, {"$ref": "#/$defs/v2Result"}]},
+    "v1Result": {"oneOf": [
       {"type": "object", "additionalProperties": false, "required": ["_tag", "intent"], "properties": {"_tag": {"const": "Planned"}, "intent": {"$ref": "#/$defs/intent"}}},
       {"type": "object", "additionalProperties": false, "required": ["_tag", "refusal"], "properties": {"_tag": {"const": "Refused"}, "refusal": {"$ref": "#/$defs/refusal"}}}
     ]},
