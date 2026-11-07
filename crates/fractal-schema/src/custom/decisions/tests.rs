@@ -3,7 +3,7 @@ use serde_json::json;
 
 fn claim(id: &str, kind: &str, order: u64, fields: Value) -> Claim {
     Claim { id: id.into(), kind: format!("custom.decision.tree.v2.{kind}"),
-        actor: Some(if kind == "answered" { "person/alice" } else { "agent/owner" }.into()), order, fields }
+        actor: Some(if kind == "answered" { "person/lichen" } else { "agent/owner" }.into()), order, fields }
 }
 fn request(id: &str, q: i64) -> Claim { claim(id, "requested", q.unsigned_abs(), json!({"q":q})) }
 fn result(claims: &[Claim]) -> Fold<'_> { fold("custom/decision/tree/v2/owner", claims, json!({"revision":"fenced"})) }
