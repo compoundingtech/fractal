@@ -363,6 +363,10 @@ pub struct ClientPageCursor {
     pub items_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_index: Option<u64>,
+    /// The stream items the first page could see: the shard index the stream mirror had passed
+    /// (fractal-store stream_mirror.rs), as `before_index` is for graph messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_stream_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_key: Option<(u128, String)>,
     pub expires_at_unix_ms: u128,
@@ -2388,6 +2392,7 @@ fn client_page_read_projected(
                 native_only: query.native_only,
                 items_digest: items_digest.clone(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })?)
@@ -4876,10 +4881,14 @@ pub async fn relay_client_message_items(
             let Some(message) = store.message(&id)? else {
                 continue;
             };
-            let sent_at = store
-                .latest_claim(&id, Some("message.sent"))?
-                .map(|claim| claim.accepted_at_unix_ms)
-                .unwrap_or_default();
+            let sent_at = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+                stream_sent_at(&store, &id)?
+            } else {
+                store
+                    .latest_claim(&id, Some("message.sent"))?
+                    .map(|claim| claim.accepted_at_unix_ms)
+                    .unwrap_or_default()
+            };
             views.push((message, sent_at));
         }
         Ok(views)
@@ -4890,6 +4899,14 @@ pub async fn relay_client_message_items(
         items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
     }
     Ok(())
+}
+
+/// A stream item's sent time, as its client metadata reads it.
+fn stream_sent_at(store: &Store, subject: &str) -> anyhow::Result<u128> {
+    Ok(store
+        .stream_message_metadata(subject)?
+        .and_then(|metadata| metadata["sent_at"].as_str().and_then(|at| at.parse().ok()))
+        .unwrap_or_default())
 }
 
 pub fn client_message_resources(
@@ -4923,32 +4940,43 @@ fn client_message_resources_at(
         if peer.is_some_and(|peer| message.from != peer && message.to != peer) {
             continue;
         }
-        let claims = store.claims_for(&message.subject, None)?;
-        let first = claims.first();
-        let last = claims.last();
-        let sent_at = first
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        let mut updated_at = last
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or(sent_at);
-        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
-        // A seat this member hosts moves its message by a local mark, which no claim records.
-        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
-            && at >= updated_at
-        {
-            (revision, updated_at) = (receipt, at);
-        }
-        let session_id = first
-            .and_then(|claim| {
-                claim
-                    .body
-                    .get("fields")
-                    .unwrap_or(&claim.body)
-                    .get("session_id")
-            })
-            .cloned()
-            .unwrap_or(Value::Null);
+        let (sent_at, updated_at, revision, session_id) = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+            // A stream item has no graph claims: the mirror and the shard carry what they would.
+            let Some(metadata) = store.stream_message_metadata(&message.subject)? else {
+                continue;
+            };
+            let at = |field: &str| metadata[field].as_str().unwrap_or("0").parse::<u128>();
+            (at("sent_at")?, at("updated_at")?, metadata["revision"].as_str().unwrap_or("message/unknown").to_owned(),
+             metadata["session_id"].clone())
+        } else {
+            let claims = store.claims_for(&message.subject, None)?;
+            let first = claims.first();
+            let last = claims.last();
+            let sent_at = first
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let mut updated_at = last
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or(sent_at);
+            let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+            // A seat this member hosts moves its message by a local mark, which no claim records.
+            if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+                && at >= updated_at
+            {
+                (revision, updated_at) = (receipt, at);
+            }
+            let session_id = first
+                .and_then(|claim| {
+                    claim
+                        .body
+                        .get("fields")
+                        .unwrap_or(&claim.body)
+                        .get("session_id")
+                })
+                .cloned()
+                .unwrap_or(Value::Null);
+            (sent_at, updated_at, revision, session_id)
+        };
         let mut reasons = Vec::new();
         if message.status == "closed"
             || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
@@ -5863,6 +5891,7 @@ fn published_work_cursor(
         native_only: query.native_only,
         items_digest,
         before_index: None,
+        before_stream_index: None,
         after_key: None,
         expires_at_unix_ms,
     }
@@ -6615,11 +6644,9 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
 /// request path. Until it is made, the collection says so instead of making a read wait for it.
-/// A newly started report returns its operation audit for the delayed startup repair to consume;
-/// later doctor calls and diagnostic refreshes always audit the current store themselves.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// The report reads the last operation audit; the daemon makes its first audit only after the
+/// reconnect window. Return whether this call started the report.
+pub fn start_operation_report(state: &AppState) -> bool {
     client_v0::start_operation_report(state)
 }
 
@@ -8815,7 +8842,8 @@ pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
 }
 
 /// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
-/// every operation, about 14 s on a 56 GB store. The daemon audits at startup and then every
+/// every operation, about 14 s on a 56 GB store. The daemon audits
+/// [`crate::store::STARTUP_MAINTENANCE_DELAY`] after it starts and then every
 /// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
 pub(crate) fn operation_projection_check(
     audit: Option<crate::store::OperationAuditRecord>,
@@ -8829,7 +8857,8 @@ pub(crate) fn operation_projection_check(
     };
     let Some(audit) = audit else {
         return check("warn", format!(
-            "no operation audit has finished since the daemon started; it audits at startup and then every {} min",
+            "no operation audit has finished since the daemon started; it audits {} min after it starts and then every {} min",
+            crate::store::STARTUP_MAINTENANCE_DELAY.as_secs() / 60,
             period.as_secs() / 60
         ));
     };

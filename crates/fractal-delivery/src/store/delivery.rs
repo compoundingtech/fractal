@@ -243,7 +243,8 @@ pub trait DeliveryStore {
             request: &crate::mailbox::Fence,
             authority: Option<&crate::mailbox::Authority>,
         ) -> Result<crate::mailbox::Fence, FractalError>;
-    /// Recheck captured physical custody under the writer, before any capability mutation.
+    /// Recheck captured physical custody before any capability mutation: under the writer when the
+    /// bind writes, and on a fresh read transaction when it would write nothing.
     fn bind_mailbox_with_lease_checked(
             &self,
             request: &crate::mailbox::Fence,
@@ -1022,117 +1023,43 @@ impl DeliveryStore for Store {
             argv_member: Option<&crate::model::MemberSpec>,
             validate: &dyn Fn() -> Result<(), FractalError>,
         ) -> Result<crate::mailbox::Fence, FractalError> {
+        // A channel that reconnects with the lease and binding it already holds, as every seat's
+        // does when the daemon restarts, writes nothing. Decide it on a read transaction begun
+        // after the request arrived, so every commit before it is seen, through the same checks
+        // in the same order; only an admission that must write takes the writer. That one runs
+        // every check again under it, `validate` included: what the read saw may have changed.
+        {
+            let connection = self.readers.get();
+            if connection.is_autocommit() {
+                let read = connection.unchecked_transaction().map_err(internal)?;
+                if let Admitted::Bound { fence, .. } = admit_mailbox(
+                    &read, &self.origin, request, authority, argv_member, validate, Admit::Check,
+                )? {
+                    return Ok(fence);
+                }
+            }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        fractal_store::store::mailbox_lease_shared_seats::AFTER_BIND_READ_CHECK.with(|pause| {
+            let pause = pause.borrow_mut().take();
+            if let Some(pause) = pause {
+                pause();
+            }
+        });
         let mut connection = self.connection.write();
         let tx = connection.transaction().map_err(internal)?;
-        let mut stable_request;
-        let identity = fractal_store::store::identities::resolve_reference_conn(&tx, &request.subject)?;
-        let request = if identity == request.subject { request } else {
-            stable_request = request.clone();
-            stable_request.subject = identity;
-            &stable_request
+        let Admitted::Bound { fence, wrote, new_owner } = admit_mailbox(
+            &tx, &self.origin, request, authority, argv_member, validate, Admit::Write,
+        )? else {
+            unreachable!("an admission under the writer decides by writing");
         };
-        check_mailbox_incarnation(&tx, request)?;
-        if let Some(member) = argv_member {
-            mailbox_lease::check_argv_declaration(&tx, request, member, &self.origin)?;
+        if wrote {
+            tx.commit().map_err(internal)?;
         }
-        validate()?;
-        if let Some(authority) = authority {
-            mailbox_lease::refuse_argv_native_adoption(&tx, request)?;
-            mailbox_lease::check_declaration(&tx, request, authority, &self.origin)?;
-            mailbox_lease::admit(&tx, request, authority)?;
+        if new_owner && let Some(wakes) = self.fractal.mailbox_wakes.get() {
+            wakes.owner_changed(&fence.subject, &fence.component);
         }
-        if request.epoch != 0 {
-            check_mailbox_fence(&tx, request, &self.origin)?;
-            if let Some(authority) = authority {
-                mailbox_lease::record(&tx, request, authority)?;
-            }
-            if let Some(member) = argv_member {
-                mailbox_lease::record_argv_binding(&tx, request, member)?;
-            }
-            if authority.is_some() || argv_member.is_some() {
-                tx.commit().map_err(internal)?;
-            }
-            return Ok(request.clone());
-        }
-        if request.token.is_empty() || request.token.len() > 128 {
-            return Err(FractalError::new(
-                "invalid-mailbox-token",
-                "binding requires a stable request token",
-            ));
-        }
-        let prior: Option<(String, String, String, u64)> = tx.query_row(
-            "SELECT subject, component, incarnation, epoch FROM local_mailbox_bindings WHERE token=?1",
-            [&request.token], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-        ).optional().map_err(internal)?;
-        let mut bound = request.clone();
-        if let Some((subject, component, incarnation, epoch)) = prior {
-            if (subject, component, incarnation)
-                != (
-                    request.subject.clone(),
-                    request.component.clone(),
-                    request.incarnation.clone(),
-                )
-            {
-                return Err(FractalError::new(
-                    "invalid-mailbox-token",
-                    "binding token belongs to another session",
-                ));
-            }
-            bound.epoch = epoch;
-            // Retired tokens cannot allocate another epoch and retake their successor's mailbox.
-            check_mailbox_fence(&tx, &bound, &self.origin)?;
-            if let Some(authority) = authority {
-                mailbox_lease::record(&tx, &bound, authority)?;
-            }
-            if let Some(member) = argv_member {
-                mailbox_lease::record_argv_binding(&tx, &bound, member)?;
-            }
-            if authority.is_some() || argv_member.is_some() {
-                tx.commit().map_err(internal)?;
-            }
-            return Ok(bound);
-        }
-        // A revoked argv capability must not be recreated even if its binding row
-        // was removed; its durable authenticated designation remains terminal.
-        mailbox_lease::refuse_argv_native_adoption(&tx, request)?;
-        let previous: Option<u64> = tx
-            .query_row(
-                "SELECT epoch FROM local_mailbox_owners WHERE subject=?1 AND component=?2",
-                params![request.subject, request.component],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(internal)?;
-        bound.epoch = previous
-            .unwrap_or(0)
-            .checked_add(1)
-            .filter(|epoch| *epoch <= i64::MAX as u64)
-            .ok_or_else(|| FractalError::new("internal", "mailbox epoch exhausted"))?;
-        tx.execute(
-            /* sqlite-large-value: allow-for-now lv-he3ce29256ad4 owner=fractal_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_bindings VALUES (?1,?2,?3,?4,?5)",
-            params![
-                bound.token,
-                bound.subject,
-                bound.component,
-                bound.incarnation,
-                bound.epoch
-            ],
-        )
-        .map_err(internal)?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-he60cb7a02517 owner=fractal_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
-            ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation, epoch=excluded.epoch",
-            params![bound.subject, bound.component, bound.incarnation, bound.epoch]).map_err(internal)?;
-        if let Some(authority) = authority {
-            mailbox_lease::record(&tx, &bound, authority)?;
-        }
-        if let Some(member) = argv_member {
-            mailbox_lease::record_argv_binding(&tx, &bound, member)?;
-        }
-        tx.commit().map_err(internal)?;
-        if let Some(wakes) = self.fractal.mailbox_wakes.get() {
-            wakes.owner_changed(&bound.subject, &bound.component);
-        }
-        Ok(bound)
+        Ok(fence)
     }
 
     fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), FractalError> {
@@ -1248,3 +1175,147 @@ impl DeliveryStore for Store {
     }
 }
 
+/// Whether a mailbox admission writes what it decides, under the writer, or only checks, on a
+/// read transaction, that it would write nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admit {
+    Write,
+    Check,
+}
+
+enum Admitted {
+    /// The fence the admission binds; whether it wrote, and whether it made a new owner.
+    Bound { fence: crate::mailbox::Fence, wrote: bool, new_owner: bool },
+    /// A checking admission met a write that would change something: the writer decides.
+    Changes,
+}
+
+/// One mailbox admission, on the writer's transaction or on a read transaction. Both run every
+/// check in this order. Where the writer records the lease or the argv binding, a check passes
+/// only if the stored row is already what the write would leave, and otherwise hands the
+/// admission to the writer.
+fn admit_mailbox(
+    tx: &Connection,
+    origin: &str,
+    request: &crate::mailbox::Fence,
+    authority: Option<&crate::mailbox::Authority>,
+    argv_member: Option<&crate::model::MemberSpec>,
+    validate: &dyn Fn() -> Result<(), FractalError>,
+    mode: Admit,
+) -> Result<Admitted, FractalError> {
+    let mut stable_request;
+    let identity = fractal_store::store::identities::resolve_reference_conn(tx, &request.subject)?;
+    let request = if identity == request.subject { request } else {
+        stable_request = request.clone();
+        stable_request.subject = identity;
+        &stable_request
+    };
+    check_mailbox_incarnation(tx, request)?;
+    if let Some(member) = argv_member {
+        mailbox_lease::check_argv_declaration(tx, request, member, origin)?;
+    }
+    validate()?;
+    if let Some(authority) = authority {
+        mailbox_lease::refuse_argv_native_adoption(tx, request)?;
+        mailbox_lease::check_declaration(tx, request, authority, origin)?;
+        mailbox_lease::admit(tx, request, authority)?;
+    }
+    // The lease and argv binding an existing binding records: written under the writer, and on a
+    // read transaction found already standing, or the admission goes to the writer.
+    let held = |bound: &crate::mailbox::Fence| -> Result<Admitted, FractalError> {
+        if mode == Admit::Check {
+            if let Some(authority) = authority
+                && !matches!(mailbox_lease::lease(tx, bound)?, Some((held, owner, false))
+                    if (&held.incarnation, &held.token, held.epoch) == (&bound.incarnation, &bound.token, bound.epoch)
+                        && owner == *authority)
+            {
+                return Ok(Admitted::Changes);
+            }
+            if argv_member.is_some() && !mailbox_lease::holds_argv_binding(tx, bound)? {
+                return Ok(Admitted::Changes);
+            }
+            return Ok(Admitted::Bound { fence: bound.clone(), wrote: false, new_owner: false });
+        }
+        if let Some(authority) = authority {
+            mailbox_lease::record(tx, bound, authority)?;
+        }
+        if let Some(member) = argv_member {
+            mailbox_lease::record_argv_binding(tx, bound, member)?;
+        }
+        let wrote = authority.is_some() || argv_member.is_some();
+        Ok(Admitted::Bound { fence: bound.clone(), wrote, new_owner: false })
+    };
+    if request.epoch != 0 {
+        check_mailbox_fence(tx, request, origin)?;
+        return held(request);
+    }
+    if request.token.is_empty() || request.token.len() > 128 {
+        return Err(FractalError::new(
+            "invalid-mailbox-token",
+            "binding requires a stable request token",
+        ));
+    }
+    let prior: Option<(String, String, String, u64)> = tx.query_row(
+        "SELECT subject, component, incarnation, epoch FROM local_mailbox_bindings WHERE token=?1",
+        [&request.token], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional().map_err(internal)?;
+    let mut bound = request.clone();
+    if let Some((subject, component, incarnation, epoch)) = prior {
+        if (subject, component, incarnation)
+            != (
+                request.subject.clone(),
+                request.component.clone(),
+                request.incarnation.clone(),
+            )
+        {
+            return Err(FractalError::new(
+                "invalid-mailbox-token",
+                "binding token belongs to another session",
+            ));
+        }
+        bound.epoch = epoch;
+        // Retired tokens cannot allocate another epoch and retake their successor's mailbox.
+        check_mailbox_fence(tx, &bound, origin)?;
+        return held(&bound);
+    }
+    if mode == Admit::Check {
+        return Ok(Admitted::Changes);
+    }
+    // A revoked argv capability must not be recreated even if its binding row
+    // was removed; its durable authenticated designation remains terminal.
+    mailbox_lease::refuse_argv_native_adoption(tx, request)?;
+    let previous: Option<u64> = tx
+        .query_row(
+            "SELECT epoch FROM local_mailbox_owners WHERE subject=?1 AND component=?2",
+            params![request.subject, request.component],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    bound.epoch = previous
+        .unwrap_or(0)
+        .checked_add(1)
+        .filter(|epoch| *epoch <= i64::MAX as u64)
+        .ok_or_else(|| FractalError::new("internal", "mailbox epoch exhausted"))?;
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-he3ce29256ad4 owner=fractal_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_bindings VALUES (?1,?2,?3,?4,?5)",
+        params![
+            bound.token,
+            bound.subject,
+            bound.component,
+            bound.incarnation,
+            bound.epoch
+        ],
+    )
+    .map_err(internal)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-he60cb7a02517 owner=fractal_delivery::store::delivery TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
+            ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation, epoch=excluded.epoch",
+        params![bound.subject, bound.component, bound.incarnation, bound.epoch]).map_err(internal)?;
+    if let Some(authority) = authority {
+        mailbox_lease::record(tx, &bound, authority)?;
+    }
+    if let Some(member) = argv_member {
+        mailbox_lease::record_argv_binding(tx, &bound, member)?;
+    }
+    Ok(Admitted::Bound { fence: bound, wrote: true, new_owner: true })
+}
