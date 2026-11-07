@@ -81,7 +81,8 @@ impl Default for SendGate {
 
 /// Run `write`, the check of the other store and the append to this one, holding the gate's
 /// stripes for `input`'s subject and idempotency key. Stripes are taken in index order, so two
-/// sends never wait on each other's second stripe.
+/// sends never wait on each other's second stripe. The locks are not reentrant: `write` must
+/// not send another message itself, or a send whose stripe it already holds waits forever.
 pub fn gated<R>(graph: &Store, input: &ClaimInput, write: impl FnOnce() -> R) -> R {
     let gate = graph.extension::<SendGate>();
     let stripe = |value: &str| usize::from(Sha256::digest(value.as_bytes())[0]) % GATE_STRIPES;
