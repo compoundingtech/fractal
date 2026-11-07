@@ -6,7 +6,7 @@ import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-u
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
-import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
+import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useFleetSelection, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
 import { nativeTurnFooter } from './NativeTurnFooter.tsx'
@@ -18,13 +18,19 @@ import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
-import type { ConversationPage, Feed } from '../data/source.ts'
+import type { ConversationPage, Feed, Fleet } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
 import type { ToolCallItem } from '../conversation/model.ts'
 import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
+
+/** Roster display names by agent ref: mail headers read names, not graph paths. */
+const selectRosterNames = (feed: Feed<Fleet>): ReadonlyMap<string, string> =>
+  new Map(feed._tag === 'Observed' ? feed.value.agents.map(agent => [agent.ref, agent.name] as const) : [])
+const sameRosterNames = (left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean =>
+  left.size === right.size && [...left].every(([ref, name]) => right.get(ref) === name)
 
 export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
   const feed = useConversation(props.agentRef)
@@ -86,7 +92,9 @@ const ConversationThreadPane = ({
   const projectTranscript = React.useMemo(createConversationTranscript, [])
   // A stable callback keeps the cached projection; the source reports progress and failure through `page.older`.
   const onLoadEarlier = React.useMemo(() => source.loadOlder === undefined ? undefined : () => { void source.loadOlder?.(agentRef) }, [source, agentRef])
-  const state = projectTranscript(feed, { agentName, showSystemEvents, onLoadEarlier })
+  const rosterNames = useFleetSelection({ select: selectRosterNames, equal: sameRosterNames })
+  const names = React.useMemo(() => (ref: string) => rosterNames.get(ref), [rosterNames])
+  const state = projectTranscript(feed, { agentName, showSystemEvents, onLoadEarlier, agentRef, names })
   const observed = state._tag === 'Observed'
   const hasTurns = observed && state.turns.length > 0
   const boundary = React.useRef<HTMLDivElement>(null)

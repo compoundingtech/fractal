@@ -92,13 +92,29 @@ const elapsedBetween = (start: string, end: string): number | undefined => {
   return Number.isFinite(from) && Number.isFinite(to) && to >= from ? to - from : undefined
 }
 
-/** Run lifecycle comes from the run's own status entries; an unanswered call stays in flight. */
+/** The latest time an item records: a call's result lands after the call itself. */
+const lastTimeOf = (items: readonly KitConversationItem[]): string | undefined => {
+  let latest: string | undefined
+  let latestMs = -Infinity
+  for (const item of items) {
+    for (const at of [item.at, item._tag === 'ToolCall' ? item.result?.at : undefined]) {
+      const ms = at === undefined ? NaN : Date.parse(at)
+      if (Number.isFinite(ms) && ms > latestMs) { latestMs = ms; latest = at }
+    }
+  }
+  return latest
+}
+
+/**
+ * Run lifecycle comes from the run's own status entries; an unanswered call stays in flight. A settled
+ * run without a settling status still reports how long it worked: from its first entry to its last.
+ */
 const workFactsFor = (promptAt: string, items: readonly KitConversationItem[]) => {
   const status = lastStatusOf(items)
   const running = status !== undefined
     ? activeRunStatuses[status.status]
     : items.some(item => item._tag === 'ToolCall' && item.status === 'running')
-  const settledAt = status !== undefined && !activeRunStatuses[status.status] ? status.at : undefined
+  const settledAt = status !== undefined && !activeRunStatuses[status.status] ? status.at : running ? undefined : lastTimeOf(items)
   return {
     running,
     failed: status?.status === 'failed',
@@ -108,6 +124,28 @@ const workFactsFor = (promptAt: string, items: readonly KitConversationItem[]) =
   }
 }
 
+/** A participant as the transcript names it: the roster name, else the ref's last segment; `ref` is the full path for hover. */
+export interface ParticipantName { readonly label: string; readonly ref?: string }
+export const participantName = (ref: string | undefined, names: TranscriptTurnOptions['names']): ParticipantName | undefined => {
+  if (ref === undefined || ref === '') return undefined
+  if (ref.startsWith('daemon/')) return { label: 'Fractal', ref }
+  const named = names?.(ref)
+  if (named !== undefined && named !== '') return { label: named, ref }
+  if (ref.startsWith('person/')) return { label: ref.slice('person/'.length), ref }
+  return { label: ref.split('/').filter(part => part !== '').at(-1) ?? ref, ref }
+}
+
+/**
+ * Input that starts an episode without being a person's prompt: machine mail that woke the agent, or
+ * mail another agent sent it. The agent's own outgoing mail belongs to the episode it was sent from.
+ */
+const isTrigger = (item: KitConversationItem, agentRef: string | undefined): boolean => {
+  if (item._tag === 'Event') return item.kind === 'delivery'
+  if (item._tag !== 'Message') return false
+  const author = item.author ?? item.from
+  return agentRef === undefined ? item.to !== undefined && author !== undefined : author !== agentRef && (item.to === undefined || item.to === agentRef)
+}
+
 export interface TranscriptTurnOptions {
   /** Roster display name for assistant captions; never invented when absent. */
   readonly agentName?: string
@@ -115,6 +153,10 @@ export interface TranscriptTurnOptions {
   readonly firstTurnComplete: boolean
   /** A view preference; known internal entries become payload-free notices when enabled. */
   readonly showSystemEvents?: boolean
+  /** This conversation's agent: mail it sends stays in its episode, mail to it starts one. */
+  readonly agentRef?: string
+  /** Roster display name for a participant ref; unresolved refs read as their last segment. */
+  readonly names?: (ref: string) => string | undefined
 }
 
 /** Prepared turns preserve the leading native tail without synthesizing a human prompt. */
@@ -128,12 +170,23 @@ export const prepareTranscriptTurns = (
 ): readonly PreparedTranscriptTurn[] => {
   const turns: PreparedTranscriptTurn[] = []
   let prompt: (KitTextItem & { readonly role: 'user' }) | undefined
+  let trigger: KitConversationItem | undefined
   let turnItems: KitConversationItem[] = []
   const flush = () => {
     const first = prompt ?? turnItems[0]
     if (first === undefined) return
     const senderCaptions: Record<string, string | undefined> = {}
+    const participants: Record<string, NonNullable<TranscriptTurn['participants']>[string]> = {}
     for (const item of turnItems) {
+      if (item._tag === 'Message') {
+        const from = participantName(item.author ?? item.from, options.names)
+        const to = participantName(item.to, options.names)
+        participants[item.id] = {
+          from: from ?? { label: 'Unknown sender' },
+          ...(to === undefined ? {} : { to }),
+          involvesPerson: [item.author, item.from, item.to].some(ref => ref?.startsWith('person/') === true),
+        }
+      }
       if (item._tag !== 'Text' && item._tag !== 'Message') continue
       const label = item.sender?.label ?? (item._tag === 'Message' ? item.from : item.role === 'assistant' ? options.agentName : undefined)
       const caption = label !== undefined && /^(?:proc|agent):\/\//i.test(label)
@@ -151,14 +204,17 @@ export const prepareTranscriptTurns = (
     turns.push({
       id: first.id,
       ...(prompt === undefined ? {} : { prompt }),
+      ...(trigger === undefined ? {} : { triggerId: trigger.id }),
       items: turnItems,
       work: { ...work, calls: work.calls.map(call => {
         const item = tools.get(call.id)
         return { ...call, title: item === undefined ? 'Working' : toolSummary(item), summary: item === undefined ? 'Working' : toolSummary(item), argsSummary: undefined }
       }) },
       ...(Object.keys(senderCaptions).length === 0 ? {} : { senderCaptions }),
+      ...(Object.keys(participants).length === 0 ? {} : { participants }),
     })
     turnItems = []
+    trigger = undefined
   }
   for (const sourceItem of items) {
     // Unsupported is always retained: F2 markers are not a system-events preference.
@@ -174,6 +230,12 @@ export const prepareTranscriptTurns = (
       flush()
       prompt = item
       continue
+    }
+    // A wake or incoming mail opens the next episode, unless it is the first input of an empty one.
+    if (isTrigger(item, options.agentRef)) {
+      if (prompt !== undefined || turnItems.length > 0) flush()
+      prompt = undefined
+      trigger = item
     }
     turnItems.push(item)
   }
@@ -226,7 +288,7 @@ const diagnosticCode = /^[a-z][a-z0-9-]{0,39}$/
 
 export const mapConversationFeed = (
   feed: Feed<ConversationPage>,
-  options: { readonly agentName?: string; readonly showSystemEvents?: boolean; readonly onLoadEarlier?: () => void },
+  options: { readonly agentName?: string; readonly showSystemEvents?: boolean; readonly onLoadEarlier?: () => void; readonly agentRef?: string; readonly names?: (ref: string) => string | undefined },
 ): ConversationTranscriptState => {
   switch (feed._tag) {
     case 'Waiting':
@@ -239,7 +301,7 @@ export const mapConversationFeed = (
     }
     case 'Observed': {
       const { hasOlder, older } = feed.value
-      const turns = transcriptTurnsForItems(feed.value.items, { agentName: options.agentName, firstTurnComplete: !hasOlder, showSystemEvents: options.showSystemEvents })
+      const turns = transcriptTurnsForItems(feed.value.items, { agentName: options.agentName, firstTurnComplete: !hasOlder, showSystemEvents: options.showSystemEvents, agentRef: options.agentRef, names: options.names })
       // Native page provenance decides emptiness: a non-empty page whose rows are all omitted
       // (or that arrived with none) is filtered, not an empty conversation.
       const filteredEmpty = feed.value.observation?.empty === false
@@ -271,9 +333,11 @@ export const createConversationTranscript = (): typeof mapConversationFeed => {
   let previousName: string | undefined
   let previousSystemEvents: boolean | undefined
   let previousLoadEarlier: (() => void) | undefined
+  let previousNames: ((ref: string) => string | undefined) | undefined
+  let previousRef: string | undefined
   let previousState: ConversationTranscriptState | undefined
   return (feed, options) => {
-    if (previousState !== undefined && previousName === options.agentName && previousSystemEvents === options.showSystemEvents && previousLoadEarlier === options.onLoadEarlier && (
+    if (previousState !== undefined && previousName === options.agentName && previousSystemEvents === options.showSystemEvents && previousLoadEarlier === options.onLoadEarlier && previousNames === options.names && previousRef === options.agentRef && (
       previousFeed === feed
       || (feed._tag === 'Observed' && previousFeed?._tag === 'Observed'
         && feed.value.hasOlder === previousFeed.value.hasOlder
@@ -291,6 +355,8 @@ export const createConversationTranscript = (): typeof mapConversationFeed => {
     previousName = options.agentName
     previousSystemEvents = options.showSystemEvents
     previousLoadEarlier = options.onLoadEarlier
+    previousNames = options.names
+    previousRef = options.agentRef
     previousState = mapConversationFeed(feed, options)
     return previousState
   }
