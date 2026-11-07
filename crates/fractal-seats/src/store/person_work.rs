@@ -182,8 +182,9 @@ pub mod tests {
     #[test]
     fn starting_thread_from_real_ask_commits_one_first_message_and_leaves_ask_pending() {
         use crate::store::thread_metadata::{StartFromAsk, TimelineItem, mixed_timeline, start_from_ask};
+        use crate::store::thread_metadata::{ThreadContext, list_context};
 
-        let (store, _, input) = fixture();
+        let (store, origin_run, input) = fixture();
         store.configure_thread_write_rollout([]);
         let ask = store.ask_person(&input).unwrap();
         let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
@@ -210,6 +211,14 @@ pub mod tests {
         assert!(appended);
         assert_eq!(created.body["fields"]["origin_ask_episode"], original.id);
         assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let origin = ThreadContext::Ask { id: &ask.subject, episode: &original.id };
+        assert_eq!(list_context(&store, person, origin, None, 20).unwrap().items[0].id, "thread/worker");
+        assert!(list_context(&store, person, ThreadContext::Ask { id: &ask.subject, episode: "wrong" }, None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, "person/robin", ThreadContext::Ask { id: &ask.subject, episode: &original.id }, None, 20).unwrap().items.is_empty());
+        let mission = store.mission_run(&origin_run.run).unwrap().unwrap().mission;
+        assert_eq!(created.body["fields"]["mission"], mission);
+        assert_eq!(list_context(&store, person, ThreadContext::Mission(&mission), None, 20).unwrap().items[0].id, "thread/worker");
+
         let read = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
         assert_eq!(read.items.len(), 1);
         let TimelineItem::Message(first) = &read.items[0] else { panic!("expected the first message") };

@@ -798,6 +798,16 @@ WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
 ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
 WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_origin_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.origin_ask'),
+          json_extract(body, '$.fields.origin_ask_episode'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_mission_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
+ON claims(actor, store_index DESC)
+WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';

@@ -421,6 +421,8 @@ pub struct Summary {
     pub title_revision: String,
     pub revision: String,
     pub state: &'static str,
+    pub message_count: u64,
+    pub unread: bool,
 }
 
 /// Read metadata for the authenticated owner. All fields come from one graph snapshot.
@@ -459,12 +461,13 @@ fn summary_conn(
             |row| row.get(0),
         )
         .map_err(internal)?;
+    let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
+    let (message_count, unread) = message_window::message_summary(
+        connection, person, agent, subject, &creation,
+    )?;
     Ok(Summary {
         id: subject.into(),
-        agent_id: creation.body["fields"]["agent"]
-            .as_str()
-            .ok_or_else(unavailable)?
-            .into(),
+        agent_id: agent.into(),
         title: title.body["fields"]["title"]
             .as_str()
             .ok_or_else(unavailable)?
@@ -472,6 +475,8 @@ fn summary_conn(
         title_revision: title.id,
         revision,
         state,
+        message_count,
+        unread,
     })
 }
 
@@ -479,6 +484,13 @@ fn summary_conn(
 pub struct SummaryPage {
     pub items: Vec<Summary>,
     pub next_cursor: Option<String>,
+}
+
+pub enum ThreadContext<'a> {
+    Agent(&'a str),
+    Ask { id: &'a str, episode: &'a str },
+    Mission(&'a str),
+    RecentlyClosed,
 }
 
 /// Read one exact conversation, with cursor scope independent of agent incarnation.
@@ -489,42 +501,211 @@ pub fn list_conversation(
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<SummaryPage, FractalError> {
+    list_context(store, person, ThreadContext::Agent(agent), cursor, limit)
+}
+
+pub fn list_context(
+    store: &Store,
+    person: &str,
+    context: ThreadContext<'_>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<SummaryPage, FractalError> {
     store.graph.read_snapshot_unindexed(|| Ok((|| {
         let connection = store.readers.get();
         let person = identities::resolve_reference_conn(&connection, person)?;
-        let agent = identities::resolve_reference_conn(&connection, agent)?;
-        let scope = canonical_hash(&("thread.conversation.v1", &person, &agent)).map_err(internal)?;
-        let after = cursor.map(|cursor| {
-            cursor.split_once(':').filter(|(id, subject)| *id == scope && subject.starts_with("thread/") && subject.len() <= 512)
-                .map(|(_, subject)| subject)
-                .ok_or_else(|| FractalError::new("invalid-thread-cursor", "the cursor belongs to another conversation"))
-        }).transpose()?.unwrap_or_default();
         let limit = limit.clamp(1, 100);
-        let mut query = connection.prepare_cached(
+        let (index, fields, key, qualifier) = match context {
+            ThreadContext::Agent(agent) => (
+                "claims_thread_conversation_index",
+                "json_extract(claims.body, '$.fields.agent')=?2",
+                identities::resolve_reference_conn(&connection, agent)?,
+                None,
+            ),
+            ThreadContext::Ask { id, episode } => (
+                "claims_thread_origin_index",
+                "json_extract(claims.body, '$.fields.origin_ask')=?2 AND json_extract(claims.body, '$.fields.origin_ask_episode')=?5",
+                id.into(),
+                Some(episode),
+            ),
+            ThreadContext::Mission(mission) => (
+                "claims_thread_mission_index",
+                "json_extract(claims.body, '$.fields.mission')=?2",
+                identities::resolve_reference_conn(&connection, mission)?,
+                None,
+            ),
+            ThreadContext::RecentlyClosed => return recently_closed(&connection, &person, cursor, limit),
+        };
+        let scope = if index == "claims_thread_conversation_index" {
+            canonical_hash(&("thread.conversation.v1", &person, &key))
+        } else {
+            canonical_hash(&("thread.context.v1", index, &person, &key, qualifier))
+        }.map_err(internal)?;
+        let after = scoped_cursor(cursor, &scope)?.unwrap_or_default();
+        if !after.is_empty() && (!after.starts_with("thread/") || after.len() > 512) {
+            return Err(invalid_context_cursor());
+        }
+        let sql = format!(
             "SELECT DISTINCT claims.subject
-             FROM claims INDEXED BY claims_thread_conversation_index
+             FROM claims INDEXED BY {index}
              JOIN operations ON operations.canonical_claim_id=claims.id AND operations.state='active'
              WHERE claims.kind='thread.created'
                AND json_extract(claims.body, '$.fields.person')=?1
-               AND json_extract(claims.body, '$.fields.agent')=?2
-               AND claims.subject>?3
+               AND {fields} AND claims.subject>?3
                AND NOT EXISTS (SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
              ORDER BY claims.subject LIMIT ?4"
-        ).map_err(internal)?;
-        let mut subjects = query.query_map(params![person, agent, after, limit + 1], |row| row.get::<_, String>(0))
-            .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        );
+        let mut query = connection.prepare_cached(&sql).map_err(internal)?;
+        let args = [person.as_str(), key.as_str(), after];
+        let read = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+        let mut subjects = match qualifier {
+            Some(episode) => query.query_map(params![args[0], args[1], args[2], limit + 1, episode], read),
+            None => query.query_map(params![args[0], args[1], args[2], limit + 1], read),
+        }.map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        if let Some(episode) = qualifier {
+            if let Some(thread) = linked_context_thread(&connection, &person, &key, episode, after)? {
+                if let Err(index) = subjects.binary_search(&thread) {
+                    subjects.insert(index, thread);
+                }
+            }
+        }
         let has_more = subjects.len() > limit;
         subjects.truncate(limit);
         let next_cursor = subjects.last().filter(|_| has_more).map(|subject| format!("{scope}:{subject}"));
-        let items = subjects.into_iter().map(|subject| {
-            let summary = summary_conn(&connection, &person, &subject)?;
-            if summary.agent_id != agent {
-                return Err(unavailable());
-            }
-            Ok(summary)
-        }).collect::<Result<Vec<_>, FractalError>>()?;
+        let items = subjects.into_iter().map(|subject| summary_conn(&connection, &person, &subject))
+            .collect::<Result<Vec<_>, FractalError>>()?;
         Ok(SummaryPage { items, next_cursor })
     })())).map_err(internal)?
+}
+
+/// Qualify the exact ask and person before resolving its private sidecar. Otherwise
+/// a conflicted association could reveal the existence of an unrelated ask.
+fn linked_context_thread(
+    connection: &Connection,
+    person: &str,
+    ask: &str,
+    episode: &str,
+    after: &str,
+) -> Result<Option<String>, FractalError> {
+    let assigned = person_work::step(connection, ask)
+        .map_err(internal)?
+        .and_then(|step| step.assigned_to)
+        .is_some_and(|assignee| {
+            identities::resolve_reference_conn(connection, &assignee)
+                .is_ok_and(|owner| owner == person)
+        });
+    if !assigned
+        || !person_work::request(connection, ask)
+            .map_err(internal)?
+            .is_some_and(|request| request.id == episode)
+    {
+        return Ok(None);
+    }
+    let link = thread_links::ask_link_subject(ask, episode)?;
+    let Some(link) = latest_applied_claim(connection, &link, "thread.ask-linked")? else {
+        return Ok(None);
+    };
+    let fields = &link.body["fields"];
+    if fields["ask"].as_str() != Some(ask) || fields["ask_episode"].as_str() != Some(episode) {
+        return Ok(None);
+    }
+    let Some(thread) = fields["thread_id"].as_str().filter(|id| *id > after) else {
+        return Ok(None);
+    };
+    match owned_creation(connection, thread, person, false) {
+        Ok(Some(_)) => Ok(Some(thread.into())),
+        Ok(None) => Ok(None),
+        Err(error) if error.code == "thread-unavailable" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn invalid_context_cursor() -> FractalError {
+    FractalError::new(
+        "invalid-thread-cursor",
+        "the cursor belongs to another thread context",
+    )
+}
+
+fn scoped_cursor<'a>(
+    cursor: Option<&'a str>,
+    scope: &str,
+) -> Result<Option<&'a str>, FractalError> {
+    cursor
+        .map(|cursor| {
+            cursor
+                .split_once(':')
+                .filter(|(id, _)| *id == scope)
+                .map(|(_, marker)| marker)
+                .ok_or_else(invalid_context_cursor)
+        })
+        .transpose()
+}
+
+/// Newest close first. Seek only owner close events and recheck the current state, because an
+/// earlier close can have been superseded. Keep the candidate scan bounded even during churn.
+fn recently_closed(
+    connection: &Connection,
+    person: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<SummaryPage, FractalError> {
+    let scope = canonical_hash(&("thread.recently-closed.v1", person)).map_err(internal)?;
+    let before = scoped_cursor(cursor, &scope)?
+        .map(|marker| {
+            marker
+                .parse::<i64>()
+                .ok()
+                .filter(|index| *index > 0)
+                .ok_or_else(invalid_context_cursor)
+        })
+        .transpose()?
+        .unwrap_or(i64::MAX);
+    let scan_limit = limit * 4;
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT claims.subject, claims.id, claims.store_index
+         FROM claims INDEXED BY claims_thread_closed_owner_index
+         JOIN operations ON operations.canonical_claim_id=claims.id AND operations.state='active'
+         WHERE claims.actor=?1 AND claims.store_index<?2 AND claims.kind='thread.state-set'
+           AND json_extract(claims.body, '$.fields.state')='closed'
+           AND NOT EXISTS (SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
+         ORDER BY claims.store_index DESC LIMIT ?3",
+        )
+        .map_err(internal)?;
+    let mut rows = statement
+        .query(params![person, before, scan_limit + 1])
+        .map_err(internal)?;
+    let mut items = Vec::new();
+    let mut last = None;
+    for index in 0..=scan_limit {
+        let Some(row) = rows.next().map_err(internal)? else {
+            return Ok(SummaryPage {
+                items,
+                next_cursor: None,
+            });
+        };
+        if index == scan_limit || items.len() == limit {
+            break;
+        }
+        let subject: String = row.get(0).map_err(internal)?;
+        let id: String = row.get(1).map_err(internal)?;
+        last = Some(row.get::<_, i64>(2).map_err(internal)?);
+        match owned_creation(connection, &subject, person, false) {
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(error) if error.code == "thread-unavailable" => continue,
+            Err(error) => return Err(error),
+        }
+        let state = latest_applied_claim(connection, &subject, "thread.state-set")?;
+        if state.is_some_and(|current| current.id == id) {
+            items.push(summary_conn(connection, person, &subject)?);
+        }
+    }
+    Ok(SummaryPage {
+        items,
+        next_cursor: last.map(|index| format!("{scope}:{index}")),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -757,13 +938,13 @@ pub fn start_from_ask_as(
             let ask_claim = person_work::request(tx, ask)
                 .map_err(internal)?
                 .ok_or_else(unavailable)?;
-            let assigned = person_work::step(tx, ask)
+            let ask_step = person_work::step(tx, ask)
                 .map_err(internal)?
-                .and_then(|step| step.assigned_to)
                 .ok_or_else(unavailable)?;
+            let assigned = ask_step.assigned_to.as_deref().ok_or_else(unavailable)?;
             if ask_claim.id != episode
                 || ask_claim.actor.as_deref() != Some(agent)
-                || identities::resolve_reference_conn(tx, &assigned)?
+                || identities::resolve_reference_conn(tx, assigned)?
                     != identities::resolve_reference_conn(tx, person)?
                 || !person_work::current(tx, &ask_claim, now_ms()).map_err(internal)?
             {
@@ -774,6 +955,22 @@ pub fn start_from_ask_as(
                 json!(identities::resolve_reference_conn(tx, person)?);
             creation_body["fields"]["agent"] =
                 json!(identities::resolve_reference_conn(tx, agent)?);
+            let mission = tx
+                .query_row(
+                    "SELECT mission_id FROM mission_runs WHERE id=?1",
+                    [ask_step.run.trim_start_matches("mission-run/")],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(internal)?;
+            if let Some(mission) = mission {
+                let mission = if mission.starts_with("mission/") {
+                    mission
+                } else {
+                    format!("mission/{mission}")
+                };
+                creation_body["fields"]["mission"] = json!(mission);
+            }
             let created = append_claim_tx(
                 tx,
                 &store.origin,
