@@ -6,12 +6,13 @@ use serde_json::{Map, Value};
 use crate::{ValidationError, error};
 
 pub const KIND: &str = "usage.limits.observed";
-pub const PRODUCER: &str = "agent/dotfiles/omp-usage-fleet-dev3";
 pub const DOCUMENTATION: &str = r#"
 ## Observed usage limits and credits
 
-`usage.limits.observed` is observational only. The initial writer allowlist is exactly
-`agent/dotfiles/omp-usage-fleet-dev3`, writing as itself on that same subject.
+`usage.limits.observed` is observational only. Daemon configuration controls admission:
+`[usage_limits] writers = ["agent/sample/usage-producer"]`. Absent or empty writers
+deny every producer. Each configured agent writes as itself on its own subject.
+Configure the same allowlist on receiving members; changes take effect after restart.
 Both `readings` and `credit_readings` arrays are required; empty arrays assert no readings,
 not zero usage or successful credit disposition. Every nested object is closed.
 
@@ -33,11 +34,16 @@ The complete claim is durable: checkpoints must not prune credit history by keep
 only the newest quota snapshot. Older members retain this unknown kind as retryable
 `unknown-claim-kind` evidence, without projecting it or granting authority. Known
 claims continue replicating, and an upgraded member replays the retained observations.
+
+Explicit offline backup restore imports previously admitted durable evidence on the
+archive source's authority, even when the current writer allowlist is empty. It still
+checks hashes, signatures, schema and same-agent authorship. This historical-import
+boundary never authorizes new writes or ordinary replication from a retired producer.
 "#;
 
-pub fn validate_actor(kind: &str, actor: Option<&str>) -> Result<(), ValidationError> {
-    if kind == KIND && actor != Some(PRODUCER) {
-        return Err(error("claim-write-forbidden", "usage observations require an allowlisted producer"));
+pub fn validate_actor(subject: &str, kind: &str, actor: Option<&str>) -> Result<(), ValidationError> {
+    if kind == KIND && (!subject.starts_with("agent/") || actor != Some(subject)) {
+        return Err(error("claim-write-forbidden", "usage observations require an agent writing as itself"));
     }
     Ok(())
 }
@@ -77,8 +83,8 @@ pub(crate) fn validate(subject: &str, kind: &str, fields: &BTreeMap<String, Valu
     if kind != KIND {
         return Ok(());
     }
-    if subject != PRODUCER {
-        return Err(error("claim-write-forbidden", "usage observations must target the allowlisted producer"));
+    if !subject.starts_with("agent/") {
+        return Err(error("claim-write-forbidden", "usage observations must target an agent"));
     }
     for reading in fields.get("readings").and_then(Value::as_array).ok_or_else(invalid)? {
         let reading = object(reading, &["account", "account_ref", "provider", "window", "used_percent", "resets_at", "measured_at", "coverage", "source", "host"])?;
@@ -111,6 +117,7 @@ mod tests {
     use super::*;
     use crate::{Cardinality, Retention, registry, retention};
     use serde_json::json;
+    const PRODUCER: &str = "agent/sample/usage-producer";
 
     fn fields() -> BTreeMap<String, Value> {
         BTreeMap::from([
@@ -120,11 +127,11 @@ mod tests {
     }
 
     #[test]
-    fn only_allowlisted_producer_can_write_observations() {
+    fn observations_require_an_agent_writing_as_itself() {
         let fields = fields();
         let spec = registry().validate_public_claim(PRODUCER, KIND, &fields, Some(PRODUCER)).unwrap();
         assert_eq!(spec.cardinality, Cardinality::Append);
-        for actor in [None, Some("person/ada"), Some("harness/omp"), Some("agent/run/worker"), Some("agent/dotfiles/omp-usage-fleet-dev3-extra")] {
+        for actor in [None, Some("person/ada"), Some("harness/omp"), Some("agent/run/worker"), Some("agent/sample/other-producer")] {
             assert_eq!(registry().validate_public_claim(PRODUCER, KIND, &fields, actor).unwrap_err().code, "claim-write-forbidden");
         }
         assert!(registry().validate_public_claim("agent/other", KIND, &fields, Some(PRODUCER)).is_err());

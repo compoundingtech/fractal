@@ -15,6 +15,8 @@ pub struct PreviousRoster {
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct FractalRuntime {
+    /// Daemon-local observer authorization; empty until configured at startup.
+    pub(super) usage_limits_writers: Mutex<BTreeSet<String>>,
     /// Source-owned observation fencing only; no canonical sample log or timer.
     pub(super) slo_source: Mutex<slo_breaches::SourceState>,
     /// Committed launch-source invalidation, independent of append frontiers.
@@ -252,6 +254,22 @@ impl FractalRuntime {
         }
         fractal_schema::registry()
     }
+
+    pub(super) fn validate_usage_limits_writer(&self, kind: &str, actor: Option<&str>) -> Result<(), FractalError> {
+        if kind == fractal_schema::usage_limits::KIND
+            && !actor.is_some_and(|actor| self.usage_limits_writers.lock().unwrap().contains(actor)) {
+            return Err(FractalError::new("claim-write-forbidden", "usage observation writer is not configured"));
+        }
+        Ok(())
+    }
+
+    fn classify_usage_claim(&self, claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, FractalError> {
+        let admission = classify_replicated_claim_with_registry(claim, self.claim_registry())?;
+        if matches!(admission, ReplicatedClaimAdmission::Valid) {
+            self.validate_usage_limits_writer(&claim.kind, claim.actor.as_deref())?;
+        }
+        Ok(admission)
+    }
 }
 
 impl Runtime for FractalRuntime {
@@ -433,7 +451,7 @@ impl Runtime for FractalRuntime {
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, FractalError> {
-        classify_replicated_claim_with_registry(claim, self.claim_registry())
+        self.classify_usage_claim(claim)
     }
 
     fn classify_replicated_claim_unbound(
@@ -441,8 +459,18 @@ impl Runtime for FractalRuntime {
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
-        // The registry is this build's schema, fixed for the process.
-        Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
+        Some(self.classify_usage_claim(claim))
+    }
+
+    fn classify_restored_claim(
+        &self,
+        _connection: &Connection,
+        _batch: &ReplicaBatch,
+        claim: &ClaimRecord,
+    ) -> Result<ReplicatedClaimAdmission, FractalError> {
+        // The source already admitted these durable facts. Current writer configuration
+        // cannot revoke history; the registry still checks schema and same-agent authorship.
+        classify_replicated_claim_with_registry(claim, self.claim_registry())
     }
 
     fn append_claim(
@@ -450,6 +478,7 @@ impl Runtime for FractalRuntime {
         store: &GraphStore,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
+        self.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
         append_claim_fenced_outcome(store, input, None)
     }
 
@@ -491,6 +520,7 @@ impl Runtime for FractalRuntime {
         predecessors: &[String],
         forced_batch: Option<&str>,
     ) -> Result<ClaimRecord> {
+        self.validate_usage_limits_writer(kind, actor).map_err(anyhow::Error::new)?;
         append_claim_tx(
             transaction,
             origin,

@@ -397,6 +397,7 @@ impl World {
     fn new(seed: u64, sabotage: Sabotage) -> Self {
         let root = scratch_dir();
         let oracle = Store::open(&root.path().join("oracle.sqlite3"), "oracle").unwrap();
+        oracle.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         oracle.bind_fleet(FLEET).unwrap();
         let mut world = Self {
             seed,
@@ -439,6 +440,7 @@ impl World {
         let path = self.root.path().join(format!("{name}.sqlite3"));
         let scratch = self.root.path().join(format!("{name}-scratch"));
         let store = Store::open(&path, name.clone()).unwrap();
+        store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         store.bind_fleet(FLEET).unwrap();
         let skew_ms = if self.rng.chance(30) {
             (self.rng.below(6 * 24) as i64 - 3 * 24) * DAY_MS / 24
@@ -519,6 +521,7 @@ impl World {
         let placeholder = Store::open_memory(format!("{name}-closed")).unwrap();
         drop(std::mem::replace(&mut self.nodes[index].store, placeholder));
         self.nodes[index].store = Store::open(&path, name).unwrap();
+        self.nodes[index].store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         self.nodes[index].store.bind_fleet(FLEET).unwrap();
         self.set_clock(index);
         self.check_index(index);
@@ -992,9 +995,9 @@ impl World {
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
         if spec.kind == fractal_schema::usage_limits::KIND {
             return Some(ClaimInput {
-                subject: fractal_schema::usage_limits::PRODUCER.into(),
+                subject: "agent/sample/usage-producer".into(),
                 kind: spec.kind.clone(),
-                actor: Some(fractal_schema::usage_limits::PRODUCER.into()),
+                actor: Some("agent/sample/usage-producer".into()),
                 fields: BTreeMap::from([
                     ("readings".into(), json!([])),
                     ("credit_readings".into(), json!([{

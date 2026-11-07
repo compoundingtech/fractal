@@ -9,7 +9,6 @@ use crate::model::ClaimRecord;
 use crate::store::Store;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
-const PRODUCER: &str = "agent/dotfiles/omp-usage-fleet-dev3";
 
 #[derive(Deserialize)]
 struct Disposition {
@@ -53,7 +52,9 @@ fn timestamp(text: &str) -> Option<u64> {
 
 impl Credits {
     fn observe(&mut self, claim: &ClaimRecord) {
-        if claim.kind != "usage.limits.observed" || claim.subject != PRODUCER {
+        // Admission checks the configured writer allowlist. Revocation does not erase evidence
+        // already admitted to the durable graph.
+        if claim.kind != "usage.limits.observed" {
             return;
         }
         for value in claim.body["fields"]["credit_readings"].as_array().into_iter().flatten() {
@@ -174,6 +175,7 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_799_452_800_000;
+    const PRODUCER: &str = "agent/sample/usage-producer";
 
     fn time(at: u64) -> String {
         chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339()
@@ -310,6 +312,7 @@ mod tests {
     #[test]
     fn durable_observation_reaches_the_shared_slo_endpoint_rows() {
         let store = Store::open_memory("credit-objectives").unwrap();
+        store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let mut reading = credit("one", "available", now + DAY_MS / 2);
         reading["measured_at"] = json!(time(now));
@@ -328,6 +331,8 @@ mod tests {
             expected_subject: None,
             idempotency_key: None,
         }).unwrap();
+        // Retiring a writer stops future admission, not reads of its accepted evidence.
+        store.set_usage_limits_writers(Vec::new()).unwrap();
         let rows = crate::api::slo_rows(&store).unwrap();
         for objective in ["CAM-R01/anthropic", "CAM-R02/anthropic"] {
             let row = rows.iter().find(|row| row["id"] == objective).unwrap();

@@ -8172,6 +8172,8 @@ impl Store {
     /// is keyed from sequence 1, and its unsigned pre-migration envelopes would wait for
     /// signatures that never come. Hashes and claims are checked as in normal admission, and
     /// restore verified every archived signature as it received it.
+    /// Runtime validation uses `classify_restored_claim` on this source-authority path:
+    /// current local writer policy cannot revoke facts already admitted by the archive source.
     pub fn admit_restored_backlog(&self) -> Result<ReplicationAdmission> {
         self.admit_replication_backlog(AdmissionAuthority::Source)
     }
@@ -8314,11 +8316,11 @@ impl Store {
                     if prepared_bytes > 0 && prepared_bytes + bytes > ADMISSION_PREPARED_BYTES {
                         break;
                     }
-                    let prepared = prepared_envelope::prepare_envelope(
-                        envelope,
-                        &*self.runtime,
-                        Some(row.clone()),
-                    );
+                    let prepare = match authority {
+                        AdmissionAuthority::Membership => prepared_envelope::prepare_envelope,
+                        AdmissionAuthority::Source => prepared_envelope::prepare_restored_envelope,
+                    };
+                    let prepared = prepare(envelope, &*self.runtime, Some(row.clone()));
                     prepared_bytes += prepared.bytes;
                     outcome.verify += prepared.verify;
                     ready.insert(index, prepared);

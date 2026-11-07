@@ -84,6 +84,8 @@ enum ClaimCheck {
     Classified(Result<ReplicatedClaimAdmission, FractalError>),
     /// The runtime classifies with the store, under the writer.
     Unclassified,
+    /// Source-authorized backup import checks historical evidence, not live admission policy.
+    Restored,
 }
 
 /// Decode, verify, encode and classify `envelope` without the store.
@@ -92,8 +94,26 @@ pub fn prepare_envelope<'r>(
     runtime: &'r dyn Runtime,
     row: Option<EnvelopeRow>,
 ) -> PreparedEnvelope<'r> {
+    prepare_envelope_for_source(envelope, runtime, row, false)
+}
+
+/// Prepare already-admitted backup history through its explicit source-authority boundary.
+pub(super) fn prepare_restored_envelope<'r>(
+    envelope: &ReplicaEnvelope,
+    runtime: &'r dyn Runtime,
+    row: Option<EnvelopeRow>,
+) -> PreparedEnvelope<'r> {
+    prepare_envelope_for_source(envelope, runtime, row, true)
+}
+
+fn prepare_envelope_for_source<'r>(
+    envelope: &ReplicaEnvelope,
+    runtime: &'r dyn Runtime,
+    row: Option<EnvelopeRow>,
+    restored: bool,
+) -> PreparedEnvelope<'r> {
     let started = std::time::Instant::now();
-    let content = prepare_payload(envelope, runtime);
+    let content = prepare_payload(envelope, runtime, restored);
     PreparedEnvelope {
         writer: envelope.writer.clone(),
         sequence: envelope.sequence,
@@ -109,6 +129,7 @@ pub fn prepare_envelope<'r>(
 fn prepare_payload(
     envelope: &ReplicaEnvelope,
     runtime: &dyn Runtime,
+    restored: bool,
 ) -> Result<PreparedPayload, FractalError> {
     let payload_bytes = envelope.payload.bytes().map_err(|error| {
         FractalError::new(
@@ -185,7 +206,7 @@ fn prepare_payload(
                 raw,
                 body: canonical_json_text(&claim.body).map_err(internal),
                 predecessors: serde_json::to_string(&claim.predecessors).map_err(internal),
-                check: check_claim(batch, claim, runtime),
+                check: check_claim(batch, claim, runtime, restored),
             }
         })
         .collect();
@@ -197,7 +218,7 @@ fn prepare_payload(
 }
 
 /// The part of `validate_replicated_claim` that reads no stored state, in its order.
-fn check_claim(batch: &ReplicaBatch, claim: &ClaimRecord, runtime: &dyn Runtime) -> ClaimCheck {
+fn check_claim(batch: &ReplicaBatch, claim: &ClaimRecord, runtime: &dyn Runtime, restored: bool) -> ClaimCheck {
     if claim.batch_id != batch.id || claim.origin != batch.origin {
         return ClaimCheck::Failed(FractalError::new(
             "claim-batch-mismatch",
@@ -216,6 +237,9 @@ fn check_claim(batch: &ReplicaBatch, claim: &ClaimRecord, runtime: &dyn Runtime)
             ));
         }
         Err(error) => return ClaimCheck::Failed(internal(error)),
+    }
+    if restored {
+        return ClaimCheck::Restored;
     }
     match runtime.classify_replicated_claim_unbound(batch, claim) {
         Some(classification) => ClaimCheck::Classified(classification),
@@ -236,6 +260,7 @@ fn finish_claim_check(
         ClaimCheck::Failed(error) => return Err(error),
         ClaimCheck::Classified(classification) => classification?,
         ClaimCheck::Unclassified => runtime.classify_replicated_claim(transaction, batch, claim)?,
+        ClaimCheck::Restored => runtime.classify_restored_claim(transaction, batch, claim)?,
     };
     if matches!(admission, ReplicatedClaimAdmission::Valid) {
         ensure_claim_blobs(transaction, claim)?;

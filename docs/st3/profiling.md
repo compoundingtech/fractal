@@ -329,9 +329,13 @@ breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `
 `reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
 explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
 The omp-usage observations do not change the harness-only inputs to the seat-stopping policy.
-Producer batches contain `readings` and `credit_readings`; only the explicitly allowlisted agent
-identity may write them, as itself. Older members retain this non-authority unknown kind for
-replay after upgrade without changing terminal/runtime routing.
+Producer batches contain `readings` and `credit_readings`. Daemon configuration
+`[usage_limits] writers = ["agent/sample/usage-producer"]` explicitly admits agent writers,
+each writing as itself; absent or empty configuration admits nobody. Writer configuration is
+admission authority, not a filter over previously admitted durable evidence. Internal window
+metadata does not extend the public `/usage` wire contract; SLO rows expose its provenance.
+Older members retain this non-authority unknown kind for replay after upgrade without changing
+terminal/runtime routing.
 
 Credit objectives read the durable `usage.limits.observed` evidence from the explicitly admitted
 omp-usage producer. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling

@@ -878,7 +878,7 @@ impl Registry {
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
-        usage_limits::validate_actor(kind, actor)?;
+        usage_limits::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
             || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject));
         if !allowed {

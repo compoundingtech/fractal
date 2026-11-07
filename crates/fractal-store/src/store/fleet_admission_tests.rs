@@ -162,18 +162,62 @@ fn replica_records_bear_authority_only_in_the_authority_families() {
 fn trusted_usage_admission_also_requires_the_allowlisted_writer() {
     let store = node("observer", None, None);
     let mut input = ClaimInput {
-        subject: fractal_schema::usage_limits::PRODUCER.into(),
+        subject: "agent/sample/usage-producer".into(),
         kind: "usage.limits.observed".into(),
-        actor: Some(fractal_schema::usage_limits::PRODUCER.into()),
+        actor: Some("agent/sample/usage-producer".into()),
         fields: serde_json::from_value(json!({"readings": [], "credit_readings": []})).unwrap(),
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: None,
     };
+    assert!(store.append_claim(&input).is_err(), "absent config denies trusted append");
+    assert!(store.append_client_claim(&input).is_err(), "absent config denies public append");
+    store.set_usage_limits_writers(Vec::new()).unwrap();
+    assert!(store.append_claim(&input).is_err(), "empty config denies");
+    for writer in ["person/sample", "harness/sample", "agent/"] {
+        assert!(store.set_usage_limits_writers(vec![writer.into()]).is_err());
+    }
+    store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
     store.append_claim(&input).unwrap();
+    store.append_client_claim(&input).unwrap();
+    input.subject = "agent/sample/other-producer".into();
+    input.actor = Some(input.subject.clone());
+    assert!(store.append_claim(&input).is_err(), "other self-authoring agents denied");
+    assert!(store.append_client_claim(&input).is_err());
+    input.subject = "agent/sample/usage-producer".into();
     for actor in [None, Some("person/ada"), Some("harness/omp"), Some("agent/other")] {
         input.actor = actor.map(str::to_owned);
         assert!(store.append_claim(&input).is_err(), "must reject actor {actor:?}");
+        assert!(store.append_client_claim(&input).is_err());
+    }
+}
+
+#[test]
+fn replicated_usage_admission_respects_each_receivers_configured_writers() {
+    let anchor_key = key();
+    let receiver_key = key();
+    let source = node("source", Some(&anchor_key), Some(&anchor_key));
+    source.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+    admit(&source, "source", &anchor_key, "anchor", None);
+    admit(&source, "receiver", &receiver_key, "invite", None);
+    let observation = source.append_claim(&ClaimInput {
+        subject: "agent/sample/usage-producer".into(),
+        kind: "usage.limits.observed".into(),
+        actor: Some("agent/sample/usage-producer".into()),
+        fields: serde_json::from_value(json!({"readings": [], "credit_readings": []})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    for writers in [None, Some(Vec::new()), Some(vec!["agent/sample/other".into()]), Some(vec!["agent/sample/usage-producer".into()])] {
+        let allowed = writers.as_ref().is_some_and(|writers| writers.iter().any(|writer| writer == "agent/sample/usage-producer"));
+        let receiver = node("receiver", Some(&receiver_key), Some(&anchor_key));
+        if let Some(writers) = writers {
+            receiver.set_usage_limits_writers(writers).unwrap();
+        }
+        let admission = sync(&source, &receiver);
+        assert_eq!(admission.invalid, usize::from(!allowed));
+        assert_eq!(admitted(&receiver, &observation), allowed);
     }
 }
 
@@ -182,11 +226,13 @@ fn old_members_hold_usage_observations_without_blocking_known_claims_or_authorit
     let anchor_key = key();
     let older_key = key();
     let current = node("current", Some(&anchor_key), Some(&anchor_key));
+    current.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
     admit(&current, "current", &anchor_key, "anchor", None);
     admit(&current, "older", &older_key, "invite", None);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("older.sqlite3");
     let older = Store::open(&path, "older").unwrap();
+    older.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
     older.bind_fleet(FLEET).unwrap();
     older.pin_fleet_anchor(anchor_key.public()).unwrap();
     older.set_member_key(Some(older_key.clone())).unwrap();
@@ -196,9 +242,9 @@ fn old_members_hold_usage_observations_without_blocking_known_claims_or_authorit
     sync(&current, &older);
 
     let observation = current.append_claim(&ClaimInput {
-        subject: fractal_schema::usage_limits::PRODUCER.into(),
+        subject: "agent/sample/usage-producer".into(),
         kind: "usage.limits.observed".into(),
-        actor: Some(fractal_schema::usage_limits::PRODUCER.into()),
+        actor: Some("agent/sample/usage-producer".into()),
         fields: serde_json::from_value(json!({"readings": [], "credit_readings": []})).unwrap(),
         evidence: Vec::new(),
         expected_subject: None,
@@ -214,11 +260,12 @@ fn old_members_hold_usage_observations_without_blocking_known_claims_or_authorit
     assert_eq!(held[0].error_code.as_deref(), Some("unknown-claim-kind"));
     assert!(!replica_record_bears_authority("unknown", Some("usage.limits.observed")));
     let connection = older.connection.lock().unwrap();
-    assert_eq!(has_unknown_claim_at(&connection, fractal_schema::usage_limits::PRODUCER, None).unwrap(), None);
+    assert_eq!(has_unknown_claim_at(&connection, "agent/sample/usage-producer", None).unwrap(), None);
     drop(connection);
     drop(older);
 
     let upgraded = Store::open(&path, "older").unwrap();
+    upgraded.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
     upgraded.set_member_key(Some(older_key)).unwrap();
     assert_eq!(upgraded.validate_replication_backlog().unwrap().unknown, 0);
     upgraded.project_replication_backlog().unwrap();

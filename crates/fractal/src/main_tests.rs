@@ -390,7 +390,7 @@ fn slo_list_and_explanation_show_observation_source_host_and_unsupported() {
         "current":"unsupported","target":"100% allowance","window":"5-hour",
         "source":"omp-usage","host":"example-host","remaining_percent":null,
         "explain":"The provider does not support this window."});
-    let list = render_slo_list(&[row.clone()]);
+    let list = render_slo_list(std::slice::from_ref(&row));
     assert!(list.contains("SOURCE"));
     assert!(list.contains("HOST"));
     assert!(list.contains("unsupported"));

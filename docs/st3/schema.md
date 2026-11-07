@@ -259,8 +259,10 @@ A `durable` claim is a fact in the replicated claim log. A `local` claim is an o
 
 ## Observed usage limits and credits
 
-`usage.limits.observed` is observational only. The initial writer allowlist is exactly
-`agent/dotfiles/omp-usage-fleet-dev3`, writing as itself on that same subject.
+`usage.limits.observed` is observational only. Daemon configuration controls admission:
+`[usage_limits] writers = ["agent/sample/usage-producer"]`. Absent or empty writers
+deny every producer. Each configured agent writes as itself on its own subject.
+Configure the same allowlist on receiving members; changes take effect after restart.
 Both `readings` and `credit_readings` arrays are required; empty arrays assert no readings,
 not zero usage or successful credit disposition. Every nested object is closed.
 
@@ -282,6 +284,11 @@ The complete claim is durable: checkpoints must not prune credit history by keep
 only the newest quota snapshot. Older members retain this unknown kind as retryable
 `unknown-claim-kind` evidence, without projecting it or granting authority. Known
 claims continue replicating, and an upgraded member replays the retained observations.
+
+Explicit offline backup restore imports previously admitted durable evidence on the
+archive source's authority, even when the current writer allowlist is empty. It still
+checks hashes, signatures, schema and same-agent authorship. This historical-import
+boundary never authorizes new writes or ordinary replication from a retired producer.
 
 ## Agent principal grammar
 

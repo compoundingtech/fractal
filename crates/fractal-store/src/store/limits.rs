@@ -734,7 +734,8 @@ pub use crate::store::limits_tests_shared_seats::{HOUR, read, read_account, read
 use super::*;
 
     fn observe(store: &Store, used: f64, measured: &str) {
-        let writer = "agent/dotfiles/omp-usage-fleet-dev3";
+        let writer = "agent/sample/usage-producer";
+        store.set_usage_limits_writers(vec![writer.into()]).unwrap();
         store.append_claim(&ClaimInput {
             subject: writer.into(), actor: Some(writer.into()), kind: "usage.limits.observed".into(),
             fields: serde_json::from_value(json!({
