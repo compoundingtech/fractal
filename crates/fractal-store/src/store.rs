@@ -11857,13 +11857,13 @@ pub fn latest_actual_at(
     // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
     // open while fetching each body on this same connection: even an unpinned caller then
     // reads both statements from one SQLite read cut, without retaining history bodies.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h217040c2fa3a owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7554008ab79c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {} AND claims.store_index<=?2
          ORDER BY {CANONICAL_ORDER}",
-        &*ACTUAL_FOLD_CLAIM
+        ACTUAL_FOLD_CLAIM.as_str()
     ))?;
     let mut rows = statement.query(params![subject, at_index])?;
     let mut bodies = connection
@@ -11906,7 +11906,7 @@ fn latest_actual_fields_at(
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {} AND +claims.store_index<=?2
          ORDER BY {CANONICAL_ORDER_DESC}",
-        &*ACTUAL_FOLD_CLAIM
+        ACTUAL_FOLD_CLAIM.as_str()
     );
     #[cfg(test)]
     let fields_sql = ACTUAL_FIELDS_FILTER_FOR_TEST.with(|filter| filter.borrow().as_ref().map(|filter| format!(
