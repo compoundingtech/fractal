@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Publish typed client APIs for thread metadata",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The SDK adds explicit reads and writes for thread metadata. Existing SDK calls keep their existing paths. Applications should use capability discovery before issuing the new calls."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual upgrade step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  }
+}
