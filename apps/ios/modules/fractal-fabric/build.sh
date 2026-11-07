@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")"
 repo_root=$(cd ../../../.. && pwd)
 # Resolve once; launchd's fixed PATH needs Nix, not a mutable rustup installation.
-toolchain=$(nix build --no-link --print-out-paths "path:$repo_root#ios-rust-toolchain")
+toolchain=$(nix build --no-link --print-out-paths "$repo_root#ios-rust-toolchain")
 export PATH="$toolchain/bin:$PATH"
 export RUSTC="$toolchain/bin/rustc"
 # Both Rust linking and cc-rs C/assembly compilation require Apple's compiler.
