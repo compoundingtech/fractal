@@ -133,6 +133,20 @@ test('policy tags fail closed even before critical selection, and a new app fold
   assert.throws(() => playSetIdsFromIndex({ entries: { wide: { ...wide, tags: ['critical', 'both-widths', 'merge-only'] } } }), /both merge-only and both-widths/)
 })
 
+test('reserved kit policy tag families reject typos before selecting critical stories', () => {
+  for (const tag of ['merge-onyl', 'merge-Only', 'both-width', 'both-wdiths']) {
+    for (const tags of [[tag], ['critical', tag]]) {
+      assert.throws(
+        () => playSetIdsFromIndex({ entries: { story: { ...story, tags } } }),
+        { message: `Unknown kit policy tag "${tag}" on ${story.id}; expected merge-only or both-widths` },
+      )
+    }
+  }
+  assert.deepEqual(playSetIdsFromIndex({ entries: { story: { ...story, tags: ['dev', 'autodocs', 'application-tag'] } } }), {
+    mergeOnlyIds: [], bothWidthsIds: [],
+  })
+})
+
 test('transcript image contracts batch per commit without dropping the individual merge matrix', () => {
   const prefix = 'fractal-app-transcript-images--'
   const individualDepth = MERGE_ONLY.filter(id => id.startsWith(prefix))
