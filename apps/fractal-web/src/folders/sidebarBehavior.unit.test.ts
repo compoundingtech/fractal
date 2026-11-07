@@ -138,7 +138,7 @@ describe('shared sidebar v1 through the production web adapter/editor', () => {
 const scaleArrangement = fixtureArrangement(v2Vectors.cases[0]!.initial.arrangement)
 const scaleFolder = Object.keys(scaleArrangement.body.folders)[0]!
 const scaleScope = { owner: scaleArrangement.owner, container: scaleArrangement.id, endpoint: 'endpoint/test', host: 'host/test', projection: 'client-projection.v0' }
-const scaleSnapshot = (index: number): Snapshot => ({ id: `snapshot/${index}`, host_id: scaleScope.host, store_index: index, projection_version: 'client-projection.v0', created_at: 'created', expires_at: 'expires' })
+const scaleSnapshot = (index: number): Snapshot & { readonly expires_at: string } => ({ id: `snapshot/${index}`, host_id: scaleScope.host, store_index: index, projection_version: 'client-projection.v0', created_at: 'created', expires_at: 'expires' })
 const scaleRows = (count: number): OrderedMembership[] => Array.from({ length: count }, (_, i) => ({
   id: `membership/${i}`, container: scaleArrangement.id, member: `agent/test/${i.toString().padStart(4, '0')}`,
   revision: 'claim/test', position: { bucket: scaleFolder, key: 'a0' },
@@ -290,7 +290,7 @@ describe('unwired web v2 scale/fault acceptance', () => {
       expect(editor.execute('Send')._tag).toBe('PersistenceRequired')
     }
   })
-  it.skip('D #4739: reject the 4,097th live-member edit through the real daemon limit', () => {})
+  it.skip('Daemon integration fixture required: reject the 4,097th live-member edit through the real server limit (not a paging-D dependency)', () => {})
   it.skip('D #4739: local-socket initial-load p95 <=1s with sustained unrelated daemon writes', () => {})
   it.skip('PR21 host activation: browser overlay visible next animation frame; render p95 <=8ms; v2 <=2x v1', () => {})
   it.skipIf(process.env.FRACTAL_SIDEBAR_PERF !== '1')('opt-in component p95 (not browser or local-socket evidence)', async () => {
