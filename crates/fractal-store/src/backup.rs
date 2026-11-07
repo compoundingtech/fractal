@@ -94,6 +94,7 @@ pub fn create_from_database(
     store.validate_replication_backlog()?;
     store.apply_replication_repairs()?;
     store.replay_replication_graph()?;
+    refuse_queued_mail(&store)?;
     // The messages shard beside the database, when there is one, as the daemon opens it. A copy
     // made without its `shards` directory is archived without stream items.
     let root = database
@@ -118,6 +119,24 @@ pub fn create_from_database(
     temporary.as_file().sync_all()?;
     temporary.persist_noclobber(destination)?;
     Ok(header)
+}
+
+/// How many waiting messages an offline export's refusal names.
+const QUEUED_NAMED: i64 = 8;
+
+/// Refuse a copy whose message outbox holds mail its member has not yet written to the messages
+/// shard. The exporter is not that member: a drain here would append the mail under the copy's
+/// writer, to the copy's shard or graph, and the archive would carry writes the member never
+/// made. The member's own daemon drains the outbox, after which a new copy exports.
+fn refuse_queued_mail(store: &Store) -> Result<()> {
+    let (subjects, count) = crate::store::message_outbox::queued(&store.readers.get(), QUEUED_NAMED)?;
+    ensure!(
+        count == 0,
+        "offline export refuses a copy whose message outbox holds {count} message(s) not yet in its messages shard ({}{}); start the member's daemon so it writes them, then copy the database again",
+        subjects.join(", "),
+        if count > subjects.len() as i64 { format!(" and {} more", count - subjects.len() as i64) } else { String::new() }
+    );
+    Ok(())
 }
 
 fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {

@@ -85,6 +85,22 @@ pub fn oldest(connection: &Connection) -> Result<Option<(String, i64, Option<Str
         .optional()?)
 }
 
+/// The first `limit` messages waiting, oldest first, and how many wait in all, which an offline
+/// export names when it refuses a copy.
+pub fn queued(connection: &Connection, limit: i64) -> Result<(Vec<String>, i64)> {
+    let subjects = connection
+        .prepare_cached(
+            "SELECT subject FROM local_message_outbox
+             ORDER BY queued_at_unix_ms, subject LIMIT ?1",
+        )?
+        .query_map([limit], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    let count = connection
+        .prepare_cached("SELECT COUNT(*) FROM local_message_outbox")?
+        .query_row([], |row| row.get(0))?;
+    Ok((subjects, count))
+}
+
 /// Whether a message waits that no drain has tried yet, and whether any waits at all: the
 /// daemon drains a new message at once and tries a refused one again only after a pause.
 pub fn waiting(connection: &Connection) -> Result<(bool, bool)> {
