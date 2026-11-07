@@ -653,8 +653,9 @@ pub struct StatusQuery {
     /// Only the subject's current harness; see `Store::status_harness_only`.
     #[serde(default)]
     harness_only: bool,
-    /// Only the subject's declaration, status and incarnation; see `Store::status_summary_at`.
-    /// A daemon older than this ignores it and answers with the full reduction.
+    /// For a seat (`agent/`) without `owner_run`: only its declaration, status and incarnation;
+    /// see `Store::status_summary_at`. Any other read, and a daemon older than this, answers with
+    /// the full reduction.
     #[serde(default)]
     summary: bool,
 }
@@ -697,7 +698,9 @@ pub async fn status(
         }).transpose()?;
         let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
             store.status_harness_only(subject)
-        } else if let (true, false, Some(subject)) = (query.summary, query.history, &subject) {
+        } else if let (true, false, None, Some(subject)) = (query.summary, query.history, &query.owner_run, &subject)
+            && subject.starts_with("agent/")
+        {
             store.status_summary_at(subject, query.at_index)
         } else if query.history {
             store.status_history(

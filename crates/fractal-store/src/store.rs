@@ -4955,7 +4955,7 @@ impl Store {
         self.status_at_view(selected, selected_owner_run, at_index, true)
     }
 
-    /// One subject's status for a caller that reads one field of it: its declaration and the
+    /// One seat's status for a caller that reads one field of it: its declaration and the
     /// `status` and `incarnation_id` of its actual state, read newest first. It leaves `harness`,
     /// `claims` and `claims_summary` empty. A full reduction folds every actual-state claim of
     /// the subject and lists every claim id, which reads each of a seat's claims in turn.
