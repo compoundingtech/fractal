@@ -89,6 +89,9 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
 }
 
 fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
+    if kind == "intent.desired" {
+        assert_eq!(payload["kind"], "agent");
+    }
     let mut empty_body = payload.clone();
     empty_body["body"] = json!({});
     let mut empty_fields = payload.clone();
@@ -161,6 +164,26 @@ fn desired_claim_decoys_cannot_hide_member_or_desired_children() {
         children_only["member"] = plain["member"].clone();
         assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &member_only);
         assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &children_only);
+    }
+}
+
+#[test]
+fn non_agent_desired_children_are_not_declared_admission() {
+    let connection = Connection::open_in_memory().unwrap();
+    for child in ["declared-priority", "declared-lane", "declared-budgets"] {
+        for payload in [
+            json!({"kind": "resource", "children": [{"name": child}]}),
+            json!({"kind": "resource", "desired": {"children": [{"name": child}]}}),
+        ] {
+            for body in [
+                payload.clone(),
+                json!({"fields": payload}),
+                json!({"body": payload}),
+                json!({"fields": {"body": payload}}),
+            ] {
+                validate_claim(&connection, "alder", "intent.desired", &body).unwrap();
+            }
+        }
     }
 }
 
