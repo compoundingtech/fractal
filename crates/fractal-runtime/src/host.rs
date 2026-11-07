@@ -11,12 +11,12 @@ pub fn size() -> Option<Capacity> {
 }
 
 /// What the seats outside lanes hold that the kernel cannot take back: the anonymous and kernel
-/// memory (`memory.stat`) of the outermost seat scopes below the user manager's `app.slice`.
+/// memory (`memory.stat`) of the outermost seat scopes below the user manager's cgroup.
 /// Hierarchical counters already include nested scopes. Page cache is left out, since it is
 /// reclaimed under pressure. `app-lanes.slice` is excluded: its seats count at their declared size
 /// instead. `None` where there is no cgroup tree to read.
 pub fn unlaned_seat_memory() -> Option<u64> {
-    Some(scopes_memory(&crate::lane::app_slice_cgroup()?))
+    Some(scopes_memory(&crate::lane::user_manager_cgroup()?))
 }
 
 fn scopes_memory(cgroup: &std::path::Path) -> u64 {
@@ -150,6 +150,28 @@ mod tests {
         ).unwrap();
         assert_eq!(scopes_memory(&app), 190);
         std::fs::remove_dir_all(&app).unwrap();
+    }
+
+    #[test]
+    fn app_and_interactive_seats_share_host_memory() {
+        let manager = std::env::temp_dir().join(format!("host-manager-scopes-{}", std::process::id()));
+        // Deployment snapshot shapes and counters, with scope identities anonymized.
+        for (scope, stat) in [
+            ("app.slice/st3-app.scope", "anon 100\nkernel 0\n"),
+            ("interactive.slice/interactive-control.slice/st3-control.scope",
+                "anon 6459392\nfile 12288\nkernel 335872\n"),
+            ("interactive.slice/interactive-seats.slice/st3-seat.scope",
+                "anon 1131495424\nfile 16973824\nkernel 14209024\n"),
+            ("interactive.slice/interactive-seats.slice/st3-other.scope",
+                "anon 436752384\nfile 9162752\nkernel 7929856\n"),
+            ("app.slice/app-lanes.slice/app-lanes-seat.slice/st3-laned.scope", "anon 9000\n"),
+        ] {
+            let path = manager.join(scope);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("memory.stat"), stat).unwrap();
+        }
+        assert_eq!(scopes_memory(&manager), 1_597_182_052);
+        std::fs::remove_dir_all(&manager).unwrap();
     }
 
     #[test]

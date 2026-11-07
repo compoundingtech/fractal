@@ -730,6 +730,8 @@ export const liveSource = ({
   const rosterDecode = rosterEvidence.atom
   const missionsEvidence = decodeEvidence<Mission>()
   const missionsDecode = missionsEvidence.atom
+  const attentionEvidence = decodeEvidence<Attention>()
+  const attentionDecode = attentionEvidence.atom
   const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
     initialRead: (fractal) => fractal.readAgents.pipe(
@@ -773,18 +775,18 @@ export const liveSource = ({
   const missions = missionsRetained.atom
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
+    prepareObservation: attentionEvidence.prepareObservation,
+    onCommit: attentionEvidence.onCommit,
+    observedFreshness: attentionEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter(
-                  (row): row is Attention => row.kind === 'attention',
-                ),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is Attention => row.kind === 'attention')
+          attentionEvidence.record(value, { undecodable, decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const attention = attentionRetained.atom
@@ -1242,6 +1244,7 @@ export const liveSource = ({
       missions,
       missionsDecode,
       attention,
+      attentionDecode,
       conversation,
       conversationInterest: (ref) => retainConversation(ref).interest,
       prefetchConversation: (ref) => {

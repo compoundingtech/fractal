@@ -10,9 +10,10 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { AgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import type { AlertAction, AlertActionResult } from '../conversation/alerts/alert-action-port.ts'
 import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
-import { useAttention, useDataSource, useNow } from '../data/react.tsx'
-import type { Feed } from '../data/source.ts'
+import { useAttention, useAttentionDecode, useDataSource, useNow } from '../data/react.tsx'
+import { decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
+import { DecodeNotice } from './LiveRoster.tsx'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
 // each, answered in place. It reads the attention collection the conversation strips read, so the tab
@@ -29,6 +30,7 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
   return (
     <AlertsList
       feed={useAttention()}
+      decode={useAttentionDecode()}
       now={useNow()}
       onOpen={onOpen}
       onAct={actions === undefined ? undefined : (alert, action) => actions.act({ alert, action })}
@@ -46,8 +48,9 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row and expanded answer stays reachable.
  */
-export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, onAnswer }: {
   readonly feed: Feed<readonly Native.Attention[]>
+  readonly decode?: RosterDecode
   readonly now: number
   /** Opens an agent conversation or a mission by ref. */
   readonly onOpen: (ref: string) => void
@@ -55,6 +58,7 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
   readonly onAnswer?: Answer
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
+  const shownIds = React.useMemo(() => new Set(feed._tag === 'Observed' ? feed.value.map((row) => row.id) : []), [feed])
   const [expanded, setExpanded] = React.useState<string>()
   const region = React.useRef<HTMLDivElement>(null)
   const message = React.useRef<HTMLParagraphElement>(null)
@@ -98,6 +102,7 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
       }}
       {...stylex.props(styles.scroll)}
     >
+      {feed._tag === 'Observed' ? <DecodeNotice noun="alert" decode={decode} shown={shownIds} /> : null}
       {feed._tag === 'Waiting' ? <p ref={message} role="status" tabIndex={-1} {...stylex.props(styles.empty)}>Loading alerts…</p>
         : feed._tag === 'Unavailable' ? (
           <p ref={message} role="alert" tabIndex={-1} {...stylex.props(styles.empty)}>

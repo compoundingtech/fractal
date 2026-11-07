@@ -271,6 +271,9 @@ export const useRosterDecode = (): RosterDecode =>
 /** SDK decode evidence for missions; a source without it decodes every row. */
 export const useMissionsDecode = (): RosterDecode =>
   useAtomValue(useDataSource().missionsDecode ?? noRosterDecode)
+/** SDK decode evidence for alerts; a source without it decodes every row. */
+export const useAttentionDecode = (): RosterDecode =>
+  useAtomValue(useDataSource().attentionDecode ?? noRosterDecode)
 /** Select only fleet fields that affect a collection's membership/order, not row presentation. */
 export const useFleetSelection = <T,>({
   select,
