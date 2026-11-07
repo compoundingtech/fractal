@@ -134,9 +134,9 @@ export function ThreadHeader({
   statusSince,
   freshness,
   panelOpen,
-  drawerOpen,
+  terminalOpen,
   onTogglePanel,
-  onToggleDrawer,
+  onToggleTerminal,
   sidebarCollapsed = false,
   onToggleSidebar,
   sidebarToggleRef,
@@ -164,9 +164,10 @@ export function ThreadHeader({
   onOpen?: () => void
   onCommit?: () => void
   panelOpen: boolean
-  drawerOpen: boolean
+  /** The main pane shows the terminal in place of the conversation; the toggle then offers the way back. */
+  terminalOpen: boolean
   onTogglePanel: () => void
-  onToggleDrawer: () => void
+  onToggleTerminal: () => void
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
@@ -197,8 +198,8 @@ export function ThreadHeader({
         <div data-testid="native-action-slot" ref={actionPortalRef} {...stylex.props(styles.actionSlot)}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Commit <Icon name="chevron-down" size={12} /></button>}
-        {!narrow && terminalAvailable && <ChromeControl icon="drawer" label="Toggle terminal drawer" pressed={drawerOpen} onPress={onToggleDrawer} />}
-        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
+        {!narrow && terminalAvailable && <ChromeControl icon={terminalOpen ? 'message' : 'terminal'} label={terminalOpen ? 'Show conversation' : 'Show terminal'} active={terminalOpen} onPress={onToggleTerminal} />}
+        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="terminal" label="Show terminal" disabledReason={terminalDisabledReason} />}
         {narrow
           ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
           : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
@@ -216,13 +217,14 @@ export function ThreadHeader({
  */
 export function PhoneTerminalToggle({ pressed, onPress, disabledReason }: { readonly pressed: boolean; readonly onPress: () => void; readonly disabledReason?: string }) {
   const reasonId = React.useId()
-  const content = <><Icon name="drawer" /><span>Terminal</span></>
+  // The name says what a press shows next; the fill says the terminal is showing now. `aria-pressed` would read "Show conversation, pressed".
+  const content = <><Icon name={pressed ? 'message' : 'terminal'} /><span>{pressed ? 'Conversation' : 'Terminal'}</span></>
   if (disabledReason === undefined) {
-    return <AriaButton aria-label="Terminal" aria-pressed={pressed} onPress={onPress} data-narrow-terminal {...stylex.props(styles.terminalTouch, pressed && styles.terminalPressed)}>{content}</AriaButton>
+    return <AriaButton aria-label={pressed ? 'Show conversation' : 'Show terminal'} onPress={onPress} data-narrow-terminal {...stylex.props(styles.terminalTouch, pressed && styles.terminalPressed)}>{content}</AriaButton>
   }
   return <DialogTrigger>
     <Pressable>
-      <button type="button" aria-label="Terminal" aria-pressed={false} aria-disabled="true" aria-describedby={reasonId} data-narrow-terminal {...stylex.props(styles.terminalTouch, styles.terminalDisabled)}>{content}</button>
+      <button type="button" aria-label="Show terminal" aria-disabled="true" aria-describedby={reasonId} data-narrow-terminal {...stylex.props(styles.terminalTouch, styles.terminalDisabled)}>{content}</button>
     </Pressable>
     <span id={reasonId} hidden>{disabledReason}</span>
     <Popover placement="bottom end">

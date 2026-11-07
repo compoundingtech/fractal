@@ -12,7 +12,7 @@ export type WorkspaceView =
 
 /** A terminal subject address, as `terminalSubjectForAgent` and the fleet projection produce it. */
 export type TerminalRef = `terminal/${string}`
-const isTerminalRef = (ref: string): ref is TerminalRef => ref.startsWith('terminal/')
+export const isTerminalRef = (ref: string): ref is TerminalRef => ref.startsWith('terminal/')
 /** The Missions screen's tab, opened from the sidebar. */
 export const MISSIONS_REF = 'missions'
 const isDocumentRef = (ref: string): ref is `doc/${string}` => ref.startsWith('doc/')

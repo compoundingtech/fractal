@@ -297,14 +297,14 @@ describe('terminal import intent', () => {
     expect(terminalPrefetch).not.toHaveBeenCalled()
     await act(async () => resolveTerminal())
     expect(prepareTerminal).toHaveBeenCalledTimes(1)
-    const toggle = container.querySelector('[aria-label="Toggle terminal drawer"]')!
+    const toggle = container.querySelector('[aria-label="Show terminal"]')!
     await act(async () => toggle.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })))
     expect(terminalPrefetch).toHaveBeenCalledWith('terminal/example')
     expect(terminalRequested).toHaveBeenCalledTimes(1)
     await act(async () => toggle.dispatchEvent(new FocusEvent('focusin', { bubbles: true })))
     expect(terminalPrefetch).toHaveBeenCalledTimes(2)
     await act(async () => (toggle as HTMLButtonElement).click())
-    // Drawer demand reuses the idle request rather than importing the terminal chunk again.
+    // Showing the terminal reuses the idle request rather than importing the terminal chunk again.
     expect(terminalRequested).toHaveBeenCalledTimes(1)
   })
   it('renders a loaded terminal in the reopen commit without a lazy fallback', async () => {

@@ -10,15 +10,14 @@ import { paneTabLabel, retainPane, workspaceHref, workspaceView, type RetainedPa
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 describe('workspace body', () => {
-  it('renders the terminal as a drawer beside the shown thread', () => {
+  it('renders the terminal alone, in place of the thread', () => {
     const view = workspaceView({ ref: 'terminal/fixture/one' })
     expect(view).toEqual({ _tag: 'Terminal', ref: 'terminal/fixture/one' })
     const source = fixtureSource({ world: { now: 0, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
     const html = renderToStaticMarkup(createElement(DataSourceProvider, { source, registry: AtomRegistry.make(), children: createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view, agentName: 'Fixture', onOpenTool: vi.fn() }) }))
-    expect(html).toMatch(/<section aria-label="Terminal drawer" data-testid="terminal-pane">/)
+    expect(html).toMatch(/<section aria-label="Terminal" data-testid="terminal-pane" data-terminal-shown="true"/)
     expect(html).toMatch(/data-system-state="loading"[^>]*>.*Loading terminal</)
-    expect(html).toMatch(/aria-label="Transcript"/)
-    expect(html).toMatch(/^<div><div><div style="display:contents" aria-hidden="false">/)
+    expect(html).not.toMatch(/aria-label="Transcript"/)
     expect(html).not.toMatch(/Terminal unavailable/i)
   })
   it('states that any other non-thread view is unavailable', () => {

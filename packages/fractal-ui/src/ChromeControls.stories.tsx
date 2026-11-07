@@ -39,7 +39,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
       </footer>
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} drawerOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleDrawer={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
+      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} terminalOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleTerminal={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
         <div {...stylex.props(styles.actions)}>
           <ChromeControl icon="person" label="Actions for fractal-web" />
           <DialogTrigger>
@@ -83,7 +83,7 @@ export const scenarioExemptions: readonly string[] = [
 type Story = StoryObj<typeof meta>
 
 const header = (canvasElement: HTMLElement) => within(canvasElement).getByTestId('thread-header')
-const headerNames = ['Actions for fractal-web', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel']
+const headerNames = ['Actions for fractal-web', 'Resources', 'Conversation menu', 'Show terminal', 'Toggle right panel']
 
 /** Every chrome control is a 28px icon button named by its accessible name; open toggles and set filters keep the fill. */
 export const QuietIcons: Story = { play: async ({ canvasElement }) => {
@@ -95,7 +95,7 @@ export const QuietIcons: Story = { play: async ({ canvasElement }) => {
     await expect(button.getBoundingClientRect().height).toBe(28)
   }
   await expect(within(header(canvasElement)).getByRole('button', { name: 'Toggle right panel' })).toHaveAttribute('aria-pressed', 'true')
-  await expect(within(header(canvasElement)).getByRole('button', { name: 'Toggle terminal drawer' })).toHaveAttribute('aria-pressed', 'false')
+  await expect(within(header(canvasElement)).getByRole('button', { name: 'Show terminal' })).not.toHaveAttribute('aria-pressed')
   const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
   await expect(sidebar.getByRole('button', { name: 'Filter agents · 1 active' })).not.toHaveAttribute('aria-pressed')
   await expect(sidebar.getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Collapse agents', 'Needs me only', 'Filter agents · 1 active', 'Sort agents · Manual', 'Toggle color scheme', 'Missions', 'Usage'])
@@ -134,9 +134,10 @@ export const QuietIconsFlow: Story = { play: async ({ args, canvasElement }) => 
   await expect(conversation).toHaveAttribute('aria-expanded', 'true')
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
-  const terminal = scope.getByRole('button', { name: 'Toggle terminal drawer' })
+  const terminal = scope.getByRole('button', { name: 'Show terminal' })
   await userEvent.click(terminal)
-  await expect(terminal).toHaveAttribute('aria-pressed', 'true')
+  await expect(terminal).toHaveAccessibleName('Show conversation')
+  await expect(terminal).not.toHaveAttribute('aria-pressed')
 } }
 
 const resourcesReason = 'Read access to agent resources has not been granted.'
