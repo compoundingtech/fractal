@@ -79,3 +79,31 @@ it('writes Filter menu choices into the query and settings, ANDs them with typed
     host.remove()
   }
 })
+
+it('offers Clear search only with text, clears like Escape and keeps focus in the field', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  vi.stubGlobal('CSS', { escape: (value: string) => value })
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler is:asking machine:host-a repo:api', hideEnded: true, sort: 'name' }
+  const update = (value: SidebarFilters) => { filters = value; render() }
+  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['host-a']} showRows={[]} />)
+  const clear = () => host.querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')
+  try {
+    await act(async () => render())
+    expect(host.querySelector('kbd')).toBeNull()
+    expect(clear()?.tabIndex).toBe(0)
+    await act(async () => clear()!.click())
+    // Escape's semantics: the whole query goes, and nothing outside the query changes.
+    expect(filters).toEqual({ ...defaultFilters, query: '', hideEnded: true, sort: 'name' })
+    expect(document.activeElement).toBe(host.querySelector('input[aria-label="Search agents"]'))
+    expect(clear()).toBeNull()
+    expect(host.querySelector('kbd')?.textContent).toBe('/')
+  } finally {
+    await act(async () => root.unmount())
+    host.remove()
+  }
+})
+
