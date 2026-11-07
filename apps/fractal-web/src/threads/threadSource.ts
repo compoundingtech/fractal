@@ -56,7 +56,9 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       if (!abort.signal.aborted) {
         if (!read && registry.get(titles).size > 0) registry.set(titles, new Map())
         const actions = new Set(read ? caps.capabilities.filter(capability =>
-          capability.state === 'granted' && capability.id.startsWith('thread.')).map(capability => capability.id) : [])
+          capability.state === 'granted' && capability.id.startsWith('thread.')
+          && (caps.transport === 'local-web' || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
+        ).map(capability => capability.id) : [])
         get.setSelf({ read, actions, actor: caps.session_actor })
       }
     }).catch(() => { if (!abort.signal.aborted) get.setSelf(noAccess) })

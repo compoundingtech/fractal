@@ -37,7 +37,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
     requests.push({ url, body })
     if (url.pathname.endsWith('/capabilities')) return Response.json({
       ...base,
-      value: { ...base.value, capabilities: [
+      value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
         { id: 'thread.close', version: 0, state: 'granted' },
@@ -90,7 +90,7 @@ it('starts with the exact ask episode and retries the same first message after a
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).endsWith('/capabilities')) return Response.json({
       ...base,
-      value: { ...base.value, capabilities: [
+      value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
         { id: 'thread.start', version: 0, state: 'granted' },
@@ -127,6 +127,29 @@ it('starts with the exact ask episode and retries the same first message after a
       parameters: { ...input, target_id: expect.stringMatching(/^thread\//) },
     })
     expect(bodies[1]?.parameters).not.toHaveProperty('in_reply_to')
+  } finally {
+    stop()
+    registry.dispose()
+  }
+})
+
+it('offers metadata edits but omits the unsigned composer on paired web transport', async () => {
+  const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async () => Response.json({
+    ...base,
+    value: { ...base.value, capabilities: [
+      ...base.value.capabilities,
+      { id: 'threads-v1', version: 1, state: 'granted' },
+      ...['thread.start', 'thread.reply', 'thread.close'].map(id => ({ id, version: 0, state: 'granted' })),
+    ] },
+  }) })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const stop = registry.mount(source.access)
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({
+      read: true,
+      actions: new Set(['thread.close']),
+    }))
   } finally {
     stop()
     registry.dispose()

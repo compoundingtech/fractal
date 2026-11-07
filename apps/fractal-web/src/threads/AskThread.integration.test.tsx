@@ -36,7 +36,7 @@ it('opens an active Inbox ask’s first composer inline with the ordinary Send c
     const url = new URL(String(input))
     requests.push(url)
     if (url.pathname.endsWith('/capabilities')) return Response.json({
-      ...base, value: { ...base.value, capabilities: [
+      ...base, value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
         { id: 'thread.start', version: 0, state: 'granted' },
