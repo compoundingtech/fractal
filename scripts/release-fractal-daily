@@ -2,11 +2,12 @@
 """Publish a release from the archives main already built, when main changed since the last one.
 
 Every main commit runs "Fractal tag release", which builds, tests and verifies both archives and
-uploads them as the `fractal-release` artifact. This takes the newest commit whose run succeeded,
+uploads them as the `fractal-release` artifact. This takes the newest commit whose run succeeded (or
+the successful main push run selected by --run),
 re-verifies its checksums and sources, tags that exact commit and publishes the same bytes. Nothing
 is rebuilt, so a release is always an archive a main run has already proven.
 
-Usage: scripts/release-fractal-daily [--dry-run] [--tag TAG]
+Usage: scripts/release-fractal-daily [--dry-run] [--tag TAG] [--run ID]
 Environment: GH_TOKEN and GH_REPO (as for gh). Run from a full-history checkout with tags.
 Needs contents: write and actions: read to publish verified artifacts. Baseline PRs use a separate job.
 """
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 
+from release_gh import gh as gh_call, missing
 from release_notes import FIELDS, ImpactError, render
 
 WORKFLOW = 'release-fractal.yml'
@@ -72,6 +74,44 @@ def newest_verified_main_run():
     rows = json.loads(run('gh', 'run', 'list', '--workflow', WORKFLOW, '--branch', 'main', '--event', 'push',
                           '--status', 'success', '--limit', '1', '--json', 'databaseId,headSha'))
     return (rows[0]['databaseId'], rows[0]['headSha']) if rows else (None, None)
+
+
+def verified_main_run(run_id):
+    row = json.loads(run('gh', 'run', 'view', str(run_id), '--json',
+                         'databaseId,headSha,headBranch,event,status,conclusion,workflowName'))
+    if (row['databaseId'] != run_id or row['headBranch'] != 'main' or row['event'] != 'push'
+            or row['status'] != 'completed' or row['conclusion'] != 'success'
+            or row['workflowName'] != 'Fractal tag release'):
+        raise CommandFailed(f'run {run_id} is not a successful Fractal tag release push run on main')
+    return row['databaseId'], row['headSha']
+
+
+def gh(*args, **options):
+    result = gh_call(*args, step='release-fractal-daily', check=False, **options)
+    if result.returncode != 0:
+        cause = diagnostic(result.stderr) or diagnostic(result.stdout) or 'no output'
+        raise CommandFailed(f'gh {" ".join(args[:2])} exited {result.returncode}: {cause}')
+    return result
+
+
+def release_state(tag):
+    result = gh_call('release', 'view', tag, '--json', 'isDraft',
+                     step='release-fractal-daily', check=False)
+    if missing(result):
+        return None
+    if result.returncode != 0:
+        raise CommandFailed(f'reading release {tag} failed: {diagnostic(result.stderr)}')
+    return json.loads(result.stdout)
+
+
+def discard_partial_draft(tag):
+    state = release_state(tag)
+    if state is not None:
+        if not state['isDraft']:
+            raise CommandFailed(f'{tag} is already published; refusing to replace it')
+        # A failed create can leave only some assets. Recreate rather than publish incomplete bytes.
+        gh('release', 'delete', tag, '--yes', done=lambda: release_state(tag) is None)
+    return False
 
 
 def download_release(run_id, repository, dist):
@@ -162,10 +202,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--dry-run', action='store_true', help='verify and print the notes; publish nothing')
     parser.add_argument('--tag', help='release tag; default is the next patch after the highest v tag')
+    parser.add_argument('--run', type=int, help='successful main tag-release run ID; default is the newest')
     args = parser.parse_args()
     repo = pathlib.Path(__file__).resolve().parent.parent
 
-    run_id, sha = newest_verified_main_run()
+    run_id, sha = verified_main_run(args.run) if args.run is not None else newest_verified_main_run()
     if sha is None:
         say('no successful main run to release')
         return 1
@@ -218,9 +259,10 @@ def main():
 
     # A draft has no tag yet. Publishing it creates the tag at exactly this commit, so a partial
     # draft can be inspected and deleted without leaving a tag behind.
-    run('gh', 'release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
-        '--notes-file', str(body_notes), *assets)
-    run('gh', 'release', 'edit', tag, '--draft=false')
+    gh('release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
+       '--notes-file', str(body_notes), *assets, done=lambda: discard_partial_draft(tag))
+    gh('release', 'edit', tag, '--draft=false',
+       done=lambda: (state := release_state(tag)) is not None and not state['isDraft'])
     tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}^{{}}', f'refs/tags/{tag}', cwd=repo).split()
     if sha not in tagged:
         say(f'published {tag}, but the tag does not point at {sha}: {tagged}')

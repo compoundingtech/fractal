@@ -1,5 +1,5 @@
 import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementBodyV1, type ArrangementOperation } from '../../clients/typescript/fractal-client';
-import { buildTree, nodeKey, sameNode, spread, type Intent, type MembershipInput, type NodeRef, type Parent, type ProjectionError, type Tree } from './sidebarPlanning';
+import { nodeKey, sameNode, spread, type Intent, type NodeRef, type Parent, type ProjectionError, type Tree } from './sidebarPlanning';
 
 export type MoveRefusal =
   | { _tag: 'NodeMissing' | 'Self'; node: NodeRef }
@@ -40,8 +40,7 @@ export const validateSidebarMove = (tree: Tree, intent: Intent): MoveRefusal | u
   return undefined;
 };
 /** Exact Place operations; widen the nearest one-sided gap, preferring forward on a tie. */
-export const planSidebarV2 = (arrangement: Arrangement, memberships: readonly MembershipInput[], intent: Intent): V2Plan | { error: PlanningError } => {
-  const tree = buildTree(arrangement, memberships);
+export const planSidebarV2 = (tree: Tree | { error: ProjectionError }, intent: Intent): V2Plan | { error: PlanningError } => {
   if ('error' in tree) return { error: { _tag: 'Projection', error: tree.error } };
   const refusal = validateSidebarMove(tree, intent);
   if (refusal) return { error: { _tag: 'Move', refusal } };
