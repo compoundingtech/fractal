@@ -17,7 +17,7 @@ const setup = (initial, storageFailure = false) => {
   const sent = [], effects = [];
   const storage = { getItem: async () => raw, setItem: async (_key, value) => { if (storageFailure) throw new Error('storage'); raw = value; }, removeItem: async () => { raw = null; } };
   const host = new SidebarJournal(storage, scope, writeReducer, async (effect, state) => { effects.push(effect); if (effect === 'Send') sent.push(structuredClone(state.request)); });
-  return { host, sent, effects, raw: () => raw };
+  return { host, storage, sent, effects, raw: () => raw };
 };
 const staged = (edit = memberPlan) => { const state = createWriteState(scope, intent); writeReducer.reduce(state, plan(edit)); return state; };
 
@@ -108,4 +108,36 @@ test('invalid runtime durable values fail the persistence barrier before send', 
   invalid.snapshot.store_index = Number.MAX_SAFE_INTEGER + 1;
   await assert.rejects(env.host.dispatch(state, plan(memberPlan, invalid)), /Invalid sidebar write state/);
   assert.equal(env.sent.length, 0); assert.equal(env.raw(), null); assert.equal(state.refusal, 'Storage');
+});
+test('storage failures match both current request identity and persistence phase', () => {
+  const state = staged(compound), pending = writeReducer.storageFailed(state, 'Pending');
+  for (const phase of ['Completion', 'Removal']) assert.deepEqual(writeReducer.reduce(state, writeReducer.storageFailed(state, phase)), []);
+  writeReducer.reduce(state, event('Persisted', 1)); writeReducer.reduce(state, event('Ack', 1));
+  assert.deepEqual(writeReducer.reduce(state, pending), []); assert.equal(state.status, 'AwaitingObservation');
+  writeReducer.reduce(state, event('Observed', 1));
+  for (const failure of [pending, writeReducer.storageFailed(state, 'Removal')]) assert.deepEqual(writeReducer.reduce(state, failure), []);
+  assert.equal(state.status, 'AwaitingCompletionPersistence');
+  const completion = writeReducer.storageFailed(state, 'Completion');
+  assert.deepEqual(writeReducer.reduce(state, completion), ['PersistPending', 'ReadBase']); assert.equal(state.status, 'PartiallyApplied');
+  const fresh = staged(); assert.deepEqual(writeReducer.reduce(fresh, writeReducer.storageFailed(fresh, 'Pending')), ['PersistPending', 'ReadBase']); assert.equal(fresh.status, 'Refused');
+});
+test('host captures failed-write identity and phase before awaiting storage', async () => {
+  for (const dependent of [false, true]) {
+    const state = staged(compound), env = setup();
+    env.storage.setItem = async () => {
+      writeReducer.reduce(state, event('Persisted', 1)); writeReducer.reduce(state, event('Ack', 1)); writeReducer.reduce(state, event('Observed', 1));
+      if (dependent) { writeReducer.reduce(state, event('CompletionPersisted', 1)); writeReducer.reduce(state, { type: 'Fresh', base: base(2), operations: compound.memberships }); }
+      throw new Error('late pending failure');
+    };
+    await assert.rejects(env.host.resume({ state, effects: ['PersistPending'] }), /late pending failure/);
+    assert.equal(state.status, dependent ? 'AwaitingPersistence' : 'AwaitingCompletionPersistence');
+    assert.equal(state.request.identity.action_id, id(dependent ? 2 : 1).action_id); assert.equal(state.refusal, null); assert.equal(env.sent.length, 0);
+  }
+});
+test('removal failure surfaces without undoing authoritative observation', async () => {
+  const state = staged(), env = setup();
+  writeReducer.reduce(state, event('Persisted')); writeReducer.reduce(state, event('Observed'));
+  env.storage.removeItem = async () => { throw new Error('removal failure'); };
+  await assert.rejects(env.host.resume({ state, effects: ['PersistCompletion'] }), /removal failure/);
+  assert.equal(state.status, 'Observed'); assert.equal(state.refusal, null); assert.equal(env.sent.length, 0);
 });

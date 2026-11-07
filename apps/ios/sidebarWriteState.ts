@@ -1,5 +1,5 @@
 import type { ArrangementOperation } from '../../clients/typescript/fractal-client';
-import type { JournalEffect, JournalReducer, JournalStatus } from './sidebarJournal';
+import type { JournalEffect, JournalPersistence, JournalReducer, JournalStatus } from './sidebarJournal';
 import type { MembershipScope } from './sidebarMemberships';
 import type { Intent } from './sidebarPlanning';
 
@@ -14,7 +14,8 @@ export type WriteEvent = { type: 'Plan'; base: WriteBase; plan: WritePlan; folde
   | { type: 'Fresh'; base: WriteBase; operations: MembershipOperation[] | { error: WriteRefusal } }
   | { type: 'Persisted' | 'CompletionPersisted' | 'Ack' | 'Unknown' | 'Observed'; identity: WriteIdentity }
   | { type: 'Refused'; identity: WriteIdentity; reason: WriteRefusal }
-  | { type: 'Replay' | 'StorageFailed' | 'Retry' | 'StoredRefusal' };
+  | { type: 'StorageFailed'; identity: WriteIdentity; phase: JournalPersistence }
+  | { type: 'Replay' | 'Retry' | 'StoredRefusal' };
 export const createWriteState = (scope: MembershipScope, intent: Intent): WriteState => ({ scope: structuredClone(scope), intent: structuredClone(intent), status: 'Intent', refusal: null, request: null, dependent: null, folder_completed: false, used: [] });
 const sameScope = (a: MembershipScope, b: MembershipScope): boolean => a.owner === b.owner && a.container === b.container && a.endpoint === b.endpoint && a.host === b.host && a.projection === b.projection;
 const sameId = (a: WriteIdentity, b: WriteIdentity): boolean => a.actor === b.actor && a.action_id === b.action_id && a.idempotency_key === b.idempotency_key;
@@ -46,9 +47,9 @@ const reduce = (s: WriteState, e: WriteEvent): JournalEffect[] => {
     const identity = s.dependent!; s.dependent = null; return stage(s, identity, e.base, { Memberships: e.operations });
   }
   if (e.type === 'Retry' && (s.status === 'Refused' || s.status === 'PartiallyApplied')) { s.status = 'Intent'; s.refusal = null; s.dependent = null; return ['ReadBase', 'Replan']; }
-  if (e.type === 'StorageFailed' && (s.status === 'AwaitingPersistence' || s.status === 'AwaitingCompletionPersistence')) return refuse(s, 'Storage');
   if (e.type === 'Replay' && s.status === 'UnknownDelivery') { s.status = 'Sending'; return ['Send']; }
   if (!('identity' in e) || !s.request || !sameId(s.request.identity, e.identity)) return [];
+  if (e.type === 'StorageFailed' && (s.status === 'AwaitingPersistence' && e.phase === 'Pending' || s.status === 'AwaitingCompletionPersistence' && e.phase === 'Completion')) return refuse(s, 'Storage');
   if (e.type === 'Persisted' && s.status === 'AwaitingPersistence') { s.status = 'Sending'; return ['Send']; }
   if (e.type === 'CompletionPersisted' && s.status === 'AwaitingCompletionPersistence') { s.status = s.dependent ? 'AwaitingFreshBase' : 'Observed'; return s.dependent ? ['ReadBase'] : ['PersistRemoval']; }
   if (e.type === 'Ack' && (s.status === 'Sending' || s.status === 'UnknownDelivery')) { s.status = 'AwaitingObservation'; return ['PersistPending', 'ReadBase']; }
@@ -105,5 +106,5 @@ export const writeReducer: JournalReducer<WriteState, WriteEvent> = {
   },
   decode: value => parse(stateShape, value) as WriteState | undefined,
   persisted: (state, completion) => state.request ? { type: completion ? 'CompletionPersisted' : 'Persisted', identity: structuredClone(state.request.identity) } : { type: 'StoredRefusal' },
-  storageFailed: () => ({ type: 'StorageFailed' }),
+  storageFailed: (state, phase) => state.request ? { type: 'StorageFailed', identity: structuredClone(state.request.identity), phase } : { type: 'StoredRefusal' },
 };
