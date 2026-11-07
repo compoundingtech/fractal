@@ -4734,7 +4734,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         };
         let message_id = &hex::encode(sha2::Sha256::digest(done.as_bytes()))[..16];
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: format!("message/{message_id}"),
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),
@@ -15032,7 +15032,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             "Declared product missing: {}",
             view.title.as_deref().unwrap_or(&view.step)
         );
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: message_subject,
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),
@@ -16807,7 +16807,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..20]
         );
         let count = entries.len();
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: message_subject.clone(),
             kind: "message.sent".into(),
             actor: None,
@@ -20062,7 +20062,7 @@ pub fn append_fault_message(
     if let Some(run) = &fault.mission_run {
         tags.push(format!("mission-run:{run}"));
     }
-    store.append_claim(&ClaimInput {
+    crate::store::message_routing::send(store, &ClaimInput {
         subject,
         kind: "message.sent".into(),
         actor: Some("daemon/runtime".into()),

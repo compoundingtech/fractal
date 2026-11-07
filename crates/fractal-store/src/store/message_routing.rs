@@ -8,8 +8,9 @@
 //! stream mail when it is this member or its current start advertises `messages_stream_inbox`
 //! ([`messages_shard::inbox_hosts`]). Anything else stays a graph claim: no shard, a member
 //! leaving its fleet (a send then lands as a claim and is never fenced), a message the stream
-//! may not carry (a person's or an assistant's), a recipient without a host (a person, an
-//! undeclared or retired seat), or a host that does not advertise the inbox.
+//! may not carry (a person's or an assistant's), one with attachments (a long message's text or
+//! an image), a recipient without a host (a person, an undeclared or retired seat), or a host
+//! that does not advertise the inbox.
 //!
 //! Work wakes, replies that settle a parent, and senders whose evidence or predecessors cite
 //! other claims stay on the graph until 4c-3; they call the graph append, not [`send_message`].
@@ -29,6 +30,11 @@ pub fn legacy_reason(store: &Store, input: &ClaimInput) -> Result<Option<&'stati
     }
     if messages_shard::validate_input(input).is_err() {
         return Ok(Some("ineligible"));
+    }
+    // A long message's text and an image live in files its sender's member serves by the claim;
+    // they stay on the graph until that path is proven for stream items.
+    if input.fields.contains_key("attachments") {
+        return Ok(Some("attached"));
     }
     let Some(to) = input.fields.get("to").and_then(Value::as_str) else {
         return Ok(Some("no-recipient"));
@@ -66,6 +72,11 @@ pub fn send_message(store: &Store, input: &ClaimInput) -> Result<(ClaimRecord, b
     store.append_claim_outcome(input)
 }
 
+/// [`send_message`], answering the claim it wrote or replayed, as [`Store::append_claim`] does.
+pub fn send(store: &Store, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
+    send_message(store, input).map(|(claim, _)| claim)
+}
+
 /// [`send_message`] for a sender inside a graph transaction, which cannot write to the shard: a
 /// message `route` (its [`legacy_reason`], read before the transaction) sends to the stream is
 /// queued in the outbox, which the daemon drains to the shard after the commit; any other is
@@ -90,5 +101,5 @@ pub fn send_message_tx(
         None,
     )
     .map(|_| true)
-    .map_err(internal)
+    .map_err(claim_append_error)
 }
