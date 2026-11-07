@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "The mixed timeline reads existing graph messages and lifecycle claims. No replay of existing data is required." },
   "schema": { "status": "changed", "detail": "Add indexed lookup for thread-bearing messages and a reserved thread.ask-linked claim. Message relation fields were staged in the reader release." },
   "rules": { "status": "none", "detail": "No checkpoint rule change. Thread delivery uses the existing graph and its retention." },
-  "compatibility": { "status": "changed", "detail": "Ordinary message replies preserve existing settlement semantics. Typed thread messages carry separate quote and ask relations and remain graph claims. Install the thread privacy reader release fleet-wide before enabling thread writes. Every configured or active peer must advertise thread_read_privacy." },
+  "compatibility": { "status": "changed", "detail": "Ordinary message replies preserve existing settlement semantics. Typed thread messages carry separate quote and ask relations and remain graph claims. Install the thread privacy reader release fleet-wide before enabling thread writes. The local build and every configured or active peer must support thread_read_privacy version 2." },
   "downtime": { "status": "none", "detail": "No planned service interruption. Store open builds an additive message index." },
   "manual": { "status": "changed", "detail": "Set thread_writes=true at daemon startup only after verifying the live privacy build on every serving replica." },
   "recovery": { "status": "changed", "detail": "Existing messages need no conversion. After enabling writes, keep all serving replicas at or above the thread privacy reader release when rolling back, restoring or joining a member." }
