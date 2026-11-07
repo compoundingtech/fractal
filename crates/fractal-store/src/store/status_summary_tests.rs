@@ -245,7 +245,7 @@ fn a_subjects_kinds_by_seeks_equal_a_distinct_over_its_claims_at_every_cut() {
         .execute(/* sqlite-large-value: allow-for-now lv-h06cff359fe46 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('kinds','node',9000,'fixture','1700000000000')", [])
         .unwrap();
     let subjects = ["agent/example/kinds-0", "agent/example/kinds-1", "agent/example/kinds-1x", "agent/example/kinds-2"];
-    let mut random = Seeded(0x5EED_0F_C1A1_u64);
+    let mut random = Seeded(0x5EED_C1A1_u64);
     for index in 0..1_500 {
         // Kinds arrive in a random order, often repeated, so each kind's first claim is at a
         // different cut on each subject.
