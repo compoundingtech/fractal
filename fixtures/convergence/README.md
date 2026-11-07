@@ -236,12 +236,10 @@ The first characterization run failed only the four stale v14 trim expectations.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
 
-`claims-v17.json` is reserved for the merged subject-notes registry, including `note.set`.
+`claims-v17.json` is the merged subject-notes registry, including `note.set`.
 Versions 1 through 16 stay frozen. The simulation and audit summaries select v17.
-Generation is deferred during the build-capacity hold. In an approved window,
-generate the complete merged registry (do not hand-edit a fixture):
-`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v17.json`.
-This command must run before compiling the integration tests; the snapshot is not yet present.
+Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v17.json`
+(do not hand-edit a fixture).
 Then characterize the shifted RNG stream with
 `cargo test --locked -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
 The v16 never-trim characterization is not evidence for v17.
