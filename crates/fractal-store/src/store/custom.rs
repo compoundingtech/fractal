@@ -170,7 +170,7 @@ pub fn open(tx: &Transaction<'_>) -> Result<()> {
         )
         .optional()?
         .as_deref()
-        != Some("3")
+        != Some("4")
     {
         rebuild(tx)
     } else {
@@ -181,7 +181,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hcc772813cbfc owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "DELETE FROM custom_registrations; DELETE FROM custom_sources; DELETE FROM custom_dependencies; DELETE FROM local_custom_dirty; INSERT INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%';")?;
     flush(tx)?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h7ce00c63384c owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','3')",
+        /* sqlite-large-value: allow-for-now lv-h15155f5d4e7e owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','4')",
         [],
     )?;
     Ok(())

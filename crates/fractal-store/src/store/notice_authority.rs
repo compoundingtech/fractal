@@ -1,5 +1,5 @@
-//! Notice admission policy. B2 supplies replicated admission cuts and revocation ordering;
-//! payload timestamps and declaration hashes are deliberately never authority evidence here.
+//! Writer-bound notice authority; disposable snapshots use the current graph designation.
+//! Payload timestamps and old declaration hashes never prove historical authorization.
 use super::*;
 use fractal_schema::{custom::Manifest, notice};
 
@@ -127,10 +127,18 @@ fn runtime(connection: &Connection) -> Result<String, FractalError> {
 }
 
 /// Compare the resolver's actual outcome, not a duplicated identity/lifecycle watch list.
+/// The exact selected declaration is the disposable materialization incarnation.
+pub(super) fn binding(connection: &Connection) -> Result<(String, String), FractalError> {
+    let actor = runtime(connection)?;
+    let declaration = connection.query_row("SELECT claim_id FROM desired WHERE subject=?1",
+        [&actor], |row| row.get(0)).map_err(internal)?;
+    Ok((actor, declaration))
+}
+
 /// Identity heads and pending records can fence a holder without changing desired at all.
 pub(super) fn refresh_binding(tx: &Transaction<'_>) -> Result<()> {
-    let outcome = match runtime(tx) {
-        Ok(actor) => json!({"runtime":actor}),
+    let outcome = match binding(tx) {
+        Ok((actor, declaration)) => json!({"runtime":actor,"declaration":declaration}),
         Err(error) => json!({"unavailable":{"code":error.code,"message":error.message,"details":error.details}}),
     };
     let current = canonical_json_text(&outcome)?;
@@ -176,7 +184,7 @@ fn pending_admission(reason: &str) -> Result<ReplicatedClaimAdmission, FractalEr
     Ok(ReplicatedClaimAdmission::PendingDependencies { message: format!("notices unavailable: {reason}") })
 }
 
-/// Current writer-bound authority only. Historical admission and revocation await B2b.
+/// Current writer-bound authority only; no historical admission or fleet-wide revocation proof.
 pub(super) fn classify_replicated(
     connection: &Connection, claim: &ClaimRecord,
 ) -> Result<ReplicatedClaimAdmission, FractalError> {
@@ -311,17 +319,22 @@ pub(super) fn validate(
         }
     }
     if subject.starts_with("custom/attention/snapshot/") {
-        let runtime = runtime(connection)?;
+        let (runtime, declaration) = binding(connection)?;
         anyhow::ensure!(fields.get("runtime").and_then(Value::as_str) == Some(runtime.as_str()),
             "notices unavailable: forged runtime");
         if let Some(prior) = creation {
-            anyhow::ensure!(custom::fields(prior).get("runtime") == fields.get("runtime"),
-                "notices unavailable: immutable runtime changed");
+            let prior_fields = custom::fields(prior);
+            for field in ["runtime", "runtime_binding"] {
+                anyhow::ensure!(prior_fields.get(field) == fields.get(field),
+                    "notices unavailable: immutable {field} changed");
+            }
         }
         anyhow::ensure!(actor == runtime, "notices unavailable: only the designated runtime may write snapshots");
     } else {
         anyhow::ensure!(subject.starts_with("custom/attention/control/") && actor.starts_with("person/") && actor == recipient,
             "notices unavailable: only the source recipient may write person controls");
+        anyhow::ensure!(fields.get("runtime_binding").and_then(Value::as_str) == Some(declaration.as_str()),
+            "notices unavailable: snapshot belongs to another designation");
     }
     Ok(())
 }

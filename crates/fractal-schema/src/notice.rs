@@ -12,7 +12,7 @@ pub const CONTROL_PREFIX: &str = "custom/attention/control/";
 pub const PREFIXES: [&str; 3] = [SOURCE_PREFIX, SNAPSHOT_PREFIX, CONTROL_PREFIX];
 pub const HASHES: [&str; 3] = [
     "1282a67945367e1557ab423f0ad6e4547c48629d9cbc0479ad70b15ef7c6a530",
-    "1f91f51979ce1b303c43453fa14fa8f0b2ec03fbb2304ff3b4a21ea99c30ff69",
+    "975f19c2cd036faa8ba19c663a5557e2cad01ba3eb4f2c274773f5a2685aec10",
     "ea890a46d937566b480ea782047f3e6d923810414e5b0e52e0c8a883561efbb0",
 ];
 
@@ -112,6 +112,9 @@ fn build(family: &str) -> custom::Manifest {
         if family == "snapshot" {
             fields.insert("policy".into(), field("object", true, &[]));
             let mut delivery = field("array", true, &[]);
+            let mut binding = field("string", true, &[]);
+            binding.pattern = Some("[0-9a-f]{64}".into());
+            fields.insert("runtime_binding".into(), binding);
             delivery.max_items = 4;
             fields.insert("delivery".into(), delivery);
         } else {

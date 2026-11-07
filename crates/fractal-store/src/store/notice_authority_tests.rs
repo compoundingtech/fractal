@@ -28,19 +28,23 @@ fn input(subject: &str, kind: &str, actor: &str, fields: Value) -> ClaimInput {
         fields: serde_json::from_value(fields).unwrap(), ..custom::tests_shared_delivery::empty_input() }
 }
 
-fn linked(source: &ClaimRecord, control: bool) -> Value {
+fn linked(store: &Store, source: &ClaimRecord, control: bool) -> Value {
     let mut fields = json!({"source_id":SOURCE,"creation_claim":source.id,"producer":"agent/example/producer","recipient":"person/example","runtime":RUNTIME});
     if control {
         fields.as_object_mut().unwrap().remove("runtime");
         for field in ["seen_at", "dismissed_at", "snoozed_until"] { fields[field] = Value::Null; }
-    } else { fields["policy"] = json!({"disposition":"deliver"}); fields["delivery"] = json!([]); }
+    } else {
+        fields["runtime_binding"] = json!(binding(&store.readers.get()).unwrap().1);
+        fields["policy"] = json!({"disposition":"deliver"});
+        fields["delivery"] = json!([]);
+    }
     fields
 }
 
 fn linked_store() -> Store {
     let (store, source) = setup();
-    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false))).unwrap();
-    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&source, true))).unwrap();
+    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&store, &source, false))).unwrap();
+    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&store, &source, true))).unwrap();
     for subject in [SNAPSHOT, CONTROL] {
         assert_eq!(custom::source(&store.readers.get(), subject).unwrap().unwrap()["state"], "ready");
     }
@@ -74,21 +78,23 @@ fn assert_runtime_fenced_like_rebuild(tx: &Transaction<'_>) -> Result<()> {
 fn notice_first_creator_forgery_and_forged_runtime_are_refused() {
     let (store, source) = setup();
     for actor in ["agent/example/producer", "person/example"] {
-        assert!(store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", actor, linked(&source, false))).is_err());
+        assert!(store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", actor, linked(&store, &source, false))).is_err());
     }
-    let mut fields = linked(&source, false); fields["runtime"] = json!("agent/example/forged");
+    let mut fields = linked(&store, &source, false); fields["runtime"] = json!("agent/example/forged");
     assert!(store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, fields)).is_err());
-    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false))).unwrap();
+    let mut fields = linked(&store, &source, false); fields["runtime_binding"] = json!("0".repeat(64));
+    assert!(store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, fields)).is_err());
+    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&store, &source, false))).unwrap();
 }
 
 #[test]
 fn notice_agent_and_runtime_cannot_write_person_controls() {
     let (store, source) = setup();
     for actor in [RUNTIME, "agent/example/producer", "person/other"] {
-        assert!(store.append_claim(&input(CONTROL, "custom.attention.control-created", actor, linked(&source, true))).is_err());
+        assert!(store.append_claim(&input(CONTROL, "custom.attention.control-created", actor, linked(&store, &source, true))).is_err());
     }
-    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&source, true))).unwrap();
-    assert!(store.append_claim(&input(CONTROL, "custom.attention.control-updated", RUNTIME, linked(&source, true))).is_err());
+    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&store, &source, true))).unwrap();
+    assert!(store.append_claim(&input(CONTROL, "custom.attention.control-updated", RUNTIME, linked(&store, &source, true))).is_err());
 }
 
 #[test]
@@ -96,7 +102,7 @@ fn notice_altered_links_recipient_producer_and_manifest_are_refused() {
     let (store, source) = setup();
     for (field, value) in [("source_id", json!("custom/attention/source/other")), ("creation_claim", json!("0".repeat(64))),
         ("recipient", json!("person/other")), ("producer", json!(RUNTIME)), ("_registration", json!("0".repeat(64)))] {
-        let mut fields = linked(&source, false); fields[field] = value;
+        let mut fields = linked(&store, &source, false); fields[field] = value;
         assert!(store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, fields)).is_err(), "{field}");
     }
     let mut fields = custom::fields(&source); fields.remove("_registration"); fields.insert("links".into(), json!([]));
@@ -116,7 +122,7 @@ fn notice_second_designated_holder_is_refused_and_missing_binding_fails_closed()
         assert_eq!(row["state"], "ready");
         Ok(())
     }).unwrap().unwrap();
-    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&source, true))).unwrap();
+    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&store, &source, true))).unwrap();
 }
 
 #[test]
@@ -131,7 +137,7 @@ fn notice_reserved_prefix_squat_and_alternate_claim_prefix_are_refused() {
 #[test]
 fn notice_generic_reads_never_expose_reserved_raw_rows() {
     let (store, source) = setup();
-    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false))).unwrap();
+    store.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&store, &source, false))).unwrap();
     for subject in [SOURCE, SNAPSHOT, CONTROL] { assert!(store.custom_subject(subject).is_err()); }
     for kind in [None, Some("attention.notice-source"), Some("attention.notice-snapshot")] {
         assert!(store.custom_subjects(kind, None, None, 10).unwrap().is_empty());
@@ -153,7 +159,7 @@ fn notice_later_replicated_source_conflict_invalidates_links_like_rebuild() {
         (SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, false),
         (CONTROL, "custom.attention.control-created", "person/example", true),
     ] {
-        store.append_claim(&input(subject, kind, actor, linked(&source, control))).unwrap();
+        store.append_claim(&input(subject, kind, actor, linked(&store, &source, control))).unwrap();
         let connection = store.readers.get();
         assert_eq!(custom::source(&connection, subject).unwrap().unwrap()["state"], "ready");
         let edges: i64 = connection.query_row(
@@ -403,9 +409,9 @@ fn notice_reordered_signed_dependencies_quarantine_then_converge_and_replay() {
     let (writer, reader) = notice_replication_pair();
     let source = notice_replication_source(&writer);
     let snapshot = writer.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created",
-        RUNTIME, linked(&source, false))).unwrap();
+        RUNTIME, linked(&writer, &source, false))).unwrap();
     let control = writer.append_claim(&input(CONTROL, "custom.attention.control-created",
-        "person/example", linked(&source, true))).unwrap();
+        "person/example", linked(&writer, &source, true))).unwrap();
     let exchange = writer.export_replication_exchange(FLEET, &reader.replication_inventory().unwrap()).unwrap();
     let mut groups: [Vec<ReplicaEnvelope>; 6] = Default::default();
     for envelope in &exchange.envelopes {
@@ -482,13 +488,13 @@ fn notice_signed_wrong_roles_hashes_and_cross_member_forgery_are_invalid_and_rep
         }
         assert!(reader.claim_by_id(&source.id).unwrap().is_some());
         let (subject, kind, actor, mut fields) = match forgery {
-            "control-role" => (CONTROL, "custom.attention.control-created", RUNTIME, linked(&source, true)),
-            "snapshot-role" => (SNAPSHOT, "custom.attention.snapshot-created", "agent/example/producer", linked(&source, false)),
-            "cross-member" => (SNAPSHOT, "custom.attention.snapshot-created", "agent/reader/forger", linked(&source, false)),
-            _ => (SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false)),
+            "control-role" => (CONTROL, "custom.attention.control-created", RUNTIME, linked(&writer, &source, true)),
+            "snapshot-role" => (SNAPSHOT, "custom.attention.snapshot-created", "agent/example/producer", linked(&writer, &source, false)),
+            "cross-member" => (SNAPSHOT, "custom.attention.snapshot-created", "agent/reader/forger", linked(&writer, &source, false)),
+            _ => (SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&writer, &source, false)),
         };
         let replacement = writer.append_claim(&input(subject, kind,
-            if subject == CONTROL { "person/example" } else { RUNTIME }, linked(&source, subject == CONTROL))).unwrap();
+            if subject == CONTROL { "person/example" } else { RUNTIME }, linked(&writer, &source, subject == CONTROL))).unwrap();
         writer.seal_local_batches().unwrap();
         let manifest = notice::manifests().iter().find(|manifest| subject.starts_with(&manifest.subject_prefix)).unwrap();
         fields["_registration"] = json!(notice::pinned_hash(manifest).unwrap());
@@ -547,7 +553,7 @@ fn notice_unknown_kind_and_field_remain_schema_quarantine_not_dependency_or_inva
             reader.project_replication_backlog().unwrap();
         }
         assert!(reader.claim_by_id(&source.id).unwrap().is_some());
-        let mut fields = linked(&source, false);
+        let mut fields = linked(&writer, &source, false);
         let manifest = notice::manifests().iter().find(|manifest| SNAPSHOT.starts_with(&manifest.subject_prefix)).unwrap();
         fields["_registration"] = json!(notice::pinned_hash(manifest).unwrap());
         if extra { fields["future_field"] = json!(true); }
@@ -578,7 +584,7 @@ fn notice_source_and_person_controls_survive_handover_and_absent_runtime() {
     store.apply_as(&intent, &BTreeMap::from([(RUNTIME.into(), vec![token])]),
         "stop-notice-runtime", Some("person/example")).unwrap();
     let control = store.append_claim(&input(CONTROL, "custom.attention.control-updated",
-        "person/example", linked(&source, true))).unwrap();
+        "person/example", linked(&store, &source, true))).unwrap();
     assert!(control.body["fields"].get("runtime").is_none());
     let fields = custom::fields(&source);
     store.append_claim(&ClaimInput {

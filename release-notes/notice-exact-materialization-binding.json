@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bind disposable notice snapshots to the exact selected runtime declaration, including a return to the same runtime actor.",
+  "replay": { "status": "changed", "detail": "Custom projection version 4 rebuilds quiet caches against the reviewed snapshot pin. An old snapshot cannot become current again merely because its runtime actor is designated again. Source and person-control facts remain runtime independent. Generic reserved-prefix data predating reservation is not notice history; facts from untagged interim notice builds are not migrated." },
+  "schema": { "status": "changed", "detail": "Re-pin the unreleased v1 snapshot manifest in place with required runtime_binding, the exact selected graph declaration claim ID. There is no v2 namespace or compatibility alias." },
+  "rules": { "status": "changed", "detail": "Admission compares the authenticated actor, runtime payload and exact selected declaration. This is a locally observed designation fence, not a historical authorization certificate or a cross-partition revocation guarantee. A trusted member asserting the designated runtime or recipient actor is not detected. It is the same fleet-member trust as the existing relay, and end-to-end actor authentication is out of scope." },
+  "compatibility": { "status": "changed", "detail": "Older interim snapshot pins are not current notice contracts. Reserved generic list and detail reads remain unavailable; full-state backup, rename-proof export and internal replication retain complete history because filtering would corrupt restore or proof." },
+  "downtime": { "status": "none", "detail": "No tagged-release notice writer requires an outage or data migration." },
+  "manual": { "status": "none", "detail": "No supported notice-history migration is required." },
+  "recovery": { "status": "changed", "detail": "A partition that has not observed a designation change may still accept old-runtime snapshots. Persisted owner binding, owner acknowledgement and action routing remain separate work; this slice does not establish their fence." }
+}
