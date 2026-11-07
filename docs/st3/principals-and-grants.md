@@ -119,12 +119,39 @@ and absent-principal legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 
+Service read admission uses a closed GET/scope registry on both the credential
+gateway and bearer-authenticated native router. `read.claims` admits
+`/v1/client/claims` and `/v1/client/claims/by-id/{id}` with the native readers'
+1–500 bounds and numeric `after`/`before` cursors. `read.work` admits exact
+`/v1/client/work-items/{subject}` reads without acknowledging wakes.
+`read.documents` admits the existing client document list/content projections.
+Native `/v1/claims`, `/v1/claims/by-id/{id}`, `/v1/work-items/{subject}` and
+`/v1/documents[/content]` aliases use the same service admission decision; the
+gateway continues to refuse raw routes. Claim bodies redact declaration trees,
+environment values and credential/code material; digests remain visible.
+No declaration, assistant, action, upgrade, HEAD or unknown route is admitted.
+
+The daemon writes only `custom.client.service.v1.read-window` as
+`daemon/{origin}`, at most once per grant per 60-second wall-clock window.
+Admission-refused requests write no audit claim. Service identity is never an acting party,
+and a bearer takes precedence over local person headers or browser identity.
+The only service-grant fixture is inside a `#[cfg(test)]` module; production
+grant append still rejects service issuance. This is not an OS sandbox:
+same-UID callers dropping the credential on an unrestricted socket remain
+outside credential enforcement (R18).
+
+Production issuance remains disabled pending owner CLI/rotation, admission
+atomicity with concurrent-admission proof, bounded/indexed profile admission,
+fleet-wide mixed-profile exclusion, mixed-version/downgrade safety, and auth-path
+p95 under concurrent completions. No claim is made that M1 lifecycle or the
+real merge consumer acceptance is complete.
+
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
 | R27 | A host user service outside a harness authenticates as a stable non-person subject provisioned by a person or a node, not as its invoking agent. | M1 | NOT STARTED: #5019/#3268; plugin/assistant primitives do not prove this consumer contract. | Restart unattended service and invoke from two agents; every read retains the same service subject. |
 | R28 | Its credential file rotates and revokes without changing the stable subject; retired/revoked credentials cease to authenticate. | M1 | NOT STARTED: #5019; general device pairing is insufficient. | Rotate, use old/new credentials, revoke, retry after daemon restart; audit subject continuity. |
-| R29 | Scoped native routes allow claims by id and paged claims, work-item reads and document reads at admission, queue proof and final merge. | M1 | NOT STARTED: #5019; client-v0/scoped raw route acceptance UNKNOWN. | Real merge consumer reads all four families, traverses pages without gaps and validates exact receipts at all three stages. |
-| R30 | Every write is refused under the service credential, including free mode, raw routes, client actions, claims, documents and runtime/admin operations. | M1 | NOT STARTED: #5019; unauthenticated local reads do not prove denial. | Enumerate mutation routes/aliases; negative-write suite asserts structured refusal and zero store/runtime effects. |
+| R29 | Scoped native routes allow claims by id and paged claims, work-item reads and document reads at admission, queue proof and final merge. | M1 | PARTIAL: closed service read surface and router fixtures implemented; issuance remains disabled and real merge-consumer acceptance is UNKNOWN (#5019). | Real merge consumer reads all four families, traverses pages without gaps and validates exact receipts at all three stages. |
+| R30 | Every write is refused under the service credential, including free mode, raw routes, client actions, claims, documents and runtime/admin operations. | M1 | PARTIAL: central GET/scope admission and both-router refusal fixtures implemented; production lifecycle acceptance remains UNKNOWN (#5019). | Enumerate mutation routes/aliases; negative-write suite asserts structured refusal and zero store/runtime effects. |
 
 ## Shared box and messaging
 

@@ -4,6 +4,7 @@ use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
 use crate::SeatsStoreCore;
 use super::*;
+use super::client_v0::{ClientSession, require_scope};
 
 /// Only a locally bound harness may recover a missing work fence from its own runtime.
 /// Explicit fences are retained so the action's validation can refuse stale callers.
@@ -180,7 +181,12 @@ pub async fn list_work(
 pub async fn get_work(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
+    session: Option<Extension<ClientSession>>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
+    if let Some(session) = &session {
+        require_scope(&session.0, if service { "read.work" } else { "read.projections" })?;
+    }
     let subject = if subject.starts_with("step-run/") {
         subject
     } else {
@@ -191,10 +197,12 @@ pub async fn get_work(
         .step_run(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
-    // A seat whose host keeps its receipts acknowledges a wake on that host.
-    super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
-        .await
-        .map_err(ApiError::internal)?;
+    // Services observe work without acknowledging wakes or changing delivery state.
+    if !service {
+        super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
+            .await
+            .map_err(ApiError::internal)?;
+    }
     Ok(Json(step))
 }
 

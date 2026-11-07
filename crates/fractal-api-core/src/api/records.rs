@@ -4,6 +4,7 @@ use crate::LanesStore;
 use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
+use super::client_v0::{ClientSession, require_scope};
 
 pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
@@ -286,14 +287,25 @@ pub async fn post_claim(
 pub async fn get_claim(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    session: Option<Extension<ClientSession>>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    if let Some(session) = &session {
+        require_scope(&session.0, if client_v0::external_grants::is_service(&session.0) {
+            "read.claims"
+        } else { "read.projections" })?;
+    }
     let store = state.store.clone();
     let id_for_read = id.clone();
     blocking_store(move || store.claim_by_id(&id_for_read))
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
         .filter(generic_claim_visible)
-        .map(Json)
+        .map(|mut claim| {
+            if session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0)) {
+                redact_service_claim(&mut claim.body);
+            }
+            Json(claim)
+        })
         .ok_or_else(|| ApiError::not_found(format!("claim `{id}` does not exist")))
 }
 
@@ -322,15 +334,22 @@ enum ClaimsOrder {
 pub async fn list_claims(
     State(state): State<AppState>,
     Query(query): Query<ClaimsQuery>,
+    session: Option<Extension<ClientSession>>,
 ) -> Result<Json<ClaimsPage>, ApiError> {
+    if let Some(session) = &session {
+        require_scope(&session.0, if client_v0::external_grants::is_service(&session.0) {
+            "read.claims"
+        } else { "read.projections" })?;
+    }
     if query.limit == 0 || query.limit > 500 {
         return Err(ApiError::bad(FractalError::new(
             "invalid-page-limit",
             "a claim page limit must be between 1 and 500",
         )));
     }
+    let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
     let store = state.store.clone();
-    blocking_store(move || {
+    let mut page = blocking_store(move || {
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
@@ -344,8 +363,31 @@ pub async fn list_claims(
             query.limit,
         )
     })
-    .await
-    .map(Json)
+    .await?;
+    if service {
+        for claim in &mut page.claims {
+            redact_service_claim(&mut claim.body);
+        }
+    }
+    Ok(Json(page))
+}
+
+/// Generic records must not become a declaration or environment-value disclosure route.
+fn redact_service_claim(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(key.as_str(), "desired" | "declaration" | "kdl" | "tree"
+                    | "env" | "environment" | "env_values" | "credential" | "code") {
+                    *value = json!("<redacted>");
+                } else {
+                    redact_service_claim(value);
+                }
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(redact_service_claim),
+        _ => {}
+    }
 }
 
 #[derive(Default, Deserialize)]

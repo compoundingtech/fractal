@@ -18,7 +18,7 @@ pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
 
 /// Closed authority profiles: callers cannot register a profile or mix its rights.
-/// Service is reserved and cannot issue credentials or authorize any request.
+/// Service authentication is supported, but production issuance remains disabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Profile {
     Assistant,
@@ -95,6 +95,15 @@ fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
 }
 
 pub fn principal(source: &Value) -> Result<&str, ApiError> {
+    if Profile::stored(source)? == Profile::Service {
+        return source["principal"].as_str().filter(|principal| {
+            let mut parts = principal.split('/');
+            let component = |part: Option<&str>| part.is_some_and(|part| !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)));
+            parts.next() == Some("plugin") && component(parts.next())
+                && component(parts.next()) && parts.next().is_none()
+        }).ok_or_else(|| forbidden("invalid service principal"));
+    }
     crate::store::assistant_write::principal(source)
         .ok_or_else(|| forbidden("invalid assistant principal"))
 }
@@ -225,8 +234,12 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     let source = fields(&policy)?;
     let principal = principal(source)?;
     let granted_fields = fields(granted)?;
-    assistant_profile(granted_fields)?;
-    assistant_profile(source)?;
+    let profile = Profile::stored(granted_fields)?;
+    profile.compatible(Profile::stored(source)?)?;
+    if profile == Profile::Service {
+        digest_only(granted_fields)?;
+        digest_only(source)?;
+    }
     if self::principal(granted_fields)? != principal
         || ["grant_id", "session_actor", "issuer"].iter().any(|key| source[*key] != granted_fields[*key])
         || source["session_actor"].as_str().and_then(|actor| actor.strip_prefix(principal))
@@ -240,11 +253,14 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     if latest(state, &granted.subject, REVOKED)?.is_some()
         || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms()
         || source["issuer"] != owning_person(state)?
-        || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow")) || source["disclosure_consent"] != true {
+        || (profile == Profile::Assistant
+            && (!matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
+                || source["disclosure_consent"] != true)) {
         return Err(forbidden("assistant grant was revoked, expired, or has invalid policy"));
     }
-    let scopes = source["scopes"].as_array().ok_or_else(|| forbidden("assistant scopes absent"))?
-        .iter().map(|value| value.as_str().filter(|scope| SCOPES.contains(scope)).map(str::to_owned))
+    let allowed = if profile == Profile::Service { SERVICE_SCOPES } else { SCOPES };
+    let scopes = source["scopes"].as_array().ok_or_else(|| forbidden("external grant scopes absent"))?
+        .iter().map(|value| value.as_str().filter(|scope| allowed.contains(scope)).map(str::to_owned))
         .collect::<Option<BTreeSet<_>>>().ok_or_else(|| forbidden("assistant scopes invalid"))?;
     Ok(ClientSession { actor: source["session_actor"].as_str()
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: principal.into(),
@@ -257,6 +273,9 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
 }
 
 pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
+    if is_service(session) {
+        return authorize_service(session, request);
+    }
     if !matches!(session.authority_actor.as_str(), PRINCIPAL | MCP_PRINCIPAL) {
         return Err(forbidden("external grant profile has no allowed routes"));
     }
@@ -270,6 +289,62 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
         || request.headers().contains_key(axum::http::header::UPGRADE) {
         return Err(forbidden("assistant read requires its exact scope"));
     }
+    Ok(())
+}
+
+pub const SERVICE_SCOPES: &[&str] = &["read.claims", "read.work", "read.documents"];
+
+pub fn is_service(session: &ClientSession) -> bool {
+    session.authority_actor.starts_with("plugin/")
+}
+
+/// This closed registry is also used for native aliases. HEAD and upgrades are not reads.
+fn authorize_service(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
+    let path = request.uri().path();
+    let scope = match path {
+        "/v1/client/claims" | "/v1/claims" => Some("read.claims"),
+        "/v1/client/documents" | "/v1/client/documents/content"
+            | "/v1/documents" | "/v1/documents/content" => Some("read.documents"),
+        _ if ["/v1/client/claims/by-id/", "/v1/claims/by-id/"].iter()
+            .any(|prefix| path.strip_prefix(prefix).is_some_and(|id| !id.is_empty() && !id.contains('/'))) =>
+            Some("read.claims"),
+        _ if ["/v1/client/work-items/", "/v1/work-items/"].iter()
+            .any(|prefix| path.strip_prefix(prefix).is_some_and(|subject| !subject.is_empty())) =>
+            Some("read.work"),
+        _ => None,
+    };
+    if request.method() != axum::http::Method::GET
+        || request.headers().contains_key(axum::http::header::UPGRADE)
+        || (session.transport == "fabric-loopback" && !path.starts_with("/v1/client/"))
+        || !scope.is_some_and(|scope| session.allows(scope)) {
+        return Err(forbidden("service requires a registered pure GET and its exact read scope"));
+    }
+    Ok(())
+}
+
+/// The only graph mutation admitted on behalf of a service read. The daemon signs as itself.
+pub const SERVICE_AUDIT_KINDS: &[&str] = &["custom.client.service.v1.read-window"];
+const AUDIT_WINDOW_MS: u128 = 60_000;
+static SERVICE_AUDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn audit_service_read(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
+    let _guard = SERVICE_AUDIT.lock().map_err(ApiError::internal)?;
+    let grant = session.pairing_grant.as_deref().ok_or_else(|| forbidden("service grant absent"))?;
+    let window = client_now_ms() / AUDIT_WINDOW_MS;
+    let subject = format!("custom/client/service-read-{}-{window}", credential_digest(grant));
+    let kind = SERVICE_AUDIT_KINDS[0];
+    if latest(state, &subject, kind)?.is_some() {
+        return Ok(());
+    }
+    state.store.append_claim(&ClaimInput {
+        subject, kind: kind.into(), actor: Some(format!("daemon/{}", state.store.origin())),
+        fields: serde_json::from_value(json!({
+            "version":1, "grant":grant, "principal":session.authority_actor,
+            "window_start_unix_ms":window * AUDIT_WINDOW_MS,
+            "window_ms":AUDIT_WINDOW_MS
+        })).map_err(ApiError::internal)?,
+        evidence: Vec::new(), expected_subject: Some(None), idempotency_key: None,
+    }).map_err(ApiError::bad)?;
     Ok(())
 }
 
@@ -346,3 +421,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "external_grants_service_tests.rs"]
+mod service_tests;
