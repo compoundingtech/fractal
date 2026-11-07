@@ -235,11 +235,33 @@ pub(super) fn read() -> Reading {
 #[must_use = "dropping the guard stops measuring listener coverage"]
 pub struct AgentsRequestSloServing(tokio::task::JoinHandle<()>);
 
-impl Drop for AgentsRequestSloServing {
-    fn drop(&mut self) {
+impl AgentsRequestSloServing {
+    /// Linearize the stop against request admission and minute cuts.
+    pub fn stop(&self) {
         PENDING.lock().stop_serving();
         self.0.abort();
     }
+}
+
+impl Drop for AgentsRequestSloServing {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Keep the listener future alive until shutdown stops minute admission.
+pub async fn stop_before_listener_drop<T>(
+    serving: impl std::future::Future<Output = T>,
+    shutdown: impl std::future::Future<Output = T>,
+    stop: impl FnOnce(),
+) -> T {
+    tokio::pin!(serving);
+    let result = tokio::select! {
+        result = &mut serving => result,
+        result = shutdown => result,
+    };
+    stop();
+    result
 }
 
 /// Start once, when the native listeners enter service.
@@ -478,6 +500,29 @@ mod tests {
         assert_eq!(tick(&mut pending, &mut previous, 6), None);
         assert_eq!(tick(&mut pending, &mut previous, 7), None);
         assert_eq!(pending.minutes, [None; 2]);
+    }
+
+    #[tokio::test]
+    async fn signal_stops_admission_before_dropping_the_listener() {
+        use std::cell::Cell;
+
+        struct Listener<'a>(&'a Cell<bool>);
+
+        impl Drop for Listener<'_> {
+            fn drop(&mut self) {
+                assert!(!self.0.get(), "listener dropped while admitting cuts");
+            }
+        }
+
+        let admitting = Cell::new(true);
+        let listener = Listener(&admitting);
+        let serving = async move {
+            let _listener = listener;
+            std::future::pending::<i32>().await
+        };
+        let result =
+            stop_before_listener_drop(serving, async { 15 }, || admitting.set(false)).await;
+        assert_eq!(result, 15);
     }
 
     #[test]

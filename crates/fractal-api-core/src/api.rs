@@ -1665,7 +1665,7 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     }
 }
 
-pub use agents_request_slo::{AgentsRequestSloServing, start_agents_request_slo};
+pub use agents_request_slo::{AgentsRequestSloServing, start_agents_request_slo, stop_before_listener_drop};
 
 pub use crate::peer::track_remote_reads;
 
