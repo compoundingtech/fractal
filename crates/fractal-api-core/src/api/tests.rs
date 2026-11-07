@@ -16,50 +16,45 @@ use std::path::PathBuf;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
-    let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
-    let pid = child.id();
-    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
-    let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
-    for (ancestor, expected) in [
-        (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
-        (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
-        (None, HarnessAncestry::Unavailable),
-    ] {
-        let result = walk_harness_ancestry(pid, Some(&peer), |candidate| {
-            if candidate == pid {
-                Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)) })
-            } else {
-                ancestor
-            }
-        }, |candidate| {
-            assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
-            Some(HarnessAncestry::Person)
-        });
-        assert_eq!(result, expected);
-    }
-    child.kill().unwrap();
-    child.wait().unwrap();
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
+        for (ancestor, expected) in [
+            (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
+            (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
+            (None, HarnessAncestry::Unavailable),
+        ] {
+            let result = walk_harness_ancestry(pid, Some(&peer), |candidate| {
+                if candidate == pid {
+                    Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)) })
+                } else {
+                    ancestor
+                }
+            }, |candidate| {
+                assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
+                Some(HarnessAncestry::Person)
+            });
+            assert_eq!(result, expected);
+        }
+    });
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> HarnessAncestry {
-    let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
-    let pid = child.id();
-    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
-    let process = local_harness_process(pid).unwrap();
-    let mut inspection = 0;
-    let result = walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
-        let mut current = process;
-        if changed_at == Some(inspection) {
-            current.generation.as_mut().unwrap().1 =
-                current.generation.unwrap().1.wrapping_add(1);
-        }
-        inspection += 1;
-        Some(current)
-    }, |_| Some(HarnessAncestry::Bound("agent/fixture/worker".into())));
-    child.kill().unwrap();
-    child.wait().unwrap();
-    result
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+            let mut current = process;
+            if changed_at == Some(inspection) {
+                current.generation.as_mut().unwrap().1 =
+                    current.generation.unwrap().1.wrapping_add(1);
+            }
+            inspection += 1;
+            Some(current)
+        }, |_| Some(HarnessAncestry::Bound("agent/fixture/worker".into())))
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -171,19 +166,26 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn inspect_ancestry_fixture(command: &mut std::process::Command) -> HarnessAncestry {
+fn with_process_fixture<T>(command: &mut std::process::Command, inspect: impl FnOnce(u32) -> T) -> T {
     use std::io::{BufRead as _, Write as _};
     let mut child = command
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut pid = String::new();
     std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut pid).unwrap();
     let pid: u32 = pid.trim().parse().unwrap();
-    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
-    let ancestry = harness_ancestor(pid, Some(&peer));
+    let result = inspect(pid);
     // The child announces readiness after exec, then stays alive until inspection ends.
     child.stdin.take().unwrap().write_all(b"done\n").unwrap();
     child.wait().unwrap();
-    ancestry
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inspect_ancestry_fixture(command: &mut std::process::Command) -> HarnessAncestry {
+    with_process_fixture(command, |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        harness_ancestor(pid, Some(&peer))
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -995,24 +997,11 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
 fn a_unix_peer_is_bound_to_its_harness_environment() {
     // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
     // with this fixture's identity and bind nothing.
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
+    let bound = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "echo $$; read answer"])
         .env_remove("FRACTAL_AGENT")
-        .env("ST_AGENT", "agent/fixture/worker")
-        .spawn()
-        .unwrap();
-    let mut bound = HarnessAncestry::Unavailable;
-    for _ in 0..50 {
-        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(child.id()).unwrap();
-        bound = harness_ancestor(child.id(), Some(&peer));
-        if bound.agent().is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+        .env("ST_AGENT", "agent/fixture/worker"));
     assert_eq!(bound.agent(), Some("agent/fixture/worker"));
-    child.kill().unwrap();
-    child.wait().unwrap();
 }
 
 #[tokio::test]
