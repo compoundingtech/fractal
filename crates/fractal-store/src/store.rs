@@ -27,6 +27,7 @@ pub mod trace_principal;
 pub mod accountable_tests;
 pub mod custom;
 mod notice_authority;
+mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;

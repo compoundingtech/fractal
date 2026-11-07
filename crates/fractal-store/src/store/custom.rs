@@ -162,6 +162,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     notice_authority::create_invalidation_triggers(connection)
 }
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    capture_work(tx)?;
     if tx
         .query_row(
             "SELECT value FROM meta WHERE key='custom_projections_version'",
@@ -174,12 +175,12 @@ pub fn open(tx: &Transaction<'_>) -> Result<()> {
     {
         rebuild(tx)
     } else {
-        flush(tx)
+        flush_pending(tx)
     }
 }
 pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hcc772813cbfc owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "DELETE FROM custom_registrations; DELETE FROM custom_sources; DELETE FROM custom_dependencies; DELETE FROM local_custom_dirty; INSERT INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%';")?;
-    flush(tx)?;
+    flush_pending(tx)?;
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-ha275af346170 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','2')",
         [],
@@ -187,6 +188,42 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    if !transaction_work::custom_pending(tx) { return Ok(()); }
+    flush_pending(tx)
+}
+
+fn capture_work(connection: &Connection) -> Result<()> {
+    transaction_work::install(connection)?;
+    // Custom queue writes include the notice authority's column-sensitive
+    // desired/run/step triggers. In particular, renewing a lease does not change
+    // declaration liveness and must not wake this finalizer.
+    for table in ["local_custom_dirty", "custom_registrations", "custom_sources",
+        "custom_dependencies", "identity_names", "identity_heads"] {
+        for action in ["INSERT", "UPDATE", "DELETE"] {
+            connection.execute_batch(&format!(
+                /* sqlite-large-value: allow-for-now lv-hfe7618035364 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */
+                "CREATE TEMP TRIGGER IF NOT EXISTS custom_work_{table}_{action}
+                 AFTER {action} ON main.{table} BEGIN SELECT custom_work_pending(); END;"
+            ))?;
+        }
+    }
+    for action in ["INSERT", "UPDATE", "DELETE"] {
+        let rows = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
+        let relevant = rows.iter().map(|row| format!(
+            "({row}.kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published')
+              OR {row}.kind_hint IS NULL)"
+        )).collect::<Vec<_>>().join(" OR ");
+        connection.execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-hd79f95d2fe80 owner=fractal_store::store::custom TODO=chunk-or-reference-exact-wire-values */
+            "CREATE TEMP TRIGGER IF NOT EXISTS custom_work_lifecycle_{action}
+             AFTER {action} ON main.replica_records WHEN {relevant}
+             BEGIN SELECT custom_work_pending(); END;"
+        ))?;
+    }
+    Ok(())
+}
+
+fn flush_pending(tx: &Transaction<'_>) -> Result<()> {
     notice_authority::refresh_binding(tx)?;
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| {
         r.get::<_, bool>(0)

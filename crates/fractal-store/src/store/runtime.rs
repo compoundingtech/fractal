@@ -562,7 +562,7 @@ impl Runtime for FractalRuntime {
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
         // Desired/liveness projections can change after the final claim projector.
-        // Never commit ready notice rows against an already-revoked current binding.
+        // The connection-local hint keeps unrelated commits SQL-free.
         custom::flush(transaction)?;
         completion_state::flush(transaction)?;
         run_eta::flush(transaction)?;
