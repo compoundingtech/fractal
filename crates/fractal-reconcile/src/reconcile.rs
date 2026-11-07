@@ -24668,12 +24668,16 @@ mission "legacy-child" state="ready" {
         );
         let nested = store.mission_spec("legacy-child", None).unwrap().unwrap();
         assert_eq!(
-            nested.steps["empty-agent-name"].assigned_to.as_deref(),
-            Some("agent/node.")
+            nested.steps["empty-agent-name"].work_selector,
+            Some(WorkSelector::Assigned {
+                agent: "agent/node.".into(),
+            })
         );
         assert_eq!(
-            nested.steps["whitespace"].assigned_to.as_deref(),
-            Some("example/worker name")
+            nested.steps["whitespace"].work_selector,
+            Some(WorkSelector::Assigned {
+                agent: "example/worker name".into(),
+            })
         );
     }
 
