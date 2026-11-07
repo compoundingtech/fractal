@@ -103,17 +103,17 @@ fn masked_child_cannot_inherit_harness_authority() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_harness_descendant_without_agent_environment_is_bound() {
-    use std::io::BufRead as _;
+    use std::io::{BufRead as _, Write as _};
     let mut harness = std::process::Command::new("sh")
-        .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sleep 10 & echo $!; wait"])
+        .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sh -c 'echo $$; read answer'; :"])
         .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent")
-        .stdout(std::process::Stdio::piped()).spawn().unwrap();
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut pid = String::new();
     std::io::BufReader::new(harness.stdout.take().unwrap()).read_line(&mut pid).unwrap();
     let pid: u32 = pid.trim().parse().unwrap();
     let ancestry = harness_ancestor(pid);
-    // The fixture owns this live child; terminate it before reaping its harness.
-    unsafe { libc::kill(i32::try_from(pid).unwrap(), libc::SIGTERM); }
+    // The child announces readiness after exec, then stays alive until inspection ends.
+    harness.stdin.take().unwrap().write_all(b"done\n").unwrap();
     harness.wait().unwrap();
     assert_eq!(ancestry, HarnessAncestry::Bound("agent/fixture/parent".into()));
 }
