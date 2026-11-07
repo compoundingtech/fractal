@@ -189,3 +189,59 @@ fn create_delete_preserves_tombstone_and_missing_ancestor_rules_in_both_orders()
     let edits = staged(intent, V2Plan { folders: vec![], memberships: vec![Member::Place { member: "member-a".into(), bucket: Some("folder-c".into()), key: "a0".into() }] });
     assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
 }
+
+#[test]
+fn cut_cycle_withholds_folder_move_and_delete_but_not_membership_overlay() {
+    let (mut arrangement, members) = inputs();
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    body.folders.get_mut("folder-a").unwrap().position.value.parent = Some("folder-b".into());
+    body.folders.get_mut("folder-b").unwrap().position.value.parent = Some("folder-a".into());
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-a".into(), Some("folder-b".into()));
+    let observed = build_v2(&arrangement, &members).unwrap();
+    assert_eq!(observed.nodes["folder:folder-b"].parent, parent("folder-a"));
+    assert_eq!(observed.nodes["folder:folder-b"].shown_under, Parent::Root {});
+    let intent = MoveIntent { node: folder("folder-a"), parent: Parent::Root {}, before: None };
+    let mut edits = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
+    assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
+    let deletion = staged(intent, V2Plan { folders: vec![Folder::FolderDelete { id: "folder-b".into() }], memberships: vec![] });
+    assert!(matches!(deletion.project(&observed).unwrap(), Cow::Borrowed(_)));
+    let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-b"), before: None };
+    let membership = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
+    let visible = membership.project(&observed).unwrap();
+    assert!(matches!(visible, Cow::Owned(_)));
+    assert_eq!(visible.nodes["subject:member-a"].shown_under, parent("folder-b"));
+    // The next authoritative resolution, not a guessed resolver, reveals the moved B.
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    body.folders.get_mut("folder-a").unwrap().position.value.parent = None;
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-a".into(), None);
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-b".into(), Some("folder-a".into()));
+    let confirmed = build_v2(&arrangement, &members).unwrap();
+    assert_eq!(confirmed.nodes["folder:folder-a"].children, vec![folder("folder-b")]);
+    edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Observed(identity(1)));
+    assert!(matches!(edits.project(&confirmed).unwrap(), Cow::Borrowed(_)));
+    assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
+}
+
+#[test]
+fn creating_an_orphans_missing_parent_waits_for_authoritative_resolution() {
+    let (mut arrangement, members) = inputs();
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    body.folders.get_mut("folder-a").unwrap().position.value.parent = Some("folder-x".into());
+    let observed = build_v2(&arrangement, &members).unwrap();
+    assert_eq!(observed.nodes["folder:folder-a"].parent, parent("folder-x"));
+    assert_eq!(observed.nodes["folder:folder-a"].shown_under, Parent::Root {});
+    let intent = MoveIntent { node: folder("folder-a"), parent: parent("folder-x"), before: None };
+    let mut edits = staged(intent, V2Plan { folders: vec![Folder::FolderCreate { id: "folder-x".into(), name: "X".into(), parent: Some("folder-b".into()), key: "a0".into() }], memberships: vec![] });
+    assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    let mut created = body.folders["folder-b"].clone();
+    created.position.value = arrangements::Position { parent: Some("folder-b".into()), key: "a0".into() };
+    body.folders.insert("folder-x".into(), created);
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-x".into(), Some("folder-b".into()));
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-a".into(), Some("folder-x".into()));
+    let confirmed = build_v2(&arrangement, &members).unwrap();
+    assert_eq!(confirmed.nodes["folder:folder-b"].children, vec![folder("folder-x")]);
+    assert_eq!(confirmed.nodes["folder:folder-x"].children, vec![folder("folder-a")]);
+    edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Observed(identity(1)));
+    assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
+}

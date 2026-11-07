@@ -13,6 +13,11 @@ impl Edits {
             return Ok(Cow::Borrowed(observed));
         }
         let Some(request) = self.request() else { return Ok(Cow::Borrowed(observed)); };
+        // A folder batch can change other server-resolved edges (cuts/lifts/orphans).
+        // SidebarTree lacks the resolver's retained graph; do not preview stale edges.
+        if matches!(&request.operations, Operations::Folders(_)) && observed.nodes.values().any(|row| matches!(row.node, NodeRef::Folder { .. }) && row.parent != row.shown_under) {
+            return Ok(Cow::Borrowed(observed));
+        }
         let mut tree = observed.clone();
         let mut deleted = std::collections::BTreeSet::new();
         match &request.operations {
