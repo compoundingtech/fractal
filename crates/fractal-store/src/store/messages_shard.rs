@@ -688,6 +688,7 @@ pub fn classify_stream_item(claim: &ClaimRecord) -> Result<ReplicatedClaimAdmiss
 }
 
 pub(crate) fn validate_input(input: &ClaimInput) -> Result<(), FractalError> {
+    super::refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
     let fields = serde_json::to_value(&input.fields).unwrap_or(Value::Null);
     refuse_ineligible(&input.kind, input.actor.as_deref(), &fields)?;
     fractal_schema::registry()

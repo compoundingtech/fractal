@@ -1621,7 +1621,7 @@ pub async fn client_history_detail(
         .next()
         .filter(|claim| claim.store_index == index)
         .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))?;
-    if fractal_schema::threads::is_reserved_record(&claim.subject, &claim.kind) {
+    if records::private_thread_claim(&claim) {
         return Err(ApiError::not_found(format!("history `{id}` does not exist")));
     }
     if !records::generic_claim_visible(&claim) {
