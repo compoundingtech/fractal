@@ -3,8 +3,8 @@
 This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
-Storage version: `20`
-Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d58`
+Storage version: `21`
+Storage digest: `609edac1efb627a350b844e3f2a999475c72ca5024224ad61394d4eaf256bb06`
 
 ## Subject families
 
@@ -153,7 +153,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `acting_for:subject-reference(agent)`, `delegation:object`, `status!:string` |  |
 | `message.delivered` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acting_for:subject-reference(agent)`, `status!:string` |  |
-| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `title:string`, `to:subject-reference` | `message` |
+| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `thread_id:subject-reference(thread)`, `thread_origin_ask:subject-reference(step-run)`, `thread_origin_episode:string`, `thread_quote_id:subject-reference(message)`, `title:string`, `to:subject-reference` | `message` |
 | `message.staged` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `mission-run.created` | `mission-run` | `system-only` | `once` | `durable` | `ad_hoc_title:string`, `after:subject-reference`, `current_generation:subject-reference`, `deadline_at_unix_ms:integer`, `default_selector:object`, `generation:subject-reference`, `initial_revision:string`, `inputs:object`, `mission:subject-reference`, `mission_spec:object`, `mode:string`, `parent_step_run:subject-reference`, `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `requester:subject-reference`, `revision:string`, `root_mission_run:subject-reference`, `root_revision:string`, `stalled_after_ms:integer`, `status:string`, `timeout_ms:integer`, `workspace:string` | `mission-run` |
 | `mission-run.report-to` | `mission-run` | `system-only` | `state-transition` | `durable` | `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `stalled_after_ms:integer` |  |
@@ -236,6 +236,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `terminal.input.requested` | `agent`, `pty` | `authorized-requester` | `append` | `durable` | `byte_count:integer`, `incarnation_id:string`, `intent:string`, `mode:string`, `runtime_id:string`, `sequence:integer`, `sha256:string` |  |
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |
+| `thread.ask-linked` | `thread` | `system-only` | `once` | `durable` | `ask!:subject-reference(step-run)`, `ask_episode!:string`, `decision_predecessor:subject-reference(step-run)`, `decision_predecessor_episode:string`, `decision_reason:string`, `thread_id!:subject-reference(thread)` |  |
 | `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `first_message:subject-reference(message)`, `origin_ask:subject-reference(step-run)`, `origin_ask_episode:string`, `person!:subject-reference(person)`, `title!:string` | `thread` |
 | `thread.state-set` | `thread` | `system-only` | `append` | `durable` | `state!:string` |  |
 | `thread.title-set` | `thread` | `system-only` | `append` | `durable` | `previous_title!:string`, `title!:string`, `title_revision!:string` |  |

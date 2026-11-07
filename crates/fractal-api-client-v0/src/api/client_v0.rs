@@ -9378,6 +9378,12 @@ async fn action_inner(
     if matches!(request.action_type.as_str(), "thread.rename" | "thread.close" | "thread.reopen") {
         return threads::lifecycle_action(state, session, request).await;
     }
+    if matches!(request.action_type.as_str(), "thread.start" | "thread.reply") {
+        return threads::message_action(state, session, request).await;
+    }
+    if request.action_type == "thread.link-ask" {
+        return threads::link_ask_action(state, session, request).await;
+    }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
@@ -24063,6 +24069,7 @@ mission "example/zero-run" state="ready" {
             authority_actor: "person/alex".into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,

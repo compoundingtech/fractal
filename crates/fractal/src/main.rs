@@ -7387,7 +7387,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7458,6 +7458,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::sekrets::client::socket_path(),
     );
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
+    if config.thread_writes {
+        store.configure_thread_write_rollout(config.peers.iter().map(|peer| peer.name.clone()));
+    }
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),
