@@ -642,7 +642,13 @@ export const Streaming: Story = { tags: ['critical'], args: { state: 'streaming'
   await expect(canvas.getByTestId('transcript-header')).not.toHaveTextContent('Running')
   await expect(canvasElement.querySelectorAll('[data-streaming-tail="true"]')).toHaveLength(1)
   await expect(canvasElement.querySelector('[aria-label="Copy answer"]')).toBeNull()
-  await expect(canvas.getByRole('button', { name: /Working/ })).toBeDisabled()
+  // A running work log still folds from its header, and stays folded as tools arrive.
+  const working = canvas.getByRole('button', { name: /Working/ })
+  await expect(working).toHaveAttribute('aria-expanded', 'true')
+  await userEvent.click(working)
+  await expect(working).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(working)
+  await expect(working).toHaveAttribute('aria-expanded', 'true')
 } }
 export const StreamingLight: Story = { ...Streaming, args: { state: 'streaming', scheme: 'light' } }
 export const Failed: Story = { tags: ['critical'], args: { state: 'failed' }, play: async ({ canvasElement }) => {
