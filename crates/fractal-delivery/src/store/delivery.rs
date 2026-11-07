@@ -295,6 +295,31 @@ pub trait DeliveryStore {
     fn claims_since_waking_kind(&self, after_index: u64) -> Result<(bool, Option<String>)>;
 }
 
+/// Whether any claim is newer than `?1`, and the most common kind among them that wakes the
+/// reconciler. NOT INDEXED keeps the grouping on the claims past the cursor: grouped by kind, the
+/// planner would walk `claims_kind_index` over the whole store.
+pub(crate) const WAKING_KIND: &str = "SELECT EXISTS(SELECT 1 FROM claims WHERE store_index > ?1), (
+         SELECT kind FROM claims NOT INDEXED
+         WHERE store_index > ?1
+           AND kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
+                            'sekret.called', 'sekret.exited', 'sekret.refused',
+                            'sekret.changed')
+           AND NOT (
+             kind IN ('message.sent', 'message.staged', 'message.delivered',
+                      'message.read', 'message.closed')
+             AND EXISTS (
+               SELECT 1 FROM claims sent
+               WHERE sent.subject=claims.subject AND sent.kind='message.sent'
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM claims sent
+               WHERE sent.subject=claims.subject AND sent.kind='message.sent'
+                 AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
+             )
+           )
+         GROUP BY kind ORDER BY COUNT(*) DESC, kind LIMIT 1
+     )";
+
 impl DeliveryStore for Store {
 
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
@@ -1158,27 +1183,7 @@ impl DeliveryStore for Store {
     fn claims_since_waking_kind(&self, after_index: u64) -> Result<(bool, Option<String>)> {
         let connection = self.readers.get();
         Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE store_index > ?1), (
-                 SELECT kind FROM claims
-                 WHERE store_index > ?1
-                   AND kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
-                                    'sekret.called', 'sekret.exited', 'sekret.refused',
-                                    'sekret.changed')
-                   AND NOT (
-                     kind IN ('message.sent', 'message.staged', 'message.delivered',
-                              'message.read', 'message.closed')
-                     AND EXISTS (
-                       SELECT 1 FROM claims sent
-                       WHERE sent.subject=claims.subject AND sent.kind='message.sent'
-                     )
-                     AND NOT EXISTS (
-                       SELECT 1 FROM claims sent
-                       WHERE sent.subject=claims.subject AND sent.kind='message.sent'
-                         AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
-                     )
-                   )
-                 GROUP BY kind ORDER BY COUNT(*) DESC, kind LIMIT 1
-             )",
+            WAKING_KIND,
             [after_index],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?)

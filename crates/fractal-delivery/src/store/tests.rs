@@ -294,6 +294,26 @@ fn only_work_wake_messages_count_as_reconciler_changes() {
 }
 
 #[test]
+fn the_waking_kind_reads_only_the_claims_past_the_cursor() {
+    // A replication receive asks this on every change, so its work must not grow with the store.
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", crate::store::delivery::WAKING_KIND))
+        .unwrap()
+        .query_map([0], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let claims = plan.iter().filter(|step| step.contains(" claims ")).collect::<Vec<_>>();
+    assert_eq!(claims.len(), 2, "{plan:?}");
+    assert!(
+        claims.iter().all(|step| step.as_str() == "SEARCH claims USING INTEGER PRIMARY KEY (rowid>?)"),
+        "{plan:?}"
+    );
+}
+
+#[test]
 fn the_quiet_answer_is_unchanged_from_every_cursor_of_a_mixed_run() {
     let store = Store::open_memory("node").unwrap();
     let append = |subject: &str, kind: &str, fields: Value| {
