@@ -216,3 +216,26 @@ fn projection_cache_keys_every_revision_but_not_unrelated_snapshots() {
     unavailable.deleted = false; unavailable.resolved = None;
     assert_eq!(cache.project(&key, &unavailable, &members, &[]), Err(ProjectionError::NotReady));
 }
+#[test]
+fn cache_rechecks_live_folder_resolution_at_the_same_revision() {
+    use fractal_sidebar::cache::ProjectionCache;
+    let (a, members) = fixture(3, 2); let key = revisions(&a);
+    let ids: Vec<_> = a.resolved.as_ref().unwrap().parents.keys().cloned().collect();
+    let mut cache = ProjectionCache::default();
+    for missing in &ids {
+        cache.project(&key, &a, &members, &[]).unwrap();
+        let mut partial = a.clone(); let parents = &mut partial.resolved.as_mut().unwrap().parents;
+        parents.remove(missing);
+        *parents.values_mut().next().unwrap() = Some("unknown".into());
+        assert_eq!(cache.project(&key, &partial, &members, &[]), Err(ProjectionError::NotReady));
+        assert_eq!(build_v2(&partial, &members), Err(ProjectionError::NotReady), "full projection owns precedence");
+        let mut poison = members.clone(); poison.push(members[0].clone());
+        assert_eq!(cache.project(&key, &a, &poison, &[]), Err(ProjectionError::InvalidResolution), "incomplete resolution cleared the entry");
+    }
+    cache.project(&key, &a, &members, &[]).unwrap();
+    let mut changed = a.clone(); changed.resolved.as_mut().unwrap().parents.insert(ids[1].clone(), None);
+    assert_eq!(cache.project(&key, &changed, &members, &[]), Ok(&build_v2(&changed, &members).unwrap()), "changed valid parent rebuilds");
+    changed.resolved.as_mut().unwrap().parents.insert(ids[0].clone(), Some("unknown".into()));
+    assert_eq!(cache.project(&key, &changed, &members, &[]), Err(ProjectionError::InvalidResolution));
+    assert_eq!(cache.project(&key, &a, &members, &[]), Ok(&build_v2(&a, &members).unwrap()), "same-revision recovery rebuilds");
+}
