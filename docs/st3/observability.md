@@ -807,7 +807,10 @@ offsets match the existing card overlay; working turns have no age-only expiry.
 With no commits or deadlines, the refresher performs zero folds per minute.
 Retention expiry removes cached zero buckets at their ten-minute deadline,
 independently of refresh admission or success, without a store read or a new
-last-success timestamp. Failed folds retry after the same minimum rest.
+last-success timestamp. Failed folds wait for a store commit or an unconsumed
+future classification deadline from the last complete fold, subject to the same
+minimum rest; failure itself never schedules a retry timer. Expired classification
+deadlines are consumed even on failure, so a defective fold cannot busy-loop.
 
 
 Consumers alert on `st_agents_refresh_last_success`: compute snapshot age with

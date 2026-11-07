@@ -257,6 +257,13 @@ pub fn start(store: &Arc<Store>, repositories: Vec<String>) {
     let _worker = start_with_meter(store, repositories, || opentelemetry::global::meter("st3"));
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct RefreshAttempts {
+    started: std::sync::atomic::AtomicUsize,
+    wake: tokio::sync::Notify,
+}
+
 fn start_with_meter(
     store: &Arc<Store>,
     repositories: Vec<String>,
@@ -269,17 +276,22 @@ fn start_with_meter(
     // The same writer notification used by published-list refreshers: never read
     // from the commit callback, and subscribe before the initial snapshot.
     let observer = store.observe_commits(move |_| commits.notify_one());
+    #[cfg(test)]
+    let attempts = store.extension::<RefreshAttempts>();
     let store = Arc::downgrade(store);
     let repositories: Arc<[String]> = repositories.into();
     Some(tokio::spawn(async move {
         let _observer = observer;
         let summary = Arc::new(RwLock::new(Summary::default()));
         let mut registered = false;
+        // Only a complete fold can discover a new classification deadline.
+        let mut next = None;
         loop {
             let Some(store) = store.upgrade() else { return; };
             let started = Instant::now();
             let registry = Arc::clone(&repositories);
-            let next;
+            #[cfg(test)]
+            attempts.started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match tokio::task::spawn_blocking(move || {
                 crate::task_cpu::profiled_blocking("population_metrics/refresh", || fold_with_deadline(&store, &registry))
             }).await {
@@ -297,13 +309,17 @@ fn start_with_meter(
                 }
                 Ok(Err(error)) => {
                     eprintln!("st3: WARN population metrics refresh failed: {error:#}");
-                    next = Some(tokio::time::Instant::now() + REFRESH_PAUSE);
+                    // Keep an unconsumed deadline from the last complete cut, but
+                    // never retry an unchanged defective fold on a polling timer.
+                    next = next.filter(|at| *at > tokio::time::Instant::now());
                 }
                 Err(error) => {
                     eprintln!("st3: WARN population metrics refresh task failed: {error}");
-                    next = Some(tokio::time::Instant::now() + REFRESH_PAUSE);
+                    next = next.filter(|at| *at > tokio::time::Instant::now());
                 }
             }
+            #[cfg(test)]
+            attempts.wake.notify_one();
             wait_for_refresh(&wake, &summary, next, REFRESH_PAUSE.max(started.elapsed())).await;
         }
     }))
@@ -431,6 +447,44 @@ mod tests {
         assert!(!waiting.is_finished(), "no commit/deadline means zero refreshes in a minute");
         wake.notify_one();
         waiting.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn population_metrics_failed_fold_waits_for_store_commit_without_retry_timer() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+        use std::sync::atomic::Ordering;
+
+        let provider = SdkMeterProvider::default();
+        let store = Arc::new(Store::open_memory("example").unwrap());
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(true).unwrap();
+        // Break the real membership query without replacing the fold or worker.
+        store.connection.write().execute_batch("ALTER TABLE desired RENAME TO unavailable_desired").unwrap();
+        assert!(fold_with_deadline(&store, &[]).is_err());
+        let attempts = store.extension::<RefreshAttempts>();
+        let worker = start_with_meter(&store, Vec::new(), || provider.meter("st3")).unwrap();
+        attempts.wake.notified().await;
+        assert_eq!(attempts.started.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.started.load(Ordering::SeqCst), 1,
+            "a failed fold with no commit or known deadline must remain asleep");
+
+        store.connection.write().execute_batch("ALTER TABLE unavailable_desired RENAME TO desired").unwrap();
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "agent/example.worker".into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running","incarnation_id":"one"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        attempts.wake.notified().await;
+        assert_eq!(attempts.started.load(Ordering::SeqCst), 2, "one commit triggers one new fold");
+        tokio::time::advance(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.started.load(Ordering::SeqCst), 2);
+        worker.abort();
+        let _ = worker.await;
+        provider.shutdown().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
