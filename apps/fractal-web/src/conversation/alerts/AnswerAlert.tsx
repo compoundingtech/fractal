@@ -7,12 +7,14 @@ import { cleanMessageText } from '../../../../../clients/typescript/fractal-view
 import { askDeadline, isRequest, report, spaced } from '../../../../../clients/typescript/fractal-views/requestView.ts'
 import { ago } from '../../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { DecisionCard, DecisionRef, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { DecisionMore, type DecisionSubject } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionMore.tsx'
+import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
-import { contextOf, firstLine, isPlainHeading, sameWords, useArmed } from './decisionText.ts'
+import { contextOf, firstLine, isPlainHeading, repeatsHeading, sameWords, useArmed } from './decisionText.ts'
 
 // Asks, review gates and launch approvals, in the one decision card: choosing an answer sends nothing, Send is its own
 // deliberate act, so a stray click answers nothing.
@@ -70,28 +72,26 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
   )
 }
 
-/** Subjects, reasons and refs, and what else the heading did not say. */
-const More = ({ alert, title, why }: { readonly alert: Native.Attention; readonly title: string | undefined; readonly why: string | undefined }): React.ReactNode => {
-  const request = alert.request
-  return (
-    <>
-      {title === undefined ? null : <div>{title}</div>}
-      {request?.reasons?.length ? <ul {...stylex.props(styles.list)}>{request.reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul> : null}
-      {request?.subjects?.length ? (
-        <ul {...stylex.props(styles.list)}>
-          {request.subjects.map((subject, index) => (
-            <li key={index}>
-              {webLink(subject.url) !== undefined ? <a href={webLink(subject.url)} target="_blank" rel="noopener noreferrer">{subject.label}</a> : subject.label}
-              {subject.ref && webLink(subject.url) === undefined ? <> <DecisionRef value={subject.ref} /></> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {why === undefined ? null : <div>Why you: {why}</div>}
-      {alert.because ? <div>because {alert.because}</div> : null}
-    </>
-  )
-}
+const SUBJECT_ICONS: Readonly<Record<string, IconName>> = { pull_request: 'pull-request', document: 'pencil', link: 'globe', mission: 'checklist', agent: 'person', run: 'gauge', message: 'message' }
+const SUBJECT_KINDS: Readonly<Record<string, string>> = { pull_request: 'Pull request', document: 'Document', link: 'Link', mission: 'Mission', agent: 'Agent', run: 'Run', message: 'Message' }
+
+/** A request's subjects as rows: a checked web link opens out, a ref the host can open opens in, and any other ref is shown to copy. */
+const subjectRows = (alert: Native.Attention, onOpenRef: ((ref: string) => void) | undefined, opensRef: (ref: string) => boolean): readonly DecisionSubject[] =>
+  (alert.request?.subjects ?? []).map((subject, index) => {
+    const href = webLink(subject.url)
+    const ref = subject.ref
+    const inner = href === undefined && ref && onOpenRef !== undefined && opensRef(ref)
+    const kind = SUBJECT_KINDS[subject.kind]
+    return {
+      key: `${index}`,
+      label: subject.label,
+      icon: SUBJECT_ICONS[subject.kind] ?? 'info',
+      ...(kind === undefined ? {} : { kind }),
+      ...(href === undefined ? {} : { href }),
+      ...(inner ? { onOpen: () => onOpenRef!(ref!) } : {}),
+      ...(href === undefined && !inner && ref ? { rawRef: ref } : {}),
+    }
+  })
 
 /** A heading's text with its `inline code` kept; the rest of a question's Markdown shows in its body when it has any. */
 const InlineCode = ({ text }: { readonly text: string }) => <>{text.split(/`([^`]+)`/).map((part, index) => index % 2 === 1 ? <code key={index} {...stylex.props(styles.command)}>{part}</code> : part.replace(/\*\*|__/g, ''))}</>
@@ -125,6 +125,8 @@ export const AnswerAlert = ({
   maxBlockSize,
   onBegin,
   focusRef,
+  onOpenRef,
+  opensRef = () => true,
 }: {
   readonly alert: Native.Attention
   readonly onAct?: Act
@@ -136,6 +138,10 @@ export const AnswerAlert = ({
   /** The answer left the card: called as it is sent, before any reply. */
   readonly onBegin?: (alert: Native.Attention) => void
   readonly focusRef?: React.Ref<HTMLElement>
+  /** Opens a subject's ref inside the app. */
+  readonly onOpenRef?: (ref: string) => void
+  /** Which refs that can open; any other stays a chip to copy. */
+  readonly opensRef?: (ref: string) => boolean
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const choices = alertChoices(alert)
@@ -163,11 +169,18 @@ export const AnswerAlert = ({
   const detail = cleanMessageText(alert.detail ?? '')
   const contextSource = request?.summary ?? (request === undefined && alert.attention_kind !== 'launch-approval' && !(isRequest(alert.attention_kind) && report(detail) !== null) ? detail : '')
   const { line, overflows } = contextOf(contextSource)
-  const title = plain && !sameWords(alert.title, question) ? alert.title : undefined
+  const title = plain && !repeatsHeading(alert.title, question) ? alert.title : undefined
   const whyText = request?.why_person.replace(/^why (you|now):\s*/i, '').replace(/^why (you|now):\s*/i, '')
-  const why = whyText === undefined || whyText === '' || sameWords(whyText, contextSource, true) || sameWords(whyText, question ?? '', true) ? undefined : request?.why_person
-  const more = title !== undefined || why !== undefined || alert.because || request?.reasons?.length || request?.subjects?.length
-    ? <More alert={alert} title={title} why={why} /> : undefined
+  const why = whyText === undefined || whyText === '' || sameWords(whyText, contextSource, true) || sameWords(whyText, question ?? '', true) ? undefined : whyText
+  const evidence = [...(alert.because ? [`Because ${alert.because}`] : []), ...(request?.reasons ?? [])]
+  const related = subjectRows(alert, onOpenRef, opensRef)
+  const full = density === 'full'
+  const contextFull = overflows ? <div {...stylex.props(styles.prose)}><Markdown text={spaced(contextSource)} /></div> : undefined
+  // A differing title is context the heading does not carry. Full density shows the long context beside More's parts already.
+  const shownContext = title === undefined && (full || contextFull === undefined) ? undefined : <>{title === undefined ? null : <p {...stylex.props(styles.titleLine)}>{title}</p>}{full ? null : contextFull}</>
+  const more = why !== undefined || evidence.length > 0 || related.length > 0 || shownContext !== undefined
+    ? <DecisionMore clamp={!full} evidence={evidence} related={related} {...(why === undefined ? {} : { why })} {...(shownContext === undefined ? {} : { context: shownContext })} />
+    : undefined
   const body = alert.attention_kind === 'launch-approval' ? <LaunchPreview alert={alert} />
     : question !== undefined && !plain ? <Question text={question} />
       : request === undefined && isRequest(alert.attention_kind) && report(detail) !== null ? <Question text={detail} /> : undefined
@@ -188,7 +201,7 @@ export const AnswerAlert = ({
     heading={plain ? <InlineCode text={question} /> : headingText}
     headingText={plain ? firstLine(question) : headingText}
     {...(line === '' ? {} : { context: line })}
-    {...(overflows ? { contextFull: <div {...stylex.props(styles.prose)}><Markdown text={spaced(contextSource)} /></div> } : {})}
+    {...(contextFull === undefined ? {} : { contextFull })}
     {...(more === undefined ? {} : { more })}
     {...(body === undefined ? {} : { body })}
     options={options.map((choice) => ({
@@ -228,5 +241,6 @@ const styles = stylex.create({
   soft: { color: c.fgSoft },
   value: { margin: 0 },
   list: { margin: 0, paddingInlineStart: s.xxl },
+  titleLine: { margin: 0 },
   command: { fontFamily: t.fontMono, color: c.fg },
 })

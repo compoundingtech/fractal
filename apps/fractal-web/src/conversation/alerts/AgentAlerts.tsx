@@ -20,6 +20,8 @@ const DOCK_SHARE_NARROW = 0.65
 const FOLD_BELOW = 480
 const DOCK_MIN = 220
 
+const isDocumentRef = (ref: string): boolean => ref.startsWith('doc/')
+
 /** The height of the host this card docks in. */
 const useRoom = (): readonly [React.RefCallback<HTMLElement>, number | undefined] => {
   const [room, setRoom] = React.useState<number>()
@@ -41,12 +43,13 @@ const useRoom = (): readonly [React.RefCallback<HTMLElement>, number | undefined
  * The alerts of an agent's conversation, above its composer: one focused card, with a pager when there are several.
  * Answering advances to the next at once; a refused answer comes back without moving the person off what they are on.
  */
-export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct }: {
+export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument }: {
   readonly alerts: readonly Native.Attention[]
   /** Keeps the record of an answer in view after the feed has dropped its alert. */
   readonly agentRef?: string
   readonly onAnswer?: Answer
   readonly onAct?: Act
+  readonly onOpenDocument?: (ref: string) => void
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const narrow = React.useContext(NarrowLayoutContext)
@@ -97,17 +100,17 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct }: {
         ))}
         {current === undefined ? null : current.attention_kind === 'harness-prompt'
           ? <PromptAlert key={current.id} alert={current} {...(onAnswer === undefined ? {} : { onAnswer })} {...shared} />
-          : <AnswerAlert key={current.id} alert={current} {...(onAct === undefined ? {} : { onAct })} {...shared} />}
+          : <AnswerAlert key={current.id} alert={current} {...(onAct === undefined ? {} : { onAct })} {...(onOpenDocument === undefined ? {} : { onOpenRef: onOpenDocument, opensRef: isDocumentRef })} {...shared} />}
       </div>
     </div>
   )
 }
 
 /** The agent's alerts from the active data source, answered through its ports. */
-export const LiveAgentAlerts = ({ agentRef, ux }: { readonly agentRef: string; readonly ux?: UxTelemetry }): React.ReactNode => {
+export const LiveAgentAlerts = ({ agentRef, ux, onOpenDocument }: { readonly agentRef: string; readonly ux?: UxTelemetry; readonly onOpenDocument?: (ref: string) => void }): React.ReactNode => {
   const { feed, onAct, onAnswer } = useAlertAnswers(ux)
   const alerts = React.useMemo(() => (feed._tag === 'Observed' ? conversationAlerts(feed.value, agentRef) : []), [feed, agentRef])
-  return <AgentAlerts alerts={alerts} agentRef={agentRef} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} />
+  return <AgentAlerts alerts={alerts} agentRef={agentRef} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />
 }
 
 const styles = stylex.create({

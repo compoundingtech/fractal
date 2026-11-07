@@ -48,8 +48,10 @@ export type DecisionCardProps = {
   readonly context?: string
   /** The context in full. `docked` holds it behind More; `full` shows it. */
   readonly contextFull?: React.ReactNode
-  /** Subjects, reasons and refs. `docked` holds them behind More; `full` shows them. */
+  /** What else there is to read, as `DecisionMore`. `docked` holds it behind More; `full` shows it. */
   readonly more?: React.ReactNode
+  /** More starts open. */
+  readonly moreOpen?: boolean
   /** Content the decision cannot be read without (a launch's preview, the call a prompt waits on): always shown. */
   readonly body?: React.ReactNode
   /** The options as one group; empty for an ask answered only in words. */
@@ -162,7 +164,7 @@ function Row({ card, touch }: { readonly card: DecisionCardProps; readonly touch
 
 export function DecisionCard(card: DecisionCardProps): React.ReactNode {
   const touch = React.useContext(NarrowLayoutContext)
-  const [open, setOpen] = React.useState(false)
+  const [open, setOpen] = React.useState(card.moreOpen === true)
   const panelId = React.useId()
   const full = card.density === 'full'
   const disabled = card.busy === true || card.unavailable !== undefined
@@ -220,7 +222,7 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
         <div role="heading" aria-level={2} {...stylex.props(styles.heading, full && styles.headingFull)}>{card.heading}</div>
         {full && card.contextFull !== undefined
           ? <div {...stylex.props(styles.contextFull)}>{card.contextFull}</div>
-          : card.context === undefined ? null : <p {...stylex.props(styles.context)}>{card.context}</p>}
+          : card.context === undefined || (open && !full && card.contextFull !== undefined) ? null : <p {...stylex.props(styles.context)}>{card.context}</p>}
         {full
           ? card.more === undefined ? null : <div {...stylex.props(styles.more)}>{card.more}</div>
           : !hasMore ? null : <>
@@ -228,7 +230,7 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
               <span {...stylex.props(open && styles.turned)}><Icon name="chevron-right" size={12} /></span>
               More
             </Aria.Button>
-            {open ? <div id={panelId} {...stylex.props(styles.more)}>{card.contextFull}{card.more}</div> : null}
+            {open ? <div id={panelId} {...stylex.props(styles.more)}>{card.more ?? card.contextFull}</div> : null}
           </>}
         {card.body === undefined ? null : <div {...stylex.props(styles.body)}>{card.body}</div>}
         <Options card={card} disabled={disabled} touch={touch} />
