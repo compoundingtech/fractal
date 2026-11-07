@@ -13,13 +13,13 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 
 import type { Feed } from './source.ts'
-import { observed, unavailable, waiting } from './source.ts'
+import { clientReadAuthorization, observed, unavailable, waiting } from './source.ts'
 import { redactPublicationDefinition, type MissionDeclarationValue } from '../declarations/model.ts'
 
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
   readonly ref: string
-  readonly reason: 'ungranted' | 'unsupported' | 'failed'
+  readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
   readonly detail: string
 }> {}
 
@@ -348,7 +348,7 @@ export const gatewaySubjectReads = ({
           catch: (cause) =>
             new SubjectReadFailure({
               ref,
-              reason: cause instanceof ClientError && cause.status === 403 ? 'ungranted' : cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed',
+              reason: clientReadAuthorization(cause) ?? (cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed'),
               detail: cause instanceof Error ? cause.message : String(cause),
             }),
         }),

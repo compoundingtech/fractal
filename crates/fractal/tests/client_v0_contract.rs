@@ -2562,6 +2562,18 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let (status, capabilities) =
         client_json_auth(fabric.clone(), "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let (status, denied) = client_json_auth(
+        fabric.clone(), "/v1/client/agent-declarations/agent/example", credential,
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["code"], "forbidden");
+    assert!(denied["details"].get("reason").is_none(), "{denied}");
+    let (status, unknown) = client_json_auth(
+        fabric.clone(), "/v1/client/capabilities", "unknown-paired-credential",
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{unknown}");
+    assert_eq!(unknown["code"], "forbidden");
+    assert_eq!(unknown["details"]["reason"], "credential-rejected");
     let capability_state = |id: &str| {
         capabilities["value"]["capabilities"]
             .as_array()
@@ -2776,13 +2788,15 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
             idempotency_key: None,
         })
         .unwrap();
-    let (status, _) = client_json_auth(
+    let (status, expired) = client_json_auth(
         fabric.clone(),
         "/v1/client/capabilities",
         expired_credential,
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(expired["code"], "forbidden");
+    assert_eq!(expired["details"]["reason"], "credential-rejected");
 
     let (_, local_capabilities) = client_json(local.clone(), "/v1/client/capabilities").await;
     let revoke = serde_json::json!({
@@ -2793,8 +2807,10 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     });
     let (status, revoked) = client_post_json(local, "/v1/client/actions", revoke).await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
-    let (status, _) = client_json_auth(fabric, "/v1/client/capabilities", credential).await;
+    let (status, refused) = client_json_auth(fabric, "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused["code"], "forbidden");
+    assert_eq!(refused["details"]["reason"], "credential-rejected");
 }
 
 #[tokio::test]

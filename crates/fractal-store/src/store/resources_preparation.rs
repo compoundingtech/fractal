@@ -59,78 +59,10 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_rebuild (
 ) WITHOUT ROWID;
 "#;
 
-// SQLite owns the signal, so it follows the native connection when the writer
-// loan moves threads and cannot survive close/address reuse. No SQL is needed to
-// inspect it. Keep it raised until the OUTER transaction ends: rolling back a
-// savepoint can restore queue rows that an earlier flush removed.
+#[cfg(test)]
 mod work_signal {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    const NAME: &std::ffi::CStr = c"fractal.resource-preparation-work";
-
-    fn state(connection: &Connection) -> Option<&AtomicBool> {
-        // SAFETY: this private name holds only an Arc<AtomicBool> transferred below.
-        // SQLite retains it until connection close; the borrow cannot outlive the
-        // connection, and no caller replaces the client data while it is borrowed.
-        unsafe {
-            let pointer = rusqlite::ffi::sqlite3_get_clientdata(connection.handle(), NAME.as_ptr());
-            pointer.cast::<AtomicBool>().as_ref()
-        }
-    }
-
-    unsafe extern "C" fn destroy(pointer: *mut std::ffi::c_void) {
-        // SAFETY: SQLite releases exactly the strong reference transferred by
-        // install, including allocation failure in sqlite3_set_clientdata.
-        unsafe {
-            drop(Arc::from_raw(pointer.cast::<AtomicBool>()));
-        }
-    }
-
-    pub(super) fn install(connection: &Connection) -> Result<()> {
-        if state(connection).is_some() {
-            return Ok(());
-        }
-        let pending = Arc::new(AtomicBool::new(false));
-        // SAFETY: SQLite owns this strong reference after the call and releases it
-        // with the matching destructor. Clones also back the safe callbacks.
-        let result = unsafe {
-            rusqlite::ffi::sqlite3_set_clientdata(
-                connection.handle(),
-                NAME.as_ptr(),
-                Arc::into_raw(pending.clone()).cast_mut().cast(),
-                Some(destroy),
-            )
-        };
-        if result != rusqlite::ffi::SQLITE_OK {
-            return Err(
-                rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(result), None).into(),
-            );
-        }
-        let inserted = pending.clone();
-        connection.create_scalar_function(
-            "resource_preparation_work_pending",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            move |_| {
-                inserted.store(true, Ordering::Relaxed);
-                Ok(0)
-            },
-        )?;
-        let committed = pending.clone();
-        connection.commit_hook(Some(move || {
-            committed.store(false, Ordering::Relaxed);
-            false
-        }));
-        connection.rollback_hook(Some(move || pending.store(false, Ordering::Relaxed)));
-        Ok(())
-    }
-
-    pub(super) fn pending(connection: &Connection) -> bool {
-        // Bare replay/proof connections without capture still flush normally.
-        state(connection).is_none_or(|pending| pending.load(Ordering::Relaxed))
-    }
+    use super::super::transaction_work::resources_pending as pending;
 
     #[cfg(test)]
     mod tests {
@@ -198,7 +130,7 @@ mod work_signal {
 }
 
 pub(super) fn flush_if_pending(transaction: &Transaction<'_>) -> Result<()> {
-    if work_signal::pending(transaction) {
+    if transaction_work::resources_pending(transaction) {
         flush(transaction)?;
     }
     Ok(())
@@ -241,7 +173,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
 }
 
 fn capture_work(connection: &Connection) -> Result<()> {
-    work_signal::install(connection)?;
+    transaction_work::install(connection)?;
     // TEMP capture belongs to this writer, not to the database. Other tools may
     // still make durable dirty marks without registering our scalar function;
     // open() unconditionally drains those marks before serving reads.

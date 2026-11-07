@@ -171,7 +171,8 @@ if name == "xcrun":
     status = 0
     if "apps" in args:
         installed = root / "device-apps.json"
-        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [])}
+        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [
+            {"bundleIdentifier": "com.compoundingtech.fractal", "bundleVersion": "0"}])}
         status = control.get("apps_exit", 0)
     elif "processes" in args:
         result = {"runningProcesses": control.get("processes", [])}
@@ -783,6 +784,127 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 1)
 
+    def stale_installed_fixture(self):
+        self.reconcile("--build-only")
+        data = self.saved_state()
+        data.update(installed_version="17664", installed=self.initial_commit, installed_key="stale")
+        data["pending"]["build_version"] = "18516"
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18528"}])
+
+    def test_reconcile_installed_raises_floor_without_approval_or_deployment(self):
+        self.stale_installed_fixture()
+        self.env.pop("AGENT_ACTION_APPROVAL")
+        before = len(self.commands())
+        self.origin.rename(self.root / "offline-origin.git")
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "18528")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(data["pending"]["build_version"], "18516")
+        self.assertEqual(self.outcomes()[-1], "installed_reconciled")
+        self.assertEqual([entry["command"] for entry in self.commands()[before:]], ["xcrun"])
+        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(self.device_commands("install"), [])
+        self.assertEqual(self.device_commands("launch"), [])
+        self.assertFalse((self.state / "installed-apps.json").exists())
+
+    def test_reconcile_installed_never_lowers_floor(self):
+        self.stale_installed_fixture()
+        data = self.saved_state()
+        data["installed_version"] = "19000"
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.reconcile("--reconcile-installed")
+        self.assertEqual(self.saved_state()["installed_version"], "19000")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_approved_tick_reads_device_and_refuses_stale_pending_build(self):
+        self.stale_installed_fixture()
+        self.reconcile()
+        self.assertEqual(self.saved_state()["installed_version"], "18528")
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.saved_state()["pending"]["build_version"], "18516")
+        self.assertEqual(self.device_commands("install"), [])
+        self.assertEqual(self.device_commands("launch"), [])
+
+    def test_approved_tick_refuses_pending_equal_to_device_build(self):
+        self.stale_installed_fixture()
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18516"}])
+        self.reconcile()
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_reconciled_floor_discards_older_pending_on_next_approved_tick(self):
+        self.stale_installed_fixture()
+        self.reconcile("--reconcile-installed")
+        self.configure(build_exit=65)
+        self.reconcile()
+        self.assertIn("pending_discarded", self.outcomes())
+        self.assertEqual(self.saved_state()["installed_version"], "18528")
+        self.assertFalse(self.saved_state().get("pending"))
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_approved_tick_readback_failures_refuse_install(self):
+        self.stale_installed_fixture()
+        for control in (
+            {"apps_exit": 1},
+            {"apps_exit": 0, "apps": []},
+            {"apps": [{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "unparseable"}]},
+        ):
+            with self.subTest(control=control):
+                self.configure(**control)
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "install_deferred")
+                self.assertEqual(self.saved_state()["installed_version"], "17664")
+                self.assertEqual(self.device_commands("install"), [])
+                self.assertEqual(self.device_commands("launch"), [])
+
+    def test_reconcile_installed_readback_failure_preserves_floor(self):
+        self.stale_installed_fixture()
+        self.configure(apps=[])
+        result = self.invoke("--reconcile-installed")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.saved_state()["installed_version"], "17664")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def reconciled_failed_launch(self, *, source_changed):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}])
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertFalse(data["pending"]["installed"])
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        if source_changed:
+            self.change_js("after-external-install")
+        installs = len(self.device_commands("install"))
+        launches = len(self.device_commands("launch"))
+        self.configure(launch_exit=0, build_exit=65)
+        self.reconcile()
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(len(self.device_commands("install")), installs)
+        self.assertEqual(len(self.device_commands("launch")), launches)
+        self.configure(build_exit=0)
+        self.reconcile()
+        self.assertGreater(int(self.saved_state()["installed_version"]), 99)
+        self.assertEqual(len(self.device_commands("install")), installs + 1)
+        self.assertEqual(len(self.device_commands("launch")), launches + 1)
+        self.assert_installed(self.git("rev-parse", "HEAD"))
+
+    def test_reconcile_installed_invalidates_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=False)
+
+    def test_reconcile_installed_invalidates_superseded_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=True)
+
     def test_interrupted_install_reads_back_success_without_reinstalling(self):
         self.configure(launch_exit=1)
         self.reconcile()
@@ -794,7 +916,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.reconcile()
         self.assert_installed(self.initial_commit)
         self.assertEqual(len(self.device_commands("install")), 1)
-        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(len(self.device_commands("apps")), 2)
         self.assertEqual(len(self.device_commands("launch")), 2)
         self.assertFalse((self.state / "installed-apps.json").exists())
 
@@ -816,7 +938,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(len(self.device_commands("install")), 1)
                 self.assertEqual(self.device_commands("launch"), [])
                 self.assertIn("install_attempt", self.saved_state())
-                self.assertFalse(self.saved_state().get("installed_version"))
+                self.assertEqual(self.saved_state()["installed_version"], "0")
                 self.assertFalse((self.state / "installed-apps.json").exists())
 
     def test_recovered_higher_device_version_forces_new_monotonic_build(self):
@@ -833,8 +955,8 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.device_commands("install")), 2)
 
     def test_contradictory_readback_reinstalls_reverted_content(self):
-        for apps, minimum_version in (([], 1), ([{
-                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100)):
+        for apps, minimum_version in (([{
+                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100),):
             with self.subTest(apps=apps):
                 self.reset_delivery()
                 self.reconcile()

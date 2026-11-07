@@ -125,6 +125,9 @@ fn every_persistent_table_has_a_projection_scope() {
         // Live gate runners, kept from the claims by triggers: member-local.
         "local_gate_runners",
         "local_gate_runners_backfill",
+        // Work-wake candidates and their resumable copy cursor: member-local.
+        "local_work_wake_tags",
+        "local_work_wake_backfill",
         "local_publication_claims",
         "local_publication_starts",
         "local_publication_pending",

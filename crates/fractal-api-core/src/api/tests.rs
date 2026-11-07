@@ -2124,6 +2124,23 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+#[test]
+fn doctor_reports_work_wake_copy_progress_and_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for complete in [false, true] {
+        state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-he79e179dc71c owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_wake_backfill SET cursor=12, ceiling=34, complete=?1 WHERE singleton=1",
+            [complete],
+        ).unwrap();
+        let check = work_wake_index_check(&state);
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains(&format!("cursor=12 ceiling=34 done={complete}")));
+        assert_eq!(check.message.contains("indexed tags only"), complete);
+        assert_eq!(check.message.contains("unindexed historical tail"), !complete);
+    }
+}
+
 /// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
 /// what holds them off: here a configured peer whose start has not reached it.
 #[test]
@@ -13681,6 +13698,52 @@ async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() 
         assert!(refused.to_string().contains("notices-unavailable"), "{path}: {refused}");
     }
 }
+
+#[tokio::test]
+async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot_pin() {
+    for exact in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let owner = state(root.path());
+        let store = owner.store.clone();
+        let subject = "agent/example-owner/worker";
+        for incarnation in ["before", "after"] {
+            roster_fixture_append(&store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":owner.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let through = store.index().unwrap();
+        let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+            .subjects.remove(0).actual_claim.unwrap();
+        assert_eq!(store.conversation_owners_at(through).unwrap()[subject].incarnation.as_deref(), Some("after"));
+        let repair_store = store.clone();
+        MANAGED_OWNER_AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    // Repair changes retained-prefix meaning without advancing its claim cut.
+                    repair_store.connection.write().execute(
+                        /* sqlite-large-value: allow-for-now lv-h7dc166900806 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
+                        [&repaired],
+                    ).unwrap();
+                    smallclaims::Runtime::forget_views(repair_store.fractal.as_ref());
+                    let rebuilt = repair_store.conversation_owners_at(through).unwrap();
+                    assert_eq!(rebuilt[subject].incarnation.as_deref(), Some("before"));
+                }).join().unwrap();
+            }));
+        });
+        let session = managed_session_id(subject, "after");
+        let found = if exact {
+            managed_session_owner_for_subject_at(&store, through, &session, subject)
+        } else {
+            managed_session_owner_at(&store, through, &session)
+        }.unwrap().expect("the pinned prefix still contains the unrepaired incarnation");
+        assert!(MANAGED_OWNER_AFTER_PIN.with(|hook| hook.borrow().is_none()));
+        assert_eq!(found.1.as_deref(), Some("after"));
+        assert!(managed_session_owner_at(&store, through, &session).unwrap().is_none());
+        assert!(managed_session_owner_for_subject_at(&store, through, &session, subject).unwrap().is_none());
+    }
+}
+
 
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
