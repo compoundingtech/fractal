@@ -94,6 +94,7 @@ export function FleetScreen() {
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}
         {carrierInfo.issue ? <T color={theme.fault}>{carrierInfo.issue}</T> : null}
         <NotificationsSetting />
+        <Button label="re-pair this device" onPress={actions.repairDevice} />
         <Button label="forget this device" color={theme.red} onPress={() => Alert.alert('Forget this device?', 'You will need to pair again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Forget', style: 'destructive', onPress: () => void actions.forget() }])} />
       </View>
       <CarrierSection />
@@ -243,7 +244,7 @@ function CarrierSection() {
   </>;
 }
 
-// Pairing: the one screen before a device has a credential.
+// Pairing: first enrollment or an in-place replacement of the saved profile.
 export function PairScreen() {
   const { carrierInfo: fabricInfo, actions: fabricActions } = useStore();
   useEffect(() => { if (fabricInfo.built) void fabricActions.loadFabricNode(); }, [fabricInfo.built]);

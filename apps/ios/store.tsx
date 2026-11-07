@@ -520,7 +520,7 @@ function useAppStore(proof?: FabricProfile) {
         if (state !== 'live') { connection++; capsClient.current = null; setCaps(null); }
         if (state === 'live') {
           const epoch = connection;
-          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          void loadCapabilities(() => current() && epoch === connection);
           carrier.feedLive(); feedMisses.current = 0;
         }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
@@ -794,6 +794,12 @@ function useAppStore(proof?: FabricProfile) {
       setBusy(true);
       try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
     },
+    /** Re-pair in Release without discarding the current profile or changing its gateway. */
+    repairDevice() {
+      if (!credential || !url || proof) return;
+      setPairDraft({ gateway: url, id: '', code: '' });
+      setPairingIssue('The current pairing stays in use until the new pairing is verified and saved. Enter the fingerprint copied separately from the trusted machine.');
+    },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
       const gateway = normalizeGatewayUrl(gatewayRaw);
@@ -834,7 +840,7 @@ function useAppStore(proof?: FabricProfile) {
     startMemberPairing(index: number) {
       const member = fabricMemberList[index];
       if (!member || member.device) return;
-      setPairingMember(member); setError('');
+      setPairingMember(member);
       carrier.pick(member);
     },
     cancelMemberPairing() { setPairingMember(null); carrier.retry(); },
@@ -1025,14 +1031,15 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {
-      if (!client) return null;
+      if (!client) { setError('Could not create terminal: still connecting; try again in a moment.'); return null; }
       let created: string | null = null;
       const done = await runAction(async () => {
         const id = actionId();
         const result = await client.terminalCreate({ id, idempotency_key: id, fence: await fence(), parameters: { name } });
         created = result.value.affected_ids?.find(affected => affected.startsWith('terminal/')) ?? null;
       });
-      if (!done || !created) return null;
+      if (!done) { setError(issue => `Could not create terminal: ${issue}`); return null; }
+      if (!created) { setError('Could not create terminal: Fractal returned no terminal ID.'); return null; }
       // The shell starts a moment after Fractal declares it: open it once Fractal can show its screen.
       for (let tries = 0; tries < 30; tries++) {
         try { await client.terminalScreen(created); return created; } catch { await new Promise(resolve => setTimeout(resolve, 500)); }
@@ -1049,7 +1056,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     async variants(launchId: string): Promise<LaunchVariant[]> {
       if (!client || status !== 'online') return [];
-      try { const result = await client.launchVariantsList(launchId, { limit: Math.min(caps?.limits.max_page_items ?? 30, 30) }); setError(''); return items(result.value, 'launch-variant'); } catch (e) { setError(errorText(e)); return []; }
+      try { const result = await client.launchVariantsList(launchId, { limit: Math.min(caps?.limits.max_page_items ?? 30, 30) }); return items(result.value, 'launch-variant'); } catch (e) { setError(errorText(e)); return []; }
     },
     async preview(launch: Launch, variant: LaunchVariant) {
       if (!client) return false;
@@ -1122,7 +1129,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     async history() {
       if (!client || !caps) return;
-      try { setHistoricalSessions((await listSessionPages(options => client.sessionsList(options), Math.min(caps.limits.max_page_items, 30), true)).filter(s => ['completed', 'failed', 'cancelled'].includes(s.state))); setError(''); } catch (e) { if (!isSnapshotChurn(e)) setError(errorText(e)); }
+      try { setHistoricalSessions((await listSessionPages(options => client.sessionsList(options), Math.min(caps.limits.max_page_items, 30), true)).filter(s => ['completed', 'failed', 'cancelled'].includes(s.state))); } catch (e) { if (!isSnapshotChurn(e)) setError(errorText(e)); }
     },
     moveTab(tab: Tab, direction: -1 | 1) {
       const index = order.indexOf(tab), next = index + direction;

@@ -10,7 +10,7 @@ import { agentGlyph, agentRows } from '../agentsView';
 import { missionTitle, missionWord, wordStyle } from '../missionsView';
 import { navigationRef, type RootScreen } from '../navigation';
 import { rememberResources, sidebarGroups, type SidebarChoices, type SidebarResource } from '../sidebarView';
-import { resourceRow, subjectToFile } from '../sidebarResources';
+import { resourceRow, subjectToFile, terminalResourceRow } from '../sidebarResources';
 import { folderCreate, folderName, folderLocation, moveFolder, placeResource, sidebarArrangement, uuid7 } from '../sidebarEdits';
 import { useStore } from '../store';
 import { Button, Field, ListRow, Note, Screen, T } from '../ui';
@@ -72,7 +72,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     ...sidebarResources.map(resourceRow),
     ...agents.map(agent => ({ id: agent.id, title: agent.name, kind: 'Agents' as const, target: agent.target })),
     ...data.missions.map(mission => ({ id: mission.id, title: missionTitle(mission), kind: 'Missions' as const, target: mission.id })),
-    ...sidebarTerminals.map(terminal => ({ id: terminal.id, title: terminal.owner_id, kind: 'Terminals' as const, target: terminal.terminal_id! })),
+    ...sidebarTerminals.map(terminalResourceRow),
     ...data.machines.map(machine => ({ id: machine.id, title: machine.name, kind: 'Machines' as const, target: machine.id })),
   ];
   sidebarSeen.current = rememberResources(sidebarSeen.current, current);
