@@ -711,6 +711,67 @@ mod tests {
         assert!(body["value"]["next_cursor"].is_null());
     }
     #[tokio::test]
+    async fn real_inbox_ask_starts_and_retries_through_typed_action() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-http-start");
+        state.store.configure_thread_write_rollout([]);
+        let person = "person/operator";
+        let agent = "agent/garden/reviewer";
+        let thread = "thread/http-start";
+        let intent = crate::graph::parse_intent(
+            r#"version 2
+agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
+"#,
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "declare-start-agent").unwrap();
+        let app = crate::api::router(state.clone());
+        let post = |actor: &'static str, bound: Option<&'static str>, action: &'static str, parameters: Value| {
+            let app = app.clone();
+            let snapshot = new_client_snapshot(&state).id;
+            async move {
+                let request = json!({
+                    "api_version": CLIENT_API_VERSION, "id": format!("action/{action}"),
+                    "type": action, "idempotency_key": format!("thread-fixture-{action}"),
+                    "fence": {"snapshot_id": snapshot}, "parameters": parameters,
+                });
+                let mut request = Request::builder().method("POST").uri("/v1/client/actions")
+                    .header(LOCAL_PERSON_HEADER, actor).header("Content-Type", "application/json")
+                    .body(Body::from(request.to_string())).unwrap();
+                if let Some(bound) = bound {
+                    request.extensions_mut().insert(crate::api::BoundAgent(bound.into()));
+                }
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(status, StatusCode::OK, "{value}");
+                value["value"].clone()
+            }
+        };
+        let asked = post(agent, Some(agent), "work.ask", json!({
+            "person_id": person, "title": "Review CI", "reason": "Can we proceed?",
+        })).await;
+        let ask = asked["affected_ids"][0].as_str().unwrap();
+        let episode = state.store.newest_claim_for_subject_kind(ask, "work.person-asked")
+            .unwrap().unwrap();
+        let parameters = json!({
+            "target_id": thread, "agent_id": agent, "origin_ask": ask,
+            "origin_ask_episode": episode.id, "title": "Review CI", "content": "Check worker tests.",
+        });
+        let start = post(person, None, "thread.start", parameters.clone()).await;
+        let retry = post(person, None, "thread.start", parameters).await;
+        assert_eq!(retry["operation_id"], start["operation_id"]);
+        let message = start["affected_ids"][1].as_str().unwrap();
+        let sent = state.store.claims_for(message, Some("message.sent")).unwrap();
+        assert_eq!(sent.len(), 1);
+        let created = state.store.newest_claim_for_subject_kind(thread, "thread.created").unwrap().unwrap();
+        assert_eq!(sent[0].batch_id, created.batch_id);
+        assert_eq!(sent[0].body["fields"]["thread_id"], thread);
+        assert_eq!(state.store.latest_claim_id(ask).unwrap().as_deref(), Some(episode.id.as_str()));
+    }
+
+    #[tokio::test]
     async fn thread_reply_keys_are_disjoint_between_two_owners() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-reply-keys");

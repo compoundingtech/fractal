@@ -105,24 +105,28 @@ fn read(
     );
     let sql = canonical_sql(&format!(
         "WITH explicit AS (
-            SELECT {CLAIM_COLUMNS}
+            SELECT {CLAIM_COLUMNS}, 'active' AS operation_state
             FROM claims INDEXED BY claims_thread_message_accepted_index
             WHERE claims.kind='message.sent' AND json_extract(claims.body, '$.fields.thread_id')=?1
               AND json_extract(claims.body, '$.fields.thread_id') IS NOT NULL
               {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
             ORDER BY CANONICAL_DESC(claims) LIMIT ?7
          ), legacy AS (
-            SELECT {CLAIM_COLUMNS} FROM claims
+            SELECT {CLAIM_COLUMNS}, 'active' AS operation_state FROM claims
             WHERE claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent'
               AND json_extract(claims.body, '$.fields.thread_id') IS NULL
               {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
          ), lifecycle AS (
-            SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_accepted_index
+            SELECT {CLAIM_COLUMNS}, operations.state AS operation_state
+            FROM claims INDEXED BY claims_subject_accepted_index
+            JOIN operations ON operations.id=json_extract(claims.body, '$._operation.id')
             WHERE claims.subject=?1 AND claims.kind IN ('thread.title-set', 'thread.state-set')
-              {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
+              AND claims.store_index <= ?4
+              AND (operations.state='conflict' OR operations.canonical_claim_id=claims.id)
+              AND {UNREPAIRED_CLAIM} {cursor_range}
             ORDER BY CANONICAL_DESC(claims) LIMIT ?7
          )
-         SELECT {CLAIM_COLUMNS}
+         SELECT {CLAIM_COLUMNS}, operation_state
          FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy UNION ALL SELECT * FROM lifecycle) claims
          ORDER BY CANONICAL_DESC(claims) LIMIT ?7"
     ));
@@ -141,17 +145,23 @@ fn read(
                     .map(|claim| claim.accepted_at_unix_ms.to_string()),
                 limit + 1,
             ],
-            claim_from_row,
+            |row| Ok((claim_from_row(row)?, row.get::<_, String>(10)?)),
         )
         .map_err(internal)?;
     let mut items = Vec::new();
     let mut last = None;
     let mut has_more = false;
     for row in rows {
-        let claim = row.map_err(internal)?;
+        let (claim, operation_state) = row.map_err(internal)?;
         if items.len() == limit {
             has_more = true;
             break;
+        }
+        if operation_state == "conflict" {
+            return Err(FractalError::new(
+                "idempotency-conflict",
+                "a thread metadata operation has conflicting requests",
+            ));
         }
         if lifecycle(&claim, thread) {
             last = Some(claim.id.clone());

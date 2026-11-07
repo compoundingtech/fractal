@@ -819,18 +819,25 @@ pub fn start_from_ask_as(
                     params![first_message.subject, person, signature],
                 ).map_err(internal)?;
             }
-            append_receipt_claim_tx(
-                tx,
-                &store.origin,
-                &first_message.subject,
+            // The typed transaction has already authorized this exact ask and sender.
+            // Retain the ordinary recipient and provenance checks before the admitted append.
+            retirements::admit_recipient(tx, Some(agent))?;
+            assistant_write::refuse_unverified(
                 "message.sent",
                 Some(person),
-                &message_body,
-                &[],
-                Some(&created.batch_id),
-                &format!("thread-start-message:{key}"),
-            )
-            .map_err(claim_append_error)?;
+                Some(person),
+                ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"]
+                    .iter().any(|field| first_message.fields.contains_key(*field)),
+            )?;
+            let mut message_body = message_body.clone();
+            smallclaims::store::idempotency::attach(
+                &mut message_body, &format!("thread-start-message:{key}"),
+            ).map_err(internal)?;
+            let message = append_admitted_claim_tx(
+                tx, &store.origin, &first_message.subject, "message.sent", Some(person),
+                &message_body, &[], Some(&created.batch_id),
+            ).map_err(claim_append_error)?;
+            register_operation_tx(tx, &message).map_err(internal)?;
             if encoded_signature.is_some() {
                 tx.execute(
                     "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind='message.sent' AND actor=?2",
