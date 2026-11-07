@@ -36,6 +36,7 @@ test('terminal create names connection failure and missing terminal ID in the ba
   const connecting = makeTerminal({}, 'connecting');
   assert.equal(await connecting.create('shell'), null);
   assert.match(connecting.error(), /Could not create terminal: Still connecting/);
+  console.log('PASS terminal create names connection failure and missing terminal ID in the banner');
 });
 
 test('successful terminal create preserves the terminal navigation ID and clears prior error', async () => {
@@ -44,6 +45,7 @@ test('successful terminal create preserves the terminal navigation ID and clears
   assert.equal(await success.create('shell'), 'terminal/one');
   assert.deepEqual(screens, ['terminal/one']);
   assert.equal(success.error(), '');
+  console.log('PASS successful terminal create preserves the terminal navigation ID and clears prior error');
 });
 
 test('action error survives actual feed reconnecting and live transitions', () => {
@@ -62,6 +64,7 @@ test('action error survives actual feed reconnecting and live transitions', () =
   transition('live');
   assert.deepEqual(statuses, ['offline', 'online']);
   assert.equal(error, 'Could not create terminal: not allowed');
+  console.log('PASS action error survives actual feed reconnecting and live transitions');
 });
 
 test('Release re-pair opens a blank form on the saved gateway without discarding credentials', () => {
@@ -73,13 +76,15 @@ test('Release re-pair opens a blank form on the saved gateway without discarding
   const fleet = readFileSync(new URL('./screens/Fleet.tsx', import.meta.url), 'utf8');
   assert.match(fleet, /label="re-pair this device" onPress=\{actions.repairDevice\}/);
   assert.match(fleet, /const submit = .*actions.pair\(id, code, fingerprint, unpinned\)/);
+  console.log('PASS Release re-pair opens a blank form on the saved gateway without discarding credentials');
 });
 
-test('failed replacement verification preserves the old secure profile and key', async () => {
+const pairingHarness = (gateway = 'https://gateway.example', fabric = {}) => {
   const pairingSource = slice('  async function completePairing(', '  /** Forget this phone');
-  const oldProfile = JSON.stringify({ url: 'https://gateway.example', credential: 'old bearer', signing: { handle: 'old-key' } });
+  const oldProfile = JSON.stringify({ url: gateway, credential: 'old bearer', signing: { handle: 'old-key' } });
   const profiles = new Map([['profile', oldProfile]]);
   const events = [];
+  const requests = [];
   const dependencies = {
     proof: undefined, validatePairingTrust: () => 'trusted fingerprint', canVerifyPairing: () => true,
     PROFILE_KEY: 'profile',
@@ -87,11 +92,13 @@ test('failed replacement verification preserves the old secure profile and key',
       getItemAsync: async key => profiles.get(key),
       setItemAsync: async (key, value) => { events.push('commit'); profiles.set(key, value); },
     },
-    gatewayFetch: () => async () => ({ ok: true, text: async () => JSON.stringify({ api_version: 'test', capabilities: [{ id: 'device-key-proofs', version: 1, state: 'granted' }] }) }),
-    fabricBuilt: false, isFabricGatewayId: () => false, API_VERSION: 'test',
+    gatewayFetch: () => async url => { requests.push(url); return { ok: true, text: async () => JSON.stringify({ api_version: 'test', capabilities: [{ id: 'device-key-proofs', version: 1, state: 'granted' }] }) }; },
+    fabricBuilt: false, carrierChoice: 'tailscale', fabricSnapshot: { phase: 'off' }, fabricMember: null,
+    isFabricGatewayId: value => value.startsWith('fabric://'), fabricGatewayId: target => `fabric://${target.node}/${encodeURIComponent(target.service)}`, API_VERSION: 'test',
     pairingFabricNode: () => ({}), createDeviceKey: async () => ({ key: 'new-public-key', handle: 'new-key', storage: 'secure' }),
     push: { forgetIssuer: async () => { events.push('cleanup'); return true; }, releaseIssuer: () => events.push('release') },
     FractalClient: class {
+      constructor({ baseUrl }) { requests.push(baseUrl); }
       async completePairing() { events.push('complete'); return { value: { kind: 'paired-session', device_id: 'device/0123456789abcdef01234567' } }; }
     },
     clientName: () => 'test', app: { expo: { version: 'test' } },
@@ -99,9 +106,37 @@ test('failed replacement verification preserves the old secure profile and key',
     verifyGrantSignature: () => {}, Crypto: {},
     removeDeviceKey: async handle => events.push(`remove:${handle}`),
     errorText: error => error.message,
+    ...fabric,
   };
   const complete = new Function(...Object.keys(dependencies), `${pairingSource}; return completePairing;`)(...Object.values(dependencies));
-  await assert.rejects(complete('pair/1', 'code', 'fingerprint', false, 'https://gateway.example'), /proof verification failed.*previous profile was retained/i);
+  return { complete: () => complete('pair/1', 'code', 'fingerprint', false, gateway), profiles, oldProfile, events, requests };
+};
+
+test('failed replacement verification preserves the old secure profile and key', async () => {
+  const { complete, profiles, oldProfile, events } = pairingHarness();
+  await assert.rejects(complete(), /proof verification failed.*previous profile was retained/i);
   assert.equal(profiles.get('profile'), oldProfile);
   assert.deepEqual(events, ['cleanup', 'complete', 'verify', 'remove:new-key', 'release']);
+  console.log('PASS failed replacement verification preserves the old secure profile and key');
+});
+
+test('re-pairing own member A refuses connected member B before submitting a code', async () => {
+  const memberA = { node: 'a'.repeat(64), service: 'paired', name: 'A', device: true };
+  const memberB = { node: 'b'.repeat(64), service: 'paired', name: 'B' };
+  const ready = member => ({ fabricBuilt: true, fabricNode: 'phone-node', carrierChoice: 'fabric', fabricSnapshot: { phase: 'ready', member: member.name, bridgeUrl: 'http://127.0.0.1:1234' }, fabricMember: member });
+  for (const gateway of ['https://gateway.example', `fabric://${memberA.node}/paired`]) {
+    for (const selected of [memberB, { ...memberA, service: 'other', device: undefined }]) {
+      const attempt = pairingHarness(gateway, ready(selected));
+      await assert.rejects(attempt.complete(), /code was not submitted; the previous profile was retained/i);
+      assert.deepEqual(attempt.requests, [], 'a wrong member or service receives neither discovery nor the pairing code');
+      assert.deepEqual(attempt.events, [], 'refusal happens before notification cleanup or key creation');
+      assert.equal(attempt.profiles.get('profile'), attempt.oldProfile);
+    }
+    const matching = pairingHarness(gateway, ready(memberA));
+    await assert.rejects(matching.complete(), /proof verification failed/i);
+    const expected = gateway.startsWith('fabric://') ? 'http://127.0.0.1:1234' : gateway;
+    assert.deepEqual(matching.requests, [`${expected}/v1/client/capabilities?accepts=fabric-gateway-grant`, expected]);
+    assert.equal(matching.profiles.get('profile'), matching.oldProfile);
+  }
+  console.log('PASS re-pairing own member A refuses connected member B before submitting a code');
 });

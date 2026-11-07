@@ -682,15 +682,21 @@ function useAppStore(proof?: FabricProfile) {
     const pin = validatePairingTrust(fingerprint, unpinned);
     if (!canVerifyPairing()) throw new Error('This build cannot verify pairing proofs; update the phone app.');
     const profileKey = member ? memberProfileKey(member) : PROFILE_KEY;
-    if (member && !(fabricSnapshot.phase === 'ready' && fabricSnapshot.member === member.name)) throw new Error(`Fabric is not connected to ${member.name} yet. Wait a moment and try again, or check ${member.name}'s fabric grant for this phone.`);
+    if (member && !(fabricSnapshot.phase === 'ready' && sameFabricTarget(fabricMember, member))) throw new Error(`Fabric is not connected to ${member.name} yet. Wait a moment and try again, or check ${member.name}'s fabric grant for this phone.`);
     const oldRaw = await SecureStore.getItemAsync(profileKey);
     const old: PhoneProfile | undefined = oldRaw ? JSON.parse(oldRaw) : undefined;
     // Anonymous discovery reveals no key material and never receives an old bearer.
     const requestFetch = gatewayFetch();
-    // With fabric chosen and its bridge open, the pairing requests go over fabric to the same member: the
-    // gateway typed (or saved) stays this device's identity and its fallback route.
-    const requestUrl = member ? fabricSnapshot.bridgeUrl : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
-    if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
+    // A URL gateway binds this request directly to that profile's issuer, regardless of the active
+    // carrier. A Fabric-only gateway must match the connected node AND service before sending a code.
+    const overFabric = isFabricGatewayId(gateway);
+    if (!member && old && !overFabric && fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' && !fabricMember?.device) {
+      throw new Error('Another Fabric member is selected. Select this device’s paired member in Fleet, or switch to the saved gateway carrier before re-pairing. The code was not submitted; the previous profile was retained.');
+    }
+    if (overFabric && !(fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' && fabricMember && fabricGatewayId(fabricMember) === gateway)) {
+      throw new Error('Fabric is not connected to this pairing’s member and service. Select the matching member in Fleet and try again. The code was not submitted; the previous profile was retained.');
+    }
+    const requestUrl = overFabric ? fabricSnapshot.bridgeUrl : gateway;
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');

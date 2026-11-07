@@ -13,6 +13,7 @@ The TypeScript human error helpers match Rust's explicit `human()` / `human_mess
 3. Open Now, Resources, Fleet and Spaces. The app shows offline/reconnect state; actions require a live connection. It does not queue offline mutations.
 
 An already paired phone can use **Fleet › this connection › re-pair this device**, including in Release, to open the form on its saved gateway. Cancel leaves the profile untouched. Replacement first confirms notification cleanup, then verifies the new grant before the single SecureStore commit; a failed replacement retains the old profile.
+Re-pairing refuses before sending the code if Fabric is connected to another member. URL gateways receive pairing directly at their saved URL, never through an unrelated Fabric bridge. A Fabric-only gateway requires the connected member's exact node and service. The replacement credential and the gateway used for that pairing are saved together.
 
 Terminal creation failures, including an answer without a terminal ID, appear in the error banner. Feed live/recovery transitions and successful background reads do not dismiss action feedback; dismiss the banner or complete a successful action to clear it.
 
