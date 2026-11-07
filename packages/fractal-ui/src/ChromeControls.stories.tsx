@@ -77,6 +77,7 @@ export const scenarioExemptions: readonly string[] = [
   'QuietIcons:primitive',
   'QuietIconsFlow:primitive',
   'QuietIconsLight:primitive',
+  'TooltipReleasedWithPointer:primitive',
   'WindowBlurQuiet:primitive',
 ]
 type Story = StoryObj<typeof meta>
@@ -232,6 +233,68 @@ export const ProgrammaticFocusQuiet: Story = { tags: ['critical'], play: async (
   await waitFor(() => expect(resources).not.toHaveAttribute('data-focus-visible'))
   await expect(getComputedStyle(resources).outlineStyle).toBe('none')
   await staysWithoutTooltip(600)
+} }
+
+/**
+ * Keyboard navigation closing a hovered control's tooltip must not bring it back as an unpositioned surface at the
+ * top-left corner once the pointer leaves, and a control a modal covers opens no tooltip however the pointer moves.
+ */
+export const TooltipReleasedWithPointer: Story = { play: async ({ canvasElement }) => {
+  const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
+  const sort = sidebar.getByRole('button', { name: 'Sort agents · Manual' })
+  const needsMe = sidebar.getByRole('button', { name: 'Needs me only' })
+  const filter = sidebar.getByRole('button', { name: 'Filter agents · 1 active' })
+  const resources = within(header(canvasElement)).getByRole('button', { name: 'Resources' })
+  const tooltips = () => within(document.body).queryAllByRole('tooltip', { hidden: true }).map(tooltip => tooltip.textContent)
+
+  // The page's very first hover opens no tooltip.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(sort)
+  await tooltipFor(sort, 'Sort agents · Manual')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await tooltipFor(filter, 'Filter agents · 1 active')
+  await userEvent.unhover(sort)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).not.toContain('Sort agents · Manual')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
+
+  // The pointer is what moves next, which ends keyboard modality.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(sort)
+  await tooltipFor(sort, 'Sort agents · Manual')
+  resources.focus()
+  await userEvent.keyboard('{Enter}')
+  const dialog = await within(document.body).findByRole('dialog', { name: 'Agent resources' })
+  await waitFor(() => expect(tooltips()).toEqual([]))
+  await userEvent.unhover(sort)
+  await userEvent.hover(sort)
+  const until = performance.now() + 600
+  while (performance.now() < until) {
+    await expect(tooltips()).toEqual([])
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(dialog).not.toBeInTheDocument())
+  await userEvent.unhover(sort)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).toEqual([])
+
+  // A tooltip its control still holds by keyboard focus outlives the pointer that also hovered it.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(filter)
+  await tooltipFor(filter, 'Filter agents · 1 active')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await tooltipFor(filter, 'Filter agents · 1 active')
+  await userEvent.unhover(filter)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).toContain('Filter agents · 1 active')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
 } }
 
 /** Losing window focus clears desktop tooltip intent; restoring focus alone must not reopen it. */
