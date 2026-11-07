@@ -52,6 +52,11 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
+Heavy checks use `gate-slot --class heavy --profile disk=cargo-cold` when gate-slot is on PATH: its admission owns the
+host's memory cap and disk floor, and its wait/refusal reason is printed with the check output. Without gate-slot (standalone
+use), the existing caller/seat/builds.slice cap is used when available, otherwise the check runs without a host cap.
+ST_EVIDENCE_GOVERN=off explicitly disables this wrapping.
+
 A run's TMPDIR (and TMP and TEMP), for itself and every check, is a directory of its own on disk, /var/tmp/st-test.XXXXXXXX (in
 ST_TEST_TMP when set), removed when the run ends; --keep keeps it and says where. Each `nix develop` leaves a nix-shell.* directory
 there, with whatever its check's tests wrote. A run that was killed leaves its directory behind, and the next run removes it.
@@ -166,7 +171,7 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 # The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
 FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
-# (a builds.slice scope, the kept target below), which nobody has to ask for.
+# (gate-slot heavy admission when installed, otherwise a builds.slice scope, and the kept target below).
 BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web', RUST_TESTS})
 # rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
@@ -992,16 +997,19 @@ def oom_note(caps, before):
                    for cgroup in sorted(inner))
 
 
-def governed(argv, name, output=None):
-    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
-    everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
-    memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
+def heavy_admission(argv, gate_slot):
+    """The host owns the disk profile and capped scope; never duplicate its capacity probes here."""
+    return [gate_slot, '--class', 'heavy', '--profile', 'disk=cargo-cold', '--'] + argv
 
-    No heavy-slot ticket is held for a whole Rust check (`cargo --stage-slot`): those tests run under the test guardian
-    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
-    stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
-    stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+
+def governed(argv, name, output=None):
+    """Wrap a building check in the host's heavy admission, including its disk profile and capped scope, when gate-slot is installed.
+    Admission diagnostics go to the same output as evidence-wrap; a refusal is a failed check, never retried outside admission.
+    The recorded command is unchanged: only what starts evidence-wrap changes.
+
+    Standalone hosts retain their existing cap selection below, with no heavy-stage cargo ticket: the test guardian detaches
+    from its parents, so cargo commands beneath it cannot reuse an ancestor's stage ticket and would queue behind that ticket.
+    A host without a user systemd bus runs as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
     A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
     gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
@@ -1018,6 +1026,11 @@ def governed(argv, name, output=None):
     lane's sccache socket, since a lane's server started inside a run kept the run's removed TMPDIR (2026-11-01)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
+    gate_slot = shutil.which('gate-slot')  # resolve before the check's fixed PATH replaces the caller's
+    if gate_slot:
+        print(f'fractal-test: {name} waits for gate-slot heavy admission (disk=cargo-cold); host wait/refusal reasons follow',
+              file=output or sys.stderr, flush=True)
+        return heavy_admission(argv, gate_slot)
     cap = own_cap()
     if cap:
         print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=output or sys.stderr)

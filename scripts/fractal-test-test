@@ -695,7 +695,7 @@ class PoolIdentityTest(unittest.TestCase):
 
 
 class GovernedTest(unittest.TestCase):
-    """A building check stays inside a kernel-verified build, lane or gate-slot cap; otherwise it takes builds.slice."""
+    """Heavy checks take gate-slot when installed; standalone checks retain their kernel-verified cap selection."""
 
     LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
     BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
@@ -736,7 +736,7 @@ class GovernedTest(unittest.TestCase):
             with mock.patch.dict(os.environ, environment, clear=True), \
                     mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
                     mock.patch.object(st_test, 'seat_lane', lambda: real_lane(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
-                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: None if program == 'gate-slot' else f'/usr/bin/{program}'), \
                     contextlib.redirect_stderr(io.StringIO()) as err:
                 governed = st_test.governed(['check'], 'linux-gate')
             if Path(tmp, 'asked').exists():
@@ -752,6 +752,44 @@ class GovernedTest(unittest.TestCase):
         # In place, and marked as in a build cap for a cargo front door that would otherwise move cargo into builds.slice.
         self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
         self.assertEqual(Path(governed[0]).name, 'env', why)
+
+    def test_gate_slot_admits_heavy_with_the_host_disk_profile_even_inside_a_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = Path(tmp, 'gate-slot')
+            calls, ran = Path(tmp, 'calls'), Path(tmp, 'ran')
+            gate.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > ' + shlex.quote(str(calls)) + '\n'
+                            'echo "gate-slot: waiting: disk=cargo-cold below host floor + headroom" >&2\n'
+                            'while [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+            gate.chmod(0o755)
+            with mock.patch.dict(os.environ, {'PATH': tmp}, clear=True), \
+                    mock.patch.object(st_test, 'own_cap', side_effect=AssertionError('must acquire admission even in a cap')):
+                output = io.StringIO()
+                argv = st_test.governed(['/bin/sh', '-c', f': > {shlex.quote(str(ran))}'], 'linux-gate', output)
+                # Use an absolute payload too: gate-slot is found from the caller, not the check's fixed PATH.
+                done = subprocess.run(argv, capture_output=True, text=True, env={'PATH': '/usr/bin:/bin'})
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue(ran.exists())
+            self.assertEqual(calls.read_text().splitlines()[:5], ['--class', 'heavy', '--profile', 'disk=cargo-cold', '--'])
+            self.assertIn('host wait/refusal reasons follow', output.getvalue())
+            self.assertIn('gate-slot: waiting: disk=cargo-cold below host floor + headroom', done.stderr)
+
+    def test_gate_slot_disk_refusal_preserves_reason_and_never_starts_the_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate, ran = Path(tmp, 'gate-slot'), Path(tmp, 'ran')
+            reason = 'gate-slot: refusing admission: disk=cargo-cold free=123 bytes below floor + headroom; wait for reclamation'
+            gate.write_text(f'#!/bin/sh\nprintf "%s\\n" {shlex.quote(reason)} >&2\nexit 75\n')
+            gate.chmod(0o755)
+            with mock.patch.dict(os.environ, {'PATH': tmp}, clear=True):
+                argv = st_test.governed(['/bin/sh', '-c', f': > {shlex.quote(str(ran))}'], 'linux-gate', io.StringIO())
+                done = subprocess.run(argv, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 75)
+            self.assertEqual(done.stderr.strip(), reason)
+            self.assertFalse(ran.exists())
+
+    def test_explicit_govern_off_preserves_the_unwrapped_command(self):
+        with mock.patch.dict(os.environ, {'ST_EVIDENCE_GOVERN': 'off'}, clear=True), \
+                mock.patch.object(st_test.shutil, 'which', side_effect=AssertionError('wrapping explicitly disabled')):
+            self.assertEqual(st_test.governed(['check'], 'linux-gate'), ['check'])
 
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
         self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
@@ -4004,6 +4042,25 @@ finally:
                          ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'linux-fleet-compat',
                           'fractal-web', 'rust-tests'])
 
+    def test_heavy_admission_refusal_is_reported_and_signs_nothing(self):
+        self.commit('b.txt', 'two')
+        tmp = Path(self.tmp.name)
+        bin_dir, ran = tmp / 'admission-bin', tmp / 'payload-ran'
+        bin_dir.mkdir()
+        reason = 'gate-slot: refusing admission: disk=cargo-cold free=123 bytes below floor + headroom; wait for reclamation'
+        gate = bin_dir / 'gate-slot'
+        gate.write_text(f'#!/bin/sh\nprintf "%s\\n" {shlex.quote(reason)} >&2\nexit 75\n')
+        gate.chmod(0o755)
+        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'ST_EVIDENCE_GOVERN': 'on'}
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env=env,
+                                            command=['sh', '-c', f': > {shlex.quote(str(ran))}', 'scripts/ci-local'])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(reason, out)
+        self.assertIn('FAILED (75)', out)
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.statements(), [])
+
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
         tmp = Path(self.tmp.name)
@@ -4020,7 +4077,9 @@ finally:
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
         # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None):
+        real_which = shutil.which
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None), \
+                mock.patch.object(st_test.shutil, 'which', lambda program: None if program == 'gate-slot' else real_which(program)):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
