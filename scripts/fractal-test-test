@@ -908,7 +908,14 @@ class LaneBurstTest(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        # Publish complete records: existence is the reader's readiness signal.
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'append_record() {\n'
+            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
+            '  mv "$1.tmp.$$" "$1"\n'
+            '}\n'
+            f'append_record {self.calls} "$*"\n{body}\ncat > /dev/null\nappend_record {self.released} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 
@@ -4998,7 +5005,14 @@ class BurstAtTheTree(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records each call, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        # Publish complete records: existence is the reader's readiness signal.
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'append_record() {\n'
+            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
+            '  mv "$1.tmp.$$" "$1"\n'
+            '}\n'
+            f'append_record {self.calls} "$*"\n{body}\ncat > /dev/null\nappend_record {self.released} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 
