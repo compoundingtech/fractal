@@ -651,7 +651,7 @@ ping sidecar queues.
 
 ## Agent population (st.agents, st.attention.open)
 
-**Contract revision: AP-2026-11-07-r1 (proposed; independent reviewer GO required).**
+**Contract revision: AP-2026-11-07-r2 (proposed; independent reviewer GO required).**
 This is the contract for separate implementation PRs, not a claim that these
 instruments or all attribution signals already exist. Review GO names this
 revision and the exact reviewed commit. See [#1580](https://github.com/compoundingtech/fractal/issues/1580).
@@ -668,6 +668,7 @@ callbacks read only a complete aggregate, as the mailbox and delivery gauges do.
 | --- | --- | --- | --- |
 | `st.agents` | `st_agents` | `{agent}` | `st.agent.driver`, `st.agent.kind`, `st.agent.repo`, `st.agent.state`, `st.agent.reason`, `st.agent.has_work` |
 | `st.attention.open` | `st_attention_open` | `{item}` | `st.attention.kind` |
+| `st.agents.refresh.last_success` | `st_agents_refresh_last_success` | `s` (Unix epoch seconds) | None; host identity from the daemon resource only |
 
 Dots in point-attribute names likewise become underscores, for example
 `st_agent_state`. Host identity is the daemon's existing `host.name` resource
@@ -775,8 +776,19 @@ it produced no new claim. Reachable presence plus missing/indeterminate activity
 is `unknown/unattributed`, not `unreachable/stale`. Daemon disappearance is an
 exporter availability failure, not zero agents. Failed refresh keeps the last
 complete snapshot and reports failure through existing diagnostics, never a
-partial count or false zero. Dashboards must distinguish unavailable/stale
-export from a successful empty snapshot.
+partial count or false zero. On each complete successful snapshot, the refresher
+atomically publishes that snapshot and sets `st.agents.refresh.last_success`
+to its completion time in seconds since the Unix epoch. Failed refreshes and
+SDK collection callbacks never advance that value; before the first success
+the instrument is absent. The dotted name follows the instrument convention
+above, without a Prometheus `_seconds` suffix.
+
+Consumers alert on `st_agents_refresh_last_success`: compute snapshot age with
+`time() - st_agents_refresh_last_success` and compare it with the deployment's
+freshness deadline. An absent series for an expected host is also a failure,
+not a successful empty snapshot. This distinguishes a stuck refresher still
+exporting cached counts from a fresh zero population; host/exporter absence
+must not be hidden by the age expression's lack of a sample.
 
 ### Orthogonal work and attention
 
@@ -802,20 +814,42 @@ belongs to its source conversation owner. For fleet-global sources select the
 fleet's authoritative source origin, not every replica that reads the item.
 An implementation must establish that unique origin before exporting those
 items; no person/message/source identifiers become labels.
+On every successful snapshot, `st.attention.open` emits all ten closed kinds,
+including explicit zeros. A missing attention-kind series means exporter
+failure, not zero open items; use the last-success gauge to detect a stale
+snapshot whose ten cached series still export.
 
 ### Cardinality budget
 
-Emit occupied population buckets only, plus a zero for a previously occupied
-bucket when its count becomes zero; never preallocate the Cartesian product.
+Emit occupied population buckets only; never preallocate the Cartesian product.
+A bucket that becomes empty emits zero for a fixed ten-minute retention window
+starting at its first complete empty snapshot. That window is at least two
+export intervals (configure export intervals no longer than five minutes) and
+at least Mimir's five-minute lookback. Repeated empty snapshots do not restart
+the window. After the window, stop reporting the bucket; becoming occupied
+again cancels its empty deadline. Only live buckets and empty buckets inside
+this window count against the 256-bucket population budget.
+
 The theoretical per-host product is `6 drivers × 6 kinds × 9 repos × 21 legal
-pairs × 2 work flags = 13,608`, plus ten attention buckets. This is not an
-acceptable active-series allocation. Population's operational allocation is at
-most 256 retained buckets plus ten attention buckets per daemon; all retained
-zero buckets count against it, including churn within the backend's active
-series window. A worked deployment bound of 64 live seats plus 128 live children
-and at most 64 recently vacated distinct buckets is `192 + 64 + 10 = 266`
-series per host. Each live agent contributes to one bucket, so simultaneous
-nonzero population series never exceed the number of included agents.
+pairs × 2 work flags = 13,608`, plus ten attention buckets and one last-success
+series. This is not an acceptable active-series allocation. Population's
+operational allocation is at most 256 live/retained buckets, plus ten attention
+buckets and one last-success series per daemon. A worked deployment bound of
+64 live seats plus 128 live children and at most 64 distinct buckets inside the
+empty retention window is `192 + 64 + 10 + 1 = 267` series per host. Each live
+agent contributes to one bucket, so simultaneous nonzero population series
+never exceed the number of included agents. Backend active-series accounting
+can outlive reporting; its additional churn cost still needs capacity review.
+
+Set the OTel SDK stream cardinality limit explicitly to 512 for each of these
+three instruments, above 266 and the combined 267-series allocation; do not
+rely on the default. This is a safety margin, not permission to exceed the
+contract's allocation. OTel Rust SDK 0.30 emits an overflow data-point series
+with the attribute `otel.metric.overflow=true`, rendered in Mimir as
+`otel_metric_overflow="true"` on the affected metric (for example,
+`st_agents{otel_metric_overflow="true"}`). Alert on the presence of that label
+for any of the three metrics: overflow is a contract violation, never a valid
+fallback bucket or silently accepted population total.
 
 This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
 another 2,000. SQL already reserves up to 1,500 series; mailbox/delivery and
@@ -854,6 +888,7 @@ must stay separate from the parent channel's session ownership: forwarding child
 events must not let a child replace the seat's channel. Implementation follows
 only after independent GO on this revision, in separate exporter/store and driver
 PRs; this documentation changes no runtime behavior.
+Consumer dashboards and alerts require telemetry-registry entries before rollout.
 
 ## Per-agent delivery health
 
