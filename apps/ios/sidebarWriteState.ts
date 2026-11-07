@@ -14,7 +14,7 @@ export type WriteEvent = { type: 'Plan'; base: WriteBase; plan: WritePlan; folde
   | { type: 'Fresh'; base: WriteBase; operations: MembershipOperation[] | { error: WriteRefusal } }
   | { type: 'Persisted' | 'CompletionPersisted' | 'Ack' | 'Unknown' | 'Observed'; identity: WriteIdentity }
   | { type: 'Refused'; identity: WriteIdentity; reason: WriteRefusal }
-  | { type: 'Replay' | 'StorageFailed' | 'Retry' };
+  | { type: 'Replay' | 'StorageFailed' | 'Retry' | 'StoredRefusal' };
 export const createWriteState = (scope: MembershipScope, intent: Intent): WriteState => ({ scope: structuredClone(scope), intent: structuredClone(intent), status: 'Intent', refusal: null, request: null, dependent: null, folder_completed: false, used: [] });
 const sameScope = (a: MembershipScope, b: MembershipScope): boolean => a.owner === b.owner && a.container === b.container && a.endpoint === b.endpoint && a.host === b.host && a.projection === b.projection;
 const sameId = (a: WriteIdentity, b: WriteIdentity): boolean => a.actor === b.actor && a.action_id === b.action_id && a.idempotency_key === b.idempotency_key;
@@ -100,6 +100,6 @@ export const writeReducer: JournalReducer<WriteState, WriteEvent> = {
   reduce,
   encode: state => parse(stateShape, { scope: state.scope, intent: state.intent, status: state.status, refusal: state.refusal, request: state.request, dependent: state.dependent, folder_completed: state.folder_completed, used: state.used }),
   decode: value => parse(stateShape, value) as WriteState | undefined,
-  persisted: (state, completion) => ({ type: completion ? 'CompletionPersisted' : 'Persisted', identity: structuredClone(state.request!.identity) }),
+  persisted: (state, completion) => state.request ? { type: completion ? 'CompletionPersisted' : 'Persisted', identity: structuredClone(state.request.identity) } : { type: 'StoredRefusal' },
   storageFailed: () => ({ type: 'StorageFailed' }),
 };

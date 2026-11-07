@@ -92,3 +92,14 @@ test('codec strips nested non-durable fields and rejects invalid durable fields 
 test('storage failures never send and preserve partial-application classification', async () => {
   for (const completed of [false, true]) { const state = createWriteState(scope, intent); state.folder_completed = completed; const env = setup(undefined, true); await assert.rejects(env.host.dispatch(state, plan()), /storage/); assert.equal(state.status, completed ? 'PartiallyApplied' : 'Refused'); assert.equal(state.refusal, 'Storage'); assert.equal(env.sent.length, 0); }
 });
+test('initial empty or invalid plans durably refuse without a request or send', async () => {
+  for (const edit of [{ folders: [], memberships: [] }, { folders: [{ op: 'retire' }], memberships: [] }]) {
+    const state = createWriteState(scope, intent), env = setup();
+    await env.host.dispatch(state, plan(edit));
+    assert.equal(state.status, 'Refused'); assert.equal(state.refusal, 'InvalidPlan'); assert.equal(state.request, null);
+    assert.equal(env.sent.length, 0); assert.deepEqual(env.effects, ['ReadBase']);
+    assert.deepEqual(JSON.parse(env.raw()).state, writeReducer.encode(state));
+    const restart = setup(JSON.parse(env.raw()).state), restored = await restart.host.restore(); await restart.host.resume(restored);
+    assert.equal(restored.state.status, 'Refused'); assert.equal(restart.sent.length, 0);
+  }
+});
