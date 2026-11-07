@@ -501,7 +501,10 @@ describe('mission decode evidence', () => {
         _tag: 'Observed', freshness: 'live', value: [{ id: mission.id }],
       })
       expect(live.registry.get(live.source.missionsDecode!)).toMatchObject({
-        decodeStale: false, undecodable: [{ _tag: 'Rejected', id: broken.id, path: expect.stringContaining('runs') }],
+        decodeStale: false,
+        undecodable: expect.arrayContaining([
+          expect.objectContaining({ _tag: 'Rejected', id: broken.id, path: 'runs' }),
+        ]),
       })
       frame([broken])
       yield* settle
