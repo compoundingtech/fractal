@@ -12,9 +12,9 @@ pub enum LiveEvent {
 #[derive(Debug)]
 pub enum Error {
     Storage(io::Error), Codec(serde_json::Error), Restore(fractal_sidebar::edits::RestoreError),
-    NoStateDirectory, ActorMismatch,
+    NoStateDirectory, ActorMismatch, ScopeMismatch,
 }
-pub struct Store { path: PathBuf, pub edits: Edits, blocked: bool }
+pub struct Store { path: PathBuf, scope: Scope, pub edits: Edits, blocked: bool }
 impl Store {
     pub fn path(scope: &Scope) -> Result<PathBuf, Error> {
         use std::hash::{Hash, Hasher};
@@ -23,7 +23,7 @@ impl Store {
         serde_json::to_vec(scope).map_err(Error::Codec)?.hash(&mut hash);
         Ok(dir.join(format!("sidebar-journal-v1-{:016x}.json", hash.finish())))
     }
-    pub fn new(path: PathBuf, edits: Edits) -> Self { Self { path, edits, blocked: false } }
+    pub fn new(path: PathBuf, edits: Edits) -> Self { Self { path, scope: edits.scope().clone(), edits, blocked: false } }
     /// Missing means no pending edit; every other read/restore failure is explicit.
     pub fn restore(path: PathBuf, scope: &Scope) -> Result<Option<(Self, Vec<Effect>)>, Error> {
         let bytes = match fs::read(&path) {
@@ -37,7 +37,8 @@ impl Store {
     fn persist(&self) -> Result<(), Error> {
         let bytes = self.edits.journal().map_err(Error::Codec)?;
         let parent = self.path.parent().ok_or_else(|| Error::Storage(io::Error::other("journal has no parent")))?;
-        fs::create_dir_all(parent).map_err(Error::Storage)?;
+        // Sync each new directory and its parent before acknowledging the record below.
+        durable_directory(parent).map_err(Error::Storage)?;
         let temp = self.path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
         let result = (|| -> io::Result<()> {
             let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
@@ -58,13 +59,14 @@ impl Store {
     }
     /// Recovery effects and ordinary reducer effects take the identical durable path.
     /// A failed barrier poisons this executor: reopen from disk before any further sends.
-    pub async fn execute<F, Fut>(&mut self, effects: Vec<Effect>, actor: &str, mut send: F) -> Result<Vec<Effect>, Error>
+    pub async fn execute<F, Fut>(&mut self, effects: Vec<Effect>, selected: impl Fn() -> Scope, actor: &str, mut send: F) -> Result<Vec<Effect>, Error>
     where F: FnMut(ActionRequest) -> Fut,
           Fut: Future<Output = Result<Envelope<ActionResult>, ClientError>> {
         if self.blocked { return Err(Error::Storage(io::Error::other("journal requires recovery"))); }
         let mut queue: VecDeque<_> = effects.into();
         let mut external = Vec::new();
         while let Some(effect) = queue.pop_front() {
+            if selected() != self.scope { return Err(Error::ScopeMismatch); }
             let result = match effect {
                 Effect::PersistPending | Effect::PersistCompletion => self.persist(),
                 Effect::PersistRemoval => self.remove(),
@@ -95,6 +97,16 @@ impl Store {
         }
         Ok(external)
     }
+}
+
+fn durable_directory(path: &std::path::Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    // Include existing ancestors: a prior failed sync may have left a visible but
+    // non-durable directory. Reopening after failure must repair that barrier too.
+    for ancestor in path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+        fs::File::open(ancestor)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Execute only the two sidebar action kinds, retaining the adapter's exact payload/fence.
@@ -139,7 +151,7 @@ mod tests {
         let (mut store, effects) = staged(path.clone(), false);
         let exact = store.edits.request().cloned().unwrap();
         let mut sent = 0;
-        store.execute(effects, "actor/test", |wire| {
+        store.execute(effects, scope, "actor/test", |wire| {
             sent += 1;
             let (restored, _) = Edits::restore(&fs::read(&path).unwrap(), &scope()).unwrap();
             assert_eq!(restored.request(), Some(&exact));
@@ -150,7 +162,7 @@ mod tests {
         assert_eq!(store.edits.status, Status::UnknownDelivery);
         let (mut store, effects) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
         assert_eq!(effects, vec![Effect::PersistPending]);
-        store.execute(effects, "actor/test", |wire| {
+        store.execute(effects, scope, "actor/test", |wire| {
             assert_eq!(wire, client::write_request(&exact).unwrap()); lost(wire)
         }).await.unwrap();
         let effects = store.edits.reduce(Event::Observed(id(2)));
@@ -158,7 +170,7 @@ mod tests {
         store.persist().unwrap();
         let (mut store, recovery) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
         assert_eq!(effects, recovery);
-        store.execute(recovery, "actor/test", |_| async { panic!("completed request resent") }).await.unwrap();
+        store.execute(recovery, scope, "actor/test", |_| async { panic!("completed request resent") }).await.unwrap();
         assert!(!path.exists());
         assert!(Store::restore(path, &scope()).unwrap().is_none());
     }
@@ -180,7 +192,7 @@ mod tests {
             store.persist().unwrap();
             let (mut restored, effects) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
             let mut sends = 0;
-            let external = restored.execute(effects, "actor/test", |wire| { sends += 1; lost(wire) }).await.unwrap();
+            let external = restored.execute(effects, scope, "actor/test", |wire| { sends += 1; lost(wire) }).await.unwrap();
             assert_eq!(sends, usize::from(matches!(stage, 0 | 1 | 2 | 6)));
             if matches!(stage, 3 | 4 | 5) { assert!(external.contains(&Effect::ReadBase)); }
         }
@@ -189,10 +201,10 @@ mod tests {
         assert!(effects.is_empty());
         store.edits.reduce(Event::Persisted(id(2)));
         let effects = store.edits.reduce(Event::Refused(id(2), fractal_sidebar::edits::Refusal::Unauthorized));
-        store.execute(effects, "actor/test", |_| async { panic!("refused request resent") }).await.unwrap();
+        store.execute(effects, scope, "actor/test", |_| async { panic!("refused request resent") }).await.unwrap();
         let (mut restored, effects) = Store::restore(path, &scope()).unwrap().unwrap();
         assert_eq!(restored.edits.status, Status::PartiallyApplied);
-        restored.execute(effects, "actor/test", |_| async { panic!("partial request resent") }).await.unwrap();
+        restored.execute(effects, scope, "actor/test", |_| async { panic!("partial request resent") }).await.unwrap();
     }
     #[tokio::test]
     async fn sidebar_store_storage_failure_and_private_record() {
@@ -201,17 +213,54 @@ mod tests {
         let blocker = root.path().join("file");
         fs::write(&blocker, b"not a directory").unwrap();
         let (mut store, effects) = staged(blocker.join("pending.json"), false);
-        assert!(matches!(store.execute(effects, "actor/test", |_| async { panic!("unjournaled send") }).await, Err(Error::Storage(_))));
+        assert!(matches!(store.execute(effects, scope, "actor/test", |_| async { panic!("unjournaled send") }).await, Err(Error::Storage(_))));
         assert_eq!(store.edits.refusal, Some(fractal_sidebar::edits::Refusal::Storage));
-        assert!(store.execute(vec![Effect::Send], "actor/test", |_| async { panic!("poisoned send") }).await.is_err());
+        assert!(store.execute(vec![Effect::Send], scope, "actor/test", |_| async { panic!("poisoned send") }).await.is_err());
         let path = root.path().join("private.json");
         let (mut store, effects) = staged(path.clone(), false);
         // Authentication remains captured by the transport, never by Edits or its record.
         let credential = ["private", "session", "credential"].join("-");
-        store.execute(effects, "actor/test", |wire| { assert!(!credential.is_empty()); lost(wire) }).await.unwrap();
+        store.execute(effects, scope, "actor/test", |wire| { assert!(!credential.is_empty()); lost(wire) }).await.unwrap();
         assert!(!String::from_utf8(fs::read(&path).unwrap()).unwrap().contains(&credential));
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let mut wrong = scope(); wrong.endpoint.push_str("/other");
         assert!(matches!(Store::restore(path, &wrong), Err(Error::Restore(_))));
+    }
+    #[tokio::test]
+    async fn sidebar_store_scope_switch_fences_every_effect() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pending.json");
+        let (mut store, _) = staged(path.clone(), false);
+        store.persist().unwrap();
+        let original = fs::read(&path).unwrap();
+        for effect in [Effect::Send, Effect::ReadBase, Effect::Replan, Effect::PersistPending, Effect::PersistCompletion, Effect::PersistRemoval] {
+            for field in 0..5 {
+                let mut selected = scope();
+                match field { 0 => selected.owner.push('x'), 1 => selected.container.push('x'), 2 => selected.endpoint.push('x'), 3 => selected.host.push('x'), _ => selected.projection.push('x') }
+                assert!(matches!(store.execute(vec![effect], || selected.clone(), "actor/test", |_| async { panic!("obsolete send") }).await, Err(Error::ScopeMismatch)));
+                assert_eq!(fs::read(&path).unwrap(), original);
+                assert_eq!(store.edits.status, Status::AwaitingPersistence);
+            }
+        }
+        // Re-read the selection after await, before executing the acknowledgement's effects.
+        let selected = std::cell::RefCell::new(scope());
+        let error = store.execute(vec![Effect::PersistPending], || selected.borrow().clone(), "actor/test", |wire| {
+            selected.borrow_mut().host.push('x'); lost(wire)
+        }).await.unwrap_err();
+        assert!(matches!(error, Error::ScopeMismatch));
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    #[tokio::test]
+    async fn sidebar_store_first_use_creates_durable_directory_chain() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("new-state/tui/journals");
+        let path = parent.join("pending.json");
+        let (mut store, effects) = staged(path.clone(), false);
+        let exact = store.edits.request().cloned().unwrap();
+        store.execute(effects, scope, "actor/test", |wire| {
+            assert!(parent.is_dir());
+            let (restored, _) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
+            assert_eq!(restored.edits.request(), Some(&exact)); lost(wire)
+        }).await.unwrap();
     }
 }
