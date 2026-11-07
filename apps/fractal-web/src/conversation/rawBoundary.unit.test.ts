@@ -292,6 +292,53 @@ describe('native closed transcript boundary', () => {
           .toEqual(['Rule applied: no-force-push', 'Visible words'])
       })
     })
+    describe.each([
+      ['record first', (record: unknown, other: unknown) => [record, other]],
+      ['other first', (record: unknown, other: unknown) => [other, record]],
+    ])('a body that repeats the record, beside another block, %s', (_, order) => {
+      const copy = `[omp session_init]\n${JSON.stringify(session)}`
+      const beside = (other: unknown, fields: object = {}) => {
+        const blocks = [block('source_record', { visibility: 'internal', payload: { raw: session } }), ...order(status('session_init', session), other)]
+        return project(entry(blocks, { body: { text: copy, media_type: 'text/plain', blocks, ...fields } }))
+      }
+      const failedJob = block('job', { source_type: 'content', view: { type: 'job', jobs: [{ id: 'j', state: 'failed' }] } })
+      it.each([false, true])('keeps a failed job, system events %s', shown => {
+        const items = beside(failedJob)
+        expect(items).toHaveLength(2)
+        expect(lane(items, shown)).toContainEqual(expect.objectContaining({ _tag: 'Event', kind: 'background-job', notice: expect.objectContaining({ state: 'failed' }) }))
+        expect(lane(items, shown).some(item => item._tag === 'Event' && item.notice?._tag === 'SystemRecord')).toBe(shown)
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it.each([
+        ['irc', block('irc', { source_type: 'content', view: { type: 'irc', from: 'peer', message: 'Hello', message_id: 'irc-1' } }), { _tag: 'Event', kind: 'irc' }],
+        ['compaction', block('status', { source_type: 'content', view: { type: 'compaction', summary: 'Short summary' } }), { _tag: 'Event', kind: 'compaction' }],
+        ['a model change', block('status', { source_type: 'status', view: { type: 'model_change', model: 'example/next', fallback: false } }), { _tag: 'Notice', text: 'Model changed to example/next' }],
+        ['an unknown block', block('future-kind', { source_type: 'future' }), { _tag: 'Unsupported', recordKind: 'future-kind' }],
+        ['an unknown record', status('future_record', { type: 'future_record' }), { _tag: 'Unsupported', recordKind: 'future_record' }],
+      ])('keeps %s', (__, other, expected) => {
+        const items = beside(other)
+        for (const shown of [false, true]) expect(lane(items, shown)).toContainEqual(expect.objectContaining(expected))
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it('keeps an attachment without reading the body as its text', () => {
+        const items = beside(block('image', { source_type: 'content' }), { attachment_id: 'blob/image' })
+        const text = items.find(item => item._tag === 'Text')
+        expect(text).toMatchObject({ text: '', attachments: [{ id: 'blob/image' }] })
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it.each([
+        ['text', block('text', { source_type: 'content' })],
+        ['reasoning', block('reasoning', { source_type: 'thinking' })],
+        ['a dropped view', block('status', { visibility: 'visible', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })],
+      ])('adds no empty row for %s', (__, other) => {
+        expect(beside(other)).toMatchObject([{ _tag: 'Event', id: 'timeline-entry/raw/1', notice: { _tag: 'SystemRecord' } }])
+      })
+      it('keeps a hidden block inspectable without the record or its copy', () => {
+        const items = beside(block('text', { visibility: 'internal' }))
+        expect(items.map(item => item._tag)).toEqual(['Event', 'UnknownEvent'])
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+    })
     it('keeps a hidden body hidden beside a record, without the record inside its disclosure', () => {
       const blocks = [status('session_init', session), block('text', { visibility: 'internal' })]
       const items = project(entry(blocks, { body: { text: 'Internal words', media_type: 'text/plain', blocks } }))
