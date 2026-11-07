@@ -10080,6 +10080,9 @@ async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
         State(state.clone()), Extension(new_client_snapshot(&state)),
         Query(ClientListQuery { history, ..ClientListQuery::default() }),
     ).await.unwrap();
+    assert!(before.items[0]["delivery"]["reason"].as_str().unwrap()
+        .contains("since the daemon started 5s ago"),
+        "blocking assessments must retain the fixture's frozen uptime");
     let mut first_other_cut = None;
     for marker in 1..=12 {
         advance(marker);

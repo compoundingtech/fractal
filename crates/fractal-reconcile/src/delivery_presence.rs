@@ -442,6 +442,31 @@ pub mod uptime_pin {
         pub(super) static CLOCKS: RefCell<Option<HashMap<String, IncarnationStateClocks>>> = const { RefCell::new(None) };
     }
 
+    /// Carry a test's frozen assessment clock across its blocking read boundary.
+    pub struct Context(Option<Duration>, Option<HashMap<String, IncarnationStateClocks>>);
+
+    pub fn capture() -> Context {
+        Context(PINNED.get(), CLOCKS.with_borrow(Clone::clone))
+    }
+
+    impl Context {
+        pub fn enter(self) -> impl Drop {
+            let previous = capture();
+            PINNED.set(self.0);
+            CLOCKS.set(self.1);
+            Restore(previous)
+        }
+    }
+
+    struct Restore(Context);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PINNED.set(self.0.0);
+            CLOCKS.set(self.0.1.take());
+        }
+    }
+
     /// Assessments on this thread read `uptime`, and keep state clocks of their own, until the
     /// returned pin drops. A nested pin shares the clocks of the pin it is inside.
     pub fn pin(uptime: Duration) -> Pin {
