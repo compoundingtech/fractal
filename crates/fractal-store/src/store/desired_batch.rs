@@ -33,7 +33,16 @@ impl Store {
             let mut desired = if request.subjects.is_empty() {
                 self.desired_subjects()?
             } else {
-                self.desired_subjects_named(&request.subjects)?
+                for subject in &request.subjects {
+                    smallclaims::touched::note_read(|| subject.clone());
+                }
+                let connection = self.readers.get();
+                let mut statement = connection.prepare_cached(
+                    "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+                     FROM desired WHERE subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
+                )?;
+                statement.query_map([serde_json::to_string(&request.subjects)?], desired_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
             };
             // Missions have their own transactionally maintained declaration projection.
             // They are not rows in `desired`, but must be included in an all-kind read.
