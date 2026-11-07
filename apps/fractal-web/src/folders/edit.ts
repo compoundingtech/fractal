@@ -173,7 +173,7 @@ export interface ArrangementEditor {
   readonly close: () => void
 }
 
-/** One owner, one serialized queue, one reserved creation subject. No client persistence. */
+/** Legacy v1 serialized queue. V2 persistence effects live in the unwired sidebarJournal.ts host. */
 export const createArrangementEditor = ({ owner, actions, read, onState }: {
   readonly owner: string
   readonly actions: ArrangementActionPort

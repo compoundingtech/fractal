@@ -13,6 +13,18 @@ impl Edits {
             return Ok(Cow::Borrowed(observed));
         }
         let Some(request) = self.request() else { return Ok(Cow::Borrowed(observed)); };
+        // A folder batch can change other server-resolved edges (cuts/lifts/orphans).
+        // SidebarTree lacks the resolver's retained graph; do not preview stale edges.
+        if matches!(&request.operations, Operations::Folders(_)) && observed.nodes.values().any(|row| matches!(row.node, NodeRef::Folder { .. }) && row.parent != row.shown_under) {
+            return Ok(Cow::Borrowed(observed));
+        }
+        // Membership reads expose only effective buckets. A root row may retain an
+        // invisible raw reference to a newly created ID, so its new bucket is unknowable.
+        if let Operations::Folders(operations) = &request.operations
+            && observed.nodes.values().any(|row| matches!(row.node, NodeRef::Subject { .. }) && row.shown_under == Parent::Root {})
+            && operations.iter().any(|operation| matches!(operation, Folder::FolderCreate { id, .. } if !observed.nodes.values().any(|row| [&row.parent, &row.shown_under].into_iter().any(|parent| matches!(parent, Parent::Folder { id: referenced } if referenced == id))))) {
+            return Ok(Cow::Borrowed(observed));
+        }
         let mut tree = observed.clone();
         let mut deleted = std::collections::BTreeSet::new();
         match &request.operations {
