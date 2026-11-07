@@ -14,6 +14,7 @@ import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { credentialExpiredMessage, type ConversationPage, type Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
 import { toolKindFor } from '../conversation/toolClassification.ts'
+import { isHiddenSystemRecord } from '../conversation/systemRecords.ts'
 
 /** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
@@ -52,7 +53,7 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
   item._tag === 'Text' && item.role === 'user'
 
 
-const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent' && item.mixedContent !== true
+const isOmittedItem = (item: ConversationItem): boolean => (item._tag === 'UnknownEvent' && item.mixedContent !== true) || isHiddenSystemRecord(item)
 
 
 /** Fallback titles when the call records no human intent; read/run/edit keep their established wording. */
@@ -321,7 +322,7 @@ export interface LastSeenActivity {
 
 /**
  * A stale conversation is last-known, not live: in-flight work stops reading as running, and each call still running
- * at the last observation leaves the work log for the "Last seen" tail. Settled history is untouched.
+ * at the last observation leaves the work log for the "Last seen" tail, and thinking stops streaming. Settled history is untouched.
  */
 export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly turns: readonly TranscriptTurn[]; readonly lastSeen: LastSeenActivity } => {
   const lastRunning = turns.findLast(turn => turn.work.running)
@@ -329,10 +330,13 @@ export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly t
   return {
     turns: turns.map(turn => {
       const running = new Set(turn.work.calls.filter(call => call.status === 'running').map(call => call.id))
-      if (!turn.work.running && running.size === 0) return turn
+      const thinking = turn.items.some(item => item._tag === 'Reasoning' && item.streaming)
+      if (!turn.work.running && running.size === 0 && !thinking) return turn
       return {
         ...turn,
-        items: turn.items.filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status])),
+        items: turn.items
+          .filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status]))
+          .map(item => item._tag === 'Reasoning' && item.streaming ? { ...item, streaming: false } : item),
         work: { ...turn.work, running: false, foldable: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
       }
     }),

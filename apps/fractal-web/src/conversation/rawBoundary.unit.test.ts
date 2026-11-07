@@ -202,6 +202,66 @@ describe('native closed transcript boundary', () => {
       expect(items[0]).not.toHaveProperty('blocks')
     }
   })
+  describe('typed OMP system records', () => {
+    const status = (kind: string, details: object, raw: object = details) => block('status', { source_type: kind, view: { type: 'omp_event', kind, details }, payload: { raw } })
+    const session = { type: 'session_init', agent: 'task', resolvedModel: 'example/model', systemPrompt: 'SYSTEM_PROMPT_SENTINEL', task: 'TASK_SENTINEL', tools: ['TOOL_SENTINEL'] }
+    const usage = { type: 'model_usage', model: 'example/model', provider: 'example', usage: { input: 10, output: 2, totalTokens: 12, cost: { total: 0.5 } } }
+    const digest = { type: 'custom', customType: 'system-prompt-digest', data: 'abc123' }
+    const lane = (items: Parameters<typeof prepareTranscriptTurns>[0], showSystemEvents: boolean) => prepareTranscriptTurns(items, { showSystemEvents, firstTurnComplete: true }).flatMap(turn => turn.items)
+
+    it.each([
+      ['model_usage', [status('model_usage', usage)], 'Model usage', 'example/model · 12 tokens'],
+      ['session_init', [status('session_init', session)], 'Session started', 'task · example/model'],
+      ['system-prompt-digest', [block('unknown', { source_type: 'custom', payload: { raw: digest } })], 'System prompt digest', 'abc123'],
+    ])('hides %s by default and shows it with details under system events', (kind, blocks, title, text) => {
+      const items = project(entry(blocks))
+      expect(items).toMatchObject([{ _tag: 'Event', kind: 'system-record', title, text, notice: { _tag: 'SystemRecord', record: kind } }])
+      expect(lane(items, false)).toEqual([])
+      expect(lane(items, true)).toEqual(items)
+      expect(items[0]).not.toHaveProperty('blocks')
+    })
+    it('reports usage numbers in its details, which the shared redaction would hide under token keys', () => {
+      const [item] = project(entry([status('model_usage', usage)]))
+      const payload = item?._tag === 'Event' ? item.notice?.payload ?? '' : ''
+      expect(JSON.parse(payload)).toMatchObject({ model: 'example/model', usage: { input: 10, total: 12, costUsd: 0.5 } })
+    })
+    it('never carries the system prompt, task or tools of session_init, whichever view is shown', () => {
+      const items = project(entry([status('session_init', session)], { body: { text: `[omp session_init]\n${JSON.stringify(session)}`, media_type: 'text/plain', blocks: [status('session_init', session)] } }))
+      for (const shown of [false, true]) expect(JSON.stringify(lane(items, shown))).not.toMatch(/SENTINEL/)
+      expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      const payload = items[0]?._tag === 'Event' ? items[0].notice?.payload ?? '' : ''
+      expect(JSON.parse(payload)).toMatchObject({ agent: 'task', notShown: ['systemPrompt', 'task', 'tools'] })
+    })
+    it.each([
+      [{ injectedRules: ['no-force-push'] }, 'Rule applied: no-force-push'],
+      [{ injectedRules: ['/home/example/.omp/rules/no-force-push.md'] }, 'Rule applied: no-force-push'],
+      [{ injectedRules: [{ name: 'first' }, 'second'] }, 'Rules applied: first, second'],
+      [{ injectedRules: ['one', 'two', 'three', 'four'] }, 'Rules applied: one, two, three +1'],
+      [{ injectedRules: ['Never force push.\nThe whole rule text, not a name.'] }, 'Rule applied'],
+      [{ injectedRules: ['x'.repeat(200)] }, 'Rule applied'],
+      [{ injectedRules: [] }, 'Rule applied'],
+      [{}, 'Rule applied'],
+    ])('keeps ttsr_injection as one quiet visible row %#', (record, text) => {
+      const items = project(entry([status('ttsr_injection', record)]))
+      expect(items).toMatchObject([{ _tag: 'Notice', kind: 'event', text }])
+      expect(lane(items, false)).toEqual(items)
+    })
+    it('falls back when oversized details arrive as marked text with no raw record', () => {
+      const bounded = block('status', { source_type: 'ttsr_injection', view: { type: 'omp_event', kind: 'ttsr_injection', details: 'long\n[st truncated this native timeline value]' } })
+      expect(project(entry([bounded]))).toMatchObject([{ _tag: 'Notice', text: 'Rule applied' }])
+    })
+    it('names a genuinely unknown record by its kind, and keeps its F2 marker visible', () => {
+      const items = project(entry([status('future_record', { type: 'future_record' })]))
+      expect(items).toMatchObject([{ _tag: 'Unsupported', recordKind: 'future_record', reason: 'missing-view' }])
+      expect(lane(items, false)).toEqual(items)
+      const custom = project(entry([block('unknown', { source_type: 'custom', payload: { raw: { customType: 'future-custom' } } })]))
+      expect(custom).toMatchObject([{ _tag: 'Unsupported', recordKind: 'future-custom' }])
+    })
+    it('keeps a visible custom message that shares a record name as prose', () => {
+      const blocks = [block('text', { source_type: 'content', view: { type: 'omp_event', kind: 'model_usage', content: 'Visible words' } })]
+      expect(project(entry(blocks, { body: { text: 'Visible words', media_type: 'text/plain', blocks } }))).toMatchObject([{ _tag: 'Text', text: 'Visible words' }])
+    })
+  })
   it('keeps a good block alongside a dropped block marker', () => {
     const items = project(entry([{ id: 'bad', kind: 23, source_type: 'omp', payload: {} }, block('text')], { role: 'assistant', body: { text: 'Good prose', media_type: 'text/plain', blocks: [{ id: 'bad', kind: 23, source_type: 'omp', payload: {} }, block('text')] } }))
     expect(items).toMatchObject([{ _tag: 'Unsupported', reason: 'undecodable-block' }, { _tag: 'Text', text: 'Good prose' }])

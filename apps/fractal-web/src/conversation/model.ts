@@ -118,6 +118,8 @@ export const HarnessNotice = Schema.TaggedUnion({
     payload: Schema.String, raw: Schema.String,
   },
   Compaction: { payload: Schema.String, raw: Schema.String },
+  /** Harness bookkeeping shown only under system events; `payload` is the redacted, capped preview. */
+  SystemRecord: { record: Schema.String, payload: Schema.String, raw: Schema.String },
 })
 export type HarnessNotice = typeof HarnessNotice.Type
 
@@ -223,7 +225,7 @@ export const ConversationItem = Schema.TaggedUnion({
   Event: {
     ...sourceFacts,
     id: Schema.String,
-    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result', 'irc', 'background-job', 'compaction']),
+    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result', 'irc', 'background-job', 'compaction', 'system-record']),
     title: Schema.String,
     text: Schema.String,
     sender: Sender,

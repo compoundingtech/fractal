@@ -1463,7 +1463,7 @@ export const MixedContent: Story = {
     await expect(canvas.queryByTestId('mixed-content-body')).toBeNull()
     await expect(canvasElement.textContent).not.toContain('Synthetic visible message body.')
     await expect(canvasElement.textContent).not.toContain('synthetic-internal-kind')
-    const control = canvas.getByText('event · Synthetic ordinary notice control.')
+    const control = canvas.getByText('Synthetic ordinary notice control.')
     await expect(control).toBeVisible()
     await expect(control.closest('[data-testid="transcript-message"]')?.querySelector('button')).toBeNull()
     show.focus()
