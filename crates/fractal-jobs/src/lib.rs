@@ -101,6 +101,7 @@ pub enum State {
     Completed { outcome: ExitOutcome }, Refused { refusal: RefusalReason },
     Withdrawn, Cancelled, Failed { failure: FailureReason },
 }
+/// Holder Refuse/Withdraw confirms nothing launched, including cancellation during slot wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
@@ -124,8 +125,8 @@ pub fn transition(state: State, event: Event) -> Result<State, TransitionError> 
         (S::Queued, E::Prepare) => S::Preparing,
         (S::Preparing, E::Prepared) => S::Prepared,
         (S::Queued | S::Prepared, E::LaunchIntent) => S::Launching,
-        (S::Queued | S::Preparing | S::Prepared, E::Refuse { refusal }) => S::Refused { refusal },
-        (S::Queued | S::Preparing | S::Prepared, E::Withdraw) => S::Withdrawn,
+        (S::Queued | S::Preparing | S::Prepared | S::Launching, E::Refuse { refusal }) => S::Refused { refusal },
+        (S::Queued | S::Preparing | S::Prepared | S::Launching | S::CancelRequested, E::Withdraw) => S::Withdrawn,
         (S::Launching | S::Recovering, E::Started) => S::Running,
         (S::Launching | S::Running, E::Recover) => S::Recovering,
         (S::CancelRequested, E::Recover) => S::RecoveringCancelRequested,

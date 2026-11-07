@@ -35,6 +35,9 @@ struct Table { states: Vec<State>, events: Vec<Event>, edges: Vec<[usize; 3]> }
 #[test]
 fn transition_fixture_refuses_every_invalid_edge() {
     let table: Table = serde_json::from_str(include_str!("transitions.json")).unwrap();
+    let waiting = transition(State::Launching, Event::CancelRequest).unwrap();
+    assert_eq!(transition(waiting, Event::Withdraw), Ok(State::Withdrawn));
+    assert_eq!(transition(State::Launching, Event::Refuse { refusal: RefusalReason::HolderPrecondition }), Ok(State::Refused { refusal: RefusalReason::HolderPrecondition }));
     for (s, state) in table.states.iter().enumerate() {
         round_trip(state);
         for (e, event) in table.events.iter().enumerate() {
