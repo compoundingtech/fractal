@@ -50,9 +50,38 @@ class EffectLintRatchetTest(unittest.TestCase):
         self.assertEqual(compare({'packages/fractal-sdk': {'newRule': 1}, **baseline}, baseline),
                          ['packages/fractal-sdk newRule: 1 findings, baseline allows 0'])
 
+    def test_the_base_baseline_cannot_be_raised_except_for_a_newly_configured_rule(self):
+        raised = api['raised']
+        base = {'effect': {'apps/fractal-web': {'schemaSync': 2}}, 'oxlint': {'packages/fractal-ui': {'eslint(func-style)': 3}},
+                'configured': {'effect': ['schemaSync'], 'oxlint': ['func-style']}}
+        self.assertEqual(raised(base, base), [])
+        lowered = dict(base, effect={'apps/fractal-web': {'schemaSync': 1}})
+        self.assertEqual(raised(lowered, base), [])
+        higher = dict(base, oxlint={'packages/fractal-ui': {'eslint(func-style)': 4}})
+        self.assertEqual(raised(higher, base),
+                         ['oxlint: packages/fractal-ui eslint(func-style): baseline raised from 3 to 4 against the base'])
+        # A default-on rule nobody configures is still ratcheted from zero.
+        unconfigured = dict(base, effect={'apps/fractal-web': {'schemaSync': 2, 'floatingEffect': 1}})
+        self.assertEqual(len(raised(unconfigured, base)), 1)
+        # Turning a rule on in this change may record its existing findings.
+        enabled = dict(base, effect={'apps/fractal-web': {'schemaSync': 2, 'globalDate': 9}},
+                       configured={'effect': ['globalDate', 'schemaSync'], 'oxlint': ['func-style']})
+        self.assertEqual(raised(enabled, base), [])
+        reacts = dict(base, oxlint={'packages/fractal-ui': {'eslint(func-style)': 3, 'react-hooks(exhaustive-deps)': 2}},
+                      configured={'effect': ['schemaSync'], 'oxlint': ['func-style', 'react/exhaustive-deps']})
+        self.assertEqual(raised(reacts, base), [])
+
+    def test_the_configured_rules_are_read_from_the_tsconfigs_and_the_oxlint_config(self):
+        configured = api['configured_rules']()
+        self.assertIn('preferSchemaOverJson', configured['effect'])
+        self.assertIn('asyncFunction', configured['effect'])
+        self.assertIn('overeng/named-args', configured['oxlint'])
+        self.assertNotIn('typescript/consistent-return', configured['oxlint'])
+
     def test_the_baseline_lists_every_ratcheted_project_and_package(self):
         baseline = json.loads(api['BASELINE'].read_text())
-        self.assertEqual(set(baseline), {'tools', 'effect', 'oxlint'})
+        self.assertEqual(set(baseline), {'tools', 'effect', 'oxlint', 'configured'})
+        self.assertEqual(baseline['configured'], api['configured_rules']())
         for project in api['PROJECTS']:
             config = (ROOT / project).read_text()
             self.assertIn('"name": "@effect/language-service"', config, project)

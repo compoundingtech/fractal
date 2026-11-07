@@ -6,7 +6,9 @@ Effect diagnostics come from the effect-tsgo compiler (`tsgo` in `nix develop .#
 the root `.oxlintrc.json` (generated from effect-utils' shared base). Counts are kept per package and rule
 in `scripts/ci-fractal-web-effect-lint.baseline.json`: a count above its baseline fails, and so does a
 count below it, so fixed findings are removed from the baseline in the same change and cannot be spent
-again later. `--update` rewrites the baseline from the current tree.
+again later. `--update` rewrites the baseline from the current tree. Against `$BASE_SHA` (the pull
+request or merge group base) the committed baseline may not raise any count, except for a rule the
+change itself newly configures; a base without the baseline file is the rollout and is not compared.
 """
 
 import argparse
@@ -141,12 +143,77 @@ def run_oxlint(oxlint):
     return parse_oxlint(text)
 
 
+def enabled(severity):
+    """Whether an Effect or oxlint severity value turns its rule on."""
+    level = severity[0] if isinstance(severity, list) else severity
+    return level not in ('off', 0, 'allow')
+
+
+def configured_rules():
+    """Rules the tsconfig plugin entries and the oxlint config name explicitly with a non-off severity."""
+    effect = set()
+    for project in PROJECTS:
+        options = json.loads((ROOT / project).read_text())['compilerOptions']
+        for plugin in options.get('plugins', []):
+            for scope in [plugin, *(entry['options'] for entry in plugin.get('overrides', []))]:
+                effect |= {rule for rule, level in scope.get('diagnosticSeverity', {}).items() if enabled(level)}
+    config = json.loads((ROOT / '.oxlintrc.json').read_text())
+    oxlint = set()
+    for scope in [config, *config.get('overrides', [])]:
+        oxlint |= {rule for rule, level in scope.get('rules', {}).items() if enabled(level)}
+    return {'effect': sorted(effect), 'oxlint': sorted(oxlint)}
+
+
+def rule_of(key):
+    """A reported rule as configs name it: oxlint's `eslint(x)` is `x`, `react-hooks(x)` is `react/x`, `ns(x)` is `ns/x`."""
+    plugin = re.fullmatch(r'([^()]+)\(([^()]+)\)', key)
+    if plugin is None:
+        return key
+    namespace, rule = plugin.groups()
+    return rule if namespace == 'eslint' else f'{"react" if namespace == "react-hooks" else namespace}/{rule}'
+
+
+def raised(head, base):
+    """Package/rule counts the head baseline raises above the base's, except for rules the head newly configures."""
+    newly = {kind: set(head['configured'][kind]) - set(base.get('configured', {}).get(kind, [])) for kind in ('effect', 'oxlint')}
+    rows = []
+    for kind in ('effect', 'oxlint'):
+        for package, rules in head[kind].items():
+            for rule, count in rules.items():
+                allowed = base[kind].get(package, {}).get(rule, 0)
+                if count > allowed and rule_of(rule) not in newly[kind]:
+                    rows.append(f'{kind}: {package} {rule}: baseline raised from {allowed} to {count} against the base')
+    return rows
+
+
+def baseline_at(ref):
+    """The committed baseline at a revision, or None before the ratchet existed there."""
+    if subprocess.run(['git', 'cat-file', '-e', f'{ref}^{{commit}}'], cwd=ROOT, capture_output=True).returncode != 0:
+        subprocess.run(['git', 'fetch', '--quiet', '--depth=1', 'origin', ref], cwd=ROOT, check=True)
+    listed = subprocess.run(['git', 'ls-tree', '--name-only', ref, '--', str(BASELINE.relative_to(ROOT))],
+                            cwd=ROOT, check=True, capture_output=True, text=True).stdout.strip()
+    if not listed:
+        return None
+    return json.loads(subprocess.run(['git', 'show', f'{ref}:{BASELINE.relative_to(ROOT)}'],
+                                     cwd=ROOT, check=True, capture_output=True, text=True).stdout)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--update', action='store_true', help='rewrite the baseline from the current tree')
     parser.add_argument('--tsgo', default=os.environ.get('FRACTAL_EFFECT_TSGO', 'tsgo'))
     parser.add_argument('--oxlint', default=os.environ.get('FRACTAL_OXLINT', 'oxlint'))
+    parser.add_argument('--base-ref', default=os.environ.get('BASE_SHA', ''),
+                        help='fail if the committed baseline raises a count above this revision\'s (default: $BASE_SHA)')
     arguments = parser.parse_args()
+    base_ref = arguments.base_ref.strip()
+    if base_ref and set(base_ref) != {'0'} and not arguments.update:
+        head_baseline = json.loads(BASELINE.read_text())
+        base_baseline = baseline_at(base_ref)
+        if base_baseline is not None:
+            rows = raised(head_baseline, base_baseline)
+            if rows:
+                sys.exit('\n'.join(rows) + '\nNew findings must be fixed, not added to the baseline.')
     tsgo_version = tool_version(arguments.tsgo)
     if 'effect-tsgo' not in tsgo_version:
         sys.exit(f'{arguments.tsgo} is not effect-tsgo ({tsgo_version}); run inside nix develop .#web')
@@ -156,6 +223,7 @@ def main():
         'tools': {'tsgo': tsgo_version, 'oxlint': tool_version(arguments.oxlint)},
         'effect': tally(run_effect(arguments.tsgo)),
         'oxlint': tally(run_oxlint(arguments.oxlint)),
+        'configured': configured_rules(),
     }
     if arguments.update:
         BASELINE.write_text(json.dumps(current, indent=2, sort_keys=True) + '\n')
@@ -165,6 +233,8 @@ def main():
     problems = []
     if baseline['tools'] != current['tools']:
         problems.append(f"toolchain changed from {baseline['tools']} to {current['tools']}; review and run --update")
+    if baseline.get('configured') != current['configured']:
+        problems.append('the configured rules changed; run --update')
     for kind in ('effect', 'oxlint'):
         problems += [f'{kind}: {problem}' for problem in compare(current[kind], baseline[kind])]
     total = {kind: sum(sum(rules.values()) for rules in current[kind].values()) for kind in ('effect', 'oxlint')}

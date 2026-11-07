@@ -976,7 +976,16 @@ compares counts per package and rule with `scripts/ci-fractal-web-effect-lint.ba
 A file reached by several projects counts once. A count above its baseline fails, including a
 new rule or package. A count below its baseline also fails until the baseline is lowered
 in the same change, so removed findings cannot be spent later. A tool version change
-requires `--update`. Locally:
+requires `--update`. The committed baseline is also compared with the one at `BASE_SHA` (the pull
+request or merge-group base): raising any count fails, unless the change itself newly configures
+that rule in a tsconfig or the oxlint config (the baseline records the configured rules). A base
+without the baseline file is the rollout and is not compared.
+
+Production code in `apps/fractal-web/src/data` and `packages/fractal-sdk` also gets the
+Effect-native rules as warnings through plugin `overrides`: `asyncFunction`, `newPromise`,
+`globalTimers`, `globalDate`, `globalFetch`, `globalConsole`, `globalRandom`, `cryptoRandomUUID`
+and `extendsNativeError`. Tests and fixtures there are exempt. Later override entries win, so the
+exemption comes last. Locally:
 
 ```sh
 nix develop .#web -c python3 scripts/ci-fractal-web-effect-lint            # check
