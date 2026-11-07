@@ -11,9 +11,25 @@ export interface RequestRecord {
   readonly durationMs: number
 }
 const requestLogSize = 8
-const requestLog: { readonly errors: RequestRecord[]; readonly slowest: RequestRecord[] } = { errors: [], slowest: [] }
 /** What the error count and latency tails are made of, newest errors first and slowest responses first. */
-export const readRequestLog = (): { readonly errors: readonly RequestRecord[]; readonly slowest: readonly RequestRecord[] } => requestLog
+export interface RequestLog {
+  readonly errors: readonly RequestRecord[]
+  readonly slowest: readonly RequestRecord[]
+}
+const emptyRequestLog: RequestLog = { errors: [], slowest: [] }
+let requestLog = emptyRequestLog
+const requestLogListeners = new Set<() => void>()
+const publishRequestLog = (next: RequestLog): void => {
+  requestLog = next
+  for (const notify of requestLogListeners) notify()
+}
+
+/** An immutable snapshot, replaced only when a request changes it, so readers can compare by identity. */
+export const readRequestLog = (): RequestLog => requestLog
+export const subscribeRequestLog = (notify: () => void): (() => void) => {
+  requestLogListeners.add(notify)
+  return () => requestLogListeners.delete(notify)
+}
 
 const requestRecord = (
   input: Parameters<typeof globalThis.fetch>[0],
@@ -31,15 +47,15 @@ const requestRecord = (
   }
 }
 const logError = (record: RequestRecord): void => {
-  requestLog.errors.unshift(record)
-  requestLog.errors.length = Math.min(requestLog.errors.length, requestLogSize)
+  publishRequestLog({ ...requestLog, errors: [record, ...requestLog.errors].slice(0, requestLogSize) })
 }
 const logSlowest = (record: RequestRecord): void => {
   const { slowest } = requestLog
   if (slowest.length === requestLogSize && record.durationMs <= slowest[requestLogSize - 1]!.durationMs) return
-  slowest.push(record)
-  slowest.sort((a, b) => b.durationMs - a.durationMs)
-  slowest.length = Math.min(slowest.length, requestLogSize)
+  publishRequestLog({
+    ...requestLog,
+    slowest: [...slowest, record].toSorted((a, b) => b.durationMs - a.durationMs).slice(0, requestLogSize),
+  })
 }
 
 /** Observe fetches and propagate UX context only to the admitted same-origin data boundary. */
@@ -59,8 +75,7 @@ export const instrumentFetch = ({ fetchImpl, origin, traceContext }: {
   setDebug('Wf.httpErrors', 0)
   setDebug('Wf.httpP50Ms', 0)
   setDebug('Wf.httpP95Ms', 0)
-  requestLog.errors.length = 0
-  requestLog.slowest.length = 0
+  publishRequestLog(emptyRequestLog)
   return async (...[input, init]) => {
     const started = performance.now()
     setDebug('Wf.httpInFlight', ++inFlight)
