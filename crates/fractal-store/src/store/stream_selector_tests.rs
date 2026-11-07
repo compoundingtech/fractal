@@ -155,6 +155,70 @@ fn stream_headers_a_build_without_them_dropped_come_back_at_the_next_start() {
     assert_eq!(subjects(&page(&graph, true, None).0), ["message/selector-reseed"]);
 }
 
+fn meta_holds(graph: &Store, key: &str) -> bool {
+    graph.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [key], |row| row.get(0)).unwrap()
+}
+
+const WHOLE: &str = "client_message_selectors_v1_stream_headers_whole";
+const SEED: &str = "client_message_selectors_v1_stream_seed";
+
+#[test]
+fn a_start_after_this_build_ran_passes_over_no_mirror_row() {
+    let root = tempfile::tempdir().unwrap();
+    {
+        let graph = graph_with_shard(root.path());
+        append(&graph, &sent("message/selector-whole", "agent/cedar"));
+        settle(&graph);
+        assert!(meta_holds(&graph, WHOLE));
+    }
+    let graph = graph_with_shard(root.path());
+    assert!(!meta_holds(&graph, SEED), "a start with whole stream headers queued a re-seed");
+    assert_eq!(subjects(&page(&graph, true, None).0), ["message/selector-whole"]);
+    // A stream header retired by any build says they are no longer whole.
+    graph
+        .connection
+        .write()
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h7a5315d40c91 owner=fractal_store::store::stream_selector_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET retired_index=1 WHERE subject='message/selector-whole' AND born_index>=0",
+            [],
+        )
+        .unwrap();
+    assert!(!meta_holds(&graph, WHOLE));
+}
+
+#[test]
+fn an_item_a_build_without_stream_headers_mirrored_is_listed_after_the_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    {
+        let graph = graph_with_shard(root.path());
+        append(&graph, &sent("message/selector-before", "agent/cedar"));
+        settle(&graph);
+        let late = append(&graph, &sent("message/selector-rolled-back", "agent/cedar"));
+        // A build with the mirror but without stream headers mirrors the item, and its fold
+        // turns the header the trigger queued into none.
+        graph
+            .connection
+            .write()
+            .execute_batch(&format!(
+                /* sqlite-large-value: allow-for-now lv-hf088a1712ea7 owner=fractal_store::store::stream_selector_tests TODO=bound-or-reference-values-and-reclamation */ "BEGIN;
+                 INSERT INTO local_stream_sent(subject,sent_ms,fields,stream_index)
+                  VALUES('{}',{},'{{\"to\":\"agent/cedar\",\"from\":\"agent/birch\"}}',{});
+                 DELETE FROM local_client_message_selectors_v1 WHERE born_index=-1;
+                 COMMIT;",
+                late.subject, late.accepted_at_unix_ms, late.store_index,
+            ))
+            .unwrap();
+        assert!(!meta_holds(&graph, WHOLE));
+        assert_eq!(subjects(&page(&graph, true, None).0), ["message/selector-before"]);
+    }
+    let graph = graph_with_shard(root.path());
+    settle(&graph);
+    let mut listed = subjects(&page(&graph, true, None).0).into_iter().map(str::to_owned).collect::<Vec<_>>();
+    listed.sort();
+    assert_eq!(listed, ["message/selector-before", "message/selector-rolled-back"]);
+    assert!(meta_holds(&graph, WHOLE));
+}
+
 #[test]
 fn a_first_selector_backfill_builds_stream_headers_from_the_mirror() {
     let root = tempfile::tempdir().unwrap();

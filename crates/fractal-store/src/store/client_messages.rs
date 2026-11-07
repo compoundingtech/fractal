@@ -8,8 +8,12 @@ const BACKFILL_MARKER: &str = "client_message_selectors_v1_backfill";
 const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
 const MALFORMED_MARKER: &str = "client_message_selectors_v1_malformed_desired";
 const TRIGGER_MARKER: &str = "client_message_selectors_v1_trigger_generation";
-/// The last mirror subject the stream re-seed has passed since this start ([`seed_stream_headers`]).
+/// The last mirror subject the stream re-seed has passed ([`seed_stream_headers`]).
 const STREAM_SEED_MARKER: &str = "client_message_selectors_v1_stream_seed";
+/// Present while every mirrored stream item has the header this build folds for it. The schema's
+/// triggers remove it whenever a stream item is queued or a stream header goes, under any build,
+/// and only this build puts it back ([`confirm_stream_headers`]), so a start without it re-seeds.
+const STREAM_WHOLE_MARKER: &str = "client_message_selectors_v1_stream_headers_whole";
 // Leave ample room for SQLite's durable commit below the 100ms transaction target.
 pub const BACKFILL_SUBJECTS: usize = 16;
 pub const BACKFILL_CLEAR_ROWS: usize = 64;
@@ -18,7 +22,7 @@ pub const PRUNE_ROWS: usize = 64;
 const BACKFILL_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
 #[cfg(any(test, feature = "test-support"))]
 const TEST_FOLD_BUDGET_MARKER: &str = "client_message_selectors_v1_test_fold_budget_us";
-const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb72fc75f85f1 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
+const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a20861ab64f owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_selectors_v1(
  subject TEXT NOT NULL,born_index INTEGER NOT NULL,retired_index INTEGER,
  sender TEXT NOT NULL DEFAULT 'requester',recipient TEXT NOT NULL DEFAULT '',
@@ -80,6 +84,19 @@ CREATE INDEX IF NOT EXISTS client_selector_destructive ON local_client_message_s
  WHERE born_index=-2;
 CREATE INDEX IF NOT EXISTS client_selector_retired_cut ON local_client_message_selectors_v1(retired_index)
  WHERE retired_index IS NOT NULL;
+-- A stream header (created_index from messages_shard::STREAM_INDEX_BASE) retired or deleted by any
+-- build: a build without stream headers folds a stream subject to none, so the next start of one
+-- with them re-seeds (STREAM_WHOLE_MARKER).
+CREATE TRIGGER IF NOT EXISTS client_selector_stream_header_retired AFTER UPDATE OF retired_index ON local_client_message_selectors_v1
+WHEN OLD.born_index>=0 AND OLD.retired_index IS NULL AND NEW.retired_index IS NOT NULL AND OLD.created_index>=281474976710656
+BEGIN
+ DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
+END;
+CREATE TRIGGER IF NOT EXISTS client_selector_stream_header_deleted AFTER DELETE ON local_client_message_selectors_v1
+WHEN OLD.born_index>=0 AND OLD.retired_index IS NULL AND OLD.created_index>=281474976710656
+BEGIN
+ DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
+END;
 CREATE TABLE IF NOT EXISTS local_client_message_publications(
  through_index INTEGER PRIMARY KEY,published_at_unix_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -752,10 +769,24 @@ fn stream_seed_incomplete(connection: &Connection) -> Result<bool> {
     )?)
 }
 
+/// Mark the stream headers whole once nothing this build folds is left: no pending header, no
+/// fold or backfill in progress and no re-seed. Each commit's fold calls it; it is two lookups
+/// when the marker is there.
+fn confirm_stream_headers(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hb1c87956ef60 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) SELECT ?1,'1'
+         WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key IN (?1,?2,?3,?4))
+          AND NOT EXISTS(SELECT 1 FROM local_client_message_fold_batches)
+          AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 INDEXED BY client_selector_pending WHERE born_index=-1)",
+        params![STREAM_WHOLE_MARKER, STREAM_SEED_MARKER, FOLD_MARKER, BACKFILL_MARKER],
+    )?;
+    Ok(())
+}
+
 /// Queue one page of mirrored stream items that have no live header. A build without stream
 /// headers refolds a stream subject it is handed to no header (a rollback past this one, while
-/// its mirror runs, drops each one closed meanwhile), so each start passes over the mirror
-/// once; a marker kept across starts would stop a later upgrade from adding them back.
+/// its mirror runs, drops each one closed meanwhile, and queues none it mirrors), so a start
+/// that finds the stream headers not whole ([`STREAM_WHOLE_MARKER`]) passes over the mirror once.
 fn seed_stream_headers(transaction: &Transaction<'_>) -> Result<()> {
     let Some(after): Option<String> = transaction.query_row(
         "SELECT value FROM meta WHERE key=?1", [STREAM_SEED_MARKER], |row| row.get(0),
@@ -1005,13 +1036,15 @@ pub(super) fn open(connection: &mut Connection) -> Result<()> {
     // Recover one bounded allowance for an existing cut, including reminder
     // eligibility invalidated by offline claim edits/deletes. Initial backfill
     // remains owned by the post-serving worker.
-    // A published cut seeds stream headers again from the start of the mirror; an initial
+    // A published cut whose stream headers are not whole (a first start of this build, or one
+    // after a build without them ran) seeds them again from the start of the mirror; an initial
     // backfill reads the mirror itself.
     if initialized && !backfill_incomplete(connection)? {
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-haae2809c0fd7 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) SELECT ?1,'' WHERE EXISTS(SELECT 1 FROM local_stream_sent)
+            /* sqlite-large-value: allow-for-now lv-h2168e8a2f839 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) SELECT ?1,'' WHERE EXISTS(SELECT 1 FROM local_stream_sent)
+              AND NOT EXISTS(SELECT 1 FROM meta WHERE key=?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [STREAM_SEED_MARKER],
+            params![STREAM_SEED_MARKER, STREAM_WHOLE_MARKER],
         )?;
     }
     if initialized && !backfill_incomplete(connection)?
@@ -1037,6 +1070,7 @@ pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudge
     )?;
     if !ready { return Ok(FoldBudget::default()); }
     let budget = flush_pending(transaction, true)?;
+    confirm_stream_headers(transaction)?;
     #[cfg(any(test, feature = "test-support"))]
     if transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_client_message_versions'))",[],|row|row.get::<_,bool>(0))? {
         super::client_messages_version_benchmark::flush(transaction)?;
