@@ -30,9 +30,21 @@ const WorkLogRhythm = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => {
   </main>
 }
 const styles = stylex.create({ root: { height: '100vh', backgroundColor: surface.canvas } })
-const meta = { title: 'Fractal App/Work log rhythm', component: WorkLogRhythm, args: { scheme: 'dark' } } satisfies Meta<typeof WorkLogRhythm>
+const meta = {
+  excludeStories: ['scenarioExemptions'],
+  title: 'Fractal App/Work log rhythm',
+  component: WorkLogRhythm,
+  args: { scheme: 'dark' },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A synthetic recorded turn, through the same feed projection and semantic tool detail the live pane uses, pins expanded work-log spacing.' } },
+} satisfies Meta<typeof WorkLogRhythm>
 export default meta
 type Story = StoryObj<typeof meta>
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Dark:contract-fixture',
+  'Light:contract-fixture',
+]
 
 const play: Story['play'] = async ({ canvasElement }) => {
   const canvas = within(canvasElement)
