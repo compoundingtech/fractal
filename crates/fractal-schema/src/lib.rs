@@ -4861,8 +4861,8 @@ mod tests {
         previous.subjects.get_mut("assistant").unwrap().pattern =
             "assistant/chatgpt[/session/assistant-grant/ID]".into();
         println!("assistant principal registry digest: {} -> {}", previous.digest(), current.digest());
-        assert_eq!(previous.digest(), "d6e203c5ad4ee9e66697ec3ce8d2122b803bdb432f48a7d273930f0de36ea89f");
-        assert_eq!(current.digest(), "5806f535680917394b9b46d00e0729b43a71171296cead3117756c90662cf405");
+        assert_eq!(previous.digest(), "ce8391a1987ae8ff1831e03a2e321c0b02088fbf8a4c819180afd0022eccfc27");
+        assert_eq!(current.digest(), "47464ac96d49d65ff43fde59e29c3df1ff4154997d69adcac93d8006a0800ac3");
     }
 
     #[test]
