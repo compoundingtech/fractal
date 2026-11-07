@@ -13,7 +13,9 @@ Removed, under every profile directory (TARGET_DIR/<profile>/, and TARGET_DIR/<t
   examples/*               every example
   NAME                     regular, executable files with no extension directly in the profile directory (the binaries' copies)
 Kept: libraries (.rlib .rmeta .so .a .d), build/ (build scripts and their out/ directories), .fingerprint/, and everything else.
-Prints what it removed and what is left; a target directory that does not exist is nothing to trim."""
+Nothing is followed through a symlink: a symlinked target directory is refused, and a symlinked profile, deps/ or examples/ directory is
+skipped, so nothing outside the target is ever removed. Prints what it removed and what is left; a target directory that does not exist
+is nothing to trim."""
 import os
 from pathlib import Path
 import shutil
@@ -45,16 +47,21 @@ def size(path):
     return total
 
 
+def real_directory(path):
+    """A directory that is not a symlink (is_dir alone follows one)."""
+    return path.is_dir() and not path.is_symlink()
+
+
 def profiles(target):
-    """Every directory that holds a deps/ directory, one or two levels down (a profile, or a target triple's profile)."""
+    """Every directory that holds a real deps/ directory, one or two levels down (a profile, or a target triple's profile)."""
     for first in sorted(target.iterdir()):
-        if not first.is_dir() or first.is_symlink():
+        if not real_directory(first):
             continue
-        if (first / 'deps').is_dir():
+        if real_directory(first / 'deps'):
             yield first
             continue
         for second in sorted(first.iterdir()):
-            if second.is_dir() and not second.is_symlink() and (second / 'deps').is_dir():
+            if real_directory(second) and real_directory(second / 'deps'):
                 yield second
 
 
@@ -64,7 +71,7 @@ def trim(target):
     for profile in profiles(target):
         doomed = [Path(entry.path) for entry in os.scandir(profile / 'deps') if executable(entry)]
         doomed += [Path(entry.path) for entry in os.scandir(profile) if executable(entry)]
-        if (profile / 'examples').is_dir():
+        if real_directory(profile / 'examples'):
             doomed += [Path(entry.path) for entry in os.scandir(profile / 'examples')]
         for path in doomed:
             freed += size(path)
@@ -81,6 +88,9 @@ def main(argv):
         print(__doc__.split('\n\n')[0], file=sys.stderr)
         return 2
     target = Path(argv[0])
+    if target.is_symlink():
+        print(f'ci-cargo-cache-trim: {target} is a symlink; not trimming through it')
+        return 0
     if not target.is_dir():
         print(f'ci-cargo-cache-trim: no target directory at {target}; nothing to trim')
         return 0

@@ -76,6 +76,30 @@ class Trim(unittest.TestCase):
         self.assertTrue((outside / 'precious').exists(), 'a symlink in examples is removed as a link, never walked')
         self.assertFalse((self.target / 'debug/examples/link').exists())
 
+    def test_a_symlinked_deps_examples_profile_or_target_is_never_walked(self):
+        outside = Path(self.tmp.name) / 'outside'
+        (outside / 'sub').mkdir(parents=True)
+        precious = [outside / 'tool', outside / 'sub' / 'file']
+        for path in precious:
+            path.write_bytes(b'keep')
+            path.chmod(0o755)
+        self.file('debug/deps/x-1', executable=True)
+        (self.target / 'debug/examples').symlink_to(outside)
+        (self.target / 'release').mkdir()
+        (self.target / 'release/deps').symlink_to(outside)
+        (self.target / 'wasm32').mkdir()
+        (self.target / 'wasm32/debug').symlink_to(outside)
+        removed, _, _ = trim.trim(self.target)
+        self.assertEqual(removed, 1, 'only the real profile\'s executable')
+        self.assertTrue(all(path.exists() for path in precious), 'nothing outside the target is removed')
+        linked = Path(self.tmp.name) / 'linked-target'
+        linked.symlink_to(self.target)
+        self.file('debug/deps/y-2', executable=True)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-cargo-cache-trim'), str(linked)], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('is a symlink; not trimming', done.stdout)
+        self.assertTrue((self.target / 'debug/deps/y-2').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
