@@ -171,6 +171,22 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inspect_ancestry_fixture(command: &mut std::process::Command) -> HarnessAncestry {
+    use std::io::{BufRead as _, Write as _};
+    let mut child = command
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut pid = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+    let pid: u32 = pid.trim().parse().unwrap();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    // The child announces readiness after exec, then stays alive until inspection ends.
+    child.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    child.wait().unwrap();
+    ancestry
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, body: Value) {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -183,15 +199,11 @@ async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, 
         (Some("agent/"), None),
         (Some("agent/fixture/worker"), Some("agent/fixture/other")),
     ] {
-        let mut command = std::process::Command::new("sleep");
-        command.arg("10").env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo $$; read answer"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
         if let Some(value) = primary { command.env("ST_AGENT", value); }
         if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
-        let mut child = command.spawn().unwrap();
-        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(child.id()).unwrap();
-        let ancestry = harness_ancestor(child.id(), Some(&peer));
-        child.kill().unwrap();
-        child.wait().unwrap();
+        let ancestry = inspect_ancestry_fixture(&mut command);
         assert_eq!(ancestry, HarnessAncestry::Unavailable);
         let mut request = Request::builder().method(method).uri(path);
         if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
@@ -223,19 +235,9 @@ async fn masked_identity_refuses_foreign_actor() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_harness_descendant_without_agent_environment_is_bound() {
-    use std::io::{BufRead as _, Write as _};
-    let mut harness = std::process::Command::new("sh")
+    let ancestry = inspect_ancestry_fixture(std::process::Command::new("sh")
         .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sh -c 'echo $$; read answer'; :"])
-        .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent")
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
-    let mut pid = String::new();
-    std::io::BufReader::new(harness.stdout.take().unwrap()).read_line(&mut pid).unwrap();
-    let pid: u32 = pid.trim().parse().unwrap();
-    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
-    let ancestry = harness_ancestor(pid, Some(&peer));
-    // The child announces readiness after exec, then stays alive until inspection ends.
-    harness.stdin.take().unwrap().write_all(b"done\n").unwrap();
-    harness.wait().unwrap();
+        .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent"));
     assert_eq!(ancestry, HarnessAncestry::Bound("agent/fixture/parent".into()));
 }
 
