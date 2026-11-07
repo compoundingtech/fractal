@@ -38,7 +38,7 @@ const FULL_REF = /^(?:[\w.-]+\/){2,}[\w.-]+$|^[0-9a-f]{24,}$/
 const TOKEN = /(~?\/[\w.~-]+(?:\/[\w.~-]+)+|\b[\w.-]+(?:\/[\w.-]+){2,}\b|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b…?)/g
 
 /** A sentence with its raw ids, hashes and paths set apart: a whole long id is a chip to copy, anything shorter goes muted. */
-export function QuietRefs({ text }: { readonly text: string }): React.ReactNode {
+function QuietRefs({ text }: { readonly text: string }): React.ReactNode {
   return <>{text.split(TOKEN).map((part, index) => {
     if (index % 2 === 0) return part
     return part.length >= 32 && FULL_REF.test(part)

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, within } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
 import { DecisionCard, type DecisionOption } from './assistant-ui/composition/DecisionCard'
 import { DecisionMore, type DecisionSubject } from './assistant-ui/composition/DecisionMore'
 import { darkTheme } from './assistant-ui/embrace-theme'
@@ -35,7 +35,7 @@ const Card = ({ density }: { readonly density: 'docked' | 'full' }) => {
   const [words, setWords] = React.useState('')
   const full = density === 'full'
   return <DecisionCard
-    density={density} moreOpen label="Build cache deletion" meta={['example/contraction', 'Request', 'step work', 'waited 47s']}
+    density={density} label="Build cache deletion" meta={['example/contraction', 'Request', 'step work', 'waited 47s']}
     heading={heading} headingText={heading} context="The cache migration moved every build output to the content store last week."
     contextFull={context}
     more={<DecisionMore clamp={!full} {...(full ? {} : { context })} why={why} evidence={evidence} related={related} />}
@@ -68,16 +68,20 @@ export const scenarioExemptions: readonly string[] = [
 ]
 
 /** Labelled sections in reading order: Context, Why you, Evidence, Related. */
+const openMore = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  await userEvent.click(within(canvasElement).getByRole('button', { name: 'More' }))
+}
 export const Docked: Story = {
   play: async ({ canvasElement }) => {
+    await openMore({ canvasElement })
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('region', { name: 'Evidence' })).toBeVisible()
-    await expect(canvas.getByRole('button', { name: 'Show all' })).toBeVisible()
+    await expect(await canvas.findByRole('button', { name: 'Show all' })).toBeVisible()
   },
 }
 export const Full: Story = { args: { density: 'full' } }
-export const Light: Story = { args: { scheme: 'light' } }
-export const Narrow: Story = { args: { width: 360 } }
+export const Light: Story = { args: { scheme: 'light' }, play: openMore }
+export const Narrow: Story = { args: { width: 360 }, play: openMore }
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: s.section, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },

@@ -50,8 +50,6 @@ export type DecisionCardProps = {
   readonly contextFull?: React.ReactNode
   /** What else there is to read, as `DecisionMore`. `docked` holds it behind More; `full` shows it. */
   readonly more?: React.ReactNode
-  /** More starts open. */
-  readonly moreOpen?: boolean
   /** Content the decision cannot be read without (a launch's preview, the call a prompt waits on): always shown. */
   readonly body?: React.ReactNode
   /** The options as one group; empty for an ask answered only in words. */
@@ -164,7 +162,7 @@ function Row({ card, touch }: { readonly card: DecisionCardProps; readonly touch
 
 export function DecisionCard(card: DecisionCardProps): React.ReactNode {
   const touch = React.useContext(NarrowLayoutContext)
-  const [open, setOpen] = React.useState(card.moreOpen === true)
+  const [open, setOpen] = React.useState(false)
   const panelId = React.useId()
   const full = card.density === 'full'
   const disabled = card.busy === true || card.unavailable !== undefined
