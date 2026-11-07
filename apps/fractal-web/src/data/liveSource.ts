@@ -133,6 +133,11 @@ const terminalUnavailable = (error: AttachFailure): Feed<never> => {
 }
 
 
+const credentialRejection = Schema.Struct({
+  code: Schema.Literal('forbidden'),
+  details: Schema.Struct({ reason: Schema.Literal('credential-rejected') }),
+})
+
 /** Connect retained workbench projections through one SDK runtime and frame writer. */
 export const liveSource = ({
   options,
@@ -159,11 +164,14 @@ export const liveSource = ({
       const url = new URL(input instanceof Request ? input.url : String(input), baseUrl)
       const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
       if (method.toUpperCase() === 'GET' && url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/v1/client/') &&
-        (response.status === 401 || response.status === 403)) {
-        credentialExpired = true
-        readRejection = 'Browser credential expired or revoked'
-        registry.set(readRefusal, readRejection)
-        for (const deny of deniedReaders) deny(readRejection)
+        response.status === 403) {
+        const body: unknown = await response.clone().json().catch(() => undefined)
+        if (Option.isSome(Schema.decodeUnknownOption(credentialRejection)(body))) {
+          credentialExpired = true
+          readRejection = 'Browser credential expired or revoked'
+          registry.set(readRefusal, readRejection)
+          for (const deny of deniedReaders) deny(readRejection)
+        }
       }
       return response
     } }),

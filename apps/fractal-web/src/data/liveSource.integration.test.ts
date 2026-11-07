@@ -112,7 +112,7 @@ class Gateway {
             message: 'Device credential revoked',
             retryable: false,
             request_id: 'request/revoked',
-            details: {},
+            details: { reason: 'credential-rejected' },
           }),
           { status: 403, headers: { 'content-type': 'application/json' } },
         )
@@ -1033,8 +1033,8 @@ describe('terminal dependent-read authority', () => {
   }
 
   for (const refusal of [
-    { status: 401, code: 'forbidden', retryable: true, reason: 'unauthorized', expectedRetryable: false },
-    { status: 403, code: 'forbidden', retryable: false, reason: 'unauthorized', expectedRetryable: false },
+    { status: 401, code: 'forbidden', retryable: true, reason: 'ungranted', expectedRetryable: false },
+    { status: 403, code: 'forbidden', retryable: false, reason: 'ungranted', expectedRetryable: false },
     { status: 400, code: 'unsupported-capability', retryable: true, reason: 'unsupported', expectedRetryable: false },
     { status: 404, code: 'not-found', retryable: false, reason: 'failed', expectedRetryable: false },
     { status: 503, code: 'unavailable', retryable: false, reason: 'failed', expectedRetryable: false },
@@ -1052,9 +1052,7 @@ describe('terminal dependent-read authority', () => {
         const ref = 'terminal/example'
         live.registry.mount(live.source.terminalInterest!(ref))
         yield* settle
-        expect(live.registry.get(live.source.terminal(ref))).toEqual(refusal.reason === 'unauthorized' ? {
-          _tag: 'Unavailable', reason: 'unauthorized', detail: 'Browser credential expired or revoked', retryable: false,
-        } : {
+        expect(live.registry.get(live.source.terminal(ref))).toEqual({
           _tag: 'Unavailable', reason: refusal.reason, detail: 'Runtime read refused',
           code: refusal.code, retryable: refusal.expectedRetryable,
         })
