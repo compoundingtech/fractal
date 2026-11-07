@@ -3,8 +3,7 @@ import * as Native from '@fractal/client/schema/read'
 import { Effect, Fiber } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { unavailable, waiting, type Feed } from './source.ts'
-import { clientReadAuthorization } from './readAuthorization.ts'
+import { clientReadAuthorization, unavailable, waiting, type Feed } from './source.ts'
 
 /** Member-owned native reads; no client-generated tones, forecasts or history samples. */
 export interface ObjectivesSource {

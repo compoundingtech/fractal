@@ -13,9 +13,8 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 
 import type { Feed } from './source.ts'
-import { observed, unavailable, waiting } from './source.ts'
+import { clientReadAuthorization, observed, unavailable, waiting } from './source.ts'
 import { redactPublicationDefinition, type MissionDeclarationValue } from '../declarations/model.ts'
-import { clientReadAuthorization } from './readAuthorization.ts'
 
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{

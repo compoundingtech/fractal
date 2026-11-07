@@ -3,9 +3,8 @@ import * as Native from '@fractal/client/schema/read'
 import { Effect, Fiber, Schedule, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { unavailable, waiting, type Feed } from './source.ts'
+import { clientReadAuthorization, unavailable, waiting, type Feed } from './source.ts'
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
-import { clientReadAuthorization } from './readAuthorization.ts'
 
 export interface NativeDetailsSource {
   /**

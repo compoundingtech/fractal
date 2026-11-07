@@ -1,6 +1,5 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
-import { clientReadAuthorization } from '../data/readAuthorization.ts'
-import { credentialExpiredMessage } from '../data/source.ts'
+import { clientReadAuthorization, credentialExpiredMessage } from '../data/source.ts'
 
 /**
  * One read of a Fractal document by name (the newest version) or by its immutable `name@hash`
