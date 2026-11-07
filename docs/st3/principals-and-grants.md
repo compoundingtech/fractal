@@ -70,7 +70,7 @@ resolution; the availability ruling alone does not authorize a protocol change.
 | R08 | Cache and uncached admission agree, including revocation propagation, corruption, cold restart and adversarial arrival order; local cache is not replicated authority. | M2 | PARTIAL: J has content-keyed verdicts and invalidation; full differential proof UNKNOWN. | Random/adversarial cached-versus-recomputed tests; edit/delete/inject cache rows and restart. |
 | R09 | Identical envelopes in canonical order yield identical projections/digests across three members after shuffled sync, checkpoints and restarts, within fleet-scale read/admission budgets. | M2 | PARTIAL: smallclaims sync exists (#1014); complete #867 convergence/performance proof and numeric budgets UNKNOWN. | Deterministic three-member fixture plus hundreds-of-thousands-of-claims benchmark; FPL accepts budgets (DQ8). |
 | R10 | Person private keys stay on personal devices, absent from the shared box; daemon-held seat keys do not reach seats; rotation/revocation are verifiable. | M5 | PARTIAL: P/D, #1054/#1126/#1353; shared-box key absence and full lifecycle UNKNOWN. | Inspect shared host/seat access, sign from phone, rotate/revoke and test old/new keys without exporting secrets. |
-| R38 | Claiming work, lease renewal and expiry are graph primitives usable by mission and plugin controllers; expiry never leaves a step both ready and working. | M3 | PARTIAL: `crates/fractal-missions/src/store/work_renew_tests.rs` exercises native claim/renew and expiry columns, including held-state renewal; graph-generic plugin reuse and expired-lease ready/working regression acceptance UNKNOWN. | Exercise the same claim/renew/expire primitive from mission and plugin controllers; expire a working lease, restart/reorder sync, and assert one consistent non-working/ready state, never both. |
+| R38 | Claiming work, lease renewal and expiry are graph primitives usable by mission and plugin controllers; expiry never leaves a step both ready and working. | M3 | PARTIAL: missions already use native claim/renew (`crates/fractal-missions/src/store/work_renew_tests.rs`); the gap is generic reuse and the ready/working expiry regression, whose acceptance is UNKNOWN. | Exercise the same claim/renew/expire primitive from mission and plugin controllers; expire a working lease, restart/reorder sync, and assert one consistent non-working/ready state, never both. |
 
 ## Grants, namespaces, and accounts
 
@@ -144,6 +144,7 @@ boundaries remain useful evidence, not completion of these larger gist phases.
 R39 is deferred because **no per-seat isolation inside one person's fleet is needed
 for delegated person authority** (FPL, `message/178ff3845421e66d`); it is not part
 of M5 acceptance. R38 remains in M3.
+M5 tests isolation between persons, not between seats of one person.
 Cross-fleet message forwarding (“shovel”) is subsequent scope in the gist, not a
 replacement for R34's within-fleet open messaging.
 
@@ -172,16 +173,17 @@ No device-scope or pairing changes are allowed until phone pilot **P2** is done,
 unless FPL explicitly approves an exception. Existing phone signing does not prove
 P2 completion (UNKNOWN here).
 
-The gist's non-deferred rollout prerequisites gate **M2 rollout**, not the landing
-of M2 code behind off/audit modes. The order is CI capacity, gated deployment and
-rollback, then the fleet-size CI benchmark after FPL accepts DQ8 budgets. All three
-receipts MUST exist before M2 rollout and remain applicable to subsequent risky
-write-path rollouts; code landing behind off/audit modes need not wait for them.
+The gist's non-deferred rollout prerequisites gate **M2 rollout** (risky write-path
+changes reaching fleet hosts), not the landing of M2 code behind its existing
+off/audit modes. The order is measured CI capacity, gated deployment and rollback,
+then the fleet-size CI benchmark after FPL accepts DQ8 budgets. All three receipts
+MUST exist before M2 rollout and remain applicable to subsequent risky write-path
+rollouts; code landing behind off/audit modes need not wait for them.
 
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
-| R40 | CI capacity is increased and demonstrated sufficient for the risky admission/signing workload before M2 rollout. | M2 | UNKNOWN: the gist requires increased capacity; no capacity-change/load receipt is verified here. | Record before/after runner capacity and run representative concurrent required jobs; FPL accepts measured queue/completion capacity before R41 and M2 rollout, not off/audit code landing. |
-| R41 | Deployment is mission-driven, checks health after deployment and automatically rolls back an unhealthy release before M2 rollout proceeds. | M2 | UNKNOWN: no mission health-gate/automatic-rollback proof is verified here. | After R40, rehearse on a copied fleet using the actual deployment mission; inject failed health, observe automatic rollback and restored health, and retain mission/gate evidence before R42 and M2 rollout. |
+| R40 | Measured CI queue and completion capacity is sufficient for the risky admission/signing workload before M2 rollout; no increase is required if measurement is sufficient. | M2 | UNKNOWN: no qualifying queue/completion capacity receipt is verified here. | Run representative concurrent required jobs and record queue/completion capacity; FPL accepts sufficient measured capacity before R41 and M2 rollout, not off/audit code landing. |
+| R41 | Deployment is mission-driven, checks health after deployment and automatically rolls back an unhealthy release before M2 rollout proceeds. | M2 | UNKNOWN: no qualifying copied-fleet health-gate/automatic-rollback rehearsal is verified here. | After R40, rehearse on a copied fleet using the actual deployment mission; the existing deploy controller's health gate and rollback may satisfy this gate if the rehearsal demonstrates them. Inject failed health, observe automatic rollback and restored health, and retain evidence before R42 and M2 rollout. |
 | R42 | A fleet-size read/admission benchmark runs in CI and meets FPL-accepted DQ8 budgets before M2 rollout; the benchmark gate waits for those budgets. | M2 | UNKNOWN: R09/DQ8 record the missing complete proof and numeric budgets; no qualifying CI receipt is verified here. | After R41 and FPL's DQ8 budget acceptance, run the hundreds-of-thousands-of-claims fixture in CI; publish each read-path/admission timing and budget comparison before M2 rollout, not off/audit code landing. |
 
 ## Open decisions
