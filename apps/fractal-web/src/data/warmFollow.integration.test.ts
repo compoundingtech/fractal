@@ -5,6 +5,7 @@
  * set: LRU eviction with a real unsubscribe, re-follow after eviction, reconnect honesty
  * (Reconnecting, never Live), and no leaked subscriptions.
  */
+import { markdownBlock } from '@fractal/client/markdown'
 import type {
   Agent,
   CollectionCommand,
@@ -49,7 +50,7 @@ const entry = (sequence: number, text: string): TimelineEntry => ({
   role: 'assistant',
   final: true,
   timestamp: snapshot.created_at,
-  body: { text, media_type: 'text/markdown' },
+  body: { text: markdownBlock(text), media_type: 'text/markdown' },
 })
 
 /** Record deterministic warm-switch timings without creating local artifacts. */

@@ -1,3 +1,4 @@
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
 import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { Attention, TimelineEntry, Work } from '@fractal/client'
 
@@ -75,7 +76,7 @@ const build = (ctx: FactoryContext): AuthoredSlices => {
   const goals = ['Keep option-schema 4.1 installed', 'Omitted limit retains the default of 20', 'CI typecheck, test and build pass']
   const work = (step: number, state: Work['state'], updatedMs: number, revision: string): Work => ({
     ...resources.work(ctx, { mission, step, state, updatedMs, claimant: builder, goals }),
-    revision, constraints: ['Do not revert the dependency bump or widen the patch'],
+    revision, constraints: [markdownInline('Do not revert the dependency bump or widen the patch')],
     ...(state === 'failed' ? { blocked_reason: redOutput[1] } : {}),
   })
   const details: Slice<'details'> = {
@@ -99,7 +100,7 @@ const build = (ctx: FactoryContext): AuthoredSlices => {
     title: 'main is red after the dependency bump', detail: 'option-schema 4.1 rejects an omitted limit. Bisect first; preserve the existing API default rather than reverting the bump.',
     priority: 'high', requestedMs: -30_000, actions: ['custom.reply'],
   })
-  const resolved: Attention = { ...card, revision: 'a2', state: 'resolved', updated_at: ctx.t.at(30_000), detail: 'Bisect isolated option-schema 4.1. The default is explicit now; CI retry #2 passed typecheck, all 48 tests and build.' }
+  const resolved: Attention = { ...card, revision: 'a2', state: 'resolved', updated_at: ctx.t.at(30_000), detail: markdownBlock('Bisect isolated option-schema 4.1. The default is explicit now; CI retry #2 passed typecheck, all 48 tests and build.') }
   const attention: Slice<'attention'> = {
     kind: 'attention', variant: 'default', source, decode: 'strict', loading: false,
     state: { attention: [card], messages: [] },

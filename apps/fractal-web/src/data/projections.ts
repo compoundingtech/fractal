@@ -7,6 +7,7 @@
  * them differently. Native actionable asks are the needs-you authority: a subject needs an
  * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
+import { optionalSource } from '@fractal/client/markdown'
 import * as Fractal from '@fractal/client/schema/read'
 import { classifySubagentDriver } from '@fractal/client'
 import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/read'
@@ -96,7 +97,7 @@ const lifecycleOf = (row: DecodedAgent): Agent['lifecycle'] => {
 
 const workFromLabel = (work: NonNullable<DecodedAgent['current_work']>[number]): NonNullable<Agent['currentWork']>[number] => ({
   id: work.id, missionId: work.mission_id, runId: work.mission_run_id,
-  path: work.path, title: Option.getOrUndefined(work.title), goal: Option.getOrUndefined(work.goal), state: leafText(work.state),
+  path: work.path, title: Option.getOrUndefined(work.title), goal: optionalSource(Option.getOrUndefined(work.goal)), state: leafText(work.state),
 })
 
 const agentFromRow = (row: DecodedAgent): Agent => {
@@ -104,7 +105,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
   const harness = harnesses.find((candidate) => candidate === driver)
   const mission = row.current_work?.[0]?.mission_id
   const work = row.current_work?.[0]
-  const description = work === undefined ? undefined : Option.getOrUndefined(work.goal)
+  const description = work === undefined ? undefined : optionalSource(Option.getOrUndefined(work.goal))
   const suspension = Option.getOrUndefined(row.suspension)
   const suspendedAt =
     row.state === 'suspended' && suspension !== undefined

@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import { describe, expect, it, vi } from 'vitest'
 import { agentSeatChildren, missionChildRowId, sidebarMissionChild, sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
 import { missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
@@ -305,11 +306,11 @@ describe('retained mission row context', () => {
 
   it('shows actual attention question without manufacturing a q handle and follows updates', () => {
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
+      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: markdownBlock('Ship this change?'), update: undefined }
     expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Waiting', question: 'Ship this change?' } })
     const waiting = project([hydrated], [card])
     if (waiting?._tag === 'Mission') expect(waiting.step).not.toHaveProperty('handle')
-    expect(project([hydrated], [{ ...card, detail: 'Use the updated plan?' }]))
+    expect(project([hydrated], [{ ...card, detail: markdownBlock('Use the updated plan?') }]))
       .toMatchObject({ step: { _tag: 'Waiting', question: 'Use the updated plan?' } })
     expect(project([hydrated], [{ ...card, state: 'resolved' }]))
       .toMatchObject({ step: { _tag: 'Step', name: work.title } })
@@ -322,7 +323,7 @@ describe('retained mission row context', () => {
     const prefix = `${seat.name}, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
     expect(sidebarRowAccessibleName(actual)).toBe(`${prefix}, Step Review changes`)
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
+      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: markdownBlock('Ship this change?'), update: undefined }
     const waiting = sidebarRow({ agent: seat, stale: false, missions: [hydrated], attention: [card],
       missionInfo: { _tag: 'Stale', updatedAt: 1000 } })
     expect(sidebarRowAccessibleName(waiting)).toBe(`${prefix}, Waiting for you: Ship this change?, mission info may be out of date`)
@@ -334,7 +335,7 @@ describe('retained mission row context', () => {
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
       actions: ['work.done' as const], conversation_id: 'agent/example-another', conversation_ids: [],
       requester_id: 'agent/example-another', source_id: 'agent/example-another', step_run_id: undefined,
-      blocked: undefined, mission_run_id: work.runId, detail: 'Someone else must decide', update: undefined }
+      blocked: undefined, mission_run_id: work.runId, detail: markdownBlock('Someone else must decide'), update: undefined }
     expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Step', name: work.title } })
   })
 
