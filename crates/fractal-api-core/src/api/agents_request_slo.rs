@@ -3,6 +3,7 @@ mod ledger;
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -48,8 +49,11 @@ impl Pending {
         self.latest_slot = Some(slot);
     }
 
-    fn record(&mut self, slot: u64, fast: bool) {
-        self.observe_slot(slot);
+    fn record(&mut self, slot: u64, observed_slot: u64, fast: bool) {
+        self.observe_slot(observed_slot);
+        if !(observed_slot.saturating_sub(1)..=observed_slot).contains(&slot) {
+            return;
+        }
         let index = (slot % 2) as usize;
         let receipt = match &mut self.minutes[index] {
             Some(receipt) if receipt.slot == slot => receipt,
@@ -67,6 +71,7 @@ impl Pending {
         previous: Option<Boundary>,
         now_ms: u64,
         at: Instant,
+        in_flight: bool,
     ) -> (Boundary, Option<Receipt>, Option<u64>) {
         let slot = now_ms / MINUTE_MS;
         self.observe_slot(slot);
@@ -79,7 +84,8 @@ impl Pending {
         };
         let receipt = previous
             .filter(|previous| {
-                rewind.is_none()
+                !in_flight
+                    && rewind.is_none()
                     && slot == previous.slot + 1
                     && previous.aligned
                     && boundary.aligned
@@ -161,6 +167,23 @@ fn count(method: &str, route: &str, outcome: RequestOutcome, elapsed: Duration) 
     }
 }
 
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct Completion;
+
+impl Completion {
+    fn reserve() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 static PENDING: LazyLock<Mutex<Pending>> = LazyLock::new(|| Mutex::new(Pending::default()));
 static PUBLISHED: Mutex<Option<Reading>> = Mutex::new(None);
 
@@ -170,9 +193,13 @@ fn now_ms() -> u64 {
 
 pub(super) fn record(method: &str, route: &str, outcome: RequestOutcome, elapsed: Duration) {
     if let Some(fast) = count(method, route, outcome, elapsed) {
+        // Reserve before capturing completion UTC so the writer can detect an
+        // earlier minute's request still waiting for the counter lock.
+        let reservation = Completion::reserve();
+        let completed = now_ms() / MINUTE_MS;
         let mut pending = PENDING.lock();
-        // Read UTC inside the lock so a request cannot arrive after its minute has closed.
-        pending.record(now_ms() / MINUTE_MS, fast);
+        pending.record(completed, now_ms() / MINUTE_MS, fast);
+        drop(reservation);
     }
 }
 
@@ -198,7 +225,12 @@ pub(super) async fn run(state_dir: PathBuf, node: String) {
     loop {
         let (boundary, receipt) = {
             let mut pending = PENDING.lock();
-            let (boundary, receipt, rewind) = pending.boundary(previous, now_ms(), Instant::now());
+            let (boundary, receipt, rewind) = pending.boundary(
+                previous,
+                now_ms(),
+                Instant::now(),
+                IN_FLIGHT.load(Ordering::SeqCst) != 0,
+            );
             if let Some(slot) = rewind.or_else(|| previous.is_none().then_some(boundary.slot)) {
                 invalidate_from = Some(invalidate_from.map_or(slot, |prior: u64| prior.min(slot)));
                 *PUBLISHED.lock() = None;
@@ -273,17 +305,21 @@ mod tests {
         let start = Instant::now();
         let mut previous = None;
         let mut tick = |pending: &mut Pending, millis| {
-            let (boundary, receipt, rewind) =
-                pending.boundary(previous, millis, start + Duration::from_millis(millis));
+            let (boundary, receipt, rewind) = pending.boundary(
+                previous,
+                millis,
+                start + Duration::from_millis(millis),
+                false,
+            );
             previous = Some(boundary);
             (receipt, rewind)
         };
 
         assert_eq!(tick(&mut pending, 20_000), (None, None));
-        pending.record(0, false);
+        pending.record(0, 0, false);
         assert_eq!(tick(&mut pending, 60_005), (None, None));
-        pending.record(1, true);
-        pending.record(2, false);
+        pending.record(1, 1, true);
+        pending.record(2, 2, false);
         assert_eq!(
             tick(&mut pending, 120_005),
             (
@@ -307,8 +343,60 @@ mod tests {
                 None
             )
         );
-        pending.record(2, false);
+        pending.record(2, 2, false);
         assert_eq!(tick(&mut pending, 360_005), (None, Some(2)));
+    }
+
+    #[test]
+    fn crossing_the_lock_minute_preserves_the_completion_slot_or_leaves_a_gap() {
+        let start = Instant::now();
+        let run = |in_flight_at_cut: bool| {
+            let mut pending = Pending::default();
+            let (startup, _, _) = pending.boundary(None, 5, start, false);
+            let (previous, _, _) = pending.boundary(
+                Some(startup),
+                60_005,
+                start + Duration::from_secs(60),
+                false,
+            );
+            // Completion stamped just before 120_000, then obtained the lock after it.
+            if !in_flight_at_cut {
+                pending.record(1, 2, true);
+            }
+            let (current, closed, _) = pending.boundary(
+                Some(previous),
+                120_005,
+                start + Duration::from_secs(120),
+                in_flight_at_cut,
+            );
+            if in_flight_at_cut {
+                pending.record(1, 2, true);
+            }
+            let (_, next, _) = pending.boundary(
+                Some(current),
+                180_005,
+                start + Duration::from_secs(180),
+                false,
+            );
+            assert_eq!(
+                next,
+                Some(Receipt {
+                    slot: 2,
+                    eligible: 0,
+                    fast: 0
+                })
+            );
+            closed
+        };
+        assert_eq!(
+            run(false),
+            Some(Receipt {
+                slot: 1,
+                eligible: 1,
+                fast: 1
+            })
+        );
+        assert_eq!(run(true), None);
     }
 
     #[test]
