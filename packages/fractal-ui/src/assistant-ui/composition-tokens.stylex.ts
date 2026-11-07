@@ -101,7 +101,7 @@ export const typeVars = stylex.defineVars({
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
 export const radiusVars = stylex.defineVars({
-  sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
+  xs: '2px', sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
   keyboard: '4px',
   full: '9999px', none: '0',
 })

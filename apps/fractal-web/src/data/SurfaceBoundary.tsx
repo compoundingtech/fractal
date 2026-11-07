@@ -1,8 +1,7 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
-import { scale } from '../ui-compat/tokens.stylex.ts'
-import { textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { textVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Owns a retained surface's activation outside Activity, including deferred hidden renders. */
 export const SurfaceActivity = ({
@@ -29,7 +28,7 @@ export const SurfaceBoundary = (props: {
 const ActivationContext = React.createContext(Symbol('initial surface activation'))
 
 const styles = stylex.create({
-  failure: { padding: scale.space4, color: textVars.fg, fontSize: '0.8125rem' },
+  failure: { padding: spaceVars.xl, color: textVars.fg, fontSize: '0.8125rem' },
   detail: { overflowWrap: 'anywhere', whiteSpace: 'pre-wrap', color: textVars.fg },
 })
 

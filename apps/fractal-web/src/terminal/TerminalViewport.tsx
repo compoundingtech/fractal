@@ -3,10 +3,8 @@ import * as React from 'react'
 import { useKeyboard } from 'react-aria'
 import { Button, Input, Label, SearchField } from 'react-aria-components'
 
-import { scale } from '../ui-compat/tokens.stylex.ts'
-
 import { terminalMatches, terminalText } from './terminalText.ts'
-import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const searches = new Map<string, readonly Range[]>()
 const activeSearches = new Map<string, readonly Range[]>()
@@ -235,8 +233,8 @@ const styles = stylex.create({
     display: 'flex',
     alignItems: 'center',
     flexWrap: 'wrap',
-    gap: scale.space1,
-    padding: scale.space1,
+    gap: spaceVars.xs,
+    padding: spaceVars.xs,
     borderBottomWidth: '1px',
     borderBottomStyle: 'solid',
     borderBottomColor: borderVars.borderStrong,
@@ -246,15 +244,15 @@ const styles = stylex.create({
   search: {
     display: 'flex',
     alignItems: 'center',
-    gap: scale.space1,
+    gap: spaceVars.xs,
     flexGrow: 1,
     minWidth: '9rem',
   },
-  label: { paddingInline: scale.space1 },
+  label: { paddingInline: spaceVars.xs },
   input: {
     minWidth: 0,
     width: '100%',
-    padding: scale.space1,
+    padding: spaceVars.xs,
     fontSize: '0.75rem',
     color: textVars.fg,
     backgroundColor: surfaceVars.canvas,
@@ -263,7 +261,7 @@ const styles = stylex.create({
     borderColor: borderVars.borderStrong,
   },
   button: {
-    paddingInline: scale.space2,
+    paddingInline: spaceVars.md,
     height: '1.5rem',
     fontSize: '0.75rem',
     color: textVars.fg,
@@ -282,10 +280,10 @@ const styles = stylex.create({
   status: { whiteSpace: 'nowrap', color: textVars.fg },
   copyStatus: {
     margin: 0,
-    padding: scale.space1,
+    padding: spaceVars.xs,
     fontSize: '0.75rem',
     color: textVars.fg,
   },
-  body: { overflow: 'auto', flexGrow: 1, minHeight: 0, padding: scale.space2 },
+  body: { overflow: 'auto', flexGrow: 1, minHeight: 0, padding: spaceVars.md },
   ended: { opacity: 0.55, filter: 'grayscale(0.6)' },
 })

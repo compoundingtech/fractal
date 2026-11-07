@@ -12,16 +12,14 @@ import {
   type Key,
 } from 'react-aria-components'
 
-import { scale } from '../ui-compat/tokens.stylex.ts'
-
 import { ChevronRightIcon } from './icons.tsx'
-import { interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { interactionVars, surfaceVars, textVars, radiusVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   tree: {
     display: 'flex',
     flexDirection: 'column',
-    paddingBlock: scale.space1,
+    paddingBlock: spaceVars.xs,
     outlineStyle: 'none',
     fontSize: '0.8125rem',
     lineHeight: '1.25rem',
@@ -36,9 +34,9 @@ const styles = stylex.create({
     alignItems: 'center',
     gap: '6px',
     height: '1.75rem',
-    marginInline: scale.space1,
-    paddingInlineEnd: scale.space2,
-    borderRadius: scale.radiusSm,
+    marginInline: spaceVars.xs,
+    paddingInlineEnd: spaceVars.md,
+    borderRadius: radiusVars.xs,
     backgroundColor: 'transparent',
   },
   rowHovered: { backgroundColor: surfaceVars.message },

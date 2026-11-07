@@ -16,7 +16,6 @@ import * as React from 'react'
 import { Button } from 'react-aria-components'
 
 import { Modal, ModalDialog, ModalHeader, ModalTitle } from '../ui-compat/components.tsx'
-import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import { DomTerminal } from './DomTerminal.tsx'
 import { terminalMetrics } from './terminalMetrics.stylex.ts'
@@ -33,7 +32,7 @@ import {
 } from './rawTerminalInput.ts'
 import { gridFor, makeResizeDebouncer, type RawPreparation, type RawTerminalPort } from './rawTerminalState.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
-import { borderVars, interactionVars, statusVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, statusVars, surfaceVars, textVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** The emulator or its asset could not be prepared; the pane falls back to the projected screen. */
 class RawTerminalUnprepared extends Schema.TaggedError<RawTerminalUnprepared>()('RawTerminalUnprepared', {
@@ -696,12 +695,12 @@ const styles = stylex.create({
     whiteSpace: 'nowrap',
     margin: 0,
   },
-  notice: { margin: 0, marginTop: scale.space1, fontSize: '0.75rem', color: statusVars.dangerFg },
-  actions: { display: 'flex', alignItems: 'center', gap: scale.space2 },
-  confirmText: { margin: 0, marginBlock: scale.space2, lineHeight: 1.5 },
+  notice: { margin: 0, marginTop: spaceVars.xs, fontSize: '0.75rem', color: statusVars.dangerFg },
+  actions: { display: 'flex', alignItems: 'center', gap: spaceVars.md },
+  confirmText: { margin: 0, marginBlock: spaceVars.md, lineHeight: 1.5 },
   button: {
     height: '1.5rem',
-    paddingInline: scale.space2,
+    paddingInline: spaceVars.md,
     fontSize: '0.75rem',
     color: textVars.fg,
     backgroundColor: {

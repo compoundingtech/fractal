@@ -15,11 +15,10 @@ import {
   Tooltip,
   TooltipTrigger,
 } from '../ui-compat/components.tsx'
-import { scale } from '../ui-compat/tokens.stylex.ts'
 
 import { BrandText } from '../workbench-kit/brand-icons.tsx'
 import { TerminalViewport } from './TerminalViewport.tsx'
-import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, radiusVars, spaceVars, typeVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Viewer state of a pane: waiting for the first screen, following frames, quiet, showing an old snapshot, or frozen for good. */
 export type PaneState = 'connecting' | 'live' | 'idle' | 'stale' | 'ended'
@@ -44,8 +43,8 @@ const styles = stylex.create({
   header: {
     display: 'flex',
     alignItems: 'center',
-    gap: scale.space2,
-    paddingInline: scale.space2,
+    gap: spaceVars.md,
+    paddingInline: spaceVars.md,
     height: '1.75rem',
     flexShrink: 0,
     borderBottomWidth: '1px',
@@ -65,8 +64,8 @@ const styles = stylex.create({
   },
   meta: {
     borderWidth: 0,
-    borderRadius: scale.radiusSm,
-    paddingInline: scale.space1,
+    borderRadius: radiusVars.xs,
+    paddingInline: spaceVars.xs,
     paddingBlock: 0,
     height: '1.5rem',
     backgroundColor: {
@@ -80,12 +79,12 @@ const styles = stylex.create({
     outlineOffset: '-2px',
     flexShrink: 0,
     whiteSpace: 'nowrap',
-    fontFamily: scale.fontMono,
+    fontFamily: typeVars.fontMono,
     fontSize: '0.75rem',
     color: textVars.fg,
   },
   banner: {
-    padding: scale.space2,
+    padding: spaceVars.md,
   },
 })
 

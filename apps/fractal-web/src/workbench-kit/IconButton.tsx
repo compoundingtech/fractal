@@ -7,8 +7,8 @@ import type { ReactNode } from 'react'
 import { Button as AriaButton, type ButtonProps as AriaButtonProps } from 'react-aria-components'
 
 import { Tooltip, TooltipTrigger } from '../ui-compat/components.tsx'
-import { scale } from '../ui-compat/tokens.stylex.ts'
-import { interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+
+import { interactionVars, surfaceVars, textVars, radiusVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   button: {
@@ -17,7 +17,7 @@ const styles = stylex.create({
     justifyContent: 'center',
     flexShrink: 0,
     borderWidth: 0,
-    borderRadius: scale.radiusSm,
+    borderRadius: radiusVars.xs,
     padding: 0,
     color: { default: textVars.fg, ':is([data-hovered])': textVars.fg },
     backgroundColor: {

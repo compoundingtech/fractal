@@ -7,10 +7,8 @@ import * as stylex from '@stylexjs/stylex'
 import { useRef, useState, type ReactNode } from 'react'
 import { useDrop } from 'react-aria'
 
-import { scale } from '../ui-compat/tokens.stylex.ts'
-
 import { readTabDrop, type TabDragPayload } from './EditorTabs.tsx'
-import { accentVars, borderVars, statusVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { accentVars, borderVars, statusVars, surfaceVars, textVars, radiusVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Drop region: the centre moves an editor, edges split in that direction. */
 export type DropZone = 'center' | 'left' | 'right' | 'top' | 'bottom'
@@ -29,7 +27,7 @@ const styles = stylex.create({
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: borderVars.borderStrong,
-    borderRadius: scale.radiusLg,
+    borderRadius: radiusVars.xs,
     overflow: 'hidden',
   },
   cardFocused: { borderColor: borderVars.borderStrong },
@@ -38,7 +36,7 @@ const styles = stylex.create({
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: borderVars.borderStrong,
-    borderRadius: scale.radiusDefault,
+    borderRadius: radiusVars.xs,
     overflow: 'hidden',
   },
   ringFocused: { borderColor: accentVars.primary },
@@ -79,7 +77,7 @@ const styles = stylex.create({
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: accentVars.primary,
-    borderRadius: scale.radiusDefault,
+    borderRadius: radiusVars.xs,
   },
   center: { inset: '4px' },
   left: { top: '4px', bottom: '4px', left: '4px', right: '50%' },

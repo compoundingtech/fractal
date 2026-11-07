@@ -12,10 +12,8 @@ import {
   NumberField,
 } from 'react-aria-components'
 
-import { scale } from '../ui-compat/tokens.stylex.ts'
-
 import type { TerminalResizePort } from './terminal-resize-port.ts'
-import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, radiusVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Changing dimensions is deliberate: other viewers share the same PTY. */
 export const TerminalResize = ({
@@ -141,7 +139,7 @@ export const TerminalResize = ({
 const styles = stylex.create({
   button: {
     height: '1.5rem',
-    paddingInline: scale.space2,
+    paddingInline: spaceVars.md,
     fontSize: '0.75rem',
     color: textVars.fg,
     backgroundColor: {
@@ -168,26 +166,26 @@ const styles = stylex.create({
     width: 'min(28rem, 90vw)',
     backgroundColor: surfaceVars.canvas,
     color: textVars.fg,
-    borderRadius: scale.radiusDefault,
+    borderRadius: radiusVars.xs,
   },
   dialog: {
-    padding: scale.space4,
+    padding: spaceVars.xl,
     outline: 'none',
     display: 'flex',
     flexDirection: 'column',
-    gap: scale.space2,
+    gap: spaceVars.md,
   },
   heading: { margin: 0, fontSize: '1rem' },
   text: { margin: 0, fontSize: '0.8125rem' },
-  field: { display: 'flex', alignItems: 'center', gap: scale.space2, fontSize: '0.8125rem' },
+  field: { display: 'flex', alignItems: 'center', gap: spaceVars.md, fontSize: '0.8125rem' },
   input: {
     width: '6rem',
-    padding: scale.space1,
+    padding: spaceVars.xs,
     color: textVars.fg,
     backgroundColor: surfaceVars.canvas,
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: borderVars.borderStrong,
   },
-  actions: { display: 'flex', justifyContent: 'flex-end', gap: scale.space2 },
+  actions: { display: 'flex', justifyContent: 'flex-end', gap: spaceVars.md },
 })
