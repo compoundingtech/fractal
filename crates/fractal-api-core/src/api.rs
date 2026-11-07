@@ -4180,7 +4180,8 @@ pub fn managed_session_owner_at(
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
+    // A logical claim cut alone does not pin identity resolution or repair state.
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
         let owners = store.conversation_owners_at(snapshot_index)?;
         for owner in owners.values() {
             if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
@@ -4194,7 +4195,7 @@ pub fn managed_session_owner_at(
             }
         }
         Ok(None)
-    })
+    }))
 }
 
 pub fn managed_session_owner_for_subject_at(
@@ -4203,7 +4204,7 @@ pub fn managed_session_owner_for_subject_at(
     session_id: &str,
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
         if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
             return Ok(None);
         }
@@ -4218,7 +4219,7 @@ pub fn managed_session_owner_for_subject_at(
             return Ok(None);
         }
         Ok(Some((owner.subject, owner.incarnation, owner.origin)))
-    })
+    }))
 }
 
 

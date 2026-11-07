@@ -36,6 +36,12 @@ reviewed manifest digest; it does not authenticate external git commits named in
 authenticated sender evidence. Notice finalization is SQL-free when no notice
 work is pending; touched authority or custom state still triggers revalidation.
 This is a finalization contract, not a checked performance result.
+Generic seat-summary visibility and reduction use one pinned read snapshot and
+effective claim cut. The incarnation reduction independently excludes reserved
+notice kinds from both actual fields and source attribution. Managed-session owner
+visibility and identity selection also share one read snapshot; a numeric claim
+cut alone does not pin mutable identity and repair state.
+
 Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
 Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
 constructors and decoding, including Unicode-scalar lengths, URI references and
