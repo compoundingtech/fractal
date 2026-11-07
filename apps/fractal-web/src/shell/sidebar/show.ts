@@ -10,6 +10,7 @@ import {
   sidebarHostValue,
   type SidebarQuery,
 } from './filter.ts'
+import type { SidebarFilters } from './state.ts'
 
 /** Show menu keys are the search tokens themselves, so menu and search share one grammar. */
 export const machineKey = (machine: string): string => `machine:${machine}`
@@ -38,6 +39,31 @@ export const withShowKeys = ({
   }
 }
 
+/** Menu keys for state that is not in the query: selected statuses, and finished agents left showing. */
+export const statusKey = (status: string): string => `status:${status}`
+export const showEndedKey = 'show:ended'
+export const showRetiredKey = 'show:retired'
+/** Every checked Filter entry: the query's own, the statuses, and finished agents that are not hidden. */
+export const selectedFilterKeys = (filters: Pick<SidebarFilters, 'hideEnded' | 'hideRetired' | 'statuses'>, parsedQuery: SidebarQuery): ReadonlySet<string> =>
+  new Set([
+    ...selectedShowKeys(parsedQuery),
+    ...filters.statuses.map(statusKey),
+    ...(filters.hideEnded ? [] : [showEndedKey]),
+    ...(filters.hideRetired ? [] : [showRetiredKey]),
+  ])
+/** A Filter menu selection back to the settings; query choices go through the shared grammar. */
+export const withFilterKeys = ({ filters, keys }: { readonly filters: SidebarFilters; readonly keys: ReadonlySet<string> }): SidebarFilters => ({
+  ...filters,
+  query: printSidebarQuery(withShowKeys({ parsedQuery: parseSidebarQuery(filters.query), keys })),
+  hideEnded: !keys.has(showEndedKey),
+  hideRetired: !keys.has(showRetiredKey),
+  statuses: [...keys].flatMap((key) => (key.startsWith('status:') ? [key.slice('status:'.length)] : [])),
+})
+/** The trigger's count: everything narrowing the list except free text, typed facets included, so Reset always has something to clear. */
+export const activeFilterCount = (filters: Pick<SidebarFilters, 'hideEnded' | 'hideRetired' | 'statuses'>, parsedQuery: SidebarQuery): number =>
+  Number(filters.hideEnded) + Number(filters.hideRetired) + Number(parsedQuery.asking) +
+  selectedMachines(parsedQuery).length + parsedQuery.facets.length + filters.statuses.length
+
 /** Machine entries: every observed host, plus selected machines no host reports, so they stay clearable. */
 export const showMachines = ({
   hosts,
@@ -52,31 +78,51 @@ export const showMachines = ({
   return [...entries].map(([value, label]) => ({ value, label }))
 }
 
-/** One roster row as the Show menu counts it; `others` = passes every filter outside the Show menu. */
+/** One roster row as the Filter menu counts it; `others` = passes free text and typed facets, everything outside the menu. */
 export interface ShowRow {
   readonly host: string
   readonly asking: boolean
   readonly others: boolean
+  /** Omitted facts count as no status and not finished. */
+  readonly status?: string
+  readonly ended?: boolean
+  readonly retired?: boolean
 }
-/** Faceted counts: each entry counts rows that pass the other filters and that entry. */
+const noMenuFilters = { hideEnded: false, hideRetired: false, statuses: [] }
+/** Faceted counts: each entry counts rows that pass every other filter and that entry. */
 export const showCounts = ({
   rows,
   parsedQuery,
   machines,
+  filters = noMenuFilters,
+  statuses = [],
 }: {
   readonly rows: readonly ShowRow[]
   readonly parsedQuery: SidebarQuery
   readonly machines: readonly string[]
-}): { readonly asking: number; readonly machines: ReadonlyMap<string, number> } => {
-  let asking = 0
-  const counts = new Map(machines.map((machine) => [machine, 0]))
+  readonly filters?: Pick<SidebarFilters, 'hideEnded' | 'hideRetired' | 'statuses'>
+  readonly statuses?: readonly string[]
+}) => {
+  let asking = 0, ended = 0, retired = 0
+  const machineCounts = new Map(machines.map((machine) => [machine, 0]))
+  const statusCounts = new Map(statuses.map((status) => [status, 0]))
   for (const row of rows) {
     if (!row.others) continue
-    if (row.asking && matchesSidebarHost(row.host, parsedQuery.machines)) asking++
-    if (parsedQuery.asking && !row.asking) continue
-    for (const machine of machines) if (matchesSidebarHost(row.host, [[machine]])) counts.set(machine, counts.get(machine)! + 1)
+    const passesAsking = !parsedQuery.asking || row.asking
+    const passesMachines = matchesSidebarHost(row.host, parsedQuery.machines)
+    const passesStatus = filters.statuses.length === 0 || (row.status !== undefined && filters.statuses.includes(row.status))
+    const passesEnded = !(filters.hideEnded && row.ended === true)
+    const passesRetired = !(filters.hideRetired && row.retired === true)
+    const finished = passesEnded && passesRetired
+    if (row.asking && passesMachines && passesStatus && finished) asking++
+    if (passesAsking && passesStatus && finished) for (const machine of machines) if (matchesSidebarHost(row.host, [[machine]])) machineCounts.set(machine, machineCounts.get(machine)! + 1)
+    if (passesAsking && passesMachines && finished && row.status !== undefined && statusCounts.has(row.status)) statusCounts.set(row.status, statusCounts.get(row.status)! + 1)
+    if (passesAsking && passesMachines && passesStatus) {
+      if (row.ended === true && passesRetired) ended++
+      if (row.retired === true && passesEnded) retired++
+    }
   }
-  return { asking, machines: counts }
+  return { asking, machines: machineCounts, statuses: statusCounts, ended, retired }
 }
 
 /** Browser-local machine groups: `null` = no readable choice; `[]` = explicitly cleared.
