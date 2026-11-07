@@ -100,17 +100,25 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
         assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
         let (missing_status, missing) = call(&app,"GET","/v1/client/claims/by-id/nonexistent",Value::Null,false).await;
         assert_eq!(status, missing_status);
-        assert_eq!(value.to_string().replace(&grant.id,"nonexistent"),missing.to_string());
+        // Correlation ids are fresh per HTTP request, independent of claim existence.
+        let mut normalized = value.clone();
+        if let Some(request_id) = normalized.get_mut("request_id") {
+            *request_id = missing["request_id"].clone();
+        }
+        assert_eq!(normalized.to_string().replace(&grant.id,"nonexistent"),missing.to_string());
         assert!(!value.to_string().contains(&credential_digest(TOKEN)));
         assert!(!value.to_string().contains(TOKEN));
         assert!(!value.to_string().contains("\"credential\":"));
         if !gateway {
             let (status, raw) = call(&app,"GET",&format!("/v1/claims/by-id/{}",grant.id),Value::Null,false).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            assert_eq!(raw, value);
+            assert_eq!(raw["code"], value["code"]);
+            assert_eq!(raw["message"], value["message"]);
             let (absent_status, absent) = call(&app,"GET","/v1/claims/by-id/nonexistent",Value::Null,false).await;
             assert_eq!(status,absent_status);
-            assert_eq!(raw.to_string().replace(&grant.id,"nonexistent"),absent.to_string());
+            let mut normalized = raw;
+            normalized["request_id"] = absent["request_id"].clone();
+            assert_eq!(normalized.to_string().replace(&grant.id,"nonexistent"),absent.to_string());
         }
     }
 }
@@ -248,7 +256,7 @@ mission "service-work" state="ready" {
     state.store.set_step_state(subject,"ready",None).unwrap();
     let action = |name: &str, summary: &str| state.store.work_action(subject,name,&crate::model::WorkRequest {
         wait_ms:None,actor:Some("agent/node.reader".into()),incarnation:Some("service-runtime".into()),
-        summary:Some(summary.into()),reason:None,evidence:vec![],idempotency_key:format!("service-{name}"),
+        summary:Some(summary.into()),reason:None,evidence:vec![],idempotency_key:format!("service-{name}-{summary}"),
     }).unwrap();
     action("claim","claim");
     action("progress","worker-progress-secret-sentinel");
@@ -270,6 +278,8 @@ mission "service-work" state="ready" {
         summary:"person-answer-secret-sentinel".into(),evidence:vec![],episode:None,
         answer:None,idempotency_key:"service-person-answer".into(),
     },false).unwrap();
+    // Answering resumes the origin as ready, with its old lease released.
+    action("claim","resume-after-answer");
     action("complete","worker-completion-secret-sentinel");
     let completed = state.store.step_run(subject).unwrap().unwrap();
     assert_eq!(completed.completion_summary.as_deref(),Some("worker-completion-secret-sentinel"));
