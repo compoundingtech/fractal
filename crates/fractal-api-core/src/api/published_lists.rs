@@ -216,10 +216,9 @@ pub fn start_published_lists(state: &AppState) {
         "runtimes/refresh",
         fold_runtimes,
         true,
-        false,
         // Its fold has no change check: it rebuilds whenever the cut moves, so a local claim
         // keeps the full pause rather than fold it on every write.
-        None,
+        Wakes { roster: false, local: None },
     );
     if !enabled() {
         return;
@@ -232,8 +231,7 @@ pub fn start_published_lists(state: &AppState) {
         "published_list.missions",
         fold_missions,
         true,
-        true,
-        Some(missions_local_commits),
+        Wakes { roster: true, local: Some(missions_local_commits) },
     );
     spawn(
         state.store.clone(),
@@ -242,8 +240,7 @@ pub fn start_published_lists(state: &AppState) {
         "published_list.work",
         fold_work,
         true,
-        false,
-        Some(work_local_commits),
+        Wakes { roster: false, local: Some(work_local_commits) },
     );
 }
 
@@ -251,7 +248,8 @@ pub fn start_published_lists(state: &AppState) {
 /// directly.
 #[cfg(any(test, feature = "test-support"))]
 pub fn start_published_work(state: &AppState) {
-    spawn(state.store.clone(), |store| store.published_work_list(), "work", "published_list.work", fold_work, true, false, Some(work_local_commits));
+    let wakes = Wakes { roster: false, local: Some(work_local_commits) };
+    spawn(state.store.clone(), |store| store.published_work_list(), "work", "published_list.work", fold_work, true, wakes);
 }
 
 /// Fold and publish the work list once, as its refresher does, for tests that drive it.
@@ -303,6 +301,16 @@ fn fold_runtimes(
     })
 }
 
+/// What wakes a refresher besides its own commits, deadlines and fresh reads.
+#[derive(Clone, Copy)]
+struct Wakes {
+    /// A list whose rows read the agents roster also folds when a roster is published.
+    roster: bool,
+    /// Its hold on the local-commit scanner, when a claim this node writes that its fold reads
+    /// cuts its pause.
+    local: Option<fn(&Arc<Store>) -> local_commits::LocalCommits>,
+}
+
 /// Keep one collection published: fold after commits, when a row's deadline passes, and again
 /// shortly after a failed fold, never more than one fold at a time. A `governed` list is never
 /// folded on read while its refresher runs: its view stays held, so its windows wait for its
@@ -314,8 +322,7 @@ fn spawn<R: Send + Sync + 'static>(
     label: &'static str,
     fold: Fold<R>,
     governed: bool,
-    roster_wakes: bool,
-    local: Option<fn(&Arc<Store>) -> local_commits::LocalCommits>,
+    wakes: Wakes,
 ) {
     // Held before it starts: from then on a reader refuses rather than reads the list directly,
     // and a window that finds it not ready waits for its next change. A second spawn holds
@@ -331,7 +338,7 @@ fn spawn<R: Send + Sync + 'static>(
         let commits = Arc::clone(&wake);
         let _observer = store.observe_commits(move |_| commits.notify_one());
         // A list whose rows read the agents roster also folds when a roster is published.
-        let _roster = roster_wakes.then(|| {
+        let _roster = wakes.roster.then(|| {
             let mut published = store.subscribe_agent_roster();
             let wake = Arc::clone(&wake);
             AbortOnDrop(tokio::spawn(async move {
@@ -346,7 +353,7 @@ fn spawn<R: Send + Sync + 'static>(
         let fresh = list(&store).fresh_requests();
         // Whether a commit holds a claim this node wrote that the fold reads is read off the
         // writer, once for every refresher that pauses on it.
-        let mut local = local.map(|hold| hold(&store));
+        let mut local = wakes.local.map(|hold| hold(&store));
         let mut failures = 0;
         loop {
             // A fresh request from before this fold is served by it: drop it, so it cannot cut

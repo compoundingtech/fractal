@@ -2005,7 +2005,7 @@ struct Refresher<R: 'static> {
 
 impl<R: Send + Sync + 'static> Refresher<R> {
     fn start(&self, store: &Arc<Store>) {
-        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, false, self.local);
+        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, Wakes { roster: false, local: self.local });
     }
 
     fn folds(&self, store: &Store) -> usize {
