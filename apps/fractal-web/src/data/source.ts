@@ -68,14 +68,14 @@ export type Feed<A> =
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
       readonly error?: {
-        readonly reason: 'ungranted' | 'unsupported' | 'failed'
+        readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
         readonly detail: string
       }
     }
   | {
       readonly _tag: 'Unavailable'
-      /** `ungranted`: the paired device lacks the scope (the read-only dev device); `unsupported`: the gateway lacks the capability. */
-      readonly reason: 'ungranted' | 'unsupported' | 'failed'
+      /** `unauthorized`: the browser credential expired or was revoked; `ungranted`: missing scope; `unsupported`: missing capability. */
+      readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
       /** Terminal feeds display this source-owned reason; other feeds treat it as diagnostic detail. */
       readonly detail: string
       /** The read error's machine code (for example `not-found`): classification and data-wf-* diagnostics only, never display copy. */
@@ -419,7 +419,7 @@ export const unavailable = ({
   code,
   retryable,
 }: {
-  readonly reason: 'ungranted' | 'unsupported' | 'failed'
+  readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
   readonly detail: string
   readonly code?: string | undefined
   readonly retryable?: boolean | undefined

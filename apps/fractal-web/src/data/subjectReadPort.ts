@@ -19,7 +19,7 @@ import { redactPublicationDefinition, type MissionDeclarationValue } from '../de
 /** A subject read failed because access, support, or a current native observation is missing. */
 export class SubjectReadFailure extends Data.TaggedError('SubjectReadFailure')<{
   readonly ref: string
-  readonly reason: 'ungranted' | 'unsupported' | 'failed'
+  readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
   readonly detail: string
 }> {}
 

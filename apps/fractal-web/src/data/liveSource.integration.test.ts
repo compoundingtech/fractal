@@ -867,11 +867,11 @@ describe('live feed sync sidecars', () => {
         live.registry.mount(live.source.agents)
         live.registry.mount(sync.agents)
         yield* settle
-        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.agents).sync.status).toEqual(failed)
         expect(Option.isNone(live.registry.get(sync.agents).last)).toBe(true)
         const later = 'agent/opened-after-rejection'
-        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.conversation(later)).sync.status).toEqual(failed)
       }),
     ),
@@ -1033,8 +1033,8 @@ describe('terminal dependent-read authority', () => {
   }
 
   for (const refusal of [
-    { status: 401, code: 'forbidden', retryable: true, reason: 'ungranted', expectedRetryable: false },
-    { status: 403, code: 'forbidden', retryable: false, reason: 'ungranted', expectedRetryable: false },
+    { status: 401, code: 'forbidden', retryable: true, reason: 'unauthorized', expectedRetryable: false },
+    { status: 403, code: 'forbidden', retryable: false, reason: 'unauthorized', expectedRetryable: false },
     { status: 400, code: 'unsupported-capability', retryable: true, reason: 'unsupported', expectedRetryable: false },
     { status: 404, code: 'not-found', retryable: false, reason: 'failed', expectedRetryable: false },
     { status: 503, code: 'unavailable', retryable: false, reason: 'failed', expectedRetryable: false },
@@ -1052,7 +1052,9 @@ describe('terminal dependent-read authority', () => {
         const ref = 'terminal/example'
         live.registry.mount(live.source.terminalInterest!(ref))
         yield* settle
-        expect(live.registry.get(live.source.terminal(ref))).toEqual({
+        expect(live.registry.get(live.source.terminal(ref))).toEqual(refusal.reason === 'unauthorized' ? {
+          _tag: 'Unavailable', reason: 'unauthorized', detail: 'Browser credential expired or revoked', retryable: false,
+        } : {
           _tag: 'Unavailable', reason: refusal.reason, detail: 'Runtime read refused',
           code: refusal.code, retryable: refusal.expectedRetryable,
         })

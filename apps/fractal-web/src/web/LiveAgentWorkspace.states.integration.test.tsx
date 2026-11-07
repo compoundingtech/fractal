@@ -100,6 +100,20 @@ const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const retry = (within: ParentNode) => [...within.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Retry')
 const transcript = () => host.querySelector('[data-testid="transcript-scroll"], [data-testid="transcript-unavailable"]')!
 describe('RM1 workspace source states', () => {
+  it('replaces loading with a quiet credential-expired notice and no ineffective retry', async () => {
+    registry.set(agents, waiting)
+    await mount()
+    await act(async () => registry.set(agents, unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })))
+    const notice = sidebar().querySelector('[data-wf-roster-reason="unauthorized"]')!
+    expect(notice.textContent).toBe("This browser's access to the daemon has expired or was revoked. Pair the device again.")
+    expect(notice.querySelector('[role="status"]')).not.toBeNull()
+    expect(notice.querySelector('[role="alert"]')).toBeNull()
+    expect(sidebar().textContent).not.toContain('private diagnostic')
+    expect(sidebar().querySelector('[data-system-state="loading"]')).toBeNull()
+    expect(roster().querySelector('[data-wf-roster-skeleton]')).toBeNull()
+    expect(retry(sidebar())).toBeUndefined()
+  })
+
   it('replaces roster loading with an observed empty roster, not a filter no-match', async () => {
     registry.set(agents, waiting)
     registry.set(agentsSync, initialFeedSync(118_000))
