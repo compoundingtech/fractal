@@ -9,7 +9,8 @@ import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
-import { SettingsControl } from './SettingsDialog.tsx'
+import { SettingsControl, type SettingsScheme } from './SettingsDialog.tsx'
+import { useResolvedScheme } from './themePreference.ts'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
 const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark', initialQuery = '' }: {
@@ -19,11 +20,12 @@ const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'd
   readonly initialQuery?: string
 }) => {
   const [filters, setFilters] = React.useState({ ...defaultFilters, query: initialQuery })
-  const [scheme, setScheme] = React.useState<'dark' | 'light'>(initialScheme)
+  const [preference, setScheme] = React.useState<SettingsScheme>(initialScheme)
+  const scheme = useResolvedScheme(preference)
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   return <main data-sidebar-chrome-story="" style={{ width: viewport }} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
-    <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined} headerActions={<SettingsControl scheme={scheme} onSchemeChange={setScheme} />}>
+    <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined} headerActions={<SettingsControl scheme={preference} onSchemeChange={setScheme} />}>
       <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} showRows={[{ host: 'local', asking: false, others: true, status: 'idle' }]} />
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>Builder session</nav>
     </ResponsiveAgentSidebar>
