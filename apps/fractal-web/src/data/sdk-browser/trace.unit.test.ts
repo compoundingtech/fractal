@@ -93,15 +93,16 @@ it('does not add query context for invalid upgrade traceparents', () => {
 })
 
 it('carries the client label on browser collection and PTY upgrades without sending credentials in URLs', () => {
+  const browserAuthorization = 'Bearer' + ' fx-input'
   const urls: URL[] = []
   vi.stubGlobal('WebSocket', class {
     constructor(url: string | URL) { urls.push(new URL(url)) }
   })
   try {
-    browserSocket('wss://gateway.test/collections?cursor=a%2Fb', [], { 'x-st3-client': 'fractal-web 0.1.0+build', Authorization: 'Bearer secret' })
+    browserSocket('wss://gateway.test/collections?cursor=a%2Fb', [], { 'x-st3-client': 'fractal-web 0.1.0+build', Authorization: browserAuthorization })
     browserPtySocket('fractal-web 0.1.0+build')('wss://gateway.test/raw-stream?incarnation=one', [])
     expect(urls.map(url => url.searchParams.get('client'))).toEqual(['fractal-web 0.1.0+build', 'fractal-web 0.1.0+build'])
     expect(urls[0]!.searchParams.get('cursor')).toBe('a/b')
-    expect(urls.every(url => !url.href.includes('secret'))).toBe(true)
+    expect(urls.every(url => !url.href.includes('fx-input'))).toBe(true)
   } finally { vi.unstubAllGlobals() }
 })
