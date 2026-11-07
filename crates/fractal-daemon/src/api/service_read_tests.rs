@@ -198,6 +198,8 @@ mission "service-gate" state="ready" {
     let reconciler = Reconciler::new(state.store.clone(),std::sync::Arc::new(FakeRuntime::default()),
         "node".into(),std::sync::Arc::new(tokio::sync::Notify::new()));
     reconciler.reconcile_once().unwrap();
+    // Pending work first becomes ready; the next pass admits agentless work and evaluates its gate.
+    reconciler.reconcile_once().unwrap();
     let receipt = state.store.claims_page(None,None,0,None,false,500).unwrap().claims.into_iter()
         .find(|claim| claim.kind == "gate.result" && claim.body["fields"]["gate"] == "gate-name-secret-sentinel")
         .expect("the real reconciler writes the literal gate name");
