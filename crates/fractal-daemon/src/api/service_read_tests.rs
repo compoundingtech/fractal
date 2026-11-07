@@ -149,6 +149,12 @@ async fn paired_devices_and_browser_sessions_cannot_use_service_claim_routes() {
         for path in ["/v1/client/claims","/v1/client/claims/by-id/absent"] {
             assert_eq!(request(&app,"GET",path,Some("device-only"),Value::Null).await.0,StatusCode::FORBIDDEN);
             assert_eq!(request(&app,"GET",path,None,Value::Null).await.0,StatusCode::FORBIDDEN);
+            let browser = Request::builder().uri(path)
+                .extension(fractal_api_core::api::client_v0::LocalWebSession {
+                    person:OWNER.into(),id:credential_digest("browser-session"),
+                    expires_at:u128::from(u64::MAX),
+                }).body(Body::empty()).unwrap();
+            assert_eq!(app.clone().oneshot(browser).await.unwrap().status(),StatusCode::FORBIDDEN);
         }
     }
 }
