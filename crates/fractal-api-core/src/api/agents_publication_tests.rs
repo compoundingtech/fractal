@@ -16,6 +16,90 @@ fn assert_publication_envelope(publication: &PublicationArc) {
     assert_eq!(publication.order(), ids);
 }
 
+fn notice_legacy_agent_claim(store: &Store, subject: &str) -> String {
+    roster_resilience_runtime(store, subject, "notice-native");
+    // Seed an old-peer-shaped row below current reserved-kind admission.
+    let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+        let hidden = crate::store::append_claim_tx(
+            tx, store.origin(), subject, "runtime.observed", None,
+            &json!({"fields":{"runtime_id":"notice-private-marker",
+                "incarnation_id":"notice-private-marker","reason":"notice-private-marker",
+                "terminal":true,"status":"stopped"}}), &[], None,
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1ceb045a5bba owner=fractal_api_core::api::agents_publication_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+        Ok(hidden)
+    }).unwrap().unwrap();
+    store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+    hidden.id
+}
+
+#[tokio::test]
+async fn notice_agent_first_page_keeps_native_membership_and_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let subject = "agent/notice-page";
+    let hidden = notice_legacy_agent_claim(&app.store, subject);
+    assert!(!app.store.agent_roster_refresher_running());
+    for history in [false, true] {
+        let snapshot = new_client_snapshot(&app);
+        let refs = app.store.read_snapshot(|index|
+            client_agent_page_refs(&app.store, history, index)).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["id"], subject);
+        // Without a publication owner this runs the ordinary first-page refs/card assembly.
+        let (Extension(served), Json(page)) = client_agents(
+            State(app.clone()), Extension(snapshot.clone()),
+            Query(ClientListQuery { history, limit: Some(1), ..ClientListQuery::default() }),
+        ).await.expect("a legacy reserved row must not break native first-page assembly");
+        assert_eq!(served.store_index, snapshot.store_index);
+        assert_eq!(page.items.len(), refs.len());
+        assert!(!page.page.has_more);
+        assert_eq!(page.items[0]["id"], refs[0]["id"]);
+        assert_eq!(page.items[0]["runtime_ids"], json!(["runtime/notice-native"]));
+        assert_eq!(page.items[0]["state"], "running");
+        let encoded = serde_json::to_string(&page).unwrap();
+        assert!(!encoded.contains("notice-private-marker"));
+        assert!(!encoded.contains(&hidden));
+        assert!(!serde_json::to_string(&refs).unwrap().contains(&hidden));
+    }
+    assert!(app.store.claim_by_id(&hidden).unwrap().is_some());
+}
+
+#[test]
+fn notice_cold_agent_publication_completes_beyond_the_startup_head() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    let hidden = (0..301).map(|agent|
+        notice_legacy_agent_claim(store, &format!("agent/notice-publication-{agent:04}")))
+        .collect::<Vec<_>>();
+    assert!(store.agents_publication().is_none());
+    store.read_snapshot(|index| client_agent_roster_head(store, index))
+        .expect("contaminated native agents must still assemble a bounded startup head");
+    assert!(store.agents_publication().is_none(), "the startup head is not a complete roster");
+    refresh_agent_roster(store, false)
+        .expect("reserved rows must not prevent bounded roster completion");
+    let publication = publication_current(store);
+    assert_eq!(publication.rows().len(), 301);
+    assert_eq!(publication.metadata().status_watermark.store_index, store.index().unwrap());
+    let ids = publication.rows().iter().map(|card| card["id"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids, (0..301).map(|agent| format!("agent/notice-publication-{agent:04}"))
+        .collect::<BTreeSet<_>>());
+    for card in publication.rows() {
+        assert_eq!(card["runtime_ids"], json!(["runtime/notice-native"]));
+        assert_eq!(card["state"], "running");
+    }
+    assert_publication_envelope(&publication);
+    let encoded = std::str::from_utf8(publication.encoded()).unwrap();
+    assert!(!encoded.contains("notice-private-marker"));
+    for id in hidden {
+        assert!(!encoded.contains(&id));
+        assert!(store.claim_by_id(&id).unwrap().is_some());
+    }
+}
+
 #[test]
 fn agents_publication_completes_a_roster_beyond_the_startup_head() {
     let root = tempfile::tempdir().unwrap();
@@ -467,26 +551,18 @@ fn roster_pause_replicate(from: &Store, to: &Store) {
     assert!(to.project_replication_backlog().unwrap());
 }
 
-/// The refresher's own wake: every commit notifies, nothing reads on the writer.
-fn roster_pause_commits(store: &Store) -> (Arc<tokio::sync::Notify>, smallclaims::sqlite::CommitObserver) {
-    let commits = Arc::new(tokio::sync::Notify::new());
-    let wake = Arc::clone(&commits);
-    let observer = store.observe_commits(move |_| wake.notify_one());
-    (commits, observer)
-}
-
 /// A claim a card reads, committed by this node mid-pause, ends the pause at its floor, not the
 /// full second, so its writer sees it in the roster after one fold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claim_this_node_commits_cuts_the_agents_roster_pause_to_its_floor() {
     let root = tempfile::tempdir().unwrap();
     let store = state(root.path()).store;
-    let (commits, _observer) = roster_pause_commits(&store);
+    let mut local = agent_roster_local_commits(&store);
     let through = store.index().unwrap();
     let started = Instant::now();
     let pause = tokio::spawn({
         let store = Arc::clone(&store);
-        async move { agent_roster_pause(&store, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through).await }
+        async move { agent_roster_pause(&store, &mut local, Duration::ZERO, through).await }
     });
     tokio::time::sleep(Duration::from_millis(150)).await;
     roster_pause_note(&store, "message/roster-pause-local");
@@ -502,12 +578,13 @@ async fn a_claim_this_node_commits_cuts_the_agents_roster_pause_to_its_floor() {
 async fn a_local_claim_no_card_reads_keeps_the_full_agents_roster_pause() {
     let root = tempfile::tempdir().unwrap();
     let store = state(root.path()).store;
-    let (commits, _observer) = roster_pause_commits(&store);
+    let mut local = agent_roster_local_commits(&store);
+    let scanner = local.clone();
     let through = store.index().unwrap();
     let started = Instant::now();
     let pause = tokio::spawn({
         let store = Arc::clone(&store);
-        async move { agent_roster_pause(&store, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through).await }
+        async move { agent_roster_pause(&store, &mut local, Duration::ZERO, through).await }
     });
     for round in 0..3 {
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -522,6 +599,10 @@ async fn a_local_claim_no_card_reads_keeps_the_full_agents_roster_pause() {
     assert!(store.first_local_commit_after(through, index).unwrap().is_some(), "this node wrote them");
     assert!(!store.local_agent_card_input_after(through, index).unwrap(), "no card reads them");
     assert_eq!(pause.await.unwrap(), AgentRosterPauseEnd::Full);
+    let cut = scanner.cut();
+    assert!(cut.scanned >= index, "the scanner read them: {cut:?}");
+    assert!(scanner.checked() >= 1, "the roster's check was asked");
+    assert_eq!(cut.newest_local_of(AGENT_ROSTER_LOCAL_CHECK), 0, "no card reads them: {cut:?}");
     assert!(started.elapsed() >= AGENT_ROSTER_REFRESH_PAUSE, "{:?}", started.elapsed());
 }
 
@@ -531,12 +612,12 @@ async fn a_local_claim_no_card_reads_keeps_the_full_agents_roster_pause() {
 async fn a_cut_of_only_replicated_claims_keeps_the_full_agents_roster_pause() {
     let root = tempfile::tempdir().unwrap();
     let (writer, reader) = roster_pause_fleet(root.path());
-    let (commits, _observer) = roster_pause_commits(&reader);
+    let mut local = agent_roster_local_commits(&reader);
     let through = reader.index().unwrap();
     let started = Instant::now();
     let pause = tokio::spawn({
         let reader = Arc::clone(&reader);
-        async move { agent_roster_pause(&reader, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through).await }
+        async move { agent_roster_pause(&reader, &mut local, Duration::ZERO, through).await }
     });
     for round in 0..3 {
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -557,7 +638,7 @@ async fn a_cut_of_only_replicated_claims_keeps_the_full_agents_roster_pause() {
 async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_floor() {
     let root = tempfile::tempdir().unwrap();
     let store = state(root.path()).store;
-    let (commits, _observer) = roster_pause_commits(&store);
+    let mut local = agent_roster_local_commits(&store);
     let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let burst = std::thread::spawn({
         let (store, writing) = (Arc::clone(&store), Arc::clone(&writing));
@@ -572,7 +653,6 @@ async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_
             last_write
         }
     });
-    let mut look = AgentRosterLook::default();
     let mut last_started = Instant::now();
     for folded in [0, 0, 250, 750, 1200, 0].map(Duration::from_millis) {
         let started = Instant::now();
@@ -580,7 +660,7 @@ async fn a_burst_of_local_commits_never_folds_the_agents_roster_faster_than_its_
         let through = store.index().unwrap();
         let full = folded.max(AGENT_ROSTER_REFRESH_PAUSE);
         let floor = (folded * 2).max(AGENT_ROSTER_LOCAL_PAUSE).min(full);
-        let end = agent_roster_pause(&store, &commits, &mut look, folded, through).await;
+        let end = agent_roster_pause(&store, &mut local, folded, through).await;
         let paused = started.elapsed();
         let expected = if floor < full { AgentRosterPauseEnd::LocalClaim } else { AgentRosterPauseEnd::Full };
         assert_eq!(end, expected, "{folded:?}: {paused:?}");
@@ -607,11 +687,13 @@ async fn a_local_claim_behind_a_long_replicated_run_still_cuts_the_agents_roster
     let replicated = reader.index().unwrap();
     assert!(replicated - through > 2, "the run is longer than one look of 2 claims");
     roster_pause_note(&reader, "message/roster-pause-after-the-run");
-    // Every commit above has already notified: one permit stands for all of them.
-    let commits = tokio::sync::Notify::new();
-    commits.notify_one();
+    // A scanner that starts behind them reads every commit above at once, 2 claims a look.
+    let mut local = local_commits::LocalCommits::from_index(
+        &reader, through, 2, AGENT_ROSTER_LOCAL_CHECK,
+        Arc::new({ let reader = Arc::clone(&reader); move |after, through| reader.local_agent_card_input_after(after, through) }),
+    );
     let started = Instant::now();
-    let end = agent_roster_pause_scanning(&reader, &commits, &mut AgentRosterLook::default(), Duration::ZERO, through, 2).await;
+    let end = agent_roster_pause(&reader, &mut local, Duration::ZERO, through).await;
     assert_eq!(end, AgentRosterPauseEnd::LocalClaim);
     assert!(started.elapsed() < AGENT_ROSTER_REFRESH_PAUSE, "{:?}", started.elapsed());
 }
@@ -628,22 +710,19 @@ fn a_busy_blocking_pool_never_holds_the_agents_roster_pause_past_its_end() {
         let root = tempfile::tempdir().unwrap();
         let store = state(root.path()).store;
         let _wake = store.start_agent_roster_refresher().unwrap();
-        let commits = tokio::sync::Notify::new();
-        let mut look = AgentRosterLook::default();
+        let mut local = agent_roster_local_commits(&store);
         let (release, held) = std::sync::mpsc::channel::<()>();
         let occupied = tokio::task::spawn_blocking(move || held.recv().unwrap());
         let through = store.index().unwrap();
         roster_pause_note(&store, "message/roster-pause-busy-pool");
         for _ in 0..2 {
-            commits.notify_one();
             let started = Instant::now();
-            let full = agent_roster_pause(&store, &commits, &mut look, Duration::ZERO, through).await;
+            let full = agent_roster_pause(&store, &mut local, Duration::ZERO, through).await;
             assert_eq!(full, AgentRosterPauseEnd::Full, "the look could not run");
             let paused = started.elapsed();
             assert!(paused >= AGENT_ROSTER_REFRESH_PAUSE, "{paused:?}");
             assert!(paused < AGENT_ROSTER_REFRESH_PAUSE + Duration::from_millis(300), "{paused:?}");
         }
-        commits.notify_one();
         let started = Instant::now();
         let fresh = {
             let store = Arc::clone(&store);
@@ -652,17 +731,16 @@ fn a_busy_blocking_pool_never_holds_the_agents_roster_pause_past_its_end() {
                 store.request_fresh_agent_roster(false);
             })
         };
-        let pause = agent_roster_pause(&store, &commits, &mut look, Duration::ZERO, through).await;
+        let pause = agent_roster_pause(&store, &mut local, Duration::ZERO, through).await;
         assert_eq!(pause, AgentRosterPauseEnd::FreshRead);
         assert!(started.elapsed() < Duration::from_millis(300) + Duration::from_millis(300), "{:?}", started.elapsed());
         fresh.await.unwrap();
-        assert_eq!(look.started, 1, "three pauses kept the one queued look");
-        assert!(look.running.is_some(), "the queued look is kept for the next pause");
+        assert_eq!(local.looks(), 1, "three pauses kept the one queued look");
+        assert!(local.looking(), "the queued look is kept for the next pause");
         release.send(()).unwrap();
         occupied.await.unwrap();
-        commits.notify_one();
-        let freed = agent_roster_pause(&store, &commits, &mut look, Duration::ZERO, through).await;
+        let freed = agent_roster_pause(&store, &mut local, Duration::ZERO, through).await;
         assert_eq!(freed, AgentRosterPauseEnd::LocalClaim);
-        assert_eq!(look.started, 1, "the kept look read the claim");
+        assert_eq!(local.looks(), 1, "the kept look read the claim");
     });
 }

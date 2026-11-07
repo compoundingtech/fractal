@@ -3499,7 +3499,7 @@ fn runtime_resources_for_id(
         include_owner.then_some(id),
         snapshot.store_index,
     )?;
-    let status = state.store.status_for_subject_names_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
+    let status = state.store.status_for_subject_names_for_generic_reads_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
     Ok(runtime_resources_from_status(state, snapshot, session, status)?
         .into_iter()
         .filter(|runtime| runtime["id"] == id || (include_owner && runtime["owner_id"] == id))
@@ -3868,7 +3868,7 @@ fn operation_checks(
             {
                 report.refreshing = true;
                 let state = state.clone();
-                std::thread::spawn(move || refresh_operation_report(&state, key, None));
+                std::thread::spawn(move || refresh_operation_report(&state, key));
             }
             return Ok(report.checks.clone());
         }
@@ -4073,6 +4073,7 @@ pub async fn missions(
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: after_key.clone(),
                 expires_at_unix_ms,
             })
@@ -10102,6 +10103,51 @@ mod tests {
         }).unwrap();
     }
 
+    #[test]
+    fn notice_typed_resources_and_session_lookup_exclude_reserved_actual_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let owner = "agent/notice-owner";
+        observe_published_runtime(&state, owner, "running", true);
+        observe_published_runtime(&state, "agent/visible-owner", "running", true);
+        let clean = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/operator")).unwrap();
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        // Seed an old-peer-shaped row below current custom-subject admission.
+        let hidden = state.store.connection.batched(|tx| -> anyhow::Result<_> {
+            let hidden = crate::store::append_claim_tx(
+                tx, state.store.origin(), owner, "runtime.observed", None,
+                &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret",
+                    "reason":"notice-secret","terminal":true,"status":"running"}}), &[], None,
+            )?;
+            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+            Ok(hidden)
+        }).unwrap().unwrap();
+        state.store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+        let snapshot = new_client_snapshot(&state);
+        for history in [false, true] {
+            let runtimes = runtime_resources(&state, history, &snapshot, &session).unwrap();
+            assert_eq!(runtimes.len(), 1);
+            assert_eq!(runtimes[0]["owner_id"], "agent/visible-owner");
+            assert!(runtime_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap().is_empty());
+            let terminals = terminal_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap();
+            assert_eq!(terminals.len(), 1);
+            assert!(!serde_json::to_string(&terminals).unwrap().contains("notice-secret"));
+        }
+        assert!(runtime_resources_for_id(&state, &snapshot, &session, "runtime/notice-secret", false).unwrap().is_empty());
+        let cards = crate::api::client_agent_resources(&state.store, true, &snapshot.created_at, snapshot.store_index).unwrap();
+        assert!(cards.iter().any(|card| card["id"] == owner));
+        assert!(!serde_json::to_string(&cards).unwrap().contains("notice-secret"));
+        assert!(!serde_json::to_string(&cards).unwrap().contains(&hidden.id));
+        let id = crate::api::managed_session_id(owner, "notice-secret");
+        assert!(crate::api::managed_session_owner_at(&state.store, snapshot.store_index, &id).unwrap().is_none());
+        assert!(crate::api::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, &id, owner).unwrap().is_none());
+        let (publication, _) = published_runtimes::fold(&state.store, None).unwrap().unwrap();
+        assert_eq!(publication.rows.items.len(), 1);
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        assert!(state.store.claim_by_id(&hidden.id).unwrap().is_some());
+    }
+
     fn publish_runtimes_once(state: &AppState) {
         let list = state.store.published_runtime_list();
         let _wake = list.start();
@@ -14946,8 +14992,12 @@ subscription "watch/source" {
         assert_eq!(statements(40), few.get());
     }
 
+    /// The first report since a start reads the last audit and never makes one: on a busy
+    /// host's store the audit read 335k statements in the first minute after a restart, while
+    /// every reconnecting client waited on the same disk. The daemon audits after that window,
+    /// and later reports show what it found.
     #[test]
-    fn startup_operation_audit_is_shared_and_later_reports_are_fresh() {
+    fn the_first_report_does_not_audit_and_later_reports_show_the_audit() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.append_client_claim(&ClaimInput {
@@ -14972,10 +15022,16 @@ subscription "watch/source" {
             at: Instant::now(),
             refreshing: true,
         });
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        refresh_operation_report(&state, key, Some(sender));
-        let drift = receiver.blocking_recv().unwrap().unwrap();
+        refresh_operation_report(&state, key);
+        assert!(state.store.last_operation_audit().is_none(), "the first report audited");
+        let checks = operation_checks(&state).unwrap().unwrap();
+        let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
+        assert_eq!(projection.status, "warn");
+        assert!(projection.message.starts_with("no operation audit has finished since the daemon started"), "{}", projection.message);
+
+        let drift = state.store.operation_projection_drift().unwrap();
         assert_eq!(drift.len(), 1);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
@@ -14987,7 +15043,7 @@ subscription "watch/source" {
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
         // Doctor reports the last audit and never audits inline: it still shows the drift the
-        // startup audit found until the next audit runs.
+        // audit found until the next audit runs.
         assert_eq!(projection_status(), "fail");
         assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
@@ -14995,7 +15051,7 @@ subscription "watch/source" {
         assert_eq!(projection_status(), "pass");
         assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         assert_eq!(checks.iter().find(|check| check.name == "operation-projection").unwrap().status, "fail");
     }
@@ -15026,7 +15082,7 @@ subscription "watch/source" {
         assert_eq!(pending[0]["severity"], "info");
         assert_eq!(pending[0]["state"], "running");
         assert_eq!(pending[0]["updated_at"], "2026-09-30T00:00:00Z");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let report = operation_resources(&state, "2026-09-30T00:00:00Z").unwrap();
         assert!(
             report.iter().all(|item| item["state"] != "running"),
@@ -15048,11 +15104,9 @@ subscription "watch/source" {
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
         let started = test_state(other.path());
-        let audit = start_operation_report(&started).unwrap();
-        let drift = audit.blocking_recv().unwrap().unwrap();
-        assert!(drift.is_empty());
+        assert!(start_operation_report(&started));
         crate::store::STATEMENTS_RUN.with(|run| run.set(0));
-        assert!(!started.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
+        assert!(!started.store.repair_operation_projection_drift_from_audit(&[]).unwrap());
         assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), 0);
         let deadline = Instant::now() + Duration::from_secs(30);
         while operation_checks(&started).unwrap().is_none() {
@@ -15063,7 +15117,8 @@ subscription "watch/source" {
             std::thread::sleep(Duration::from_millis(10));
         }
         let made = operation_checks(&started).unwrap().unwrap();
-        assert!(start_operation_report(&started).is_none());
+        assert!(started.store.last_operation_audit().is_none());
+        assert!(!start_operation_report(&started));
         assert!(Arc::ptr_eq(
             &made,
             &operation_checks(&started).unwrap().unwrap()

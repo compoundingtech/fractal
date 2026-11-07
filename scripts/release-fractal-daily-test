@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise bounded release bodies, full-note assets and credential-safe command failures."""
+"""Exercise release selection, transient reconciliation, bounded bodies and safe failures."""
 import hashlib
 import io
 import json
@@ -11,6 +11,9 @@ import sys
 import tarfile
 import tempfile
 
+from unittest import mock
+
+import release_gh
 from release_notes import FIELDS
 
 repo = Path(__file__).resolve().parent.parent
@@ -23,6 +26,12 @@ import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 if args[:2] == ['run', 'list']:
     print(json.dumps([{'databaseId': 7, 'headSha': os.environ['FAKE_SHA']}]))
+elif args[:2] == ['run', 'view']:
+    row = {'databaseId': int(args[2]), 'headSha': os.environ['FAKE_SHA'], 'headBranch': 'main',
+           'event': 'push', 'status': 'completed', 'conclusion': 'success',
+           'workflowName': 'Fractal tag release'}
+    row.update(json.loads(os.environ['FAKE_RUN']))
+    print(json.dumps(row))
 elif args[0] == 'api' and '/actions/runs/' in args[1]:
     print(json.dumps([{'artifacts': [{'name': os.environ['FAKE_ARTIFACT'], 'expired': False}]}]))
 elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
@@ -106,6 +115,7 @@ with tempfile.TemporaryDirectory() as temporary:
     (checkout / 'scripts').mkdir(parents=True)
     shutil.copy(repo / 'scripts/release-fractal-daily', checkout / 'scripts/release-fractal-daily')
     shutil.copy(repo / 'scripts/release-fractal-manifest.py', checkout / 'scripts/release-fractal-manifest.py')
+    shutil.copy(repo / 'scripts/release_gh.py', checkout / 'scripts/release_gh.py')
     shutil.copy(repo / 'scripts/compat-baseline-release', checkout / 'scripts/compat-baseline-release')
     (checkout / '.github').mkdir()
     pin = {'commit': 'a' * 40, 'tag': 'v0.3.17', 'why': 'Previous stable release fixture',
@@ -137,15 +147,19 @@ with tempfile.TemporaryDirectory() as temporary:
 
     receipt = root / 'receipt.json'
 
-    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None, artifact='fractal-release'):
+    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None, artifact='fractal-release',
+              run_id=None, run_fields=None):
         receipt.unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
         (root / 'impact.json').write_text(json.dumps(impact or {'fragments': [], 'change_links': {}}))
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', GH_TOKEN=token, GH_REPO='example/project',
                    FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure,
                    FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt),
-                   FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact)
+                   FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact,
+                   FAKE_RUN=json.dumps(run_fields or {}), RELEASE_GH_RETRY_DELAYS='0,0,0')
         args = ['python3', 'scripts/release-fractal-daily']
+        if run_id is not None:
+            args += ['--run', str(run_id)]
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
 
@@ -154,6 +168,16 @@ with tempfile.TemporaryDirectory() as temporary:
         done = daily(dry_run=True, artifact=artifact)
         assert done.returncode == 0 and 'Validated both release targets' in done.stdout, done
         assert 'would publish v0.3.18' in done.stdout, done
+
+    # An explicitly selected older run wins over the newer run returned by `run list`.
+    done = daily(dry_run=True, run_id=6)
+    assert done.returncode == 0 and '(run 6)' in done.stdout, done
+    for field, value in (('headBranch', 'feature'), ('event', 'workflow_dispatch'),
+                         ('status', 'in_progress'), ('conclusion', 'failure'),
+                         ('workflowName', 'Another workflow'), ('databaseId', 8)):
+        done = daily(dry_run=True, run_id=6, run_fields={field: value})
+        assert done.returncode == 1 and 'not a successful Fractal tag release push run on main' in done.stdout, done
+        assert not receipt.exists(), done
 
     # The Oct 10-11 shape: every earlier step passes, then gh release create fails with a cause.
     cause = 'HTTP 403: Resource not accessible by integration (https://api.example.invalid/releases)'
@@ -252,4 +276,67 @@ except module.CommandFailed as error:
     assert str(error) == 'sh exited 3: reason', str(error)
 else:
     raise AssertionError('a failing command must raise')
+
+# Exercise the real retry helper with stateful GitHub responses, including partially applied calls.
+def retry_publish(create_failures=1, partial=False, edit_failure=False, permanent=False,
+                  view_failure=False):
+    state = {'draft': None, 'calls': [], 'creates': 0, 'edits': 0}
+
+    def github(cmd, **kwargs):
+        args = cmd[1:]
+        state['calls'].append(args[:2])
+        code, out, error = 0, '', ''
+        if args[:2] == ['release', 'create']:
+            state['creates'] += 1
+            assert state['draft'] is None, 'never create a duplicate draft'
+            if state['creates'] <= create_failures:
+                if partial:
+                    state['draft'] = True
+                code, error = 1, 'HTTP 403: forbidden' if permanent else 'HTTP 504: gateway timeout'
+            else:
+                state['draft'] = True
+        elif args[:2] == ['release', 'view']:
+            if view_failure:
+                code, error = 1, 'HTTP 403: forbidden'
+            elif state['draft'] is None:
+                code, error = 1, 'release not found'
+            else:
+                out = json.dumps({'isDraft': state['draft']})
+        elif args[:2] == ['release', 'delete']:
+            assert state['draft'] is True
+            state['draft'] = None
+        elif args[:2] == ['release', 'edit']:
+            state['edits'] += 1
+            assert state['draft'] is not None
+            state['draft'] = False
+            if edit_failure:
+                code, error = 1, 'HTTP 502: bad gateway'
+        else:
+            raise AssertionError(args)
+        return subprocess.CompletedProcess(cmd, code, out, error)
+
+    with mock.patch.dict(os.environ, RELEASE_GH_RETRY_DELAYS='0,0,0'), \
+            mock.patch.object(release_gh.subprocess, 'run', side_effect=github):
+        try:
+            module.gh('release', 'create', 'v0.3.18', done=lambda: module.discard_partial_draft('v0.3.18'))
+            module.gh('release', 'edit', 'v0.3.18', '--draft=false',
+                      done=lambda: (result := module.release_state('v0.3.18')) is not None and not result['isDraft'])
+        except module.CommandFailed:
+            state['failed'] = True
+    return state
+
+
+for partial in (False, True):
+    state = retry_publish(partial=partial, edit_failure=True)
+    assert state['draft'] is False and state['creates'] == 2 and state['edits'] == 1, state
+    assert state['calls'].count(['release', 'delete']) == int(partial), state
+state = retry_publish(create_failures=3, partial=True)
+assert state['draft'] is False and state['creates'] == 4, state
+state = retry_publish(create_failures=99, partial=True)
+assert state['failed'] and state['creates'] == 4 and state['draft'] is None, state
+state = retry_publish(permanent=True)
+assert state['failed'] and state['creates'] == 1 and state['calls'] == [['release', 'create']], state
+state = retry_publish(partial=True, view_failure=True)
+assert state['failed'] and state['creates'] == 1 and ['release', 'delete'] not in state['calls'], state
+print('PASS: daily release retries reconcile drafts and publication; --run selects only verified main push runs')
 print('Daily release bodies are bounded, full notes are attached, and failures are credential-safe')

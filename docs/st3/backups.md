@@ -301,7 +301,8 @@ its first read. Nor is `stream_operations`, the idempotency keys this member's o
 used: a send retried after a restore writes its message again. The graph's mirror of the shard
 (`local_stream_sent` and `local_stream_lifecycle`, which the graph's idle, unread, held and usage
 indexes read) is not carried either; the restored member's daemon rebuilds it from the restored
-shard when it starts.
+shard when it starts, and the mirror's triggers queue each stream item's client selector header
+as it goes, so the phone's list holds the restored stream mail once the mirror has caught up.
 
 ### Message marks
 
@@ -319,9 +320,13 @@ A message a graph write sends waits in `local_message_outbox` until the daemon w
 messages shard (db break-up step 4c). The archive does not carry the outbox: a live export first
 drains it, and refuses while a message remains ("backup waits for the messages in the outbox to
 drain"), so pending mail is never left out of an archive silently and no format version changes.
-The offline exporter opens its copy without the shard, so it does not drain; it refuses a copy
-whose outbox is not empty. In this build nothing queues messages, so the outbox is always empty
-and archives are unchanged.
+The offline exporter never drains, even when the copy's `shards` directory is beside it and it
+opens the copy's shard: the exporter is not the member, and a drain would write the member's
+mail into the copy under the copy's writer. It refuses a copy whose outbox is not empty and names
+the waiting messages (`offline export refuses a copy whose message outbox holds 2 message(s) not
+yet in its messages shard (...)`); start the member's daemon so it writes them, then copy the
+database again. In this build nothing queues messages, so the outbox is always empty and archives
+are unchanged.
 
 ### Permanent ledgers
 

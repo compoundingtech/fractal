@@ -11228,13 +11228,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .map(|agent| format!("`{agent}`"))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            changed |= self.store.set_step_state(
-                                &view.subject,
-                                "blocked",
-                                Some(&format!(
-                                    "no eligible agent is present in the desired graph: {eligible}"
-                                )),
-                            )?;
+                            // A cancelled run does not wait for a seat that is known to be gone:
+                            // every named agent is stopped or retired, which both select a stop.
+                            // A seat this host has not seen yet may still replicate, so its step
+                            // keeps waiting.
+                            let mut agents = view.assigned_to.iter().chain(view.available_to.iter()).peekable();
+                            let mut gone = agents.peek().is_some();
+                            for agent in agents {
+                                gone &= self.store.selected_desired_kind(agent)?.as_deref() == Some("stop");
+                            }
+                            let (status, reason) = if run.phase == "final-cancelled" && gone {
+                                (
+                                    "cancelled",
+                                    format!(
+                                        "the mission run was cancelled and every eligible agent is stopped or retired: {eligible}"
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "blocked",
+                                    format!(
+                                        "no eligible agent is present in the desired graph: {eligible}"
+                                    ),
+                                )
+                            };
+                            changed |=
+                                self.store.set_step_state(&view.subject, status, Some(&reason))?;
                             return Ok(changed);
                         }
                         // A step that raises its seat's lane is delivered only once the raised lane
@@ -14950,11 +14969,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
         let message_subject = format!("message/{message_id}");
-        if self
-            .store
-            .latest_claim(&message_subject, Some("message.sent"))?
-            .is_some()
-        {
+        if self.store.message_sent(&message_subject)? {
             return Ok(false);
         }
         let expected = missing
@@ -19006,6 +19021,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Wake reconciliation when a background identity measurement completes, counted as a
+    /// launch identity wake.
+    fn launch_input_wake(&self) -> &Arc<dyn Fn() + Send + Sync> {
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::LaunchIdentity, None);
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        })
+    }
+
     fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
         let item = format!("launch-inputs:{}", subject.subject);
         if !self.incremental.needs(&item, now_ms()) {
@@ -19014,18 +19047,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
-        self.launch_input_wake.get_or_init(|| {
-            let incremental = self.incremental.clone();
-            let notify = self.notify.clone();
-            let revision = self.file_watch_revision.clone();
-            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                incremental.touch("launch-identity");
-                notify.notify_one();
-            });
-            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
-            wake
-        });
+        self.launch_input_wake();
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
         let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
         let (result, reads) = smallclaims::touched::record(|| {
@@ -19984,10 +20006,7 @@ pub fn append_fault_message(
     let idempotency_key = format!("st3-fault:{agent}:{}:{}", fault.subject, fault.episode);
     let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
     let subject = format!("message/{message_id}");
-    if store
-        .latest_claim(&subject, Some("message.sent"))?
-        .is_some()
-    {
+    if store.message_sent(&subject)? {
         return Ok(());
     }
     let inspect = fault
@@ -20922,6 +20941,7 @@ pub mod tests {
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
     mod final_cancel_gate_exit;
+    mod final_cancel_missing_assignee;
     mod gate_on_demand;
     mod github_watch_selection;
     mod standing_observer_stop;
@@ -26995,6 +27015,29 @@ agent "import/omp/fixture" {{
     }
 
     #[tokio::test]
+    async fn a_completed_identity_measurement_is_counted_as_a_launch_identity_wake() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let wakes = || smallclaims::performance::snapshot()["reconciler_wakes"].as_array().unwrap().iter()
+            .find(|row| row["cause"] == "launch identity").map_or(0, |row| row["count"].as_u64().unwrap());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
+        reconciler.launch_input_wake();
+        let root = tempfile::tempdir().unwrap();
+        let provider = root.path().join("provider");
+        std::fs::write(&provider, "provider bytes").unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = wakes();
+        // An unmeasured executable is measured in the background, and its completion is the wake.
+        assert!(fractal_drivers::harness_admission::executable_identity_ready_with(&provider, &|_| unreachable!())
+            .unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await
+            .expect("a completed measurement must wake reconciliation");
+        fractal_drivers::harness_admission::identity_measurements_settled();
+        assert!(wakes() > before, "the measurement's wake was not counted as a launch identity wake");
+    }
+
+    #[tokio::test]
     async fn launch_input_watchers_follow_recursive_rules_and_missing_inputs() {
         let root = tempfile::tempdir().unwrap();
         let notify = Arc::new(Notify::new());
@@ -27099,6 +27142,40 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("the replacement's subsequent mutations must remain watched");
+
+        // The old inner-directory lease is still held when both acquisitions run.
+        std::fs::remove_dir_all(root.path().join("outer")).unwrap();
+        let independent = tempfile::tempdir().unwrap();
+        reconciler
+            .ensure_file_watch("independent", &independent.path().join("gate.txt"))
+            .unwrap();
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        assert_eq!(
+            reconciler.file_watchers.lock().unwrap()[&subject].directory,
+            root.path().canonicalize().unwrap()
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("recreating a removed parent must wake reconciliation");
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::write(&path, "recreated").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the recreated target must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "recreated"
+        );
     }
 
     #[tokio::test]

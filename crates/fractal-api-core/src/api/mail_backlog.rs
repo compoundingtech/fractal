@@ -25,6 +25,17 @@ fn overdue(
         {
             continue;
         }
+        // A stream item's status is its lifecycle in the shard already, and its sent time the
+        // mirror's: it has no claims or marks to read.
+        if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+            let sent_at = store
+                .stream_message_metadata(&message.subject)?
+                .and_then(|metadata| metadata["sent_at"].as_str().and_then(|at| at.parse::<u128>().ok()));
+            if sent_at.is_some_and(|sent_at| now.saturating_sub(sent_at) > u128::from(threshold)) {
+                result.push(message);
+            }
+            continue;
+        }
         // A later projection must not make an already read or closed message eligible again,
         // whether a claim or a local mark records it.
         let marked = |kind: &str| -> anyhow::Result<bool> {
@@ -264,6 +275,19 @@ pub async fn cleanup(
                         _ => unreachable!(),
                     };
                     if !needed {
+                        continue;
+                    }
+                    // A stream item's step is this member's shard record, not a claim.
+                    if crate::store::messages_shard::mailbox_reads::is_stream_item(&current) {
+                        crate::store::messages_shard::record_lifecycle(
+                            &store,
+                            &message.subject,
+                            &format!("message.{lifecycle}"),
+                            Some(&message.to),
+                            &BTreeMap::from([("status".into(), json!(lifecycle))]),
+                        )
+                        .map_err(ApiError::bad)?;
+                        current.status = lifecycle.into();
                         continue;
                     }
                     let record = store

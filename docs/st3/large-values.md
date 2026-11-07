@@ -91,6 +91,13 @@ it replaces one local scalar, never replicated input or a growing result.
 The lexical inventory supports only transitional exceptions, not bounded-value exemptions.
 Keep this site registered while the producer owns the metadata representation and reclamation review.
 
+### Closed-mark header close inventory
+
+`fractal_store::store::client_messages` owns `lv-h316d1fc30c66` and `lv-hea48a278f076`.
+When a member records a closed mark, they update in place the message's live selector header and at most two reminder-group candidates that the indexed winner lookups find.
+Each binds the message subject and, for the second, the header's existing reminder and recipient TEXT values. Neither writes a new value: one sets `closed` to 1, and the other recomputes the two currency flags.
+Existing selector columns and index keys remain inline. The reclamation TODO must keep a closed mark's header closed at every cut when the representation changes.
+
 ### Selector fold budget test seam inventory
 
 `fractal_store::store::client_messages` owns `lv-h888b095a594c`, compiled only with test support.
