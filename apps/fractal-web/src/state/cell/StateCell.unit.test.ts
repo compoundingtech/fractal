@@ -197,7 +197,8 @@ describe('across windows', () => {
     const a = open(origin.window().environment), b = open(origin.window().environment)
     const dockA = dockBinding(a.store), dockB = dockBinding(b.store)
     dockA.write({ open: true, width: 300, tab: 'details' })
-    await settle(1)
+    // Writes in the same millisecond tie-break on writer id; this test is about a later write.
+    await settle(5)
     dockB.write({ open: true, width: 600, tab: 'details' })
     b.store.flush(); a.store.flush()
     await settle()
