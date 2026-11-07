@@ -610,6 +610,7 @@
           "name",
           "memory",
           "cpu",
+          "io",
           "swap",
           "tasks"
         ],

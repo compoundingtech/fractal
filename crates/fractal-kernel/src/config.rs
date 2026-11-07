@@ -765,6 +765,12 @@ impl Config {
         let default = fractal_client::product_dirs::config_dir().join("host-envelope.json");
         let path = self.host_envelope_file.as_deref().unwrap_or(&default);
         match fractal_runtime::host_envelope::HostEnvelope::read(path) {
+            Ok(envelope) if envelope.host != self.node => Err(
+                fractal_runtime::host_envelope::Error::HostMismatch {
+                    node: self.node.clone(),
+                    host: envelope.host,
+                }
+            ).with_context(|| format!("validate inactive host envelope {}", path.display())),
             Ok(envelope) => Ok(Some(envelope)),
             Err(fractal_runtime::host_envelope::Error::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound && self.host_envelope_file.is_none() => Ok(None),
@@ -1268,6 +1274,7 @@ mod tests {
         let path = directory.path().join("envelope.json");
         let config = super::Config {
             host_envelope_file: Some(path.clone()),
+            node: "fixture-capped".into(),
             ..super::Config::default()
         };
         let encoded = toml::to_string(&config).unwrap();
@@ -1276,6 +1283,13 @@ mod tests {
         assert!(decoded.read_host_envelope().is_err());
         std::fs::write(&path, include_bytes!("../../fractal-runtime/tests/host-envelope/capped.json")).unwrap();
         assert_eq!(decoded.read_host_envelope().unwrap().unwrap().host, "fixture-capped");
+        let wrong_host = super::Config { node: "fixture-other".into(), ..decoded.clone() };
+        let error = wrong_host.read_host_envelope().unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<fractal_runtime::host_envelope::Error>(),
+            Some(fractal_runtime::host_envelope::Error::HostMismatch { node, host })
+                if node == "fixture-other" && host == "fixture-capped"
+        )));
         std::fs::write(&path, br#"{"schema_version":99}"#).unwrap();
         let error = decoded.validate().unwrap_err();
         assert!(error.chain().any(|cause| matches!(

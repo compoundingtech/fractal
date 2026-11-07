@@ -58,6 +58,10 @@
           "coverage": "not-enforced",
           "reason": "task admission is not enabled"
         }
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "IO admission is not configured"
       }
     },
     {
@@ -92,6 +96,10 @@
           "coverage": "not-enforced",
           "reason": "task admission is not enabled"
         }
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "IO admission is not configured"
       }
     }
   ]

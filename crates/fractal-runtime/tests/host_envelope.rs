@@ -54,6 +54,7 @@ fn coverage_is_required_for_each_resource_and_unknown_fields_are_errors() {
         "/slices/0/memory/max",
         "/slices/0/memory/high",
         "/slices/0/cpu",
+        "/slices/0/io",
         "/slices/0/swap/max",
         "/slices/0/tasks/max",
     ] {
@@ -84,7 +85,9 @@ fn advisory_platform_cpu_weight_and_all_named_psi_windows_are_supported() {
     value["slices"][0]["cpu"]["value"] = json!({"weight":100});
     value["slices"][0]["io"] = json!({"coverage":"enforced","value":{"weight":100}});
     for window in ["avg10", "avg60", "avg300"] {
-        value["slice_psi"]["cpu"]["value"]["window"] = json!(window);
+        value["slice_psi"]["cpu"] = json!({"coverage":"enforced","value":{
+            "window":window,"percent":20,"target_slice":"app-capped.slice"
+        }});
         assert!(parse(&value).is_ok());
     }
     fn advisory(value: &mut Value) {
@@ -111,8 +114,25 @@ fn shared_size_overflow_and_invalid_targets_are_refused() {
     value["mem_available_floor"]["value"] = json!("18446744073709551615T");
     assert!(parse(&value).is_err());
     value["mem_available_floor"]["value"] = json!("16G");
-    value["slice_psi"]["memory"]["value"]["target_slice"] = json!("unknown.slice");
+    value["slice_psi"]["memory"] = json!({"coverage":"enforced","value":{
+        "window":"avg60","percent":10,"target_slice":"unknown.slice"
+    }});
     assert!(parse(&value).is_err());
+}
+
+#[test]
+fn enforced_memory_high_cannot_exceed_max_in_bytes() {
+    let mut value: Value = serde_json::from_slice(CAPPED).unwrap();
+    value["slices"][0]["memory"]["max"] = json!({"coverage":"enforced","value":"1G"});
+    value["slices"][0]["memory"]["high"] = json!({"coverage":"enforced","value":"1025M"});
+    assert!(matches!(parse(&value), Err(Error::Invalid(reason))
+        if reason == "memory.high must not exceed memory.max"));
+    value["slices"][0]["memory"]["high"]["value"] = json!("1024M");
+    assert!(parse(&value).is_ok());
+    value["slices"][0]["memory"]["high"] = json!({
+        "coverage":"not-enforced","reason":"no configured soft limit"
+    });
+    assert!(parse(&value).is_ok());
 }
 
 #[test]

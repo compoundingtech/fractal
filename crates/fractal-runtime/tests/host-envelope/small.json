@@ -8,20 +8,12 @@
   },
   "slice_psi": {
     "memory": {
-      "coverage": "enforced",
-      "value": {
-        "window": "avg60",
-        "percent": 10,
-        "target_slice": "app-capped.slice"
-      }
+      "coverage": "not-enforced",
+      "reason": "not measured"
     },
     "cpu": {
-      "coverage": "enforced",
-      "value": {
-        "window": "avg300",
-        "percent": 20,
-        "target_slice": "app-capped.slice"
-      }
+      "coverage": "not-enforced",
+      "reason": "not measured"
     }
   },
   "slices": [
@@ -29,28 +21,98 @@
       "name": "app-capped.slice",
       "memory": {
         "max": {
-          "coverage": "enforced",
-          "value": "16G"
+          "coverage": "not-enforced",
+          "reason": "not measured"
         },
         "high": {
-          "coverage": "enforced",
-          "value": "16G"
+          "coverage": "not-enforced",
+          "reason": "not measured"
         }
       },
       "cpu": {
         "coverage": "not-enforced",
         "reason": "CPU limits are not configured"
       },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "not measured"
+      },
       "swap": {
         "max": {
-          "coverage": "enforced",
-          "value": "0"
+          "coverage": "not-enforced",
+          "reason": "not measured"
         }
       },
       "tasks": {
         "max": {
           "coverage": "not-enforced",
-          "reason": "task admission is not enabled"
+          "reason": "not measured"
+        }
+      }
+    },
+    {
+      "name": "app-capped-heavy.slice",
+      "memory": {
+        "max": {
+          "coverage": "enforced",
+          "value": "16G"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "CPU limits are not configured"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "not measured"
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
+        }
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
+        }
+      }
+    },
+    {
+      "name": "app-seats.slice",
+      "memory": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
+        }
+      },
+      "cpu": {
+        "coverage": "not-enforced",
+        "reason": "CPU limits are not configured"
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "not measured"
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
+        }
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "not measured"
         }
       }
     },
@@ -70,6 +132,10 @@
         "coverage": "not-enforced",
         "reason": "CPU limits are not configured"
       },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "not measured"
+      },
       "swap": {
         "max": {
           "coverage": "enforced",
@@ -79,7 +145,7 @@
       "tasks": {
         "max": {
           "coverage": "not-enforced",
-          "reason": "task admission is not enabled"
+          "reason": "not measured"
         }
       }
     }

@@ -102,8 +102,7 @@ pub struct Slice {
     pub name: String,
     pub memory: Memory,
     pub cpu: Coverage<Cpu>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub io: Option<Coverage<Io>>,
+    pub io: Coverage<Io>,
     pub swap: Swap,
     pub tasks: Tasks,
 }
@@ -119,6 +118,7 @@ object!(HostEnvelope {
 #[derive(Debug)]
 pub enum Error {
     UnsupportedVersion(u64),
+    HostMismatch { node: String, host: String },
     Invalid(String),
     Json(serde_json::Error),
     Io(std::io::Error),
@@ -129,6 +129,10 @@ impl fmt::Display for Error {
             Self::UnsupportedVersion(version) => write!(
                 f,
                 "host envelope schema version {version} is unsupported; refusing declaration"
+            ),
+            Self::HostMismatch { node, host } => write!(
+                f,
+                "host envelope names host {host:?}, but configured node is {node:?}; refusing declaration"
             ),
             Self::Invalid(reason) => write!(f, "invalid host envelope: {reason}"),
             Self::Json(error) => write!(f, "invalid host envelope JSON: {error}"),
@@ -209,6 +213,12 @@ impl HostEnvelope {
             }
             check(slice.memory.max.enforced(), slice.memory.max.reason())?;
             check(slice.memory.high.enforced(), slice.memory.high.reason())?;
+            if let (Coverage::Enforced { value: high }, Coverage::Enforced { value: max }) =
+                (&slice.memory.high, &slice.memory.max)
+                && high.bytes() > max.bytes()
+            {
+                return Err(invalid("memory.high must not exceed memory.max"));
+            }
             check(slice.cpu.enforced(), slice.cpu.reason())?;
             check(slice.swap.max.enforced(), slice.swap.max.reason())?;
             check(slice.tasks.max.enforced(), slice.tasks.max.reason())?;
@@ -219,13 +229,11 @@ impl HostEnvelope {
             {
                 return Err(invalid("CPU weight must be 1..10000"));
             }
-            if let Some(io) = &slice.io {
-                check(io.enforced(), io.reason())?;
-                if let Coverage::Enforced { value } = io
-                    && value.weight.get() > 10_000
-                {
-                    return Err(invalid("IO weight must be 1..10000"));
-                }
+            check(slice.io.enforced(), slice.io.reason())?;
+            if let Coverage::Enforced { value } = &slice.io
+                && value.weight.get() > 10_000
+            {
+                return Err(invalid("IO weight must be 1..10000"));
             }
         }
         Ok(())
@@ -309,7 +317,7 @@ impl Schema for Cpu {
 impl Schema for Slice {
     fn schema() -> Value {
         json!({"type":"object","additionalProperties":false,
-            "required":["name","memory","cpu","swap","tasks"],
+            "required":["name","memory","cpu","io","swap","tasks"],
             "properties":{"name":{"type":"string","pattern":"^[^/\\s]+\\.slice$"},
                 "memory":Memory::schema(),"cpu":Coverage::<Cpu>::schema(),"io":Coverage::<Io>::schema(),
                 "swap":Swap::schema(),"tasks":Tasks::schema()}})
