@@ -1234,7 +1234,7 @@ Other slices retain their full marker contract. World-switch contrast selection 
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
-Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
+Fractal-ui exports `transcriptMountedWindow` from its transcript-window module, derived from
 Transcript's initial source-row count. Stories can use this shared value instead of copying
 the count; a consumer-side test guards it.
 

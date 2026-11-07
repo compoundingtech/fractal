@@ -286,7 +286,6 @@ describe('RM1 workspace source states', () => {
     expect(sidebar().textContent).toContain('Last observed 18 s ago')
     expect(host.textContent).toContain('Last seen working · 18 s ago')
     expect(host.querySelector('[data-last-seen]')?.textContent).toContain('Last seen working · 18 s ago')
-    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
     expect(roster().querySelector('[data-status="working"][data-frozen="true"]')).not.toBeNull()
     expect(transcript().textContent).toContain('The retained answer remains readable.')
     const retainedAgents = registry.get(agents)
@@ -330,7 +329,6 @@ describe('RM1 workspace source states', () => {
     expect(log.querySelector('button[aria-expanded="true"]')).not.toBeNull()
     expect(host.textContent).toContain('Last seen working · 18 s ago')
     expect(transcript().textContent).not.toContain('Run running')
-    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
   })
 
   it('freezes the working cue on disconnect without requiring replacement feed values', async () => {

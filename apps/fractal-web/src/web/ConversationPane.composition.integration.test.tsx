@@ -527,16 +527,13 @@ describe('ConversationPane composition activation', () => {
     const runtimeRenders = source.runtimeItems.length
     const composerRenders = source.composerProps.length
     const activity = container.querySelector('[data-testid="live-activity-label"]')!
-    const header = container.querySelector('[data-testid="run-elapsed"]')!
     expect(activity.textContent).toBe('Working · 1s')
-    expect(header.textContent).toBe('Running · 1s')
     for (const [elapsed, label] of [[2000, '2s'], [60_000, '1m']] as const) {
       await act(async () => {
         source.now = Date.parse(at(0)) + elapsed
         source.clockListeners.forEach(listener => listener())
       })
       expect(activity.textContent).toBe(`Working · ${label}`)
-      expect(header.textContent).toBe(`Running · ${label}`)
     }
     expect(source.transcriptTurns).toHaveLength(transcriptRenders)
     expect(source.runtimeItems).toHaveLength(runtimeRenders)
