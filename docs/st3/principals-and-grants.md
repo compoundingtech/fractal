@@ -53,8 +53,8 @@ Source abbreviations are repository-relative:
 These criteria derive from gist §§1–4, its deterministic-sync prerequisites,
 October 1's actor/on-behalf distinction, and FPL's legacy-history ruling.
 
-**Pre-M2 gate:** if the #5102 author demonstrates that R05–R06 cannot be met
-without a protocol change, the concrete case MUST go to FPL **before M2 starts**.
+**Pre-M2 rollout gate:** if the #5102 author demonstrates that R05–R06 cannot be met
+without a protocol change, the concrete case MUST go to FPL **before M2 rollout**.
 The gate's verification evidence is the author's concrete case and FPL's recorded
 resolution; the availability ruling alone does not authorize a protocol change.
 
@@ -100,7 +100,7 @@ approval or implementation of the deferred authenticating model proxy.
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
 | R23 | Opt-in Linux gateway runs as a separate credential user, checks kernel caller/daemon revision/person authority, and returns results, never credentials. | M4 | PARTIAL: #1092/#1742/#1752, S; local attestation exists, universal person grant chain absent. | Real gh PR call under authorized seat; forge each identity layer; attempt credential reads from seat and tile. |
-| R24 | Brokered calls record actor/profile/command/result claims; global/person lock and broker failure deny loudly without fallback credentials. | M4 | PARTIAL: S call audit exists, but `gateway.rs::connection_from_peer` dispatches `Request::Authorized` to `authorized()`, whose `usable()`/token/HTTP path omits `lock_for()`; only shell `run()` checks locks. Authorized-HTTP lock enforcement is outstanding; live fail-closed proof UNKNOWN. | Inspect successful/refused audit claims; lock one person/all and require refusal on BOTH shell and authorized-HTTP paths; stop gateway and assert refusal without fallback. |
+| R24 | Brokered calls record actor/profile/command/result claims; global/person lock and broker failure deny loudly without fallback credentials. | M4 | PARTIAL: S call audit exists, but `gateway.rs::connection_from_peer` dispatches `Request::Authorized` to `authorized()`, whose `usable()`/token/HTTP path omits `lock_for()`; only shell `run()` checks locks. Authorized-HTTP lock enforcement is outstanding; live fail-closed proof UNKNOWN. | Inspect successful/refused audit claims; lock one person or all persons and require refusal on BOTH shell and authorized-HTTP paths; stop gateway and assert refusal without fallback. |
 | R25 | gh adoption moves credentials only on request, proves broker access before deleting originals, is idempotent, repairable and reversible. | M4 | NOT STARTED: #1753 closed unmerged; no current adoption command established. | Fresh-machine gh adoption, real broker call, second no-op run, interrupted migration, repair and rollback. |
 | R26 | Model-login adoption follows gh; adopted credentials are unreadable to seats, remaining credential paths are tool-sandbox denied and doctor reports leftovers. | M4 | NOT STARTED: #1753 did not implement model adoption; A still uses login directories. Sandbox sufficiency UNKNOWN (DQ6). | Adopt supported model logins on fresh machine; run real harness, read/exfiltration probes, repeat and reverse adoption. |
 
@@ -111,7 +111,7 @@ pairing or an unauthenticated local socket is not a substitute for service ident
 
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
-| R27 | A host user service outside a harness authenticates as a stable non-person subject provisioned by person/node, not as its invoking agent. | M1 | NOT STARTED: #5019/#3268; plugin/assistant primitives do not prove this consumer contract. | Restart unattended service and invoke from two agents; every read retains the same service subject. |
+| R27 | A host user service outside a harness authenticates as a stable non-person subject provisioned by a person or a node, not as its invoking agent. | M1 | NOT STARTED: #5019/#3268; plugin/assistant primitives do not prove this consumer contract. | Restart unattended service and invoke from two agents; every read retains the same service subject. |
 | R28 | Its credential file rotates and revokes without changing the stable subject; retired/revoked credentials cease to authenticate. | M1 | NOT STARTED: #5019; general device pairing is insufficient. | Rotate, use old/new credentials, revoke, retry after daemon restart; audit subject continuity. |
 | R29 | Scoped native routes allow claims by id and paged claims, work-item reads and document reads at admission, queue proof and final merge. | M1 | NOT STARTED: #5019; client-v0/scoped raw route acceptance UNKNOWN. | Real merge consumer reads all four families, traverses pages without gaps and validates exact receipts at all three stages. |
 | R30 | Every write is refused under the service credential, including free mode, raw routes, client actions, claims, documents and runtime/admin operations. | M1 | NOT STARTED: #5019; unauthenticated local reads do not prove denial. | Enumerate mutation routes/aliases; negative-write suite asserts structured refusal and zero store/runtime effects. |
@@ -126,7 +126,6 @@ These criteria derive from gist §12 and October 1's shared-box and open-message
 | R32 | Other people's namespaces/accounts/profiles/optional signed-attach terminals refuse access without grant; node operation adds no graph authority beyond delegated rights. | M5 | NOT STARTED: full #882/shared-box boundary; operator remains trusted for machine access, not person signing. | Cross-person negative/positive grant matrix, expiry/revoke; operator cannot forge absent person key. |
 | R33 | Personal machines connect as clients, not shared-fleet participants; the server has no reverse fabric exec grant, and daemons launch only own-host seats. | M5 | UNKNOWN: the gist defines the requirement, not implementation evidence; concrete shared-topology enforcement and negative-exec proof have not been verified. | Inspect membership/grants; attempt reverse exec and foreign-host launch from shared box, assert refusal. |
 | R34 | Messaging between all people/agents in the fleet is open by default, independent of cross-namespace work grants; refusal is opt-in. | M5 | PARTIAL: #887 preserves messaging; three-person default/opt-out proof UNKNOWN. | Pairwise messages among three people and their agents without work grants; test explicit refusal separately. |
-| R39 | Opt-in Linux seats run under separate Unix users with per-seat scopes; a seat cannot read the person's files. | M5 | PARTIAL: [tiles](tiles.md) implements separate tile UIDs, namespaces and root-owned cgroups; S's “What is not built yet” leaves harness-in-tile integration outstanding. Real-seat isolation acceptance UNKNOWN. | Launch a real harness seat with isolation enabled; inspect UID and scope, attempt reads of protected person files and require denial; verify isolation-off behavior is unchanged. |
 
 ## Explicit deferrals
 
@@ -137,10 +136,14 @@ These exclusions are FPL decisions, not missing prerequisites silently counted a
 | R35 | Plugin-defined principal kinds, generic status/UI and generic verbs support arbitrary kinds without kind-specific code. | Deferred | PARTIAL: P hard-codes families; schema registry/plugins exist; arbitrary-principal end-to-end behavior UNKNOWN. | Future plugin-kind acceptance; not a #867 closure gate. |
 | R36 | Resource graph and Sekrets build independently without agent/mission dependencies or behavior changes. | Deferred | PARTIAL: #907/#917/#1014 extracted smallclaims; #1751 standalone Sekrets closed unmerged; independent-build proof UNKNOWN. | Future independent builds and behavior comparison; not a #867 closure gate. |
 | R37 | An authenticating model proxy holds/refreshes real tokens while harnesses receive placeholders. | Deferred | NOT STARTED: no proxy established; provider-terms answer UNKNOWN (DQ6). | Provider-terms approval plus proxy/credential isolation probes; not a #867 closure gate. |
+| R39 | Opt-in Linux seats run under separate Unix users with per-seat scopes; a seat cannot read the person's files. | Deferred | PARTIAL: [tiles](tiles.md) implements separate tile UIDs, namespaces and root-owned cgroups; S's “What is not built yet” leaves harness-in-tile integration outstanding. Real-seat isolation acceptance UNKNOWN. | Future real-harness isolation test: inspect UID/scope, deny protected person-file reads and preserve isolation-off behavior; not a #867 closure gate. |
 
 R35–R37 are deferred because they are **not needed for delegated person authority**.
 R37 additionally waits for a provider-terms answer. Existing schema/plugin and crate
 boundaries remain useful evidence, not completion of these larger gist phases.
+R39 is deferred because **no per-seat isolation inside one person's fleet is needed
+for delegated person authority** (FPL, `message/178ff3845421e66d`); it is not part
+of M5 acceptance. R38 remains in M3.
 Cross-fleet message forwarding (“shovel”) is subsequent scope in the gist, not a
 replacement for R34's within-fleet open messaging.
 
@@ -169,16 +172,17 @@ No device-scope or pairing changes are allowed until phone pilot **P2** is done,
 unless FPL explicitly approves an exception. Existing phone signing does not prove
 P2 completion (UNKNOWN here).
 
-The gist's non-deferred rollout prerequisites gate risky write-path work from M2
-onward in this order: establish CI capacity, prove gated deployment/rollback, then
-run the fleet-size benchmark in CI. All three receipts MUST exist before M2 starts
-and remain applicable to subsequent risky write-path milestones.
+The gist's non-deferred rollout prerequisites gate **M2 rollout**, not the landing
+of M2 code behind off/audit modes. The order is CI capacity, gated deployment and
+rollback, then the fleet-size CI benchmark after FPL accepts DQ8 budgets. All three
+receipts MUST exist before M2 rollout and remain applicable to subsequent risky
+write-path rollouts; code landing behind off/audit modes need not wait for them.
 
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
-| R40 | CI capacity is increased and demonstrated sufficient for the risky admission/signing workload before deployment and write-path work. | M2 | UNKNOWN: the gist requires increased capacity; no capacity-change/load receipt is verified here. | Record before/after runner capacity and run representative concurrent required jobs; FPL accepts the measured queue/completion capacity before R41. |
-| R41 | Deployment is mission-driven, checks health after deployment and automatically rolls back an unhealthy release before risky write-path work proceeds. | M2 | UNKNOWN: no mission health-gate/automatic-rollback proof is verified here. | After R40, rehearse on a copied fleet using the actual deployment mission; inject failed health, observe automatic rollback and restored health, and retain mission/gate evidence before R42. |
-| R42 | A fleet-size read/admission benchmark runs in CI and meets explicit accepted budgets before risky write-path work, starting with M2. | M2 | UNKNOWN: R09/DQ8 record the missing complete proof and numeric budgets; no qualifying CI receipt is verified here. | After R41, run the hundreds-of-thousands-of-claims fixture in CI; publish each read-path/admission timing and budget comparison, obtaining FPL's DQ8 acceptance before M2 begins. |
+| R40 | CI capacity is increased and demonstrated sufficient for the risky admission/signing workload before M2 rollout. | M2 | UNKNOWN: the gist requires increased capacity; no capacity-change/load receipt is verified here. | Record before/after runner capacity and run representative concurrent required jobs; FPL accepts measured queue/completion capacity before R41 and M2 rollout, not off/audit code landing. |
+| R41 | Deployment is mission-driven, checks health after deployment and automatically rolls back an unhealthy release before M2 rollout proceeds. | M2 | UNKNOWN: no mission health-gate/automatic-rollback proof is verified here. | After R40, rehearse on a copied fleet using the actual deployment mission; inject failed health, observe automatic rollback and restored health, and retain mission/gate evidence before R42 and M2 rollout. |
+| R42 | A fleet-size read/admission benchmark runs in CI and meets FPL-accepted DQ8 budgets before M2 rollout; the benchmark gate waits for those budgets. | M2 | UNKNOWN: R09/DQ8 record the missing complete proof and numeric budgets; no qualifying CI receipt is verified here. | After R41 and FPL's DQ8 budget acceptance, run the hundreds-of-thousands-of-claims fixture in CI; publish each read-path/admission timing and budget comparison before M2 rollout, not off/audit code landing. |
 
 ## Open decisions
 
