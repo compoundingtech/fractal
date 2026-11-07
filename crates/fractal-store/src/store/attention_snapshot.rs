@@ -105,22 +105,42 @@ impl Store {
         person: Option<&str>,
         now: u128,
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
-        let eventual = self.attention_snapshot(person, u128::MAX)?;
+        // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
+        // upper bound to -1 by passing u128::MAX through that reducer.
+        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
         let connection = self.readers.get();
-        let mut starts = Vec::with_capacity(eventual.len());
-        for item in &eventual {
-            let mut starts_at = item.requested_at_unix_ms;
-            if item.kind == "person-step"
-                && let Some(ask) = person_work::request(&connection, &item.subject)?
-            {
-                starts_at = starts_at.max(ask.accepted_at_unix_ms);
-            }
-            starts.push(starts_at);
-        }
+        let subjects: BTreeSet<_> = eventual.iter()
+            .filter(|item| item.kind == "person-step")
+            .map(|item| item.subject.as_str())
+            .collect();
+        let accepted: BTreeMap<String, u128> = if subjects.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha8edfbce8177 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT claims.subject, claims.accepted_at_unix_ms
+                 FROM json_each(?1) requested JOIN claims ON claims.id=(
+                   SELECT claims.id FROM claims
+                   WHERE claims.subject=requested.value AND claims.kind='work.person-asked'
+                   ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+            ))?;
+            query.query_map([serde_json::to_string(&subjects)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?.map(|row| {
+                let (subject, at) = row?;
+                Ok((subject, at.parse()?))
+            }).collect::<Result<_>>()?
+        };
         let mut valid_until = None;
         let rows = eventual
             .into_iter()
-            .zip(starts)
+            .map(|item| {
+                let starts_at = if item.kind == "person-step" {
+                    item.requested_at_unix_ms.max(accepted.get(&item.subject).copied().unwrap_or(0))
+                } else {
+                    item.requested_at_unix_ms
+                };
+                (item, starts_at)
+            })
             .filter(|(_, starts_at)| {
                 if *starts_at > now {
                     valid_until =

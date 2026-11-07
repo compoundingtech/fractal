@@ -23,6 +23,7 @@ pub mod missions;
 pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
+pub mod workspace_observations;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
