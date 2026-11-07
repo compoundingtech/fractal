@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Sidebar search, a Filter menu with per-choice counts and sort order share one toolbar line, and the search field has a clear button",
+  "summary": "Sidebar search, a Filter menu with live per-choice counts and sort share one toolbar line with a clear button, and the agent hover card lists current and queued missions, saying when that list is a retained observation",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Reverting restores the previous toolbar and Show menu."
+    "detail": "Reverting restores the previous toolbar, Show menu and hover card."
   }
 }
