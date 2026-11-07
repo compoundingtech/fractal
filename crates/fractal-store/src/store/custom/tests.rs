@@ -86,7 +86,7 @@ fn decision_inputs_limits_exclude_repaired_history() {
     store.seal_local_batches().unwrap();
     store.connection.batched(|tx| -> Result<()> {
         let changed = tx.execute(
-            "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h7ddc25a3b2d6 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
             [&repaired.id],
         )?;
         assert!(changed > 0);
@@ -210,7 +210,7 @@ fn custom_non_custom_dependency_canonical_change_refreshes_consumer() {
     audit_custom_dirty(&store);
     // Synthetic canonical repair isolates record invalidation from claim insertion.
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h7ddc25a3b2d6 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&input.id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h59a9d79d4e2d owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&input.id])?;
         let queued: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
             [consumer], |row| row.get(0),
@@ -266,7 +266,7 @@ fn custom_registration_document_record_change_reaches_registry_expansion() {
              WHERE binding.kind='doc.bound' LIMIT 1", [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h59a9d79d4e2d owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [binding])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hbe9ab32f43d1 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [binding])?;
         assert!(tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
             [registry], |row| row.get::<_, bool>(0),
