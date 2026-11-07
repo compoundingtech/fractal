@@ -100,7 +100,7 @@ const styles = stylex.create({
   triggerActive: { color: ink.fg, backgroundColor: surface.rowActive },
   // Narrow (phone) hosts: the trigger and every entry are 44px touch targets.
   touchRow: { minHeight: g.touchTarget },
-  badge: { minWidth: g.icon, height: g.icon, paddingInline: s.xs, boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: r.full, backgroundColor: accent.primary, color: accent.onPrimary, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
+  badge: { minWidth: g.icon, height: g.icon, paddingInline: s.xs, boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, backgroundColor: surface.controlFill, color: ink.fgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
   popover: { minWidth: g.menuMin, maxWidth: 'calc(100vw - 16px)', overflowY: 'auto', boxSizing: 'border-box', padding: s.xs, backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, boxShadow: elevation.popover, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   menu: { outlineStyle: 'none' },
   // The More row reads as the end of the group above it, not as a group of its own.
