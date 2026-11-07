@@ -60,6 +60,14 @@ async function assertCountsAligned(menu: HTMLElement) {
     await expect(getComputedStyle(count).fontVariantNumeric).toContain('tabular-nums')
   }
 }
+/** Colour is for status and attention: a neutral mark has no hue, whatever the theme resolves it to. */
+const hueless = (color: string) => {
+  const ink = document.createElement('canvas').getContext('2d')!
+  ink.fillStyle = color
+  ink.fillRect(0, 0, 1, 1)
+  const [r, g, b] = ink.getImageData(0, 0, 1, 1).data
+  return Math.max(r!, g!, b!) - Math.min(r!, g!, b!) < 24
+}
 /** The custom menu is the only disclosure: no native title tooltips. */
 async function assertNoNativeTitles(root: HTMLElement) {
   await expect(root.querySelector('[title]')).toBeNull()
@@ -90,6 +98,9 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(items[2]).toHaveAttribute('aria-checked', 'false')
   await expect(body.getByTestId('show-selection')).toHaveTextContent('machine:host-a is:asking')
   await expect(trigger).toHaveAccessibleName(/^Show\s*,\s*2 active$/)
+  // The active-filter count is a neutral count, not a call to act: no accent fill.
+  const badge = getComputedStyle([...trigger.querySelectorAll('span')].find(span => span.textContent === '2')!)
+  await expect(hueless(badge.backgroundColor) && hueless(badge.color)).toBe(true)
 
   // Negative controls: a misaligned count and an injected native title must each be rejected.
   const count = menu.querySelector<HTMLElement>('[data-show-count]')!

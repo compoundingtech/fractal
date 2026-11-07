@@ -88,12 +88,24 @@ export const scenarioExemptions: readonly string[] = [
   'WordsOnly:primitive',
 ]
 
+/** Colour is for status and attention: a neutral mark has no hue, whatever the theme resolves it to. */
+const hueless = (color: string) => {
+  const ink = document.createElement('canvas').getContext('2d')!
+  ink.fillStyle = color
+  ink.fillRect(0, 0, 1, 1)
+  const [r, g, b] = ink.getImageData(0, 0, 1, 1).data
+  return Math.max(r!, g!, b!) - Math.min(r!, g!, b!) < 24
+}
+
 /** The focused card: one heading, one line of context, one group with each rationale in its row, a quiet row. */
 export const Docked: Story = {
   args: { children: <Live /> },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('radio', { name: /Thread the session through/ })).toBeChecked()
+    // Recommended is a fact about an option, not a call to act: a neutral pill, not the accent.
+    const recommended = getComputedStyle(canvas.getByText('Recommended'))
+    await expect(hueless(recommended.color) && hueless(recommended.borderTopColor)).toBe(true)
     // Selecting answers nothing; sending is its own act.
     await userEvent.click(canvas.getByRole('radio', { name: /Keep an overload/ }))
     await expect(canvas.getByTestId('sent').textContent).toBe('')

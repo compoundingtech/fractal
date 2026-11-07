@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Test the Effect diagnostics and oxlint ratchet's parsing, attribution and comparison."""
+
+import json
+from pathlib import Path
+import runpy
+import unittest
+
+api = runpy.run_path(str(Path(__file__).with_name('ci-fractal-web-effect-lint')))
+ROOT = api['ROOT']
+
+
+class EffectLintRatchetTest(unittest.TestCase):
+    def test_effect_diagnostics_keep_only_plugin_rules_relative_to_the_root(self):
+        output = '\n'.join([
+            "src/a.ts(3,5): warning TS377001: Prefer Schema. effect(preferSchemaOverJson)",
+            "src/a.ts(4,1): error TS2307: Cannot find module './x.ts'.",
+            "../../packages/fractal-ui/src/b.tsx(9,2): suggestion TS377074: Runs inside. effect(runEffectInsideEffect)",
+            "noise without a location",
+        ])
+        found = api['parse_effect'](output, ROOT / 'apps/fractal-web')
+        self.assertEqual(found, {
+            ('apps/fractal-web/src/a.ts', 3, 5, 'preferSchemaOverJson'),
+            ('packages/fractal-ui/src/b.tsx', 9, 2, 'runEffectInsideEffect'),
+        })
+
+    def test_a_file_reached_by_two_projects_counts_once(self):
+        one = api['parse_effect']("src/b.tsx(9,2): warning TS377001: x effect(schemaSync)", ROOT / 'packages/fractal-ui')
+        two = api['parse_effect']("../../packages/fractal-ui/src/b.tsx(9,2): warning TS377001: x effect(schemaSync)", ROOT / 'apps/fractal-web')
+        self.assertEqual(api['tally'](one | two), {'packages/fractal-ui': {'schemaSync': 1}})
+
+    def test_oxlint_report_tolerates_trailing_output(self):
+        report = json.dumps({'diagnostics': [
+            {'code': 'eslint(func-style)', 'filename': 'clients/typescript/fractal-views/a.ts', 'labels': [{'span': {'line': 2, 'column': 1}}]},
+            {'code': 'eslint(func-style)', 'filename': 'scripts/other.ts', 'labels': []},
+        ]}) + '\nFinished in 3ms'
+        self.assertEqual(api['tally'](api['parse_oxlint'](report)), {
+            'clients/typescript/fractal-views': {'eslint(func-style)': 1},
+            'other': {'eslint(func-style)': 1},
+        })
+
+    def test_counts_above_or_below_the_baseline_fail(self):
+        compare = api['compare']
+        baseline = {'apps/fractal-web': {'globalDate': 2, 'schemaSync': 1}}
+        self.assertEqual(compare(baseline, baseline), [])
+        self.assertEqual(compare({'apps/fractal-web': {'globalDate': 3, 'schemaSync': 1}}, baseline),
+                         ['apps/fractal-web globalDate: 3 findings, baseline allows 2'])
+        self.assertEqual(compare({'apps/fractal-web': {'globalDate': 2}}, baseline),
+                         ['apps/fractal-web schemaSync: 0 findings, below baseline 1; lower it with --update'])
+        self.assertEqual(compare({'packages/fractal-sdk': {'newRule': 1}, **baseline}, baseline),
+                         ['packages/fractal-sdk newRule: 1 findings, baseline allows 0'])
+
+    def test_the_base_baseline_cannot_be_raised_except_for_a_newly_configured_rule(self):
+        raised = api['raised']
+        base = {'effect': {'apps/fractal-web': {'schemaSync': 2}}, 'oxlint': {'packages/fractal-ui': {'eslint(func-style)': 3}},
+                'configured': {'effect': ['schemaSync'], 'oxlint': ['func-style']}}
+        self.assertEqual(raised(base, base), [])
+        lowered = dict(base, effect={'apps/fractal-web': {'schemaSync': 1}})
+        self.assertEqual(raised(lowered, base), [])
+        higher = dict(base, oxlint={'packages/fractal-ui': {'eslint(func-style)': 4}})
+        self.assertEqual(raised(higher, base),
+                         ['oxlint: packages/fractal-ui eslint(func-style): baseline raised from 3 to 4 against the base'])
+        # A default-on rule nobody configures is still ratcheted from zero.
+        unconfigured = dict(base, effect={'apps/fractal-web': {'schemaSync': 2, 'floatingEffect': 1}})
+        self.assertEqual(len(raised(unconfigured, base)), 1)
+        # Turning a rule on in this change may record its existing findings.
+        enabled = dict(base, effect={'apps/fractal-web': {'schemaSync': 2, 'globalDate': 9}},
+                       configured={'effect': ['globalDate', 'schemaSync'], 'oxlint': ['func-style']})
+        self.assertEqual(raised(enabled, base), [])
+        reacts = dict(base, oxlint={'packages/fractal-ui': {'eslint(func-style)': 3, 'react-hooks(exhaustive-deps)': 2}},
+                      configured={'effect': ['schemaSync'], 'oxlint': ['func-style', 'react/exhaustive-deps']})
+        self.assertEqual(raised(reacts, base), [])
+
+    def test_the_configured_rules_are_read_from_the_tsconfigs_and_the_oxlint_config(self):
+        configured = api['configured_rules']()
+        self.assertIn('preferSchemaOverJson', configured['effect'])
+        self.assertIn('asyncFunction', configured['effect'])
+        self.assertIn('overeng/named-args', configured['oxlint'])
+        self.assertNotIn('typescript/consistent-return', configured['oxlint'])
+
+    def test_the_baseline_lists_every_ratcheted_project_and_package(self):
+        baseline = json.loads(api['BASELINE'].read_text())
+        self.assertEqual(set(baseline), {'tools', 'effect', 'oxlint', 'configured'})
+        self.assertEqual(baseline['configured'], api['configured_rules']())
+        for project in api['PROJECTS']:
+            config = (ROOT / project).read_text()
+            self.assertIn('"name": "@effect/language-service"', config, project)
+        for kind in ('effect', 'oxlint'):
+            self.assertLessEqual(set(baseline[kind]), set(api['PACKAGES']) | {'other'})
+
+
+if __name__ == '__main__':
+    unittest.main()

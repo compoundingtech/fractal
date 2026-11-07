@@ -5,6 +5,7 @@ import { activeTab, groupsOf, tabsOf, WorkspaceState, type Layout } from './mode
 import { createWorkspaceStore, localStorageLayer, memoryStorage, WorkspaceStorage, type WorkspaceStorageLayer } from './store.ts'
 
 const settle = () => Effect.runPromise(Effect.sleep(30))
+const quiet = () => Effect.runPromise(Effect.sleep(200))
 
 const key = 'test-workspace'
 const unchanged = Layer.succeed(WorkspaceStorage, WorkspaceStorage.of({ key, changed: Stream.empty }))
@@ -145,18 +146,18 @@ describe('workspace store', () => {
     const right = createWorkspaceStore(shared.window(), { debounceMs: 1 })
     left.dispatch({ _tag: 'Open', pane: 'agent:agent/a' })
     left.dispatch({ _tag: 'Open', pane: 'agent:agent/b' })
-    await settle()
-    expect(panes(right.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b'])
+    await vi.waitFor(() => expect(panes(right.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b']))
     right.dispatch({ _tag: 'Open', pane: 'agent:agent/a' })
     await settle()
     expect(activeTab(right.getState())?.pane).toBe('agent:agent/a')
     expect(activeTab(left.getState())?.pane).toBe('agent:agent/b')
     right.dispatch({ _tag: 'Open', pane: 'list:home' })
-    await settle()
-    expect(panes(left.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b', 'list:home'])
+    await vi.waitFor(() => expect(panes(left.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b', 'list:home']))
     expect(activeTab(left.getState())?.pane).toBe('agent:agent/b')
+    // Quiet means no window writes again: wait out any exchange still in flight, then watch for another.
+    await quiet()
     const settled = shared.read()
-    await settle()
+    await quiet()
     expect(shared.read()).toBe(settled)
     left.dispose()
     right.dispose()

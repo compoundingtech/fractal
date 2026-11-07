@@ -9,8 +9,8 @@ import type { AgentFoldersProps } from './sidebarContract.ts'
 import type { SystemStateKind } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 
 const editingUnavailable = 'Folder editing is unavailable'
-/** A refused attempt on a connection that cannot edit is news once; the roster itself is unaffected. */
-const editingUnavailableMs = 6000
+/** A refused gesture is news once; the roster itself is unaffected. */
+const attemptRefusalMs = 6000
 
 export interface SidebarFoldersOptions {
   /** The host supplies actual seat row keys and their shared subject; never infer a subject from a label. */
@@ -34,15 +34,18 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   const snapshot = useAtomValue(source)
   const local = React.useMemo(() => ({
     collapse: Atom.make<readonly string[]>([]),
-    /** Fixed-copy refusal of a write planned without a request, such as the filing stage of create-with-agent. */
-    refused: Atom.make<string | undefined>(undefined),
+    /**
+     * Fixed-copy refusal of a write planned without a request, such as the filing stage of create-with-agent.
+     * `transient` refusals answer one attempted gesture and clear themselves; a restage refusal stays until the next edit.
+     */
+    refused: Atom.make<{ readonly sentence: string; readonly transient: boolean } | undefined>(undefined),
   }), [source])
   const collapseAtom = collapsedSource ?? local.collapse
   const [collapsedIds, setCollapsedIds] = useAtom(collapseAtom)
   const refused = useAtomValue(local.refused)
   React.useEffect(() => {
-    if (refused !== editingUnavailable) return
-    const timer = setTimeout(() => registry.set(local.refused, undefined), editingUnavailableMs)
+    if (refused?.transient !== true) return
+    const timer = setTimeout(() => registry.set(local.refused, undefined), attemptRefusalMs)
     return () => clearTimeout(timer)
   }, [refused, registry, local])
   const currentRoster = React.useRef(roster)
@@ -60,11 +63,11 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   }
   /** Plans against fresh state at gesture time and again on every restage; the old fence is never resent. */
   const submit = (plan: (fresh: SidebarDocument) => RestageVerdict, onApplied?: () => void): void => {
-    if (!ready()) { registry.set(local.refused, editingUnavailable); return }
+    if (!ready()) { registry.set(local.refused, { sentence: editingUnavailable, transient: true }); return }
     registry.set(local.refused, undefined)
     const fresh = (doc: FolderDoc): SidebarDocument => ({ ...doc, roster: currentRoster.current })
     const verdict = plan(fresh(currentDoc()))
-    if (verdict._tag === 'Refused') { registry.set(local.refused, verdict.sentence); return }
+    if (verdict._tag === 'Refused') { registry.set(local.refused, { sentence: verdict.sentence, transient: false }); return }
     if (verdict._tag === 'Satisfied') { onApplied?.(); return }
     void registry.get(source).edit(verdict.operations, {
       restage: (arrangement) => plan(fresh(arrangement === undefined ? emptyDoc() : arrangementSidebarDoc(arrangement))),
@@ -87,7 +90,7 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   }, targets)
   const treeStatus = snapshot.refusal !== undefined
     ? React.createElement('div', { role: 'status' }, refusalText(snapshot.refusal), retry === undefined ? null : React.createElement('button', { type: 'button', onClick: retry }, snapshot.retryReady ? 'Try again' : 'Refresh for retry'))
-    : refused !== undefined ? refused
+    : refused !== undefined ? refused.sentence
     : snapshot.phase === 'pending' ? 'Saving folder layout…' : undefined
   const unreachable = snapshot.phase === 'unavailable' && snapshot.refusal === undefined
   const unavailable = snapshot.restoreUnavailable ? 'Restore unavailable.'
@@ -102,7 +105,7 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   return {
     tree: filterSidebarTree(orderingTree, query), orderingTree, status, rowStatus: status, treeStatus, unavailable, unavailableKind,
     ...(onRetryUnavailable === undefined ? {} : { onRetryUnavailable }),
-    onEditRefused: (sentence) => { registry.set(local.refused, sentence) },
+    onEditRefused: (sentence) => { registry.set(local.refused, { sentence, transient: true }) },
     canDrop: (items, target) => ready() ? canDrop({ ...currentDoc(), roster: currentRoster.current }, { items, target }) : { refused: editingUnavailable },
     onMove: (intent) => {
       // Agent rows are bound to the subject they showed now; a rebound row key refuses instead of moving another agent.

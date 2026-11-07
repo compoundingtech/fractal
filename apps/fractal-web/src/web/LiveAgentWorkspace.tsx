@@ -23,6 +23,7 @@ import { narrowLayoutQuery } from './narrowLayout.ts'
 import { rightPanelAtom, type RightPanel } from './rightPanel.ts'
 import { AlertFlashBand } from './AlertFlashBand.tsx'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
+import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -255,7 +256,8 @@ export function LiveAgentWorkspace(props: WorkspaceProps) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
-  return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
+  // Alerts name their senders as the roster does, in the docked card and the alert pane alike.
+  return <UNSAFE_PortalProvider getContainer={getContainer}><LiveAlertNames><Workspace {...props} overlayHost={overlayHost} /></LiveAlertNames></UNSAFE_PortalProvider>
 }
 
 const scopeHash = (scope: string) => {
