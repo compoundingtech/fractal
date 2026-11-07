@@ -712,6 +712,9 @@ pub struct Args {
     /// Show invented data without connecting to a daemon.
     #[arg(long)]
     pub demo: bool,
+    /// Preview-only PR 17 ordered-membership sidebar fixture (invented, read-only).
+    #[arg(long, requires = "demo")]
+    pub sidebar_v2_preview: bool,
     /// Use the local daemon even when a paired-device profile exists.
     #[arg(long, conflicts_with = "client")]
     pub local: bool,
@@ -797,6 +800,7 @@ impl Args {
         let mut args = vec!["fractal ui".to_owned()];
         for (enabled, flag) in [
             (self.demo, "--demo"),
+            (self.sidebar_v2_preview, "--sidebar-v2-preview"),
             (self.local, "--local"),
             (self.client, "--client"),
             (self.glasses, "--glasses"),
