@@ -44,8 +44,8 @@ pub fn note_local_progress(store: &crate::store::Store, step: &str) {
         .unwrap();
 }
 
-/// A resource observation this node writes: a claim the attention list's check reads, as it
-/// reads any kind it does not name.
+/// A resource observation this node writes: a claim the missions list's check reads, as it is
+/// not one of the kinds that check counts as neutral.
 pub fn note_local_resource(store: &crate::store::Store, subject: &str) {
     store
         .append_claim(&crate::model::ClaimInput {

@@ -235,12 +235,7 @@ pub trait AttentionListStore {
             through: u64,
             now: u128,
             due: &mut Option<u128>,
-            origin: Option<&str>,
         ) -> Result<Option<String>>;
-    /// Whether a claim this node wrote after `after`, through `through`, refolds the attention
-    /// list published as `previous`: the refresher's own check (`attention_claims_matter`),
-    /// asked about this node's claims only, for the local-commit scanner.
-    fn local_attention_claims_matter(&self, previous: &AttentionPublication, after: u64, through: u64, now: u128) -> Result<bool>;
 }
 
 impl AttentionListStore for Store {
@@ -468,7 +463,7 @@ impl AttentionListStore for Store {
                 (Some((before, after)), Some((status, through)))
                     if before == status && after <= through =>
                 {
-                    if let Some(cause) = self.attention_claims_matter(&mut seats, *after, *through, now, &mut due, None)? {
+                    if let Some(cause) = self.attention_claims_matter(&mut seats, *after, *through, now, &mut due)? {
                         return Ok(AttentionDelta::Refold(format!("projection {cause}")));
                     }
                 }
@@ -477,17 +472,11 @@ impl AttentionListStore for Store {
         }
         if index > previous.cut
             && let Some(cause) =
-                self.attention_claims_matter(&mut seats, previous.cut, index, now, &mut due, None)?
+                self.attention_claims_matter(&mut seats, previous.cut, index, now, &mut due)?
         {
             return Ok(AttentionDelta::Refold(cause));
         }
         Ok(AttentionDelta::Unchanged(due))
-    }
-
-    fn local_attention_claims_matter(&self, previous: &AttentionPublication, after: u64, through: u64, now: u128) -> Result<bool> {
-        let mut seats = SeatChecks::new(self, previous);
-        let mut due = None;
-        Ok(self.attention_claims_matter(&mut seats, after, through, now, &mut due, Some(self.origin()))?.is_some())
     }
 
     fn attention_claims_matter(
@@ -497,17 +486,15 @@ impl AttentionListStore for Store {
             through: u64,
             now: u128,
             due: &mut Option<u128>,
-            origin: Option<&str>,
         ) -> Result<Option<String>> {
         let claims = {
             let connection = self.readers.get();
             let mut statement = connection.prepare_cached(
                 "SELECT id, subject, kind, actor, CAST(accepted_at_unix_ms AS TEXT) FROM claims
-                 WHERE store_index>?1 AND store_index<=?2 AND (?4 IS NULL OR origin=?4)
-                 ORDER BY store_index LIMIT ?3",
+                 WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
             )?;
             statement
-                .query_map(params![after, through, DELTA_LIMIT as u64 + 1, origin], |row| {
+                .query_map(params![after, through, DELTA_LIMIT as u64 + 1], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
