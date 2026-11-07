@@ -22,7 +22,7 @@ interface Args extends React.ComponentProps<typeof TabStrip> { scenario: 'resize
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Tab Strip Ancestors',
+  id: 'fractal-ui-tab-strip-ancestors', title: 'Surfaces/Details/Tab strip ancestors',
   component: TabStrip,
   parameters: { scenario: { _tag: 'primitive', reason: 'Five local tab labels isolate ancestor-only resize and scroll clipping without a window resize; no conversation, agent or resource data is rendered.' }, layout: 'fullscreen' },
   args: { items, selectedKey: 'coordinator', scenario: 'resize', scheme: 'dark' },
