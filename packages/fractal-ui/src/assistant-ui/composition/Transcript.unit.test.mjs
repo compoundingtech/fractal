@@ -13,7 +13,8 @@ const server = await createServer({
   server: { middlewareMode: true },
 })
 after(() => server.close())
-const { Transcript, LiveActivity, transcriptInitialSourceRowCount } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+const { Transcript, LiveActivity } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+const { transcriptInitialSourceRowCount } = await server.ssrLoadModule('/src/assistant-ui/composition/transcript-window.ts')
 const { EmbraceRuntimeProvider } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 const { SendUnconfirmed } = await server.ssrLoadModule('/src/assistant-ui/composition/TranscriptFeedback.tsx')
 const { ThinkingRun } = await server.ssrLoadModule('/src/assistant-ui/composition/ThinkingEntry.tsx')

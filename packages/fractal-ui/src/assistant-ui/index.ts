@@ -42,6 +42,7 @@ export type { AgentRowData, AgentStatus } from './composition-model.ts'
 export { liveComposerDarkTheme, liveAccentTheme } from './embrace-theme.ts'
 
 export { Icon as CompositionIcon } from './composition/Icons'
+export { LiveRing } from './composition/LiveRing'
 export { Button as CompositionButton, IconButton as CompositionIconButton, Menu, MenuItem, MenuTrigger, Popover, Checkbox, Tooltip, TooltipSurface } from './composition/Controls'
 export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProps, TooltipSurfaceProps } from './composition/Controls'
 
