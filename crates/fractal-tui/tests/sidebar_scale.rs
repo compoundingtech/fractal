@@ -49,6 +49,8 @@ async fn socket_load(count: usize, sustained: bool) {
     for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
     assert!(socket.exists(), "private scale daemon failed to listen");
     let http = reqwest::Client::builder().unix_socket(socket).build().unwrap();
+    let (person, uuid) = CONTAINER.strip_prefix("arrangement/person/").unwrap().split_once('/').unwrap();
+    let memberships_url = format!("http://localhost/v1/client/arrangements/{person}/{uuid}/memberships");
     let mut samples = Vec::new();
     for round in 0..20 {
         let mut paging = Paging::new(None);
@@ -62,8 +64,8 @@ async fn socket_load(count: usize, sustained: bool) {
             let (token, cursor) = match effects.as_slice() { [Effect::SubscribeAndRead(token)] => (token.clone(), None),
                 [Effect::Read(token, cursor)] => (token.clone(), Some(cursor.clone())), [Effect::PersistBase] => break, other => panic!("unexpected effects {other:?}") };
             if sustained { unrelated(&store, round as usize * 100 + requests); }
-            let mut request = http.get("http://localhost/v1/client/ordered-memberships").header("x-st3-person", "person/avery")
-                .query(&[("person", "person/avery"), ("subject", CONTAINER), ("limit", "200"), ("paging_contract", "collection-v1")]);
+            let mut request = http.get(&memberships_url).header("x-st3-person", "person/avery")
+                .query(&[("person", "person/avery"), ("limit", "200"), ("paging_contract", "collection-v1")]);
             if let Some(cursor) = cursor { request = request.query(&[("cursor", cursor)]); }
             let response = request.send().await.unwrap(); let status = response.status(); let bytes = response.bytes().await.unwrap();
             assert!(status.is_success(), "requires D #4739: {status} {}", String::from_utf8_lossy(&bytes));
