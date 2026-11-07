@@ -66,6 +66,10 @@ fn invalid_record(message: &str) -> RestoreError {
 fn valid_identity(id: &Identity) -> bool {
     [&id.actor, &id.action_id, &id.idempotency_key].iter().all(|value| !value.trim().is_empty() && value.len() <= 512)
 }
+fn check_journal_size(size: usize) -> Result<(), serde_json::Error> {
+    if size > MAX_JOURNAL_BYTES { return Err(<serde_json::Error as serde::de::Error>::custom("journal exceeds size limit")); }
+    Ok(())
+}
 impl Edits {
     pub fn new(scope: Scope, intent: MoveIntent) -> Self {
         Self { scope, intent, status: Status::Intent, refusal: None, request: None, dependent: None, folder_completed: false, used: Vec::new() }
@@ -76,14 +80,18 @@ impl Edits {
     /// Capture immediately for each persistence effect, before processing another event.
     /// The host atomically replaces the scoped record and acknowledges only that write.
     /// This contains identities and fences, never connection credentials or transport objects.
+    /// Encoding errors are storage failures: report `StorageFailed` for that identity/phase,
+    /// never a persistence acknowledgement. The same byte ceiling applies on recovery.
     pub fn journal(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(&Journal { version: JOURNAL_VERSION, state: self })
+        let bytes = serde_json::to_vec(&Journal { version: JOURNAL_VERSION, state: self })?;
+        check_journal_size(bytes.len())?;
+        Ok(bytes)
     }
     /// Restore only host-owned durable bytes. New plans still require a fresh complete base.
     /// Sending is ambiguous after a crash: re-persist, then replay the immutable request.
     /// Observation/completion markers never replay an already completed step.
     pub fn restore(bytes: &[u8], scope: &Scope) -> Result<(Self, Vec<Effect>), RestoreError> {
-        if bytes.len() > MAX_JOURNAL_BYTES { return Err(invalid_record("journal exceeds size limit")); }
+        check_journal_size(bytes.len()).map_err(RestoreError::InvalidRecord)?;
         let journal: StoredJournal<'_> = serde_json::from_slice(bytes).map_err(RestoreError::InvalidRecord)?;
         if journal.version != JOURNAL_VERSION { return Err(RestoreError::Version(journal.version)); }
         let mut state: Self = serde_json::from_str(journal.state.get()).map_err(RestoreError::InvalidRecord)?;
@@ -526,5 +534,30 @@ mod tests {
         for path in ["/state/request", "/state/request/identity", "/state/request/fence"] { refused_record(|r| { r.pointer_mut(path).unwrap()["extra"] = true.into(); }); }
         refused_record(|r| { r.as_object_mut().unwrap().remove("version"); });
         refused_record(|r| { r["version"] = "1".into(); });
+    }
+    #[test]
+    fn oversized_encoding_fails_the_persistence_barrier_without_sending() {
+        for phase in [Persistence::Pending, Persistence::Completion] {
+            let mut state = state(); stage(&mut state, false, true);
+            if phase == Persistence::Completion { state.reduce(Event::Persisted(id(2))); state.reduce(Event::Observed(id(2))); }
+            state.used.extend((3..40_000).map(id));
+            assert!(state.journal().is_err());
+            state.reduce(Event::StorageFailed { identity: id(2), phase });
+            assert_eq!(state.refusal, Some(Refusal::Storage));
+            assert!(state.reduce(Event::Persisted(id(2))).is_empty());
+            assert!(state.reduce(Event::CompletionPersisted(id(2))).is_empty());
+            assert!(state.reduce(Event::Replay).is_empty());
+        }
+    }
+    #[test]
+    fn journal_at_exact_size_ceiling_round_trips() {
+        let mut state = state(); stage(&mut state, false, true);
+        state.intent.before = Some(NodeRef::Subject { subject: String::new() });
+        let padding = MAX_JOURNAL_BYTES - state.journal().unwrap().len();
+        state.intent.before = Some(NodeRef::Subject { subject: "a".repeat(padding) });
+        let bytes = state.journal().unwrap(); assert_eq!(bytes.len(), MAX_JOURNAL_BYTES);
+        let (restored, effects) = Edits::restore(&bytes, &scope()).unwrap();
+        assert_eq!(restored.request(), state.request()); assert_eq!(restored.intent(), state.intent());
+        assert_eq!(effects, vec![Effect::PersistPending]); assert_eq!(restored.journal().unwrap(), bytes);
     }
 }
