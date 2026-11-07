@@ -116,9 +116,8 @@ impl Edits {
                 || arrangements::validate_actor(&self.scope.container, Some(&request.identity.actor)).is_err() { return Err(invalid()); }
             let count = match &request.operations { Operations::Folders(ops) => ops.len(), Operations::Memberships(ops) => ops.len() };
             if count == 0 || count > ordered_membership::MAX_OPERATIONS { return Err(invalid()); }
-            if let Operations::Folders(ops) = &request.operations {
-                if ops.iter().any(|op| !matches!(op, arrangements::Operation::FolderCreate { .. } | arrangements::Operation::FolderRename { .. } | arrangements::Operation::FolderMove { .. } | arrangements::Operation::FolderDelete { .. })) { return Err(invalid()); }
-            }
+            if let Operations::Folders(ops) = &request.operations
+                && ops.iter().any(|op| !matches!(op, arrangements::Operation::FolderCreate { .. } | arrangements::Operation::FolderRename { .. } | arrangements::Operation::FolderMove { .. } | arrangements::Operation::FolderDelete { .. })) { return Err(invalid()); }
             let operations = match &request.operations {
                 Operations::Folders(ops) => serde_json::to_value(ops),
                 Operations::Memberships(ops) => serde_json::to_value(ops),
