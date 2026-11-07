@@ -237,16 +237,6 @@ export function PhoneTerminalToggle({ pressed, onPress, disabledReason }: { read
 }
 
 
-export function TerminalDrawer({ lines, open, height, onHeight }: { lines: readonly string[]; open: boolean; height: number; onHeight: (value: number) => void }) {
-  if (!open) return null
-  return <section aria-label="Terminal drawer" data-testid="terminal-drawer" style={{ height }} {...stylex.props(styles.drawer)}>
-    <div {...stylex.props(styles.drawerHead)}><span {...stylex.props(styles.drawerLabel)}>terminal</span><span {...stylex.props(styles.drawerHint)}>Drag the header edge, or focus it and use ↑/↓</span></div>
-    <div {...stylex.props(styles.drawerBody)}>
-      {lines.map((line, index) => <div key={index} {...stylex.props(styles.drawerLine)}>{line}</div>)}
-    </div>
-    <label {...stylex.props(styles.drawerRangeLabel)}>height<input type="range" aria-label="Drawer height" min={120} max={480} value={height} onChange={event => onHeight(Number(event.target.value))} {...stylex.props(styles.drawerRange)} /></label>
-  </section>
-}
 
 const styles = stylex.create({
   // Full 1px layout rules; fixed chrome owns the last raster row and the sidebar owns the crossing hit area.
@@ -275,12 +265,4 @@ const styles = stylex.create({
   terminalPressed: { backgroundColor: c.rowActive, color: c.fg, ':hover': { backgroundColor: c.rowActive, color: c.fg } },
   terminalDisabled: { opacity: 0.64, cursor: 'default', ':hover': { backgroundColor: 'transparent', color: c.fgMuted } },
   terminalReason: { maxWidth: 280, padding: 8, fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fg, outline: 'none' },
-  drawer: { display: 'flex', flexDirection: 'column', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.canvas, flexShrink: 0, minHeight: 0 },
-  drawerHead: { height: 32, display: 'flex', alignItems: 'center', gap: 12, paddingInline: 12 },
-  drawerLabel: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, fontWeight: t.weightMedium },
-  drawerHint: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, marginInlineStart: 'auto' },
-  drawerBody: { paddingInline: 12, paddingBottom: 4, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: '20px', whiteSpace: 'pre-wrap' },
-  drawerLine: { color: c.fgMuted },
-  drawerRangeLabel: { display: 'flex', alignItems: 'center', gap: 8, marginInline: 12, marginBottom: 8, fontSize: t.metaSize, color: c.fgMuted },
-  drawerRange: { accentColor: c.primary, flexGrow: 1 },
 })
