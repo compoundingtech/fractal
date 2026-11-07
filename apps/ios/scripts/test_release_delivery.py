@@ -18,7 +18,7 @@ import textwrap
 import time
 import unittest
 
-from release_delivery import ios_env
+from release_delivery import FABRIC_FRAMEWORK, framework_hash, ios_env
 
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
@@ -73,6 +73,17 @@ if name == "node":
     staged = Path.cwd() / ".devenv/pnpm-source-inputs/current"
     staged.mkdir(parents=True, exist_ok=True)
     (staged / "fixture.json").write_text(json.dumps(args[4:]))
+    sys.exit(0)
+if name == "fabric-build":
+    assert os.environ["FRACTAL_FABRIC"] == os.environ["ST3_FABRIC"] == "1"
+    framework = Path.cwd() / "modules/fractal-fabric/ios/build/FractalFabricRust.xcframework"
+    if control.get("missing_framework"):
+        import shutil
+        shutil.rmtree(framework, ignore_errors=True)
+    else:
+        framework.mkdir(parents=True, exist_ok=True)
+        (framework / "Info.plist").write_text("fixture framework")
+        (framework / "libfixture.a").write_text(control.get("framework_content", "rust bridge"))
     sys.exit(0)
 if name == "pnpm":
     if args == ["install", "--frozen-lockfile", "--ignore-scripts"]:
@@ -144,6 +155,15 @@ if name == "xcodebuild":
 if name == "node":
     assert args in (["--version"], ["-v"]), args
     print("v24.0.0")
+    sys.exit(0)
+if name == "nm":
+    assert args[:2] == ["-g", "-U"], args
+    assert Path(args[2]).is_file(), args
+    if not control.get("fabric_stub"):
+        print("00000000 T _st_fabric_identity\n00000010 T _st_fabric_dial")
+    else:
+        # The stub deliberately shares the real module's Swift class name.
+        print("00000000 T FractalFabricModule")
     sys.exit(0)
 if name == "xcrun":
     assert args[0] == "devicectl", args
@@ -220,7 +240,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.control_path = self.root / "control.json"
         self.control_path.write_text("{}")
         self.command_log = self.root / "commands.jsonl"
-        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node", "nix"):
+        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node", "nix", "fabric-build", "nm"):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
@@ -272,6 +292,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.write_source("apps/ios/app.json", json.dumps({"expo": {
             "name": "Fractal", "slug": "fractal", "ios": {"bundleIdentifier": BUNDLE_ID},
         }}))
+        self.write_source("apps/ios/modules/fractal-fabric/build.sh", "exec fabric-build\n")
         self.write_source("server/main.go", "package main\n")
         self.initial_commit = self.commit("Initial fixture")
 
@@ -1010,17 +1031,17 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["trusted_head"], revert)
         self.assertEqual(len(self.commands("xcodebuild")), 3)
 
-    def test_inherited_native_environment_is_pinned_to_daily_release_values(self):
-        self.env.update(FRACTAL_FABRIC="1", ST3_FABRIC="1",
+    def test_inherited_native_environment_is_pinned_to_fabric_enabled_daily_release(self):
+        self.env.update(FRACTAL_FABRIC="0", ST3_FABRIC="0",
                         FRACTAL_FABRIC_PROOF="1", ST3_FABRIC_PROOF="1",
                         FRACTAL_FABRIC_OFFLINE_DEBUG="1", ST3_FABRIC_OFFLINE_DEBUG="1",
                         APP_VARIANT="dev")
         self.reconcile()
         native = [entry["native_env"] for entry in self.commands()
-                  if entry["command"] in ("pnpm", "pod", "xcodebuild")]
+                  if entry["command"] in ("pnpm", "pod", "xcodebuild", "fabric-build")]
         self.assertTrue(native)
         for observed in native:
-            self.assertEqual(observed, {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "0", "ST3_FABRIC": "0",
+            self.assertEqual(observed, {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "1", "ST3_FABRIC": "1",
                                         "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
                                         "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"})
         # The inherited values are not build inputs, so dropping them neither
@@ -1105,6 +1126,67 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                         # stays stuck behind a matching or superseded artifact.
                         self.assertEqual(phone, expected, message)
                         self.assert_installed(self.saved_state()["installed"])
+
+    def test_framework_hash_is_deterministic_and_content_addressed(self):
+        framework = self.root / FABRIC_FRAMEWORK
+        framework.mkdir(parents=True)
+        (framework / "z.a").write_bytes(b"rust")
+        (framework / "Info.plist").write_bytes(b"metadata")
+        original = framework_hash(self.root)
+        (framework / "z.a").unlink()
+        (framework / "z.a").write_bytes(b"rust")
+        os.utime(framework / "Info.plist", (1, 1))
+        self.assertEqual(framework_hash(self.root), original)
+        (framework / "z.a").write_bytes(b"changed")
+        self.assertNotEqual(framework_hash(self.root), original)
+        (framework / "z.a").write_bytes(b"rust")
+        (framework / "z.a").rename(framework / "a.a")
+        self.assertNotEqual(framework_hash(self.root), original)
+
+    def test_framework_hash_invalidates_build_and_native_cache(self):
+        self.reconcile("--build-only")
+        receipt_path = self.state / "artifacts" / self.initial_commit / "success.json"
+        original = json.loads(receipt_path.read_text())
+        checkout = self.state / "checkout"
+        self.assertEqual(original["fabric_framework_hash"], framework_hash(checkout))
+        self.assertEqual(self.saved_state()["observed"]["inputs"], original["build_inputs"])
+        self.reconcile("--build-only")
+        self.assertEqual(len(self.commands("fabric-build")), 1)
+        self.configure(framework_content="changed rust bridge")
+        (checkout / FABRIC_FRAMEWORK / "libfixture.a").write_text("changed rust bridge")
+        self.reconcile("--build-only")
+        changed = json.loads(receipt_path.read_text())
+        self.assertNotEqual(original["fabric_framework_hash"], changed["fabric_framework_hash"])
+        self.assertNotEqual(original["key"], changed["key"])
+        self.assertNotEqual(original["build_inputs"], changed["build_inputs"])
+        self.assertEqual(len(self.commands("pod")), 2)
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
+        commands = [entry["command"] for entry in self.commands()]
+        self.assertLess(commands.index("fabric-build"), commands.index("pod"))
+        self.reconcile("--build-only")
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
+
+    def test_missing_framework_fails_before_pods_or_linking(self):
+        self.configure(missing_framework=True)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+        self.assertEqual(self.commands("pod"), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual(self.device_commands("install"), [])
+        output = self.state / "artifacts" / self.initial_commit
+        self.assertFalse((output / "success.json").exists())
+        self.assertIn("Missing FractalFabricRust.xcframework", (output / "build.log").read_text())
+
+    def test_disabled_stub_fails_linkage_check_before_publishing(self):
+        self.configure(fabric_stub=True)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        self.assertEqual(self.commands("codesign"), [])
+        self.assertEqual(self.device_commands("install"), [])
+        output = self.state / "artifacts" / self.initial_commit
+        self.assertFalse((output / "success.json").exists())
+        self.assertIn("refusing the disabled stub", (output / "build.log").read_text())
 
     def test_changed_build_inputs_rebuild_unchanged_revision_before_trusting_artifacts(self):
         self.reconcile("--build-only")
