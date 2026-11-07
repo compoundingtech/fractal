@@ -106,6 +106,9 @@ struct Choices {
 }
 #[derive(Default)]
 pub(crate) struct Sidebar {
+    /// Preview-only PR17 switch; live feeds and the v1 editor remain unchanged.
+    pub(super) preview_v2: bool,
+    preview: Option<V2Preview>,
     pub arrangements: Vec<fractal_client::Arrangement>,
     pub terminals: Vec<ResourceRow>,
     pub terminals_has_more: bool,
@@ -127,11 +130,111 @@ pub(crate) struct Sidebar {
     pub filtering: bool,
     pub focused: bool,
 }
+
+/// An in-memory complete demo view, not a live subscription or a persisted confirmed base.
+struct V2Preview {
+    arrangement: fractal_sidebar::model::ArrangementInput,
+    members: Vec<fractal_sidebar::model::MembershipInput>,
+    revisions: fractal_sidebar::cache::Revisions,
+    cache: std::cell::RefCell<fractal_sidebar::cache::ProjectionCache>,
+}
 /// What a person reads when their Sidebar was removed and no older one exists to edit.
 pub(super) const SIDEBAR_RETIRED: &str =
     "This Sidebar was removed; restoring a removed Sidebar is not available yet.";
 
 impl Sidebar {
+    /// Seed only an isolated demo. Membership absence is authoritative, including retirement;
+    /// remembered catalog entries must never be added back to this complete v2 set.
+    pub(super) fn set_v2_preview(
+        &mut self,
+        arrangement: fractal_client::Arrangement,
+        members: Vec<fractal_sidebar::model::MembershipInput>,
+    ) {
+        use fractal_sidebar::{cache::Revisions, model::{ArrangementInput, ResolvedInput}, paging::{Frontier, Scope}};
+        let revisions = Revisions {
+            scope: Scope {
+                owner: arrangement.owner.clone(), container: arrangement.header.id.clone(),
+                endpoint: "demo://pr17-preview".into(), host: "demo".into(), projection: "pr17-preview".into(),
+            },
+            membership: Frontier { epoch: "demo".into(), changed_index: 1, live_count: members.len() as u64 },
+            // This cache stores structural rows only; labels, folds and filters are applied below.
+            catalog: "unused-v2".into(), presentation: "structural".into(),
+        };
+        self.preview = Some(V2Preview {
+            arrangement: ArrangementInput {
+                subject: arrangement.header.id, owner: arrangement.owner, revision: arrangement.header.revision,
+                deleted: arrangement.deleted, body: arrangement.body,
+                resolved: arrangement.resolved.map(|r| ResolvedInput { parents: r.parents, folders: r.folders }),
+            },
+            members, revisions, cache: Default::default(),
+        });
+    }
+
+    fn v2_rows(&self) -> Vec<Row> {
+        use fractal_sidebar::model::NodeRef;
+        let mut rows = vec![Row::Notice("PR17 prototype · demo v2 · read-only".into())];
+        let Some(preview) = &self.preview else {
+            rows.push(Row::Notice("V2 preview requires --demo; live v2 is not connected.".into()));
+            return rows;
+        };
+        let fractal_schema::arrangements::VersionedBody::V2(body) = &preview.arrangement.body else {
+            rows.push(Row::Notice("V2 preview requires a version 2 fixture.".into()));
+            return rows;
+        };
+        let mut cache = preview.cache.borrow_mut();
+        let tree = match cache.project(&preview.revisions, &preview.arrangement, &preview.members, &[]) {
+            Ok(tree) => tree,
+            Err(error) => {
+                rows.push(Row::Notice(format!("V2 layout unavailable: {error:?}")));
+                return rows;
+            }
+        };
+        let query = self.filter.to_lowercase();
+        // Flatten in tree order, retaining ancestor identities for filtering and rollup counts.
+        let mut stack = tree.roots.iter().rev().map(|node| (node, Vec::<String>::new())).collect::<Vec<_>>();
+        let mut flattened = Vec::new();
+        let mut counts = BTreeMap::<String, usize>::new();
+        while let Some((node, ancestors)) = stack.pop() {
+            let projected = &tree.nodes[&fractal_sidebar::model::node_key(node)];
+            let mut children_ancestors = ancestors.clone();
+            match node {
+                NodeRef::Folder { id } => children_ancestors.push(id.clone()),
+                NodeRef::Subject { subject } => {
+                    let label = self.seen.get(subject).map_or(subject.as_str(), |row| row.title.as_str());
+                    if query.is_empty() || label.to_lowercase().contains(&query) || subject.to_lowercase().contains(&query) {
+                        for id in &ancestors { *counts.entry(id.clone()).or_default() += 1; }
+                    }
+                }
+            }
+            flattened.push((node, ancestors));
+            stack.extend(projected.children.iter().rev().map(|child| (child, children_ancestors.clone())));
+        }
+        for (node, ancestors) in flattened {
+            if query.is_empty() && ancestors.iter().any(|id| self.choices.collapsed.get(&format!("v2/folder/{id}")).copied().unwrap_or(false)) {
+                continue;
+            }
+            let indent = "  ".repeat(ancestors.len());
+            match node {
+                NodeRef::Folder { id } => {
+                    let count = counts.get(id).copied().unwrap_or(0);
+                    if !query.is_empty() && count == 0 { continue; }
+                    rows.push(Row::Group {
+                        id: format!("v2/folder/{id}"), title: format!("{indent}{}", body.folders[id].name.value),
+                        count, closed: query.is_empty() && self.choices.collapsed.get(&format!("v2/folder/{id}")).copied().unwrap_or(false),
+                    });
+                }
+                NodeRef::Subject { subject } => {
+                    let mut row = self.seen.get(subject).cloned().unwrap_or_else(|| ResourceRow {
+                        id: subject.clone(), kind: "Unavailable".into(), title: subject.clone(), open: subject.clone(), missing: true,
+                    });
+                    if !query.is_empty() && !row.title.to_lowercase().contains(&query) && !subject.to_lowercase().contains(&query) { continue; }
+                    row.title = format!("{indent}{}", row.title);
+                    rows.push(Row::Resource(row));
+                }
+            }
+        }
+        rows
+    }
     /// The person's one Sidebar: the reserved subject whatever its name (#2043), else the oldest
     /// live arrangement named "Sidebar", which clients created before the reserved id. Every
     /// client picks the same one, so their edits land in the same arrangement.
@@ -394,6 +497,7 @@ impl Sidebar {
         }
     }
     pub fn rows(&self) -> Vec<Row> {
+        if self.preview_v2 { return self.v2_rows(); }
         let arrangement = self.arrangement();
         use fractal_sidebar::model::{NodeRef, Parent};
         let mut rows = Vec::new();
@@ -587,6 +691,10 @@ impl Sidebar {
 }
 impl Ui {
     pub(super) fn sidebar_edit(&mut self, operations: Vec<fractal_client::ArrangementOperation>) {
+        if self.resource_sidebar.preview_v2 {
+            self.flash("PR17 v2 prototype is read-only; editing remains on the live v1 path.");
+            return;
+        }
         if self.resource_sidebar.writing {
             self.flash("Sidebar edit is still being saved.");
             return;
@@ -660,6 +768,10 @@ impl Ui {
         }
     }
     pub(super) fn sidebar_create_folder(&mut self, name: &str, subject: Option<&str>) {
+        if self.resource_sidebar.preview_v2 {
+            self.flash("PR17 v2 prototype is read-only; editing remains on the live v1 path.");
+            return;
+        }
         let id = uuid::Uuid::now_v7().to_string();
         let last = self
             .resource_sidebar
@@ -722,7 +834,11 @@ impl Ui {
             text: theme::fg(theme::TEXT), accent: theme::fg(theme::ACCENT),
             selected: Style::default().fg(theme::CRUST).bg(theme::ACCENT),
         });
+        if self.resource_sidebar.preview_v2 && area.width >= 8 {
+            buf.set_stringn(area.right() - 5, area.y, "     ", 5, theme::dim());
+        }
         for hit in regions.hits {
+            if self.resource_sidebar.preview_v2 && !matches!(hit.action, Action::Row | Action::Filter) { continue; }
             let id = hit.row.unwrap_or("");
             let folder = || id.strip_prefix("folder:").expect("widget folder identity").to_owned();
             let action = match hit.action {
@@ -767,6 +883,11 @@ impl Ui {
             return false;
         }
         let count = self.resource_sidebar.rows().len();
+        if self.resource_sidebar.preview_v2 && !self.resource_sidebar.filtering
+            && matches!(key.code, KeyCode::Char('n' | 'm' | 'r' | 'd' | '+')) {
+            self.flash("PR17 v2 prototype is read-only; editing remains on the live v1 path.");
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 if self.resource_sidebar.filter.is_empty() && !self.resource_sidebar.filtering {
@@ -903,6 +1024,67 @@ mod tests {
             missing: false,
         }
     }
+    fn v2_sidebar() -> Sidebar {
+        let mut wire = serde_json::to_value(arrangement()).unwrap();
+        wire["body"]["version"] = json!(2);
+        wire["body"].as_object_mut().unwrap().remove("placements");
+        wire["resolved"]["folders"] = json!({});
+        let arrangement: fractal_client::Arrangement = serde_json::from_value(wire).unwrap();
+        let members = [
+            ("agent/z-first", Some("second"), "a0"),
+            ("mission/a-second", Some("second"), "a1"),
+            ("agent/root", None, "a0"),
+        ].into_iter().map(|(member, bucket, key)| fractal_sidebar::model::MembershipInput {
+            container: arrangement.header.id.clone(), member: member.into(), revision: "membership/1".into(),
+            position: fractal_schema::ordered_membership::Position { bucket: bucket.map(str::to_owned), key: key.into() },
+        }).collect();
+        let mut sidebar = Sidebar::default();
+        sidebar.arrangements.push(self::arrangement());
+        for id in ["agent/z-first", "mission/a-second", "agent/root", "agent/retired"] {
+            sidebar.seen.insert(id.into(), resource(id, "Agents"));
+        }
+        sidebar.set_v2_preview(arrangement, members);
+        sidebar.preview_v2 = true;
+        sidebar
+    }
+
+    #[test]
+    fn preview_v2_preserves_recursive_order_and_never_resurrects_retired_catalog_rows() {
+        let sidebar = v2_sidebar();
+        let rows = sidebar.rows();
+        assert!(matches!(&rows[0], Row::Notice(message) if message.contains("read-only")));
+        assert!(matches!(&rows[1], Row::Group { id, count: 2, .. } if id == "v2/folder/first"));
+        assert!(matches!(&rows[2], Row::Group { title, count: 2, .. } if title == "  Second"));
+        let subjects = rows.iter().filter_map(|row| match row { Row::Resource(row) => Some(row.id.as_str()), _ => None }).collect::<Vec<_>>();
+        assert_eq!(subjects, ["agent/z-first", "mission/a-second", "agent/root"]);
+        assert!(matches!(&rows[3], Row::Resource(row) if row.title.starts_with("    ")));
+    }
+
+    #[test]
+    fn preview_v2_folds_ancestors_search_expands_and_catalog_labels_refresh_on_cache_hits() {
+        let mut sidebar = v2_sidebar();
+        sidebar.toggle(1);
+        assert!(!sidebar.rows().iter().any(|row| matches!(row, Row::Resource(row) if row.id == "agent/z-first")));
+        sidebar.filter = "renamed".into();
+        sidebar.seen.get_mut("agent/z-first").unwrap().title = "Renamed worker".into();
+        let rows = sidebar.rows();
+        assert_eq!(rows.iter().filter(|row| matches!(row, Row::Group { closed: false, .. })).count(), 2);
+        assert_eq!(rows.iter().filter(|row| matches!(row, Row::Resource(_))).count(), 1);
+        assert!(rows.iter().any(|row| matches!(row, Row::Resource(row) if row.title.trim() == "Renamed worker")));
+        sidebar.preview_v2 = false;
+        assert!(sidebar.rows().iter().any(|row| matches!(row, Row::Resource(row) if row.id == "agent/retired")));
+    }
+
+    #[test]
+    fn preview_v2_refuses_incomplete_resolution_without_catalog_fallback() {
+        let mut sidebar = v2_sidebar();
+        sidebar.preview.as_mut().unwrap().arrangement.resolved = None;
+        assert!(sidebar.rows().iter().any(|row| matches!(row, Row::Notice(message) if message.contains("NotReady"))));
+        assert!(!sidebar.rows().iter().any(|row| matches!(row, Row::Resource(_))));
+        sidebar.preview = None;
+        assert!(sidebar.rows().iter().any(|row| matches!(row, Row::Notice(message) if message.contains("--demo"))));
+    }
+
     #[test]
     fn folders_follow_register_order_and_missing_placements_stay_marked() {
         let mut sidebar = Sidebar::default();
