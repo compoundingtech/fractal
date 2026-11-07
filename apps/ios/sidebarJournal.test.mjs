@@ -13,8 +13,8 @@ const reducer = {
     if (e.type === 'StorageFailed') { s.status = s.folder_completed ? 'PartiallyApplied' : 'Refused'; return ['PersistPending', 'ReadBase']; }
     if (e.identity && JSON.stringify(e.identity) !== JSON.stringify(s.request.identity)) return [];
     if (e.type === 'Stage') { s.status = 'AwaitingPersistence'; return ['PersistPending']; }
-    if (e.type === 'Persisted' && s.status === 'AwaitingPersistence') { s.status = 'Sending'; return ['Send']; }
-    if (e.type === 'Replay' && s.status === 'UnknownDelivery') { s.status = 'Sending'; return ['Send']; }
+    if (e.type === 'Persisted' && s.status === 'AwaitingPersistence') { s.status = 'Sending'; return [{ type: 'Send', delivery: 'Replay' }]; }
+    if (e.type === 'Replay' && s.status === 'UnknownDelivery') { s.status = 'Sending'; return [{ type: 'Send', delivery: 'Replay' }]; }
     if (e.type === 'Ack' && s.status === 'Sending') { s.status = 'AwaitingObservation'; return ['PersistPending', 'ReadBase']; }
     if (e.type === 'Observed' && ['Sending', 'UnknownDelivery', 'AwaitingObservation'].includes(s.status)) { s.folder_completed = s.dependent; s.status = 'AwaitingCompletionPersistence'; return ['PersistCompletion']; }
     if (e.type === 'CompletionPersisted' && s.status === 'AwaitingCompletionPersistence') { s.status = s.dependent ? 'AwaitingFreshBase' : 'Observed'; return s.dependent ? ['ReadBase'] : ['PersistRemoval']; }
@@ -24,7 +24,7 @@ const reducer = {
 const setup = (values = new Map()) => {
   const storage = { getItem: async key => values.get(key) ?? null, setItem: async (key, value) => { values.set(key, value); }, removeItem: async key => { values.delete(key); } };
   const effects = [], sent = [];
-  const host = () => new SidebarJournal(storage, scope, reducer, async (effect, s) => { effects.push(effect); if (effect === 'Send') sent.push(structuredClone(s.request)); });
+  const host = () => new SidebarJournal(storage, scope, reducer, async (effect, s) => { effects.push(effect); if (effect.type === 'Send') sent.push(structuredClone(s.request)); });
   return { values, storage, effects, sent, host };
 };
 const seed = (env, s) => env.values.set('record', JSON.stringify({ version: 1, state: s }));
@@ -38,7 +38,7 @@ test('all crash boundaries restore exact immutable request with a new persistenc
     await host.resume(restored);
     assert.deepEqual(env.sent, status === 'AwaitingObservation' ? [] : [original.request]);
     assert.equal(restored.state.status, status === 'AwaitingObservation' ? status : 'Sending');
-    assert.deepEqual(env.effects, status === 'AwaitingObservation' ? ['ReadBase'] : ['Send']);
+    assert.deepEqual(env.effects, status === 'AwaitingObservation' ? ['ReadBase'] : [{ type: 'Send', delivery: 'Replay' }]);
   }
 });
 test('pending and completion writes block their acknowledgements until durable', async () => {
@@ -109,7 +109,7 @@ test('switching host scope refuses all restored effects and unknown-delivery rep
     const selected = { ...scope, [field]: `${scope[field]}-other` };
     const host = new SidebarJournal(env.storage, selected, reducer, async effect => { calls.push(effect); });
     if (requestOnly) restored.state.scope = selected;
-    for (const effect of ['Send', 'ReadBase', 'Replan', 'PersistPending', 'PersistCompletion', 'PersistRemoval']) {
+    for (const effect of [{ type: 'Send', delivery: 'Replay' }, 'ReadBase', 'Replan', 'PersistPending', 'PersistCompletion', 'PersistRemoval']) {
       await assert.rejects(host.resume({ state: restored.state, effects: [effect] }), /scope mismatch/);
     }
     restored.state.status = 'UnknownDelivery';

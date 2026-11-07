@@ -24,12 +24,35 @@ pub struct ReplicationRecordsQuery {
     unresolved: bool,
 }
 
+fn generic_replica_record_visible(record: &ReplicaRecordView) -> bool {
+    !record.subject.as_deref().is_some_and(fractal_schema::notice::is_reserved_subject)
+        && !record.kind.as_deref().is_some_and(fractal_schema::notice::is_reserved_kind)
+}
+
+#[test]
+fn notice_replication_diagnostics_hide_reserved_subject_or_kind() {
+    let mut record: ReplicaRecordView = serde_json::from_value(json!({
+        "record_ref":"record/example", "writer":"example", "sequence":1,
+        "envelope_hash":"example", "position":0, "state":"valid",
+        "subject":"custom/example/ordinary", "kind":"custom.example.created"
+    })).unwrap();
+    assert!(generic_replica_record_visible(&record));
+    record.subject = Some("custom/attention/source/legacy".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.subject = Some("custom/example/alternate".into());
+    record.kind = Some("custom.attention.notice-created".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.kind = Some("attention.notice-source".into());
+    assert!(!generic_replica_record_visible(&record));
+}
+
 pub async fn replication_records(
     State(state): State<AppState>,
     Query(query): Query<ReplicationRecordsQuery>,
 ) -> Result<Json<Vec<ReplicaRecordView>>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.replica_records(query.unresolved))
+    blocking_store(move || Ok(store.replica_records(query.unresolved)?
+        .into_iter().filter(generic_replica_record_visible).collect()))
         .await
         .map(Json)
 }
@@ -47,6 +70,7 @@ pub async fn replication_record(
     let record_for_read = record.clone();
     blocking_store(move || store.replica_record(&record_for_read))
         .await?
+        .filter(generic_replica_record_visible)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
@@ -279,7 +303,7 @@ pub async fn replication_receive(
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
-    let (response, reconcile_changed, waking_kind, notice_visible) = blocking_action(move || {
+    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -364,32 +388,22 @@ pub async fn replication_receive(
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
-        // One read answers both whether every new claim is quiet and which kind names the wake;
-        // only a change that projected can wake the reconciler, so no other receive asks it.
-        let (any_new, waking_kind) = if changed && projected {
-            store
-                .claims_since_waking_kind(before_index)
-                .map_err(|error| FractalError::new("internal", error.to_string()))?
-        } else {
-            (false, None)
-        };
         let quiet_only = projection_was_healthy
             && projected
             && repairs == 0
             && admission.unknown == 0
             && admission.invalid == 0
-            && any_new
-            && waking_kind.is_none();
+            && store
+                .claims_since_only_quiet_notifications(before_index)
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
-        let reconcile_changed = changed && !quiet_only && projected;
         Ok((
             ReplicationReceiveResponse {
                 receipt,
                 changed,
                 store_index,
             },
-            reconcile_changed,
-            waking_kind,
+            changed && !quiet_only && projected,
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
@@ -397,7 +411,7 @@ pub async fn replication_receive(
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,
-            waking_kind.as_deref(),
+            None,
         );
         state.notify.notify_one();
     }
@@ -656,6 +670,20 @@ pub async fn test_shard_append(
     let mut answer = serde_json::to_value(claim).map_err(ApiError::internal)?;
     answer["appended"] = serde_json::Value::Bool(appended);
     Ok(Json(answer))
+}
+
+/// Test support: write a claim to the messages shard as a peer's replicated copy arrives, without
+/// the graph check a send makes, so a test can hold a stream item under a subject the graph has.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_copy(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let (claim, _) = blocking_action(move || crate::store::messages_shard::append_replicated_copy(&store, &input)).await?;
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
+    Ok(Json(serde_json::to_value(claim).map_err(ApiError::internal)?))
 }
 
 /// Test support: the claims the messages shard holds about one subject.

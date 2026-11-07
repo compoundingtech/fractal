@@ -1,6 +1,8 @@
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isNonemptyString = value => typeof value === 'string' && value.trim().length > 0
 
+export const KIT_POLICY_TAGS = Object.freeze(['merge-only', 'both-widths'])
+
 // With a tag (the per-commit `critical` set), only stories carrying it are
 // selected; the whole index is still validated, and an empty selection fails.
 export function storyIdsFromIndex(index, { tag } = {}) {
@@ -22,4 +24,26 @@ export function storyIdsFromIndex(index, { tag } = {}) {
     throw new Error('Storybook index must contain unique, nonempty story IDs')
   }
   return ids.sort()
+}
+
+// Read policy before selecting critical stories or shards: a policy tag without
+// critical must fail closed, not silently disappear from the per-commit gate.
+export function playSetIdsFromIndex(index) {
+  storyIdsFromIndex(index)
+  const mergeOnlyIds = [], bothWidthsIds = []
+  for (const entry of Object.values(index.entries)) {
+    if (entry.type !== 'story') continue
+    for (const tag of entry.tags ?? []) {
+      if (/^(?:merge|both)-/.test(tag) && !KIT_POLICY_TAGS.includes(tag)) {
+        throw new Error(`Unknown kit policy tag ${JSON.stringify(tag)} on ${entry.id}; expected ${KIT_POLICY_TAGS.join(' or ')}`)
+      }
+    }
+    const mergeOnly = entry.tags?.includes('merge-only'), bothWidths = entry.tags?.includes('both-widths')
+    if (!mergeOnly && !bothWidths) continue
+    if (!entry.tags.includes('critical')) throw new Error(`The per-commit set names ${entry.id}, which is not a critical story`)
+    if (mergeOnly && bothWidths) throw new Error(`The per-commit set names ${entry.id} as both merge-only and both-widths`)
+    if (mergeOnly) mergeOnlyIds.push(entry.id)
+    if (bothWidths) bothWidthsIds.push(entry.id)
+  }
+  return { mergeOnlyIds: mergeOnlyIds.sort(), bothWidthsIds: bothWidthsIds.sort() }
 }

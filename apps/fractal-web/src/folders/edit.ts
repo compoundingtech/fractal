@@ -1,4 +1,4 @@
-import { SidebarJournal, type SidebarJournalState, type SidebarJournalRequest, type SidebarJournalEffect, type SidebarJournalResult, type SidebarPersistenceFailure } from './sidebarJournal.ts'
+import { SidebarJournal, type MembershipDelivery, type SidebarJournalState, type SidebarJournalRequest, type SidebarJournalEffect, type SidebarJournalResult, type SidebarPersistenceFailure } from './sidebarJournal.ts'
 import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
 import { ErrorCode, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { ActionResult } from '@fractal/client/schema'
@@ -435,6 +435,8 @@ const sameMembershipIdentity = (a: MembershipIdentity, b: MembershipIdentity): b
 /** Unwired Rust edits.rs port. Host serializes events and executes every journal effect. */
 export class MembershipEditor {
   state: SidebarJournalState
+  // Restored requests may already have committed, even before their first recorded send.
+  #nextDelivery: MembershipDelivery = 'Replay'
   constructor(readonly journal: SidebarJournal, intent: SidebarJournalState['intent'], restored?: SidebarJournalState) {
     this.state = restored ?? { scope: journal.scope, intent, status: 'Intent', refusal: null, request: null, dependent: null, folder_completed: false, used: [] }
   }
@@ -452,6 +454,7 @@ export class MembershipEditor {
   #stage(identity: MembershipIdentity, fence: MembershipBase, operations: MembershipOperations): SidebarJournalEffect[] {
     if (!this.#unused(identity)) return this.#refuse('InvalidPlan')
     this.state = { ...this.state, used: [...this.state.used, identity], request: structuredClone({ identity, fence, operations }), status: 'AwaitingPersistence' }
+    this.#nextDelivery = 'First'
     return ['PersistPending']
   }
   /** Persistence acknowledgements come only from this journal executor, never transport. */
@@ -488,8 +491,13 @@ export class MembershipEditor {
       this.state = { ...state, status: 'Intent', refusal: null, dependent: null }; return ['ReadBase', 'Replan']
     }
     if (event._tag === 'StorageFailed' && (state.status === 'AwaitingPersistence' && event.phase === 'Pending' || state.status === 'AwaitingCompletionPersistence' && event.phase === 'Completion')) return this.#refuse('Storage')
-    if (event._tag === 'Replay' && state.status === 'UnknownDelivery' || event._tag === 'Persisted' && state.status === 'AwaitingPersistence') {
-      this.state = { ...state, status: 'Sending' }; return ['Send']
+    if (event._tag === 'Replay' && state.status === 'UnknownDelivery') {
+      this.state = { ...state, status: 'Sending' }; return [{ _tag: 'Send', delivery: 'Replay' }]
+    }
+    if (event._tag === 'Persisted' && state.status === 'AwaitingPersistence') {
+      const delivery = this.#nextDelivery
+      this.#nextDelivery = 'Replay'
+      this.state = { ...state, status: 'Sending' }; return [{ _tag: 'Send', delivery }]
     }
     if (event._tag === 'CompletionPersisted' && state.status === 'AwaitingCompletionPersistence') {
       this.state = { ...state, status: state.dependent ? 'AwaitingFreshBase' : 'Observed' }

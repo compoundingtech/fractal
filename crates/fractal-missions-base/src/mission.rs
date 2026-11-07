@@ -269,6 +269,7 @@ fn parse_mission(
         .children()
         .ok_or_else(|| FractalError::new("empty-mission", format!("mission `{id}` has no steps")))?;
     unique_named_child(children, "provenance")?;
+    let admission = crate::declared_admission::parse(children, "mission", &format!("mission/{id}"))?;
     let mut inputs = BTreeMap::new();
     for input_node in children
         .nodes()
@@ -309,6 +310,7 @@ fn parse_mission(
     let mut capacity = None;
     for child in children.nodes() {
         match child.name().value() {
+            "declared-priority" | "declared-lane" | "declared-budgets" => {}
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -554,14 +556,14 @@ fn parse_mission(
     }
     let declarations_kdl = declarations_document(declarations);
     let mut mission = MissionSpec {
-        declared_priority: None,
-        declared_lane: None,
-        declared_budgets: None,
         subject: format!("mission/{id}"),
         id,
         state,
         revision: String::new(),
         system,
+        declared_priority: admission.priority,
+        declared_lane: admission.lane,
+        declared_budgets: admission.budgets,
         resources,
         inputs,
         max_active_runs,
@@ -2685,20 +2687,10 @@ fn normalize_subject(value: &str, kind: &str) -> String {
 }
 
 fn normalize_assignee(value: &str, default_host: &str) -> String {
-    // Declaration shorthand is host-relative, including the historical `agent/worker` spelling.
-    // Qualify it before accepting an already-prefixed actor as canonical.
-    let identity = value.strip_prefix("agent/").unwrap_or(value);
-    if !identity.contains('.') && !identity.contains("${") && !identity.contains('/') {
-        return format!("agent/{default_host}.{identity}");
-    }
-    if let Some(canonical) = fractal_schema::canonical_agent_actor(value) {
-        return canonical.into_owned();
-    }
-    // Stored declarations are parsed again during reconciliation. Preserve their historical
-    // normalization when an actor cannot be canonicalized; writers validate new work actors.
     if value.starts_with("person/") {
         return value.to_owned();
     }
+    let identity = value.strip_prefix("agent/").unwrap_or(value);
     if identity.contains('.') || identity.contains("${") {
         format!("agent/{identity}")
     } else if identity.contains('/') {
@@ -3140,9 +3132,9 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     #[test]
-    fn assignees_canonicalize_legacy_slash_ids() {
+    fn assignees_retain_main_spelling_during_expansion() {
         for (input, expected) in [
-            ("example/worker", "agent/example/worker"),
+            ("example/worker", "example/worker"),
             ("agent/example/worker", "agent/example/worker"),
             ("person/reviewer", "person/reviewer"),
             ("daemon/scheduler", "daemon/scheduler"),

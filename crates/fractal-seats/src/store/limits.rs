@@ -470,18 +470,27 @@ impl LimitsStore for Store {
                 "message/limits-{}",
                 &canonical_hash(&key).map_err(internal)?[..20]
             );
+            let notice = ClaimInput {
+                subject: subject.clone(),
+                kind: "message.sent".into(),
+                actor: Some(LIMITS_ACTOR.into()),
+                fields: serde_json::from_value(json!({
+                    "from": LIMITS_ACTOR, "to": policy.notify,
+                    "title": title, "content": reason, "status": "sent",
+                    "tags": ["account-limits", format!("account:{}", limit.account), format!("window:{episode}")]
+                })).map_err(internal)?,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            };
+            // Where its recipient's host reads it, decided before the transaction: a notice
+            // routed to the stream is queued in the outbox, which drains to the shard.
+            let route = fractal_store::store::message_routing::legacy_reason(self, &notice).map_err(internal)?;
             self.connection.batched(|tx| {
-                let recorded = tx.query_row(
-                    "SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
-                    [&subject], |_| Ok(()),
-                ).optional().map_err(internal)?.is_some();
+                // Sent as a graph claim, a mirrored stream item or a queued outbox row.
+                let recorded = fractal_store::store::message_sent::message_sent_tx(tx, &subject).map_err(internal)?;
                 if !recorded {
-                    append_claim_tx(tx, &self.origin, &subject, "message.sent", Some(LIMITS_ACTOR),
-                        &json!({"fields": {
-                            "from": LIMITS_ACTOR, "to": policy.notify,
-                            "title": title, "content": reason, "status": "sent",
-                            "tags": ["account-limits", format!("account:{}", limit.account), format!("window:{episode}")]
-                        }, "evidence": []}), &[], None).map_err(claim_append_error)?;
+                    fractal_store::store::message_routing::send_message_tx(tx, &self.origin, &notice, route)?;
                 }
                 Ok::<_, FractalError>(())
             }).map_err(internal)??;

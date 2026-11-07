@@ -16,6 +16,90 @@ fn assert_publication_envelope(publication: &PublicationArc) {
     assert_eq!(publication.order(), ids);
 }
 
+fn notice_legacy_agent_claim(store: &Store, subject: &str) -> String {
+    roster_resilience_runtime(store, subject, "notice-native");
+    // Seed an old-peer-shaped row below current reserved-kind admission.
+    let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+        let hidden = crate::store::append_claim_tx(
+            tx, store.origin(), subject, "runtime.observed", None,
+            &json!({"fields":{"runtime_id":"notice-private-marker",
+                "incarnation_id":"notice-private-marker","reason":"notice-private-marker",
+                "terminal":true,"status":"stopped"}}), &[], None,
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1ceb045a5bba owner=fractal_api_core::api::agents_publication_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+        Ok(hidden)
+    }).unwrap().unwrap();
+    store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+    hidden.id
+}
+
+#[tokio::test]
+async fn notice_agent_first_page_keeps_native_membership_and_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let subject = "agent/notice-page";
+    let hidden = notice_legacy_agent_claim(&app.store, subject);
+    assert!(!app.store.agent_roster_refresher_running());
+    for history in [false, true] {
+        let snapshot = new_client_snapshot(&app);
+        let refs = app.store.read_snapshot(|index|
+            client_agent_page_refs(&app.store, history, index)).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["id"], subject);
+        // Without a publication owner this runs the ordinary first-page refs/card assembly.
+        let (Extension(served), Json(page)) = client_agents(
+            State(app.clone()), Extension(snapshot.clone()),
+            Query(ClientListQuery { history, limit: Some(1), ..ClientListQuery::default() }),
+        ).await.expect("a legacy reserved row must not break native first-page assembly");
+        assert_eq!(served.store_index, snapshot.store_index);
+        assert_eq!(page.items.len(), refs.len());
+        assert!(!page.page.has_more);
+        assert_eq!(page.items[0]["id"], refs[0]["id"]);
+        assert_eq!(page.items[0]["runtime_ids"], json!(["runtime/notice-native"]));
+        assert_eq!(page.items[0]["state"], "running");
+        let encoded = serde_json::to_string(&page).unwrap();
+        assert!(!encoded.contains("notice-private-marker"));
+        assert!(!encoded.contains(&hidden));
+        assert!(!serde_json::to_string(&refs).unwrap().contains(&hidden));
+    }
+    assert!(app.store.claim_by_id(&hidden).unwrap().is_some());
+}
+
+#[test]
+fn notice_cold_agent_publication_completes_beyond_the_startup_head() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    let hidden = (0..301).map(|agent|
+        notice_legacy_agent_claim(store, &format!("agent/notice-publication-{agent:04}")))
+        .collect::<Vec<_>>();
+    assert!(store.agents_publication().is_none());
+    store.read_snapshot(|index| client_agent_roster_head(store, index))
+        .expect("contaminated native agents must still assemble a bounded startup head");
+    assert!(store.agents_publication().is_none(), "the startup head is not a complete roster");
+    refresh_agent_roster(store, false)
+        .expect("reserved rows must not prevent bounded roster completion");
+    let publication = publication_current(store);
+    assert_eq!(publication.rows().len(), 301);
+    assert_eq!(publication.metadata().status_watermark.store_index, store.index().unwrap());
+    let ids = publication.rows().iter().map(|card| card["id"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids, (0..301).map(|agent| format!("agent/notice-publication-{agent:04}"))
+        .collect::<BTreeSet<_>>());
+    for card in publication.rows() {
+        assert_eq!(card["runtime_ids"], json!(["runtime/notice-native"]));
+        assert_eq!(card["state"], "running");
+    }
+    assert_publication_envelope(&publication);
+    let encoded = std::str::from_utf8(publication.encoded()).unwrap();
+    assert!(!encoded.contains("notice-private-marker"));
+    for id in hidden {
+        assert!(!encoded.contains(&id));
+        assert!(store.claim_by_id(&id).unwrap().is_some());
+    }
+}
+
 #[test]
 fn agents_publication_completes_a_roster_beyond_the_startup_head() {
     let root = tempfile::tempdir().unwrap();

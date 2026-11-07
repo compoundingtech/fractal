@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pair Fractal iOS by scanning a terminal QR while keeping root fingerprint verification and pairing confirmation explicit.",
+  "replay": { "status": "none", "detail": "No persisted data replay or migration changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or coordination semantics change." },
+  "compatibility": { "status": "changed", "detail": "Adds optional --gateway to fractal devices pair and iOS camera permission with a candidate-only scan flow; existing JSON output and pairing protocol are unchanged." },
+  "downtime": { "status": "none", "detail": "No service interruption is required." },
+  "manual": { "status": "none", "detail": "No upgrade steps are required; manual pairing remains available." },
+  "recovery": { "status": "none", "detail": "No stored state requires recovery or conversion." }
+}

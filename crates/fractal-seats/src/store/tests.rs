@@ -1179,6 +1179,44 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
 }
 
 #[test]
+fn notice_terminal_resources_keep_native_owners_and_strip_reserved_rows() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/notice-terminal";
+    observe_runtime(&store, subject, "running", "one");
+    let clean_cut = store.index().unwrap();
+    // Seed an old-peer-shaped row below current custom-subject admission.
+    let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+        let hidden = append_claim_tx(
+            tx, store.origin(), subject, "runtime.observed", None,
+            &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret"}}),
+            &[], None,
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9e9e37dcf663 owner=fractal_seats::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+        Ok(hidden)
+    }).unwrap().unwrap();
+    store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+    let cut = store.index().unwrap();
+    let names = BTreeSet::from([subject.to_owned()]);
+    let raw = store.agent_card_status_at(Some(&names), cut, false).unwrap();
+    assert!(serde_json::to_string(&raw).unwrap().contains("notice-secret"));
+    let clean = store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap();
+    for history in [false, true] {
+        for owner in [None, Some(subject)] {
+            let visible = store.terminal_resource_status_at(owner, cut, history).unwrap();
+            assert_eq!(visible.subjects.len(), 1);
+            assert_eq!(visible.subjects[0].actual.as_ref().unwrap()["incarnation_id"], "one");
+            assert_eq!(visible.subjects[0].claims, clean.subjects[0].claims);
+            let shown = serde_json::to_string(&visible).unwrap();
+            assert!(!shown.contains("notice-secret"));
+            assert!(!shown.contains(&hidden.id));
+        }
+    }
+    assert_eq!(store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap().subjects.len(), 1);
+    assert!(store.claim_by_id(&hidden.id).unwrap().is_some());
+    assert_eq!(store.status_history(Some(subject), None, Some(cut)).unwrap().subjects.len(), 1);
+}
+
+#[test]
 fn runtime_status_reuses_subject_generations_across_actor_only_claims() {
     let store = Store::open_memory("node").unwrap();
     // Keep the selected set below the parallel reduction threshold so the existing

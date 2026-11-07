@@ -293,8 +293,8 @@ impl DeliveryStoreCore for Store {
         ) -> Result<(ClaimRecord, bool), FractalError> {
         if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
             || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
-            || input.actor.as_deref() != Some("assistant/chatgpt")
-            || input.fields.get("from").and_then(Value::as_str) != Some("assistant/chatgpt")
+            || input.actor.as_deref() != Some(authorization.principal())
+            || input.fields.get("from").and_then(Value::as_str) != Some(authorization.principal())
         { return Err(FractalError::new("forbidden", "assistant authorization does not bind this message")); }
         #[cfg(feature = "test-support")]
         let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;

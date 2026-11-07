@@ -30,6 +30,21 @@ preserves full immutable producer input; its recipient is the addressed person.
 Delivery/integrity use tagged states, and person controls are explicitly nullable.
 Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
 serialized claim-field budget and cross-field provenance/receipt consistency.
+Immutable source lineage authenticates the stored source creation claim and its
+reviewed manifest digest; it does not authenticate external git commits named in
+`input.source`. Execution-context provenance remains informational, not
+authenticated sender evidence. Notice finalization is SQL-free when no notice
+work is pending; touched authority or custom state still triggers revalidation.
+This is a finalization contract, not a checked performance result.
+Generic seat-summary visibility and reduction use one pinned read snapshot and
+effective claim cut. Exact incarnation summaries neither use nor advance the shared
+subject cache; unrelated claim backlogs do not trigger its maintenance. The reduction
+independently excludes reserved notice kinds from actual fields and source attribution.
+Managed-session owner
+visibility and identity selection also share one read snapshot and read routing
+identities uncached on its connection; a shared map keyed only by the numeric
+claim cut cannot pin mutable identity and repair state.
+
 Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
 Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
 constructors and decoding, including Unicode-scalar lengths, URI references and
@@ -219,13 +234,21 @@ Revoking or expiring the pairing removes it. Fractal does not send pushes yet.
 ### Person ask respondents
 
 Work `person_answers[].respondent` uses `SenderRef`: `agent/...`, `assistant/...`,
-`person/...`, or `step/...`. An assistant answer identifies `assistant/chatgpt` as
-the respondent, never the grant's owning person. Optional `sender_class`,
+`person/...`, or `step/...`. An assistant answer identifies its grant principal,
+`assistant/chatgpt` or `assistant/mcp`, as the respondent, never the grant's owning person. Optional `sender_class`,
 `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor` carry
 server-owned provenance separately; `assistant_owner` is a concrete `PersonId`.
 These fields do not confer person authority or replace an agent's `acted_for`
 delegation proof. `ActorRef`, `ParticipantRef`, and recipient contracts remain
 narrower; accepting an assistant respondent does not make assistants recipients.
+
+The [external-assistant operator guide](../external-assistants.md) covers explicit
+owner pairing, scoped writes, protected profiles, stdio MCP client configuration,
+and revocation. Both principals use `external-assistant` provenance and the same
+assistant-only routes; neither is a person or recipient. Historical grants that
+omit their stored principal remain ChatGPT grants. MCP pairing is an explicit
+choice, not a reinterpretation of a ChatGPT profile. Older servers that do not
+recognize `assistant/mcp` reject it; clients must not retry as a person or ChatGPT.
 
 ### Mission run timing
 
@@ -1883,9 +1906,9 @@ frontend-auth boundary and does not alter tool arguments or daemon grants. No ge
 runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 405; unknown
 paths return an empty 404.
 
-The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
-Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
+The flake's `packages.fractal-chatgpt` builds only the adapter executable with the shared locked
+Cargo dependencies. Run `nix build .#fractal-chatgpt` from a checkout, or
+`nix build github:compoundingtech/fractal/<commit>#fractal-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
@@ -2235,6 +2258,12 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `runtime-authority-indeterminate`, `runtime-list-not-ready`, `runtime-list-ended`,
 `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
+
+Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
+`retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
+access. A valid credential missing a required scope still returns ordinary `forbidden` without
+that reason; it does not mean the credential was rejected. Clients must not infer credential
+expiry from status, code, or message text alone. Older daemons may omit the additive reason.
 
 Current runtime lists return HTTP 503 `runtime-list-not-ready` with `retryable: true`
 until their first complete publication. `runtime-list-ended` is HTTP 503 with

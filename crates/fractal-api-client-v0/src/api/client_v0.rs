@@ -3499,7 +3499,7 @@ fn runtime_resources_for_id(
         include_owner.then_some(id),
         snapshot.store_index,
     )?;
-    let status = state.store.status_for_subject_names_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
+    let status = state.store.status_for_subject_names_for_generic_reads_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
     Ok(runtime_resources_from_status(state, snapshot, session, status)?
         .into_iter()
         .filter(|runtime| runtime["id"] == id || (include_owner && runtime["owner_id"] == id))
@@ -8223,8 +8223,8 @@ async fn dispatch_action(
                 MessageSendRequest {
                     idempotency_key: request.idempotency_key.clone(),
                     // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if session.assistant_write.is_some() {
-                        assistant::PRINCIPAL.into()
+                    from: if let Some(authorization) = session.assistant_write.as_ref() {
+                        authorization.principal().into()
                     } else {
                         authority_actor.clone()
                     },
@@ -10101,6 +10101,51 @@ mod tests {
             })).unwrap(),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
+    }
+
+    #[test]
+    fn notice_typed_resources_and_session_lookup_exclude_reserved_actual_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let owner = "agent/notice-owner";
+        observe_published_runtime(&state, owner, "running", true);
+        observe_published_runtime(&state, "agent/visible-owner", "running", true);
+        let clean = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/operator")).unwrap();
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        // Seed an old-peer-shaped row below current custom-subject admission.
+        let hidden = state.store.connection.batched(|tx| -> anyhow::Result<_> {
+            let hidden = crate::store::append_claim_tx(
+                tx, state.store.origin(), owner, "runtime.observed", None,
+                &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret",
+                    "reason":"notice-secret","terminal":true,"status":"running"}}), &[], None,
+            )?;
+            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+            Ok(hidden)
+        }).unwrap().unwrap();
+        state.store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+        let snapshot = new_client_snapshot(&state);
+        for history in [false, true] {
+            let runtimes = runtime_resources(&state, history, &snapshot, &session).unwrap();
+            assert_eq!(runtimes.len(), 1);
+            assert_eq!(runtimes[0]["owner_id"], "agent/visible-owner");
+            assert!(runtime_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap().is_empty());
+            let terminals = terminal_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap();
+            assert_eq!(terminals.len(), 1);
+            assert!(!serde_json::to_string(&terminals).unwrap().contains("notice-secret"));
+        }
+        assert!(runtime_resources_for_id(&state, &snapshot, &session, "runtime/notice-secret", false).unwrap().is_empty());
+        let cards = crate::api::client_agent_resources(&state.store, true, &snapshot.created_at, snapshot.store_index).unwrap();
+        assert!(cards.iter().any(|card| card["id"] == owner));
+        assert!(!serde_json::to_string(&cards).unwrap().contains("notice-secret"));
+        assert!(!serde_json::to_string(&cards).unwrap().contains(&hidden.id));
+        let id = crate::api::managed_session_id(owner, "notice-secret");
+        assert!(crate::api::managed_session_owner_at(&state.store, snapshot.store_index, &id).unwrap().is_none());
+        assert!(crate::api::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, &id, owner).unwrap().is_none());
+        let (publication, _) = published_runtimes::fold(&state.store, None).unwrap().unwrap();
+        assert_eq!(publication.rows.items.len(), 1);
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        assert!(state.store.claim_by_id(&hidden.id).unwrap().is_some());
     }
 
     fn publish_runtimes_once(state: &AppState) {

@@ -450,8 +450,6 @@ pub fn signal_visible_change(state: &AppState) {
 
 #[cfg(test)]
 mod storage_contention_response_tests;
-#[cfg(test)]
-mod replication_wake_tests;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -1032,6 +1030,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
         .route("/v1/internal/test/message-marks", post(test_record_message_mark));
@@ -3140,7 +3139,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
@@ -3612,7 +3611,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3629,7 +3628,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -4176,14 +4175,34 @@ pub fn managed_session_id(owner: &str, identity: &str) -> String {
 
 pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 
+#[cfg(test)]
+thread_local! {
+    static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn managed_owner_after_pin() {
+    MANAGED_OWNER_AFTER_PIN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() { hook(); }
+    });
+}
+
 pub fn managed_session_owner_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
-        let owners = store.conversation_owners_at(snapshot_index)?;
+    // Pin identity/repair state and bypass the shared logical-cut owner cache.
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        let connection = store.readers.get();
+        let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
         for owner in owners.values() {
+            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
+                continue;
+            }
             let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
                 continue;
             };
@@ -4192,7 +4211,7 @@ pub fn managed_session_owner_at(
             }
         }
         Ok(None)
-    })
+    }))
 }
 
 pub fn managed_session_owner_for_subject_at(
@@ -4201,7 +4220,12 @@ pub fn managed_session_owner_for_subject_at(
     session_id: &str,
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4213,7 +4237,7 @@ pub fn managed_session_owner_for_subject_at(
             return Ok(None);
         }
         Ok(Some((owner.subject, owner.incarnation, owner.origin)))
-    })
+    }))
 }
 
 
@@ -4342,7 +4366,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -5950,7 +5974,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
@@ -6545,7 +6569,11 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    #[cfg(any(test, feature = "test-support"))]
+    let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let _uptime = uptime.enter();
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
@@ -6915,7 +6943,7 @@ pub async fn serve_unix_with_ancestor(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
@@ -6925,7 +6953,7 @@ async fn serve_unix_with_ancestor_ready(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
@@ -7023,7 +7051,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let ReservedUnixSocket {
@@ -7082,29 +7110,36 @@ async fn serve_reserved_unix_with_ancestor_ready(
             if let Some(connection) = &mut diagnostic_connection {
                 connection.queued();
             }
-            let (bound_agent, caller, delivery_peer, diagnostic_connection) = match peer_pid {
+            let ancestry_peer = peer_process.clone();
+            let (ancestry, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.started();
                     }
-                    let bound_agent = bind_ancestry.then(|| ancestor(pid)).flatten();
+                    let ancestry = if !bind_ancestry {
+                        HarnessAncestry::Person
+                    } else if ancestry_peer.is_none() {
+                        HarnessAncestry::Unavailable
+                    } else {
+                        ancestor(pid, ancestry_peer.as_ref())
+                    };
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
-                        bound_agent.as_deref(),
+                        ancestry.agent(),
                     ));
                     let delivery_peer = bind_harness.then(|| native_delivery_peer(pid)).flatten();
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.finished();
                     }
-                    (bound_agent, caller, delivery_peer, diagnostic_connection)
+                    (ancestry, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
                 .unwrap_or_default(),
-                None => (None, None, None, diagnostic_connection),
+                None => (if bind_ancestry { HarnessAncestry::Unavailable } else { HarnessAncestry::Person }, None, None, diagnostic_connection),
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
-                let bound_agent = bound_agent.clone();
+                let ancestry = ancestry.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
                 let peer_process = peer_process.clone();
@@ -7117,7 +7152,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                         request.extensions_mut().insert(LocalPeer {
                             pid,
                             peer_process,
-                            ancestor: bound_agent.clone(),
+                            ancestor: ancestry.agent().map(str::to_owned),
                         });
                     }
                     if let Some(peer) = delivery_peer {
@@ -7126,8 +7161,11 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(caller) = caller {
                         request.extensions_mut().insert(caller);
                     }
-                    if let Some(agent) = &bound_agent {
-                        request.extensions_mut().insert(BoundAgent(agent.clone()));
+                    if let Some(agent) = ancestry.agent() {
+                        request.extensions_mut().insert(BoundAgent(agent.to_owned()));
+                    }
+                    if matches!(ancestry, HarnessAncestry::Unavailable) {
+                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
                     app.oneshot(request).await
                 }
@@ -7165,38 +7203,139 @@ fn publish_state_socket(socket: &Path, state_socket: &Path) -> anyhow::Result<()
 #[cfg(test)]
 mod gateway_listener_tests;
 
-#[cfg(target_os = "linux")]
-fn harness_ancestor(mut pid: u32) -> Option<String> {
-    use std::collections::BTreeSet;
-    let mut seen = BTreeSet::new();
-    while pid > 1 && pid != std::process::id() && seen.insert(pid) {
-        let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
-            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        });
-        // A masked/conflicting child identity must not inherit an ancestor's authority.
-        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            return fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
-                .filter(|value| value.starts_with("agent/"));
-        }
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        pid = stat
-            .rsplit_once(") ")?
-            .1
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-    }
-    None
+/// A completed walk without a harness is different from an unverifiable caller.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HarnessAncestry {
+    Bound(String),
+    Person,
+    #[default]
+    Unavailable,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn harness_ancestor(_pid: u32) -> Option<String> {
-    None
+impl HarnessAncestry {
+    fn agent(&self) -> Option<&str> {
+        match self { Self::Bound(agent) => Some(agent), _ => None }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
+        let primary = lookup("ST_AGENT");
+        let legacy = lookup("FRACTAL_AGENT");
+        if primary.is_none() && legacy.is_none() {
+            return Self::Person;
+        }
+        if primary.is_some_and(str::is_empty)
+            || legacy.is_some_and(str::is_empty)
+        {
+            return Self::Unavailable;
+        }
+        fractal_drivers::contracts::env_with("ST_AGENT", &|name| lookup(name).map(str::to_owned))
+            .filter(|value| value.starts_with("agent/") && fractal_schema::registry().validate_subject(value).is_ok())
+            .map_or(Self::Unavailable, Self::Bound)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct HarnessProcess {
+    uid: u32,
+    generation: Option<(u32, u64)>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn walk_harness_ancestry(
+    mut pid: u32,
+    peer: Option<&fractal_runtime::PeerProcessIdentity>,
+    mut inspect: impl FnMut(u32) -> Option<HarnessProcess>,
+    identity: impl Fn(u32) -> Option<HarnessAncestry>,
+) -> HarnessAncestry {
+    let Some(first) = inspect(pid) else { return HarnessAncestry::Unavailable; };
+    let Some(peer) = peer else { return HarnessAncestry::Unavailable; };
+    let Some((_, birth)) = first.generation else { return HarnessAncestry::Unavailable; };
+    if peer.validate_generation(pid, birth).is_err() { return HarnessAncestry::Unavailable; }
+    let connector = pid;
+    let uid = first.uid;
+    let mut first = Some(first);
+    let mut observed = std::collections::BTreeMap::new();
+    let mut binding = HarnessAncestry::Person;
+    while pid > 1 && pid != std::process::id() {
+        let Some(process) = first.take().or_else(|| inspect(pid)) else {
+            return HarnessAncestry::Unavailable;
+        };
+        // An observed ownership transition ends this caller's cooperative ancestry.
+        if process.uid != uid { break; }
+        let Some((parent, birth)) = process.generation else { return HarnessAncestry::Unavailable; };
+        if observed.insert(pid, birth).is_some() { return HarnessAncestry::Unavailable; }
+        match identity(pid) {
+            Some(HarnessAncestry::Person) => {}
+            Some(ancestry) => { binding = ancestry; break; }
+            None => return HarnessAncestry::Unavailable,
+        }
+        pid = parent;
+    }
+    if observed.into_iter().any(|(pid, birth)| {
+        !inspect(pid).is_some_and(|current| current.uid == uid && current.generation.is_some_and(|(_, token)| token == birth))
+    }) {
+        return HarnessAncestry::Unavailable;
+    }
+    if !inspect(connector).and_then(|process| process.generation)
+        .is_some_and(|(_, token)| peer.validate_generation(connector, token).is_ok())
+    {
+        return HarnessAncestry::Unavailable;
+    }
+    binding
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace().nth(1)?.parse().ok()?;
+    let generation = (|| {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
+        if matches!(fields.next()?, "Z" | "X" | "x") { return None; }
+        let parent = fields.next()?.parse().ok()?;
+        let birth = fields.nth(17)?.parse().ok()?;
+        Some((parent, birth))
+    })();
+    Some(HarnessProcess { uid, generation })
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+    match fractal_runtime::macos_process_identity(pid) {
+        Ok((parent, birth, uid)) => Some(HarnessProcess { uid, generation: Some((parent, birth)) }),
+        Err(_) => Some(HarnessProcess { uid: fractal_runtime::macos_process_owner(pid).ok()?, generation: None }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
+    let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(HarnessAncestry::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
+        let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+        (key == name).then_some(value)
+    })))
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
+    let (_, environment) = local_process_arguments(pid)?;
+    Some(HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        (key == name).then_some(value)
+    })))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn harness_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    HarnessAncestry::Unavailable
 }
 
 #[derive(Clone)]
@@ -7276,7 +7415,12 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        fractal_runtime::PeerProcessIdentity::capture_pid(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
@@ -7461,8 +7605,18 @@ pub async fn guard_bound_request(
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
     let Some(bound_agent) = bound_agent else {
-        return Ok(request);
+        return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
+            guard_unverifiable_request(request).await
+        } else {
+            Ok(request)
+        };
     };
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+    {
+        return Err(custom::notices_unavailable());
+    }
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
@@ -7571,6 +7725,30 @@ pub async fn guard_bound_request(
                 )));
             }
         }
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
+}
+
+async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
+    let refuse = || ApiError::bad(FractalError::new(
+        "foreign-agent-actor", "local caller ancestry could not be verified",
+    ));
+    let path = request.uri().path();
+    if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
+    {
+        return Err(refuse());
+    }
+    if matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return Ok(request);
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.map_err(ApiError::internal)?;
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(refuse());
     }
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
@@ -8164,6 +8342,23 @@ pub fn relayed_held_mail(
                 .map(|(count, oldest)| (seat, count, oldest))
         })
         .collect())
+}
+
+/// A constant-size progress read: no message history is read to report the migration.
+fn work_wake_index_check(state: &AppState) -> DoctorCheck {
+    let name = "work-wake-index".into();
+    match crate::store::wake_lookup::status(&state.store.readers.get()) {
+        Ok((cursor, ceiling, complete)) => DoctorCheck {
+            name,
+            status: "pass".into(),
+            message: format!(
+                "cursor={cursor} ceiling={ceiling} done={complete}; {}",
+                if complete { "wake lookups seek indexed tags only" }
+                else { "legacy recipient reads remain only for the unindexed historical tail" },
+            ),
+        },
+        Err(error) => DoctorCheck { name, status: "warn".into(), message: error.to_string() },
+    }
 }
 
 /// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
@@ -9596,6 +9791,7 @@ fn doctor_report_within(
     checks.check("message-marks", || {
         Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
     });
+    checks.check("work-wake-index", || Ok(vec![work_wake_index_check(state)]));
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
@@ -11057,7 +11253,10 @@ pub fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => match assistant_authorization {
             Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
-            None => state.store.append_claim_outcome(&input),
+            // A reply settles its parent citing the reply's claim, so it stays on the graph until
+            // 4c-3; any other send goes where its recipient's host reads it (message_routing).
+            None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
+            None => crate::store::message_routing::send_message(&state.store, &input),
         },
     }
     .map_err(|error| {
@@ -11086,12 +11285,18 @@ pub fn accept_message_receipt_with_upload_owner(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut work_wake = is_work_wake(&tags);
+    // A send routed to the messages shard, or a repeat replaying a stream item an earlier send of
+    // this key wrote, lists past the graph's indexes; the send that wrote it settled its parent.
+    let (created_index, stream_item) =
+        crate::store::message_sent::listed_index(&state.store, &record).map_err(ApiError::internal)?;
     if let Some(reference) = request.in_reply_to.as_deref() {
         // Settling the parent writes its lifecycle claims too.
         work_wake |= parent
             .as_ref()
             .is_none_or(|message| is_work_wake(&message.tags));
-        settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        if !stream_item {
+            settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        }
     }
     signal_message_changed(state, "message.sent", work_wake);
     let kind = if tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
@@ -11119,7 +11324,7 @@ pub fn accept_message_receipt_with_upload_owner(
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
-            created_index: record.store_index,
+            created_index,
             status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
@@ -11302,8 +11507,13 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     ])),
                 }));
             }
-            let (items, next_after, has_more) =
+            let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Events retain their bounded last-inspected cursor contract, even when hidden.
+            items.retain(|event| {
+                !fractal_schema::notice::is_reserved_subject(&event.subject)
+                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
+            });
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11316,6 +11526,10 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .filter(|event| {
+                        !fractal_schema::notice::is_reserved_subject(&event.subject)
+                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    })
                     .cloned()
                     .collect()
             });

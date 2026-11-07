@@ -565,24 +565,25 @@ both generations continue to coordinate with Claude's own config lock.
 
 ### Isolation VM
 
-Four current-runtime controls cover the surviving work-scope obligations. Three
+Five current-runtime controls cover the surviving work-scope obligations. Four
 ignored tests live in the `fractal-runtime` package's `scope_cascade` binary:
 
 | Test | Guarantee |
 | --- | --- |
 | `exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | An exec scope survives its parent service's cgroup SIGKILL, keeps its incarnation and cgroup, then stops cleanly. |
+| `exec_survives_a_parent_service_sigkill_as_soon_as_spawn_returns` | An exec survives a cgroup SIGKILL of its parent service sent the moment its spawn returns, while the scope's start is held back: the spawn returns only once `systemd-run` has joined its scope. |
 | `pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | A PTY scope survives the same cascade with its incarnation and cgroup intact, then stops cleanly. |
 | `literal_environment_is_preserved_across_a_work_scope` | Literal environment values cross a real user scope unchanged. |
 
 The landed `fractal-runtime` library test
 `isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor`
-adds the fourth current-runtime control. It checks that a changed original request cannot
+adds the fifth current-runtime control. It checks that a changed original request cannot
 signal either workload, then retires an escaped descendant while its neighboring scope
 survives. The test remains ignored in ordinary CI; the VM explicitly selects it by package,
 `fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
 activation of the retirement primitive.
 
-All four controls need a real systemd user manager, which Namespace's runner image does not
+All five controls need a real systemd user manager, which Namespace's runner image does not
 boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
 job (`daily-long.yml`):
 
@@ -593,13 +594,13 @@ job (`daily-long.yml`):
    fractal-runtime `scope_cascade` and library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive and extracts it at the producer checkout's
-   path for its package working directories. It runs the four controls through nextest as a
+   path for its package working directories. It runs the five controls through nextest as a
    transient service of that user's systemd manager. The VM compiles nothing.
 
-The archive inventory must match the four exact package, binary, kind and test identities.
+The archive inventory must match the five exact package, binary, kind and test identities.
 Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
-The JUnit report must contain exactly those four distinct successful results, with no missing,
-extra, skipped, rerun or flaky result. All four tests must run and pass, with no isolation
+The JUnit report must contain exactly those five distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All five tests must run and pass, with no isolation
 opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
@@ -846,13 +847,13 @@ the UI owners' choice. `KIT_PLAY_SET=critical` selects only stories tagged `crit
 empty selection fails). `commit` narrows the critical stories to fit about 60 seconds
 on the 4-vCPU runner (the critical set took about 185 s): each story runs in one case, dark at
 440 or light at 1440 chosen by a hash of its id, so both schemes and both widths stay covered
-across the set; the layout stories in `BOTH_WIDTHS` run dark at 440 and 1440; the stories in
-`MERGE_ONLY` do not run per commit. The lists live in
-`packages/fractal-ui/scripts/kit-play-commit-set.mjs`, name only critical stories (a rename fails
-the gate), and the receipt records what the run omitted. Per commit this leaves out the
-other three cases of every story (the other scheme and width pairs; the `BOTH_WIDTHS` stories
-lose their light cases) and the two `MERGE_ONLY` stories (`transcript--no-green-all-states`,
-`sidebar-roster--hundred-agent-render`); merge groups run all of them.
+across the set; stories tagged `both-widths` run dark at 440 and 1440; stories tagged
+`merge-only` do not run per commit. These tags live beside `critical` on the stories and
+are read from the built Storybook index. Either policy tag without `critical`, or both
+policy tags on one story, fails the gate before tag selection or sharding. The receipt
+records omitted coverage; merge groups retain the full matrix. App stories under
+`apps/fractal-web/src/**/*.stories.tsx` are discovered and owned by the kit lane, so
+adding a story folder or assigning these tags requires no lane-definition edits.
 `KIT_PLAY_A11Y=off` sets addon-a11y's own `a11y.manual` global so axe does not run, and
 each case must then carry no a11y report, while with a11y on each case must carry exactly
 one passed a11y report; `KIT_PLAY_MAX_SECONDS` is the set's wall-time budget: every case

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Name the scenario kit maintainer and clarify the fractalite exclusion contract",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "Documentation-only clarification of Fractal Web 2 kit maintenance, consumer adapter ownership, and Fractal Product Lead ownership of the fractalite exclusion and adoption conditions. Runtime APIs and emitted files are unchanged." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}

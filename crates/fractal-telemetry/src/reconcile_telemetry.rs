@@ -131,7 +131,6 @@ pub enum WakeCause {
     TimerGatePoll,
     TimerLlmGate,
     FileWatch,
-    LaunchIdentity,
     Reconciler,
     RecorderReceipts,
     Startup,
@@ -139,7 +138,7 @@ pub enum WakeCause {
     Other,
 }
 impl WakeCause {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 17] = [
         Self::Api,
         Self::ReplicationReceive,
         Self::Deadline,
@@ -152,7 +151,6 @@ impl WakeCause {
         Self::TimerGatePoll,
         Self::TimerLlmGate,
         Self::FileWatch,
-        Self::LaunchIdentity,
         Self::Reconciler,
         Self::RecorderReceipts,
         Self::Startup,
@@ -175,7 +173,6 @@ impl From<&str> for WakeCause {
             "timer gate-poll" => Self::TimerGatePoll,
             "timer llm-gate" => Self::TimerLlmGate,
             "file watch" => Self::FileWatch,
-            "launch identity" => Self::LaunchIdentity,
             "reconciler" => Self::Reconciler,
             "recorder receipts" => Self::RecorderReceipts,
             "startup" => Self::Startup,
@@ -199,7 +196,6 @@ impl WakeCause {
             Self::TimerGatePoll => "timer gate-poll",
             Self::TimerLlmGate => "timer llm-gate",
             Self::FileWatch => "file watch",
-            Self::LaunchIdentity => "launch identity",
             Self::Reconciler => "reconciler",
             Self::RecorderReceipts => "recorder receipts",
             Self::Startup => "startup",
@@ -221,7 +217,6 @@ impl WakeCause {
             Self::TimerGatePoll => "timer_gate_poll",
             Self::TimerLlmGate => "timer_llm_gate",
             Self::FileWatch => "file_watch",
-            Self::LaunchIdentity => "launch_identity",
             Self::Reconciler => "reconciler",
             Self::RecorderReceipts => "recorder_receipts",
             Self::Startup => "startup",
@@ -394,7 +389,6 @@ mod tests {
             "timer gate-poll",
             "timer llm-gate",
             "file watch",
-            "launch identity",
             "reconciler",
             "recorder receipts",
         ];
@@ -417,7 +411,6 @@ mod tests {
             "timer_gate_poll",
             "timer_llm_gate",
             "file_watch",
-            "launch_identity",
             "reconciler",
             "recorder_receipts",
             "startup",

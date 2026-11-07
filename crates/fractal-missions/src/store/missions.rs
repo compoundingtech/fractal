@@ -81,15 +81,14 @@ impl ObservationBatches {
 }
 
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
-    let actor = canonical_work_actor(actor)?;
-    let resolved = resolve_reference_conn(connection, &actor)?;
-    canonical_work_actor(&resolved)
+    let actor = normalize_actor(actor, "agent");
+    resolve_reference_conn(connection, &actor)
 }
 
 /// Read filters historically accept bare seat names as well as qualified actors.
-/// Work-action admission deliberately uses `physical_actor` directly instead.
+/// Canonicalization is read-only; work-action writes retain main's physical actor spelling.
 fn physical_read_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
-    physical_actor(connection, &normalize_actor(actor, "agent"))
+    canonical_work_actor(&physical_actor(connection, actor)?)
 }
 
 fn canonical_work_actor(actor: &str) -> Result<String, FractalError> {
@@ -98,6 +97,19 @@ fn canonical_work_actor(actor: &str) -> Result<String, FractalError> {
         .ok_or_else(|| {
             FractalError::new("invalid-work-actor", format!("invalid agent actor `{actor}`"))
         })
+}
+
+fn validate_work_write_actor(actor: &str) -> Result<(), FractalError> {
+    let canonical = fractal_schema::canonical_agent_actor(actor).ok_or_else(|| {
+        FractalError::new("invalid-work-actor", format!("invalid agent actor `{actor}`"))
+    })?;
+    if canonical != actor {
+        return Err(FractalError::new(
+            "invalid-work-actor",
+            format!("work writes require the prefixed actor spelling `{canonical}`; retry with that actor"),
+        ));
+    }
+    Ok(())
 }
 
 // One query preserves the native collection's indexed latest/live probes and shallow
@@ -5910,11 +5922,10 @@ impl MissionsStore for Store {
             ));
         }
         let subject = normalize_step_run(subject);
-        let actor = canonical_work_actor(
-            request.actor.as_deref().ok_or_else(|| {
-                FractalError::new("missing-work-actor", "a work action needs an actor")
-            })?,
-        )?;
+        let actor = request.actor.as_deref().ok_or_else(|| {
+            FractalError::new("missing-work-actor", "a work action needs an actor")
+        })?;
+        validate_work_write_actor(actor)?;
         let requested_incarnation = request
             .incarnation
             .as_deref()
@@ -5931,6 +5942,7 @@ impl MissionsStore for Store {
             .connection
             .batched(|transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
                 let actor = physical_actor(transaction, &actor)?;
+                validate_work_write_actor(&actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?
@@ -6192,25 +6204,10 @@ impl MissionsStore for Store {
                         ));
                     }
                 }
-                let mut lease_actor = actor.as_str();
                 // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
-                // Old validators reject raw claimants. Preserve legacy eligibility spelling only
-                // after every current member advertises the internal admission bridge; otherwise
-                // retain main's canonical claimant. A later contraction PR migrates the rows and
-                // removes this arm once every fleet member compares canonical identities.
-                if let Some(legacy) = current.assigned_to.as_deref().into_iter()
-                    .chain(current.available_to.iter().map(String::as_str))
-                    .find(|candidate| *candidate != actor.as_str()
-                        && work_actor_matches(Some(*candidate), &actor))
-                    && fractal_store::store::marks_switch::feature_blockers(
-                        transaction, &self.origin, &[], "work-claimant-legacy-admission",
-                    ).map_err(internal)?.is_empty()
-                {
-                    lease_actor = legacy;
-                }
+                // Expand comparisons and admission only; writes retain main's physical actor
+                // spelling. A later spelling switch requires a durable one-way fleet fence.
                 // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
-                let ownership_changed = current.claimant.as_deref()
-                    .is_some_and(|claimant| claimant != lease_actor);
                 let (status, worker_reported, claimant, claim_incarnation, claim_expiry) = match action {
                     "claim" => {
                         if current.status != "ready" && current.status != "claimed" {
@@ -6222,7 +6219,7 @@ impl MissionsStore for Store {
                         (
                             "claimed",
                             current.worker_reported,
-                            Some(lease_actor.to_owned()),
+                            Some(actor.clone()),
                             effective_incarnation.clone(),
                             Some(now + 600_000),
                         )
@@ -6230,21 +6227,21 @@ impl MissionsStore for Store {
                     "renew" => (
                         current.status.as_str(),
                         current.worker_reported,
-                        Some(lease_actor.to_owned()),
+                        Some(actor.clone()),
                         effective_incarnation.clone(),
                         Some(now + 600_000),
                     ),
                     "progress" => (
                         "working",
                         current.worker_reported,
-                        Some(lease_actor.to_owned()),
+                        Some(actor.clone()),
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
                     "extend" => (
                         current.status.as_str(),
                         current.worker_reported,
-                        Some(lease_actor.to_owned()),
+                        Some(actor.clone()),
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
@@ -6252,7 +6249,7 @@ impl MissionsStore for Store {
                     "wait" | "resume" => (
                         "working",
                         current.worker_reported,
-                        Some(lease_actor.to_owned()),
+                        Some(actor.clone()),
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
@@ -6288,7 +6285,7 @@ impl MissionsStore for Store {
                 } else {
                     None
                 };
-                let publish = !quiet_renewal || ownership_changed
+                let publish = !quiet_renewal
                     || last_replicated_expiry.is_none_or(|expiry| expiry <= now.saturating_add(300_000));
                 let readiness_epoch = current
                     .readiness_epoch
@@ -6397,7 +6394,7 @@ impl MissionsStore for Store {
                                lease_owner=excluded.lease_owner, lease_incarnation=excluded.lease_incarnation,
                                lease_expires_at_unix_ms=excluded.lease_expires_at_unix_ms,
                                updated_at_unix_ms=excluded.updated_at_unix_ms",
-                            params![subject, current.attempt, lease_actor, requested_incarnation,
+                            params![subject, current.attempt, actor, requested_incarnation,
                                     claim_expiry.expect("a renewal has a lease expiry").to_string(), now.to_string()],
                         )
                         .map_err(internal)?;
@@ -7466,6 +7463,8 @@ impl MissionsStore for Store {
                             if latest_claim_id_tx(transaction, &wake.subject)
                                 .map_err(internal)?
                                 .is_none()
+                                && !fractal_store::store::message_sent::message_sent_tx(transaction, &wake.subject)
+                                    .map_err(internal)?
                             {
                                 append_first_receipt_claim_tx(
                                     transaction,

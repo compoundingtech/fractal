@@ -5,6 +5,44 @@ use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
 
+pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
+    !fractal_schema::notice::is_reserved_subject(&claim.subject)
+        && !fractal_schema::notice::is_reserved_kind(&claim.kind)
+}
+
+/// Fill a serving page with visible claims, leaving raw replication/projector reads intact.
+pub(super) fn generic_claims_page(
+    store: &Store,
+    subject: Option<&str>,
+    owner_run: Option<&str>,
+    mut after: u64,
+    mut before: Option<u64>,
+    descending: bool,
+    limit: usize,
+) -> anyhow::Result<ClaimsPage> {
+    let mut claims = Vec::with_capacity(limit.saturating_add(1));
+    loop {
+        let page = store.claims_page(subject, owner_run, after, before, descending, limit.saturating_add(1))?;
+        let next = page.next_cursor;
+        for claim in page.claims.into_iter().filter(generic_claim_visible) {
+            claims.push(claim);
+            if claims.len() > limit {
+                claims.pop();
+                let next_cursor = claims.last().map(|claim| claim.store_index);
+                return Ok(ClaimsPage { claims, next_cursor });
+            }
+        }
+        let Some(next) = next else {
+            return Ok(ClaimsPage { claims, next_cursor: None });
+        };
+        if descending {
+            before = Some(next);
+        } else {
+            after = next;
+        }
+    }
+}
+
 pub async fn put_document(
     State(state): State<AppState>,
     bound: Option<axum::Extension<BoundAgent>>,
@@ -254,6 +292,7 @@ pub async fn get_claim(
     blocking_store(move || store.claim_by_id(&id_for_read))
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
+        .filter(generic_claim_visible)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("claim `{id}` does not exist")))
 }
@@ -295,7 +334,8 @@ pub async fn list_claims(
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
-        store.claims_page(
+        generic_claims_page(
+            &store,
             subject.as_deref(),
             query.owner_run.as_deref(),
             query.after_index,
