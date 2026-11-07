@@ -10,7 +10,7 @@ use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 pub use fractal_store::store::mailbox_lease::*;
-pub use fractal_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, record};
+pub use fractal_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, mailbox_member, record};
 
 /// The wall bound on a card-fault capture that no request encloses, read on an already pinned
 /// snapshot (the roster refresher's). Scheduling pauses under load must not cancel it: its 25 ms
@@ -104,6 +104,15 @@ pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &Memb
     Ok(())
 }
 
+/// Whether this capability token's argv binding is stored, so `record_argv_binding` would leave
+/// it as it is.
+pub fn holds_argv_binding(connection: &Connection, fence: &Fence) -> Result<bool, FractalError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_mailbox_argv_bindings WHERE token=?1)",
+        [&fence.token], |row| row.get(0),
+    ).map_err(internal)
+}
+
 pub fn check_declaration(
     connection: &Connection,
     fence: &Fence,
@@ -113,15 +122,11 @@ pub fn check_declaration(
     let declared = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member: MemberSpec = declared
-        .member
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(internal)?
+    // A seat its run's end stopped keeps the mailbox of the declaration it ended while the
+    // reconciler holds it, so it can read the mail that holds it.
+    let member = mailbox_member(connection, &fence.subject, &declared.kind, declared.member.as_deref())?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
-    if declared.kind == "stop"
-        || member.driver.as_deref() != Some(&authority.provider)
+    if member.driver.as_deref() != Some(&authority.provider)
         || member.host != host
         || member
             .terminal_binding
