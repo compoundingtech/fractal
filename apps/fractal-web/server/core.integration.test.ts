@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { createServer } from 'node:http'
+import { createServer, request } from 'node:http'
 import type { IncomingMessage, OutgoingHttpHeaders, Server } from 'node:http'
 import { connect } from 'node:net'
 import { once } from 'node:events'
@@ -104,6 +104,53 @@ const requestSpans = (spans: readonly Tracer.Span[]) => {
   expect(gateway[0].traceId).toBe(server[0].traceId)
   return { server: server[0], gateway: gateway[0] }
 }
+
+it.each(['content-length', 'chunked'] as const)('forwards the dev collections upgrade 403 and credential-expired body (%s)', async (framing) => {
+  const setup = await fixture()
+  const body = 'credential expired\n'
+  setup.gateway.removeAllListeners('upgrade')
+  setup.gateway.on('upgrade', (_req, socket) => {
+    setup.sockets.add(socket)
+    socket.once('close', () => setup.sockets.delete(socket))
+    socket.on('error', () => undefined)
+    const framingHeader = framing === 'chunked'
+      ? 'Transfer-Encoding: chunked' : `Content-Length: ${Buffer.byteLength(body)}`
+    socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain\r\n${framingHeader}\r\n\r\n`)
+    queueMicrotask(() => socket.end(framing === 'chunked'
+      ? `${Buffer.byteLength(body).toString(16)}\r\n${body}\r\n0\r\n\r\n` : body))
+  })
+  // The same middleware is mounted by vite-gateway.mjs; no asset/live-server host.
+  const server = createServer()
+  const boundary = createFractalWebMiddleware({
+    server, admit: () => true,
+    gateway: { socketPath: join(setup.root, 'gateway.sock'), host: 'paired-gateway', authorization: gatewayAuthorization, timeoutMs: 1000 },
+    tracer: Tracer.make({ span: (options) => new Tracer.NativeSpan(options) }),
+  })
+  await listen(server)
+  cleanups.push(async () => {
+    await boundary.close()
+    const closed = once(server, 'close')
+    server.close()
+    await closed
+  })
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new TypeError('Missing dev listener')
+  const { promise, resolve, reject } = Promise.withResolvers<{ status?: number; reason?: string; contentType?: string; body: string }>()
+  const client = request({
+    host: '127.0.0.1', port: address.port, path: '/v1/client/collections/stream',
+    headers: { connection: 'Upgrade', upgrade: 'websocket' },
+  })
+  client.once('error', reject)
+  client.once('upgrade', (_reply, socket) => { socket.destroy(); reject(new TypeError('Rejection unexpectedly upgraded')) })
+  client.once('response', (reply) => {
+    const chunks: Buffer[] = []
+    reply.on('data', (chunk: Buffer) => chunks.push(chunk))
+    reply.once('error', reject)
+    reply.once('end', () => resolve({ status: reply.statusCode, reason: reply.statusMessage, contentType: reply.headers['content-type'], body: Buffer.concat(chunks).toString() }))
+  })
+  client.end()
+  expect(await promise).toEqual({ status: 403, reason: 'Forbidden', contentType: 'text/plain', body })
+})
 
 it('restricts HTML, assets, HEAD and cached responses with the same image policy', async () => {
   const setup = await fixture()

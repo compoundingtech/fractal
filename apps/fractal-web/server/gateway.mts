@@ -1,5 +1,5 @@
-import { request } from 'node:http'
-import type { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+import { request, ServerResponse } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage, OutgoingHttpHeaders } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { pipeline } from 'node:stream'
 import { constants, createBrotliCompress, createGzip } from 'node:zlib'
@@ -125,6 +125,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
     const span = yield* Effect.currentSpan.pipe(Effect.orDie)
     const status = yield* Effect.callback<number, BoundaryError>((resume) => {
       let settled = false
+      let rejection: ServerResponse | undefined
       const fail = (cause?: unknown) => {
         if (settled) return
         settled = true; upstream.destroy(); cleanup(); resume(Effect.fail(unavailable(cause)))
@@ -144,10 +145,14 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       upstream.once('response', (reply) => {
         if (settled) { reply.destroy(); return }
         settled = true; cleanup()
-        // No rejection body reaches the browser. Release it before completing the handshake.
-        reply.destroy(); upstream.destroy()
-        socket.end(`HTTP/1.1 ${reply.statusCode ?? 502} Gateway rejected upgrade\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
-        resume(Effect.succeed(reply.statusCode ?? 502))
+        // An HTTP rejection is a response, not a failed tunnel. Let Node frame its body
+        // (including decoded chunked replies) instead of discarding the gateway diagnostic.
+        rejection = new ServerResponse(req)
+        rejection.assignSocket(socket)
+        rejection.writeHead(reply.statusCode ?? 502, reply.statusMessage, {
+          ...cleanHeaders(reply.headers), connection: 'close',
+        })
+        pipeline(reply, rejection, () => resume(Effect.succeed(reply.statusCode ?? 502)))
       })
       upstream.once('upgrade', (reply, peer, upstreamHead) => {
         if (settled) { peer.destroy(); return }
@@ -164,7 +169,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
         resume(Effect.succeed(reply.statusCode ?? 101))
       })
       upstream.end()
-      return Effect.sync(() => { settled = true; upstream.destroy(); cleanup() })
+      return Effect.sync(() => { settled = true; rejection?.destroy(); upstream.destroy(); cleanup() })
     }).pipe(Effect.timeoutOrElse({ duration: timeoutMs, orElse: () => Effect.fail(unavailable()) }))
     yield* Effect.annotateCurrentSpan('http.response.status_code', status)
     return status
