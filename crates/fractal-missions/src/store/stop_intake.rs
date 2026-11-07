@@ -4,24 +4,7 @@
 //! nor can be claimed by it, so a stopping seat always drains.
 use super::*;
 
-/// The stop declared for `seat`, if its declaration is one: the run whose end declared it
-/// (`None` for a person's or an agent's own stop) and the stop claim's local store index.
-pub fn stop_cut(connection: &Connection, seat: &str) -> Result<Option<(Option<String>, u64)>> {
-    Ok(connection
-        .query_row(
-            "SELECT desired.owner_run, claims.store_index
-             FROM desired JOIN claims ON claims.id=desired.claim_id
-             WHERE desired.subject=?1 AND desired.kind='stop'",
-            [seat],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, i64>(1)? as u64,
-                ))
-            },
-        )
-        .optional()?)
-}
+pub use fractal_store::store::stopping_seat::stop_cut;
 
 /// Live work `seat` holds or is assigned in a run outside the root of `owner_run`, at most three
 /// steps, or only `step` when one is named. With `before`, only work in runs this host recorded
