@@ -953,6 +953,24 @@ fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
     assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
 }
 
+/// The GitHub plugin's reads are mounted on the daemon router and refuse untyped path values
+/// before any credential lookup or request to GitHub.
+#[tokio::test]
+async fn github_plugin_reads_are_mounted_and_refuse_untyped_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let app = fractal_daemon::api::router(test_state(root.path()));
+    for uri in [
+        "/v1/client/plugins/github/-acme/garden/pulls/7",
+        "/v1/client/plugins/github/acme/garden%2Fother/issues/7",
+        "/v1/client/plugins/github/acme/garden/pulls/0/files",
+        "/v1/client/plugins/github/acme/garden/comments/https%3A%2F%2Fexample.com",
+        "/v1/client/plugins/github/acme/garden/runs/01",
+    ] {
+        let (status, _) = client_json(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+    }
+}
+
 /// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
 /// carrying it (as the client-v0 middleware serves it) conforms to `Envelope`.
 #[test]
