@@ -80,15 +80,17 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const { changedFiles, branchFiles, proseResources, reviewerCard, now: milestoneNow } = props
   const { folders: rosterFolders, inboxCount } = props.roster.value
   const { primaryRef: mainAgentRef, reviewerRef, lastSeen } = props.conversation.value
-  const [recovery, setRecovery] = React.useState<Partial<Record<'roster' | 'conversation', 'loading' | 'ready'>>>({})
-  const rosterLoad = recovery.roster ?? props.roster._tag
-  const conversationLoad = recovery.conversation ?? props.conversation._tag
-  const conversationPhase: Phase = recovery.conversation === 'loading' ? 'thread-retry'
+  const [recovery, setRecovery] = React.useState<Partial<Record<'roster' | 'conversation', { readonly input: RedesignMilestoneProps['roster'] | RedesignMilestoneProps['conversation']; readonly state: 'loading' | 'ready' }>>>({})
+  const rosterRecovery = recovery.roster?.input === props.roster ? recovery.roster.state : undefined
+  const conversationRecovery = recovery.conversation?.input === props.conversation ? recovery.conversation.state : undefined
+  const rosterLoad = rosterRecovery ?? props.roster._tag
+  const conversationLoad = conversationRecovery ?? props.conversation._tag
+  const conversationPhase: Phase = conversationRecovery === 'loading' ? 'thread-retry'
     : conversationLoad === 'loading' ? 'loading'
     : conversationLoad === 'failed' ? 'thread-unavailable'
     : conversationLoad === 'stale' ? 'stale' : 'slice'
   // Preserve the reference canvas marker; rendering reads each slice independently below.
-  const phase: Phase = recovery.roster === 'loading' ? 'roster-retry' : (
+  const phase: Phase = rosterRecovery === 'loading' ? 'roster-retry' : (
     rosterLoad === 'failed' ? 'roster-error'
       : rosterLoad === 'loading' ? 'loading'
       : conversationPhase !== 'slice' ? conversationPhase
@@ -98,13 +100,14 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
       : props.defaultOpenRefs.length === 1 && props.conversation.value.threads[props.defaultOpenRefs[0]!]?.turns.length === 0 ? 'empty-thread'
       : props.defaultPaletteOpen ? 'navigation' : 'slice')
   const allRows = rosterFolders.flatMap(folder => folder.rows.flatMap(row => [row, ...row.children]))
-  const rowFor = (ref: string) => allRows.find(row => row.ref === ref)!
+  const rowFor = (ref: string) => allRows.find(row => row.ref === ref)
   const agentTab = (ref: string, current: Phase): PaneTab => {
     const row = rowFor(ref)
-    if (current === 'loading' || current === 'thread-retry') return { key: ref, title: row.title, status: 'pending', statusLabel: 'Connecting' }
-    if (current === 'thread-unavailable') return { key: ref, title: row.title, status: 'offline', statusLabel: 'Unavailable' }
-    if (current === 'stale' && ref === mainAgentRef) return { key: ref, title: row.title, status: 'stale', statusLabel: 'Last seen working' }
-    return { key: ref, title: row.title, status: row.status, statusLabel: row.statusLabel }
+    const title = row?.title ?? ref
+    if (current === 'loading' || current === 'thread-retry') return { key: ref, title, status: 'pending', statusLabel: 'Connecting' }
+    if (current === 'thread-unavailable' || row === undefined) return { key: ref, title, status: 'offline', statusLabel: 'Unavailable' }
+    if (current === 'stale' && ref === mainAgentRef) return { key: ref, title, status: 'stale', statusLabel: 'Last seen working' }
+    return { key: ref, title, status: row.status, statusLabel: row.statusLabel }
   }
   const threadSync = (current: Phase): SyncStatus => {
     if (current === 'loading' || current === 'thread-retry') return { _tag: 'Connecting', attempt: 1, since: milestoneNow - 1200 }
@@ -137,10 +140,11 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
 
   // Each Retry walks the real recovery path for its own fault only: the failed surface loads, then shows live data.
   const recover = React.useCallback((surface: 'roster' | 'conversation') => {
-    setRecovery(previous => ({ ...previous, [surface]: 'loading' }))
+    const input = props[surface]
+    setRecovery(previous => ({ ...previous, [surface]: { input, state: 'loading' } }))
     const current = ++attempt.current[surface]
-    void reload().then(() => { if (attempt.current[surface] === current) setRecovery(previous => ({ ...previous, [surface]: 'ready' })) })
-  }, [reload])
+    void reload().then(() => { if (attempt.current[surface] === current) setRecovery(previous => ({ ...previous, [surface]: { input, state: 'ready' } })) })
+  }, [reload, props.roster, props.conversation])
   const retryRoster = React.useCallback(() => recover('roster'), [recover])
   const retryThread = React.useCallback(() => recover('conversation'), [recover])
 
@@ -175,7 +179,8 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const roster: RosterState = rosterLoad === 'loading' ? 'loading' : rosterLoad === 'failed' ? 'error' : rosterLoad === 'stale' ? 'stale' : rosterFolders.length === 0 ? 'empty' : 'ready'
   const sync = threadSync(conversationPhase)
   const renderInlineReference = (path: string) => {
-    if (path === reviewerCard.path) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} onOpen={() => openAgent(rowFor(reviewerRef))} />
+    const reviewer = rowFor(reviewerRef)
+    if (path === reviewerCard.path && reviewer !== undefined) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} onOpen={() => openAgent(reviewer)} />
     const resource = proseResources[path]
     return resource === undefined ? undefined : <ResourceChipV1 resource={resource} file={resource.files[0]!} />
   }
@@ -200,7 +205,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
       const at = new Date(milestoneNow).toISOString()
       return { ...current, [key]: [...list, { id, prompt: { _tag: 'Text', id: `${id}-prompt`, role: 'user', text, attachments: [], streaming: false, at }, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }] }
     })
-    return <MilestoneThread key={key} title={rowFor(key).title} view={view} now={milestoneNow}
+    return <MilestoneThread key={key} title={rowFor(key)?.title ?? key} view={view} now={milestoneNow}
       runtime={{ messages: turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt]), ...turn.items]), isRunning: running, onNew: async message => send(message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')) }}
       transcript={{ turns, sync, now: milestoneNow, observedAt: props.conversation._tag === 'stale' ? props.conversation.observedAt : milestoneNow, renderInlineReference, onOpenTool: openTool, viewportKey: `${props.persistKey}.${key}` }}
       composer={{ running, folder: 'fractal-web', branch: 'feat/metric-track', onSend: send, onSteer: send, draftKey: `${props.persistKey}.${key}` }} />

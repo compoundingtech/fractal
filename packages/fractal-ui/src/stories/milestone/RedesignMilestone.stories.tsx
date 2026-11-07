@@ -226,10 +226,22 @@ export const NavigationKeyboard: Story = {
   },
 }
 
+const recoveryUpdates = React.createRef<{ failRoster: () => void; removeAgent: () => void; emptyRoster: () => void }>()
+/** Keep the same mounted composition while its parent replaces data projections. */
+function RecoveryUpdates({ args, persistKey }: { readonly args: Args; readonly persistKey: string }) {
+  const [props, setProps] = React.useState(() => fixtureProps(args))
+  React.useImperativeHandle(recoveryUpdates, () => ({
+    failRoster: () => setProps(current => ({ ...current, roster: { _tag: 'failed', value: current.roster.value, reason: 'Roster unavailable again', detail: 'A later request failed.' } })),
+    removeAgent: () => setProps(current => ({ ...current, roster: { _tag: 'ready', value: { ...current.roster.value, folders: rosterFolders.map(folder => ({ ...folder, rows: folder.rows.filter(row => row.ref !== mainAgentRef).map(row => ({ ...row, children: row.children.filter(child => child.ref !== mainAgentRef) })) })) } } })),
+    emptyRoster: () => setProps(current => ({ ...current, roster: { _tag: 'ready', value: { ...current.roster.value, folders: [], inboxCount: 0 } } })),
+  }), [])
+  return <RedesignMilestone {...props} persistKey={persistKey} reload={rosterReload.reload} />
+}
+
 /** A roster fault stays in the sidebar while the open thread keeps working; Retry walks loading back to a loaded roster. */
 export const ErrorRecovery: Story = {
   tags: ['critical'], args: { state: 'roster-error' },
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...fixtureProps(args)} persistKey={`rm1-${context.id}`} reload={rosterReload.reload} />,
+  render: (args, context) => <RecoveryUpdates key={JSON.stringify(args)} args={args} persistKey={`rm1-${context.id}`} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const alert = await canvas.findByRole('alert')
@@ -244,6 +256,18 @@ export const ErrorRecovery: Story = {
     rosterReload.settle()
     await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'ready'))
     await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3))
+    // Replacing the retried input must expose a later fault, not retain the local ready override.
+    recoveryUpdates.current?.failRoster()
+    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'error'))
+    await expect(await canvas.findByRole('alert')).toHaveTextContent('Couldn’t load agents')
+    // Preserve the selected conversation with a neutral ref title if its roster row disappears.
+    recoveryUpdates.current?.removeAgent()
+    await waitFor(() => expect(canvasElement.querySelector(`[data-pane="${mainAgentRef}"]`)).toHaveAttribute('aria-label', mainAgentRef))
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
+    recoveryUpdates.current?.emptyRoster()
+    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'empty'))
+    await expect(canvasElement.querySelector(`[data-pane="${mainAgentRef}"]`)).toHaveAttribute('aria-label', mainAgentRef)
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
   },
 }
 

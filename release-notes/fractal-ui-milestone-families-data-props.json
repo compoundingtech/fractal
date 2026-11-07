@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Expose typed roster, conversation and example-data props in RedesignMilestone and Families while retaining authored story defaults",
+  "summary": "Expose typed roster, conversation and example-data props in RedesignMilestone and Families while retaining authored story defaults; scope Retry recovery to its input and keep open conversations safe when roster rows disappear",
   "replay": {"status": "none", "detail": "Presentation-only seam; no replay behavior changes."},
   "schema": {"status": "none", "detail": "No wire schema or persistent data changes."},
   "rules": {"status": "none", "detail": "No checkpoint rules or coordinated upgrade required."},
