@@ -10,6 +10,7 @@ pub mod full_value;
 pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
+pub mod notice;
 pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;

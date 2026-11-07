@@ -3132,7 +3132,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
@@ -3604,7 +3604,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3621,7 +3621,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -4176,6 +4176,9 @@ pub fn managed_session_owner_at(
     crate::performance::task("conversation/owner", || {
         let owners = store.conversation_owners_at(snapshot_index)?;
         for owner in owners.values() {
+            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
+                continue;
+            }
             let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
                 continue;
             };
@@ -4194,6 +4197,9 @@ pub fn managed_session_owner_for_subject_at(
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4334,7 +4340,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -5918,7 +5924,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
@@ -6513,7 +6519,11 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    #[cfg(any(test, feature = "test-support"))]
+    let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let _uptime = uptime.enter();
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
@@ -7507,6 +7517,12 @@ pub async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+    {
+        return Err(custom::notices_unavailable());
+    }
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
@@ -11344,8 +11360,13 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     ])),
                 }));
             }
-            let (items, next_after, has_more) =
+            let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Events retain their bounded last-inspected cursor contract, even when hidden.
+            items.retain(|event| {
+                !fractal_schema::notice::is_reserved_subject(&event.subject)
+                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
+            });
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11358,6 +11379,10 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .filter(|event| {
+                        !fractal_schema::notice::is_reserved_subject(&event.subject)
+                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    })
                     .cloned()
                     .collect()
             });

@@ -170,7 +170,7 @@ pub fn open(tx: &Transaction<'_>) -> Result<()> {
         )
         .optional()?
         .as_deref()
-        != Some("1")
+        != Some("2")
     {
         rebuild(tx)
     } else {
@@ -181,7 +181,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hcc772813cbfc owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "DELETE FROM custom_registrations; DELETE FROM custom_sources; DELETE FROM custom_dependencies; DELETE FROM local_custom_dirty; INSERT INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%';")?;
     flush(tx)?;
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-ha3a90c10519b owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','1')",
+        /* sqlite-large-value: allow-for-now lv-ha275af346170 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','2')",
         [],
     )?;
     Ok(())
@@ -288,6 +288,9 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
             if m.validate().is_err() || m.subject() != subject {
                 continue;
             }
+            if fractal_schema::notice::validate_registration(&m, hash).is_err() {
+                continue;
+            }
             registrations.entry(hash.to_owned()).or_insert((m, c));
         }
         if let Some((hash, (m, c))) = registrations.first_key_value() {
@@ -333,11 +336,19 @@ pub fn prepare(
             "use schema register to publish a registration",
         ));
     }
+    let reserved = fractal_schema::notice::is_reserved_subject(&input.subject)
+        || fractal_schema::notice::is_reserved_kind(&input.kind);
+    if reserved {
+        return Err(fail("notices unavailable: native graph authority admission is not enabled"));
+    }
     if !input.subject.starts_with("custom/") {
         return Ok(None);
     }
     flush(tx).map_err(internal)?;
     let Some((hash, m, state)) = registration(tx, &input.subject).map_err(internal)? else {
+        if reserved {
+            return Err(fail("notices unavailable: pinned registration is not available"));
+        }
         if input.fields.contains_key("_registration") {
             return Err(fail("registration is not available"));
         }
@@ -357,12 +368,16 @@ pub fn prepare(
     let creation = history.iter().find(|c| {
         c.kind == m.creation_kind && fields(c).get("_registration") == Some(&json!(hash))
     });
-    validate_fact(tx, &m, &input.kind, input.actor.as_deref(), &f, creation)
+    if input.subject.starts_with("custom/attention/source/") && creation.is_some() {
+        return Err(fail("notices unavailable: producer input is immutable"));
+    }
+    validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation)
         .map_err(|e| fail(e.to_string()))?;
     Ok(Some(f))
 }
 fn validate_fact(
     connection: &Connection,
+    subject: &str,
     m: &Manifest,
     kind: &str,
     actor: Option<&str>,
@@ -381,6 +396,10 @@ fn validate_fact(
     anyhow::ensure!(
         actor.starts_with("agent/") || actor.starts_with("person/"),
         "typed actor must be a person or agent"
+    );
+    anyhow::ensure!(
+        !fractal_schema::notice::is_reserved_subject(subject) && !fractal_schema::notice::is_reserved_kind(kind),
+        "notices unavailable: native graph authority admission is not enabled"
     );
     match spec.authority {
         Authority::Creator => {
@@ -535,6 +554,12 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
+        if fractal_schema::notice::is_reserved_subject(subject) {
+            let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h50b120964acf owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO custom_sources VALUES(?1,'','','','unavailable',?2,NULL,NULL,0,'0')",
+                params![subject, canonical_json_text(&body)?])?;
+            return Ok(());
+        }
         let history = claims(tx, subject)?;
         if let Some(c) = history
             .iter()
@@ -564,7 +589,7 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let mut error = None;
     let mut valid = Vec::new();
     for c in &pinned {
-        match validate_fact(tx, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
+        match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
             Ok(()) => valid.push(c.clone()),
             Err(e) => {
                 error = Some(e.to_string());
@@ -760,6 +785,7 @@ impl Store {
         let m = &request.manifest;
         let bytes = serde_json::to_vec(m).map_err(internal)?;
         let hash = hex::encode(Sha256::digest(&bytes));
+        fractal_schema::notice::validate_registration(m, &hash).map_err(typed)?;
         let name = format!("doc/custom-kinds/{}.v{}/{}", m.kind, m.version, hash);
         self.put_document_as(
             &name,
@@ -789,6 +815,9 @@ impl Store {
         self.readers.get().prepare("SELECT subject,hash,manifest,state,error FROM custom_registrations ORDER BY subject")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?)))?.map(|r|{let(s,h,m,state,error)=r?;Ok(json!({"id":s,"registration":h,"manifest":serde_json::from_str::<Value>(&m)?,"state":state,"error":error}))}).collect()
     }
     pub fn custom_subject(&self, subject: &str) -> Result<Option<Value>> {
+        if fractal_schema::notice::is_reserved_subject(subject) {
+            anyhow::bail!("notices unavailable: reserved raw notice rows require the native notice reader");
+        }
         source(&self.readers.get(), subject)
     }
     /// Which of these subjects are registered custom sources, in one read.
@@ -824,29 +853,31 @@ impl Store {
         let connection = self.readers.get();
         let query = match (kind, version) {
             (Some(_), Some(_)) => {
-                "SELECT body FROM custom_sources WHERE kind=?1 AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE kind=?1 AND json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject"
             }
             (Some(_), None) => {
-                "SELECT body FROM custom_sources WHERE kind=?1 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE kind=?1 AND subject>?3 ORDER BY subject"
             }
             (None, Some(_)) => {
-                "SELECT body FROM custom_sources WHERE json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE json_extract(body,'$.schema_version')=?2 AND subject>?3 ORDER BY subject"
             }
             (None, None) => {
-                "SELECT body FROM custom_sources WHERE subject>?3 ORDER BY subject LIMIT ?4"
+                "SELECT subject,body FROM custom_sources WHERE subject>?3 ORDER BY subject"
             }
         };
-        let texts = connection
-            .prepare(/* sqlite-large-value: allow-for-now lv-hef0985e2aacf owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ query)?
-            .query_map(
-                params![kind, version, after.unwrap_or(""), limit.min(501)],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        texts
-            .into_iter()
-            .map(|s| serde_json::from_str(&s).map_err(Into::into))
-            .collect()
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hef0985e2aacf owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ query)?;
+        let rows = statement.query_map(params![kind, version, after.unwrap_or("")], |row| {
+            let subject: String = row.get(0)?;
+            if fractal_schema::notice::is_reserved_subject(&subject) {
+                Ok(None)
+            } else {
+                row.get::<_, String>(1).map(Some)
+            }
+        })?;
+        // Apply the shared reservation predicate before the bounded page, including roots
+        // and ancestors. Streaming avoids parsing reserved bodies or reading beyond the page.
+        rows.filter_map(|row| row.transpose()).take(limit.min(501))
+            .map(|text| Ok(serde_json::from_str(&text?)?)).collect()
     }
     pub fn custom_basis_revision(&self, subject: &str, kinds: &[String]) -> Result<String> {
         basis_revision(&self.readers.get(), subject, kinds)
@@ -856,17 +887,20 @@ impl Store {
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
-        let rows = if let Some(person) = person {
-            connection.prepare("SELECT body,requested_at FROM custom_sources WHERE active=1 AND person=?1 ORDER BY subject")?
-                .query_map([person], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+        let query = if person.is_some() {
+            "SELECT subject,body,requested_at FROM custom_sources WHERE active=1 AND person=?1 ORDER BY subject"
         } else {
-            connection
-                .prepare(
-                    "SELECT body,requested_at FROM custom_sources WHERE active=1 ORDER BY subject",
-                )?
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            "SELECT subject,body,requested_at FROM custom_sources WHERE active=1 AND ?1 IS NULL ORDER BY subject"
         };
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h45d8564d30b6 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ query)?;
+        let rows = statement.query_map([person], |row| {
+            let subject: String = row.get(0)?;
+            if fractal_schema::notice::is_reserved_subject(&subject) {
+                Ok(None)
+            } else {
+                Ok(Some((row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            }
+        })?.filter_map(|row| row.transpose()).collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
             .map(|(text, at)| {
                 attention_item(&serde_json::from_str(&text)?, at.parse().unwrap_or(0))

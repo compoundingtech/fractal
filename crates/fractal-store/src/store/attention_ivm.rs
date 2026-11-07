@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v2",
+            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -212,6 +212,9 @@ fn custom_row(
     tx: &Transaction<'_>,
     source: &str,
 ) -> Result<Option<(AttentionItemView, Value, u128)>> {
+    if fractal_schema::notice::is_reserved_subject(source) {
+        return Ok(None);
+    }
     let row: Option<(String, String)> = tx
         .query_row(
             "SELECT body,requested_at FROM custom_sources WHERE subject=?1 AND active=1",
@@ -643,19 +646,21 @@ pub fn window(
     };
     anyhow::ensure!(limit <= 501, "attention window exceeds bound");
     let at = at.to_string();
-    let rows = connection
-        .prepare_cached(
-            "SELECT body FROM local_attention_open WHERE family=?1 AND person=?2
-      AND (length(eligible)<length(?3) OR (length(eligible)=length(?3) AND eligible<=?3))
-      ORDER BY priority,length(requested) DESC,requested DESC,source,person,episode LIMIT ?4",
-        )?
-        .query_map(params![family, person, at, limit], |r| {
-            r.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.into_iter()
-        .map(|text| serde_json::from_str(&text).map_err(Into::into))
-        .collect()
+    let mut statement = connection.prepare_cached(
+        "SELECT source,body FROM local_attention_open WHERE family=?1 AND person=?2
+         AND (length(eligible)<length(?3) OR (length(eligible)=length(?3) AND eligible<=?3))
+         ORDER BY priority,length(requested) DESC,requested DESC,source,person,episode",
+    )?;
+    let rows = statement.query_map(params![family, person, at], |row| {
+        let source: String = row.get(0)?;
+        if family == "custom" && fractal_schema::notice::is_reserved_subject(&source) {
+            Ok(None)
+        } else {
+            row.get::<_, String>(1).map(Some)
+        }
+    })?;
+    rows.filter_map(|row| row.transpose()).take(limit)
+        .map(|text| Ok(serde_json::from_str(&text?)?)).collect()
 }
 
 pub fn row(
@@ -675,12 +680,19 @@ pub fn row(
     let at = at.to_string();
     let text: Option<String> = connection
         .query_row(
-            "SELECT body FROM local_attention_open WHERE family=?1 AND person=?2 AND id=?3
+            "SELECT source,body FROM local_attention_open WHERE family=?1 AND person=?2 AND id=?3
       AND (length(eligible)<length(?4) OR (length(eligible)=length(?4) AND eligible<=?4))",
             params![family, person, id, at],
-            |r| r.get(0),
+            |row| {
+                let source: String = row.get(0)?;
+                if family == "custom" && fractal_schema::notice::is_reserved_subject(&source) {
+                    Ok(None)
+                } else {
+                    row.get::<_, String>(1).map(Some)
+                }
+            },
         )
-        .optional()?;
+        .optional()?.flatten();
     text.map(|text| serde_json::from_str(&text).map_err(Into::into))
         .transpose()
 }

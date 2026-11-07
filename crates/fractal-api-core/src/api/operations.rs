@@ -691,21 +691,19 @@ pub async fn status(
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
-        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
-            store.status_harness_only(subject)
-        } else if query.history {
-            store.status_history(
-                subject.as_deref(),
-                query.owner_run.as_deref(),
-                query.at_index,
-            )
+        let mut response = if query.harness_only && !query.history && let Some(subject) = subject.as_deref() {
+            // The harness shortcut reads current state even when a historical cut is supplied.
+            if !store.generic_status_subject_visible_at(subject, store.index()?)? {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
+                ).with_detail("reason", "notices-unavailable")));
+            }
+            store.status_harness_only(subject)?
         } else {
-            store.status_at(
-                subject.as_deref(),
-                query.owner_run.as_deref(),
-                query.at_index,
-            )
-        }?;
+            store.status_for_generic_reads(
+                subject.as_deref(), query.owner_run.as_deref(), query.at_index, query.history,
+            )?
+        };
         if !query.history && query.at_index.is_none() {
             response.seat_admission = Some(admission.snapshot(admission_now()));
         }
