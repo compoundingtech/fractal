@@ -346,7 +346,7 @@ describe('unwired web v2 scale/fault acceptance', () => {
     const intent: MembershipIntent = { node: { kind: 'subject', subject: complete.members[0]!.member }, parent: null, before: null }
     expect(planMembershipMove(cache.get(arrangement, complete, 'catalog/1', 'presentation/1'), intent)).toEqual({ _tag: 'RefusedV2', refusal: 'NoChange' })
   })
-  it('does not retain NotReady while resolved parents complete at the same arrangement revision', () => {
+  it('invalidates complete -> incomplete -> complete resolution at the same arrangement revision', () => {
     const cache = new MembershipProjectionCache()
     const parents = { ...scaleArrangement.resolved!.parents }
     const parent = parents[scaleFolder]!
@@ -359,6 +359,16 @@ describe('unwired web v2 scale/fault acceptance', () => {
     expect(model._tag).toBe('ProjectedV2')
     expect(planMembershipMove(model, scaleIntent(complete.members))._tag).toBe('PlannedV2')
     expect(cache.get(arrangement, complete, 'catalog/1', 'presentation/1')).toBe(model)
+    delete parents[scaleFolder]
+    const incomplete = cache.get(arrangement, complete, 'catalog/1', 'presentation/1')
+    expect(incomplete).toEqual({ _tag: 'RefusedV2', refusal: 'NotReady' })
+    expect(planMembershipMove(incomplete, scaleIntent(complete.members))).toEqual(incomplete)
+    parents[scaleFolder] = parent
+    const recovered = cache.get(arrangement, complete, 'catalog/1', 'presentation/1')
+    expect(recovered._tag).toBe('ProjectedV2')
+    expect(recovered).not.toBe(model)
+    parents[scaleFolder] = scaleFolder
+    expect(cache.get(arrangement, complete, 'catalog/1', 'presentation/1')).toEqual({ _tag: 'RefusedV2', refusal: 'InvalidResolution' })
   })
   it.skip('Daemon integration fixture required: reject the 4,097th live-member edit through the real server limit (not a paging-D dependency)', () => {})
   it.skip('D #4739: local-socket initial-load p95 <=1s with sustained unrelated daemon writes', () => {})

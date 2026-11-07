@@ -331,7 +331,7 @@ export const projectMemberships = (arrangement: Arrangement, memberships: readon
 
 /** One retained projection per host. Snapshot store_index is deliberately not a collection revision. */
 export class MembershipProjectionCache {
-  #held: { id: string; revision: string; scope: MembershipComplete['scope']; frontier: MembershipComplete['frontier']; catalog: string; presentation: string; model: MembershipProjection } | undefined
+  #held: { id: string; revision: string; scope: MembershipComplete['scope']; frontier: MembershipComplete['frontier']; catalog: string; presentation: string; model: Extract<MembershipProjection, { _tag: 'ProjectedV2' }> } | undefined
   get(arrangement: Arrangement, complete: MembershipComplete, catalog: string, presentation: string): MembershipProjection {
     const held = this.#held
     const scope = complete.scope
@@ -343,7 +343,17 @@ export class MembershipProjectionCache {
       this.#held = undefined
       return projectMemberships(arrangement, complete.members)
     }
-    if (held && held.id === arrangement.id && held.revision === arrangement.revision
+    // PR21 supplies resolved.parents directly: validate at most 1,024 folders, never scan members on a cache hit.
+    let resolutionChanged = false
+    for (const folder in arrangement.body.folders) {
+      if (arrangement.body.folders[folder]!.tombstone !== null) continue
+      if (!Object.hasOwn(arrangement.resolved.parents, folder)) {
+        this.#held = undefined
+        return { _tag: 'RefusedV2', refusal: 'NotReady' }
+      }
+      if (held && held.model.nodes.get(`folder:${folder}`)?.shown !== arrangement.resolved.parents[folder]) resolutionChanged = true
+    }
+    if (held && !resolutionChanged && held.id === arrangement.id && held.revision === arrangement.revision
       && held.catalog === catalog && held.presentation === presentation
       && held.scope.owner === scope.owner && held.scope.container === scope.container && held.scope.endpoint === scope.endpoint
       && held.scope.host === scope.host && held.scope.projection === scope.projection
