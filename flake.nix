@@ -846,27 +846,38 @@
         };
       in
       {
-        packages.st = st3;
-        # Release runners need a host linker for Cargo build scripts and stamp tests.
-        # The release target still links through the pinned Zig/glibc-baseline wrapper.
-        packages.release-cc = pkgs.stdenv.cc;
-        packages.st3 = st3;
-        packages.fractal-web = fractalWeb;
-        packages.fractal = fractal;
-        # Preserve existing .#st2 profile upgrades for at least one release.
-        packages.st2 = fractal;
-        packages.fractal-chatgpt = fractalChatgpt;
-        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-        packages.st-chatgpt = fractalChatgpt;
-        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
-        packages.fractal-fabric-adapter = fractalFabricAdapter;
-        packages.st-fabric-adapter = fractalFabricAdapter;
-        # Isolated bootstrap/live proofs use the exact pairing API revision.
-        packages.fabric-pairing = fabric.packages.${system}.default;
-        packages.st3-migrate = st3;
-        packages.small-talk = st3;
-        # All four components come out of one build; the install paths are unchanged.
-        packages.default = st3;
+        packages = {
+          st = st3;
+          # Release runners need a host linker for Cargo build scripts and stamp tests.
+          # The release target still links through the pinned Zig/glibc-baseline wrapper.
+          release-cc = pkgs.stdenv.cc;
+          st3 = st3;
+          fractal-web = fractalWeb;
+          fractal = fractal;
+          # Preserve existing .#st2 profile upgrades for at least one release.
+          st2 = fractal;
+          fractal-chatgpt = fractalChatgpt;
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+          st-chatgpt = fractalChatgpt;
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
+          fractal-fabric-adapter = fractalFabricAdapter;
+          st-fabric-adapter = fractalFabricAdapter;
+          # Isolated bootstrap/live proofs use the exact pairing API revision.
+          fabric-pairing = fabric.packages.${system}.default;
+          st3-migrate = st3;
+          small-talk = st3;
+          # All four components come out of one build; the install paths are unchanged.
+          default = st3;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+          # One locked compiler and target-stdlib set for every iOS framework caller.
+          ios-rust-toolchain = fenix.packages.${system}.combine [
+            fenix.packages.${system}.stable.cargo
+            fenix.packages.${system}.stable.rustc
+            fenix.packages.${system}.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios-sim.stable.rust-std
+          ];
+        };
 
         # `nix flake check` is the whole CI: it builds the package — which runs
         # the hermetic portion of the in-tree `cargo test` suite via doCheck —
