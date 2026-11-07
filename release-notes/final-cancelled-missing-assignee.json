@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "A cancelled mission run whose finally step is assigned to a seat that is no longer in the desired graph now finishes cancelling. Before, the step stayed blocked with \"no eligible agent is present in the desired graph\", so the run stayed `running · final-cancelled` with no way to set its outcome, and `repair` found nothing to repair. Fixes #5480.",
+  "summary": "A cancelled mission run whose finally step is assigned to a seat that was stopped or retired now finishes cancelling. Before, the step stayed blocked with \"no eligible agent is present in the desired graph\", so the run stayed `running · final-cancelled` with no way to set its outcome, and `repair` found nothing to repair. Fixes #5480.",
   "replay": {
     "status": "none",
-    "detail": "No graph replay. A run already stuck in final-cancelled ends on the first reconcile pass after the upgrade."
+    "detail": "No graph replay. A run already stuck in final-cancelled on a stopped or retired seat ends on the first reconcile pass after the upgrade."
   },
   "schema": {
     "status": "none",
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "In a cancelled run's final phase, a finally step whose assigned and available agents are all missing from the desired graph, after the step's own seat declarations are materialized, ends as `cancelled` with the reason \"the mission run was cancelled and no eligible agent is present in the desired graph: ...\", and the run goes on to cleanup and ends cancelled. A run that finished its work and is in its ordinary final phase still waits for the seat with the step blocked, as before, since its cleanup can still run once the seat is declared again. Steps for agentless work, a person or a seat the step declares itself are unchanged. The check reads the desired graph of the host that evaluates the run: a seat missing there when the step is evaluated, for example because the source that declares it has not replicated to that host yet or is being re-applied under a new name, skips that cleanup step for good."
+    "detail": "In a cancelled run's final phase, a finally step with no eligible agent, after the step's own seat declarations are materialized, ends as `cancelled` only on positive evidence that its seats are gone: every agent it is assigned or available to selects a stop declaration in the desired graph, which both a stop and a retirement produce. The reason reads \"the mission run was cancelled and every eligible agent is stopped or retired: ...\", and the run goes on to cleanup and ends cancelled. A seat this host has never seen, for example one whose declaration has not replicated yet, is not evidence that it is gone: the step stays blocked as before and is offered to the seat once it arrives, so replication lag cannot skip cleanup. A run that finished its work and is in its ordinary final phase still waits with the step blocked, as before, even for a stopped seat. Steps for agentless work, a person or a seat the step declares itself are unchanged."
   },
   "compatibility": {
     "status": "none",

@@ -1,5 +1,7 @@
-//! A cancelled run whose finally step is assigned to a seat that is no longer declared still ends.
+//! A cancelled run whose finally step is assigned to a seat that is stopped or retired still ends.
+//! A seat this host has not seen yet may still replicate, so its step keeps waiting.
 use super::*;
+use crate::RetirementsStore;
 
 const SOURCE: &str = r#"version 2
 resource "heron-work" { kind "custom.st3.document-source" }
@@ -23,6 +25,38 @@ fn step(store: &Store, run: &str, path: &str) -> crate::model::StepRunView {
         .into_iter()
         .find(|step| step.step == path)
         .unwrap()
+}
+
+const SEAT: &str = "agent/node.heron-requester";
+
+/// Declare the close-out seat, then stop or retire it, as ending a requester does.
+fn end_seat(store: &Store, retire: bool) {
+    apply_source(
+        store,
+        r#"version 2
+agent "heron-requester" { workspace "/tmp"; command "true"; restart "never" }"#,
+        "heron-requester-seat",
+    );
+    if retire {
+        let token = store.selected_desired_token(SEAT).unwrap().unwrap();
+        store
+            .retire_agent(SEAT, "person/operator", "Work finished", &token, None, "heron-retire", &[])
+            .unwrap();
+    } else {
+        apply_source(
+            store,
+            r#"version 2
+stop "agent/node.heron-requester""#,
+            "heron-requester-stop",
+        );
+    }
+    assert_eq!(
+        store
+            .selected_desired_kind(SEAT)
+            .unwrap()
+            .as_deref(),
+        Some("stop")
+    );
 }
 
 fn start(key: &str) -> (Arc<Store>, Reconciler<FakeRuntime>, String) {
@@ -53,8 +87,18 @@ fn start(key: &str) -> (Arc<Store>, Reconciler<FakeRuntime>, String) {
 }
 
 #[test]
-fn a_cancelled_run_cancels_a_finally_step_whose_assignee_is_gone() {
+fn a_cancelled_run_cancels_a_finally_step_whose_assignee_is_stopped() {
+    cancels_a_finally_step_whose_assignee_ended(false);
+}
+
+#[test]
+fn a_cancelled_run_cancels_a_finally_step_whose_assignee_is_retired() {
+    cancels_a_finally_step_whose_assignee_ended(true);
+}
+
+fn cancels_a_finally_step_whose_assignee_ended(retire: bool) {
     let (store, reconciler, run) = start("heron-cancel");
+    end_seat(&store, retire);
     assert!(
         store
             .request_mission_run_cancellation(&run, "the work is no longer needed")
@@ -69,7 +113,8 @@ fn a_cancelled_run_cancels_a_finally_step_whose_assignee_is_gone() {
         close_out
             .blocked_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("heron-requester`")),
+            .is_some_and(|reason| reason.contains("stopped or retired")
+                && reason.contains("heron-requester`")),
         "the step records why it never ran: {close_out:?}"
     );
     let ended = store.mission_run(&run).unwrap().unwrap();
@@ -77,8 +122,49 @@ fn a_cancelled_run_cancels_a_finally_step_whose_assignee_is_gone() {
 }
 
 #[test]
-fn a_finished_run_still_waits_for_its_finally_steps_missing_assignee() {
+fn a_cancelled_run_keeps_waiting_for_a_seat_this_host_has_not_seen() {
+    // The seat may be declared on another host and not have replicated here yet.
+    let (store, reconciler, run) = start("heron-unseen");
+    assert!(
+        store
+            .selected_desired_kind(SEAT)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .request_mission_run_cancellation(&run, "the work is no longer needed")
+            .unwrap()
+    );
+    for _ in 0..6 {
+        reconciler.reconcile_once().unwrap();
+    }
+    let close_out = step(&store, &run, "close-out");
+    assert_eq!(close_out.status, "blocked", "{close_out:?}");
+    assert!(
+        close_out
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("no eligible agent is present")),
+        "{close_out:?}"
+    );
+    assert_eq!(store.mission_run(&run).unwrap().unwrap().phase, "final-cancelled");
+
+    // Once the seat replicates and runs, the cleanup step is offered to it.
+    apply_source(
+        &store,
+        r#"version 2
+agent "heron-requester" { workspace "/tmp"; command "true"; restart "never" }"#,
+        "heron-requester-seat",
+    );
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(step(&store, &run, "close-out").status, "ready");
+}
+
+#[test]
+fn a_finished_run_still_waits_for_its_finally_steps_stopped_assignee() {
     let (store, reconciler, run) = start("heron-finish");
+    end_seat(&store, false);
     store
         .append_claim(&ClaimInput {
             subject: "resource/heron-work".into(),

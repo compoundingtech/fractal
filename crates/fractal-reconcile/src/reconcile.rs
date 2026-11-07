@@ -11228,13 +11228,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .map(|agent| format!("`{agent}`"))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            // A cancelled run does not wait for a seat to come back for its
-                            // cleanup. The step ends with the reason, so the run can end.
-                            let (status, reason) = if run.phase == "final-cancelled" {
+                            // A cancelled run does not wait for a seat that is known to be gone:
+                            // every named agent is stopped or retired, which both select a stop.
+                            // A seat this host has not seen yet may still replicate, so its step
+                            // keeps waiting.
+                            let mut agents = view.assigned_to.iter().chain(view.available_to.iter()).peekable();
+                            let mut gone = agents.peek().is_some();
+                            for agent in agents {
+                                gone &= self.store.selected_desired_kind(agent)?.as_deref() == Some("stop");
+                            }
+                            let (status, reason) = if run.phase == "final-cancelled" && gone {
                                 (
                                     "cancelled",
                                     format!(
-                                        "the mission run was cancelled and no eligible agent is present in the desired graph: {eligible}"
+                                        "the mission run was cancelled and every eligible agent is stopped or retired: {eligible}"
                                     ),
                                 )
                             } else {
