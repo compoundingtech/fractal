@@ -17,6 +17,11 @@ export default githubWorkflow(auditCaches({
           required: false,
           type: 'string',
         },
+        run: {
+          description: 'Successful main tag-release run ID; default is the newest',
+          required: false,
+          type: 'string',
+        },
       },
     },
   },
@@ -32,12 +37,13 @@ export default githubWorkflow(auditCaches({
         GH_TOKEN: '${{ github.token }}',
         GH_REPO: '${{ github.repository }}',
         TAG: '${{ inputs.tag }}',
+        RUN: '${{ inputs.run }}',
       },
       steps: [
         ...fullHistoryCheckoutSteps(),
         {
           name: 'Publish the verified archives of main when it changed',
-          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"}',
+          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"}',
         },
       ],
     },

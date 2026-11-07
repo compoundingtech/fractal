@@ -31,6 +31,7 @@ fn open_installs_each_domain_in_order() {
             "arrangements",
             "limits",
             "run-eta",
+            "gate-runners",
         ]
     );
 }
@@ -98,7 +99,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "run-eta", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "run-eta", "gate-runners", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep iOS sidebar cached projections valid during same-revision resolution changes",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Only successful projections are cached. Every lookup checks all live folders for resolved parents and compares them to the cached tree, without scanning membership rows on valid warm hits. Missing or changed resolution clears the cache and delegates to the authoritative projector, preserving unsupported-version and invalid-membership error precedence even at the same revision. The host model revision still covers raw folder/register changes outside the arrangement revision."},
+  "downtime": {"status": "none", "detail": "Unwired cache; no restart required."},
+  "manual": {"status": "none", "detail": "No manual action required; native activation and daemon prerequisite gates remain unchanged."},
+  "recovery": {"status": "none", "detail": "Revert this cache-validity change."}
+}

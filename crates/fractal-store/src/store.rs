@@ -98,9 +98,11 @@ pub mod rollouts;
 pub mod refresh_intake;
 pub mod refresh;
 pub mod publication;
+pub mod local_commits;
 pub mod publication_facts;
 pub mod seat_status;
 pub mod stop_deferral;
+pub mod stopping_seat;
 pub mod card_fold;
 #[cfg(test)]
 pub mod card_fold_tests;
@@ -258,11 +260,19 @@ pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
+pub mod message_sent;
+#[cfg(test)]
+mod message_sent_tests;
 #[cfg(test)]
 mod message_outbox_tests;
 pub mod relayed_closes;
 #[cfg(test)]
 mod relayed_closes_tests;
+pub mod stream_mirror;
+#[cfg(test)]
+mod stream_mirror_tests;
+#[cfg(test)]
+mod stream_selector_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -303,6 +313,9 @@ pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
+pub mod gate_runners;
+#[cfg(test)]
+mod gate_runners_tests;
 #[cfg(test)]
 mod run_eta_tests;
 #[cfg(test)]
@@ -1708,11 +1721,13 @@ pub struct SubjectCache {
     through: u64,
     conflicts: u64,
     views: HashMap<String, ViewEntry>,
+    serving_views: HashMap<String, ViewEntry>,
     pub statuses: HashMap<String, StatusEntry>,
     summary_statuses: HashMap<String, StatusEntry>,
     runtime_statuses: HashMap<String, StatusEntry>,
     // Summary and full statuses never share entries: their provenance/harness fields differ.
     card_statuses: HashMap<String, StatusEntry>,
+    serving_card_statuses: HashMap<String, StatusEntry>,
 }
 
 const AGENT_CARD_STATUS_LIMIT: usize = 4096;
@@ -1862,6 +1877,11 @@ fn runtime_view_entry_from(
         declared: true,
         owners,
     })
+}
+
+struct StatusSubjects<'a> {
+    names: Option<BTreeSet<String>>,
+    excluded: Option<&'a BTreeSet<String>>,
 }
 
 /// Which claims — and, for agent cards, which provenance — a status reduction reads.
@@ -2265,6 +2285,12 @@ pub struct Store {
 /// How often the daemon audits the operation projection against the claim log and counts the
 /// fleet admission residue. Doctor calls a result older than two periods stale.
 pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// How long after it starts the daemon defers whole-store maintenance reads: its first
+/// operation audit and the sealing frontier's recovery search. Every client and peer reconnects
+/// in the first minute after a restart, and those reads (66 s of SQL and a 14 s batch walk on a
+/// busy host's store) made each of their requests wait on the same disk.
+pub const STARTUP_MAINTENANCE_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// One finished background audit: when it finished, how long it took and what it found.
 #[derive(Clone, Debug)]
@@ -4139,11 +4165,20 @@ impl Store {
         )
     }
 
+    /// Append `input` to the graph; a repeat replays (false). A `message.sent` the messages shard
+    /// already holds, by idempotency key or subject, replays the stream item instead, so a send
+    /// retried down the graph path never writes a message twice (see [`message_sent`]).
     pub fn append_claim_outcome(
         &self,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
-        self.graph.append_claim_outcome(input)
+        if input.kind != "message.sent" {
+            return self.graph.append_claim_outcome(input);
+        }
+        message_sent::gated(self, input, || match message_sent::sent_to_stream(self, input)? {
+            Some(item) => Ok((item, false)),
+            None => self.graph.append_claim_outcome(input),
+        })
     }
 
     pub fn claims_page(
@@ -4585,20 +4620,27 @@ impl Store {
             .transpose()
     }
 
+    /// The claim written under the idempotency key `key`: the graph's, or the stream item this
+    /// member's own stream send wrote under it, which the shard's `stream_operations` records. A
+    /// key names one request wherever it went, so a sender asking whether it already sent finds
+    /// either.
     pub fn operation_claim(&self, key: &str) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         let operation_id = operation_id_for_key(key);
-        connection
+        let graph = connection
             .query_row(
                 "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
                         claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
                  FROM operations JOIN claims ON claims.id=operations.canonical_claim_id
                  WHERE operations.id=?1 AND operations.state='active'",
-                [operation_id],
+                [&operation_id],
                 claim_from_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        match (graph, messages_shard::shard(self)) {
+            (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
+            (graph, _) => Ok(graph),
+        }
     }
 
     /// Daemon-only evidence captured while holding the runtime spawn locks.
@@ -4934,6 +4976,18 @@ impl Store {
         include_history: bool,
         claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
+        self.status_for_subject_prefix_view(prefix, at_index, include_history, claims, false)
+    }
+
+    pub fn status_for_subject_prefix_for_generic_reads_at(
+        &self, prefix: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        self.status_for_subject_prefix_view(prefix, at_index, include_history, claims, true)
+    }
+
+    fn status_for_subject_prefix_view(
+        &self, prefix: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
+    ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
         let store_index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
@@ -4960,7 +5014,11 @@ impl Store {
                 .collect::<Result<BTreeSet<_>, _>>()?,
         }};
         drop(connection);
-        self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        if generic {
+            self.status_for_subject_names_for_generic_reads_at(subjects, store_index, include_history, claims)
+        } else {
+            self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        }
     }
 
     /// Reduce only subjects that have emitted one claim kind at the selected snapshot.
@@ -4970,6 +5028,18 @@ impl Store {
         at_index: Option<u64>,
         include_history: bool,
         claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        self.status_for_claim_kind_view(kind, at_index, include_history, claims, false)
+    }
+
+    pub fn status_for_claim_kind_for_generic_reads_at(
+        &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        self.status_for_claim_kind_view(kind, at_index, include_history, claims, true)
+    }
+
+    fn status_for_claim_kind_view(
+        &self, kind: &str, at_index: Option<u64>, include_history: bool, claims: ClaimsReduction, generic: bool,
     ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
@@ -4993,7 +5063,11 @@ impl Store {
                 .collect::<Result<BTreeSet<_>, _>>()?
         };
         drop(connection);
-        self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        if generic {
+            self.status_for_subject_names_for_generic_reads_at(subjects, store_index, include_history, claims)
+        } else {
+            self.status_for_subject_names_at(subjects, store_index, include_history, claims)
+        }
     }
 
     /// Of `subjects`, those a current view can show at `store_index`. A runtime that nothing
@@ -5015,14 +5089,16 @@ impl Store {
                 .query_row(/* sqlite-large-value: allow-for-now lv-h021ae8b69609 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))?;
             if conflicts != cache.conflicts {
                 cache.views.clear();
+                cache.serving_views.clear();
                 cache.statuses.clear();
                 cache.summary_statuses.clear();
                 cache.runtime_statuses.clear();
                 cache.card_statuses.clear();
+                cache.serving_card_statuses.clear();
                 cache.conflicts = conflicts;
-            } else if !cache.views.is_empty() || !cache.statuses.is_empty()
+            } else if !cache.views.is_empty() || !cache.serving_views.is_empty() || !cache.statuses.is_empty()
                 || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
-                || !cache.card_statuses.is_empty() {
+                || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
                     "SELECT subject, actor, kind IN ('work.claimed','work.progress')
@@ -5056,6 +5132,7 @@ impl Store {
                 cache
                     .views
                     .retain(|subject, entry| !runtime_stale(subject, &entry.owners));
+                cache.serving_views.retain(|subject, entry| !runtime_stale(subject, &entry.owners));
                 cache
                     .statuses
                     .retain(|subject, entry| !stale(subject, &entry.owners));
@@ -5064,6 +5141,7 @@ impl Store {
                     !runtime_stale(subject, &entry.owners) && !runtime_work_actors.contains(subject)
                 });
                 cache.card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.serving_card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
             }
             cache.through = store_index;
         }
@@ -5080,21 +5158,21 @@ impl Store {
         newest: bool,
         claims: ClaimsReduction,
     ) -> Result<(SubjectStatus, Option<PlannedAction>)> {
-        if let Some(kept) = self.kept_subject_status(subject, store_index, claims) {
+        if let Some(kept) = self.kept_subject_status(subject, store_index, claims, false) {
             return Ok(kept);
         }
         let (status, action) =
             subject_status_at(connection, subject, Some(store_index), None, claims)?
                 .expect("a reduction without an owner filter always has a status");
         if newest {
-            self.keep_subject_status(subject, store_index, claims, &status, &action);
+            self.keep_subject_status(subject, store_index, claims, &status, &action, false);
         }
         Ok((status, action))
     }
 
     /// `subject`'s kept status reduction, if one holds at `store_index`.
     fn kept_subject_status(
-        &self, subject: &str, store_index: u64, claims: ClaimsReduction,
+        &self, subject: &str, store_index: u64, claims: ClaimsReduction, serving_card: bool,
     ) -> Option<(SubjectStatus, Option<PlannedAction>)> {
         let cache = self.fractal
             .subject_cache
@@ -5106,6 +5184,7 @@ impl Store {
             ClaimsReduction::Full => &cache.statuses,
             ClaimsReduction::Summary => &cache.summary_statuses,
             ClaimsReduction::Runtime => &cache.runtime_statuses,
+            ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
         };
         entries.get(subject)
@@ -5120,7 +5199,7 @@ impl Store {
     /// Keep a reduction read at the newest applied snapshot, `store_index`.
     fn keep_subject_status(
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
-        status: &SubjectStatus, action: &Option<PlannedAction>,
+        status: &SubjectStatus, action: &Option<PlannedAction>, serving_card: bool,
     ) {
         let mut cache = self.fractal
             .subject_cache
@@ -5140,6 +5219,7 @@ impl Store {
             ClaimsReduction::Full => &mut cache.statuses,
             ClaimsReduction::Summary => &mut cache.summary_statuses,
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
+            ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
@@ -5177,6 +5257,14 @@ impl Store {
         self.current_view_candidates_with(connection, subjects, store_index, owners, &mut reads)
     }
 
+    /// Native serving membership uses the same reserved-row-free inputs as serving cards.
+    pub fn current_view_candidates_for_generic_reads(
+        &self, connection: &Connection, subjects: BTreeSet<String>, index: u64, owners: bool,
+    ) -> Result<BTreeSet<String>> {
+        let mut reads = card_fold::CardReads::for_generic_reads(index);
+        self.current_view_candidates_with(connection, subjects, index, owners, &mut reads)
+    }
+
     /// [`Self::current_view_candidates`], reading the runtimes it has no answer for a chunk at
     /// a time into `reads`.
     fn current_view_candidates_with(
@@ -5201,9 +5289,8 @@ impl Store {
                     continue;
                 }
                 // Without the owner checks, only an answer that used no declaration applies.
-                let known = cache
-                    .views
-                    .get(&subject)
+                let views = if reads.hide_reserved { &cache.serving_views } else { &cache.views };
+                let known = views.get(&subject)
                     .filter(|entry| entry.head <= store_index && (owners || !entry.declared))
                     .map(|entry| entry.history);
                 match known {
@@ -5228,7 +5315,8 @@ impl Store {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 if cache.through == store_index {
-                    cache.views.insert(subject.clone(), entry);
+                    let views = if reads.hide_reserved { &mut cache.serving_views } else { &mut cache.views };
+                    views.insert(subject.clone(), entry);
                 }
             }
             if !history {
@@ -5254,6 +5342,31 @@ impl Store {
             input.actor.as_deref(), &json!({"fields": input.fields}), &input.evidence, None)
             .unwrap();
         transaction.rollback().unwrap();
+    }
+
+    pub fn status_for_subject_names_for_generic_reads_at(
+        &self, subjects: BTreeSet<String>, index: u64, history: bool, claims: ClaimsReduction,
+    ) -> Result<StatusResponse> {
+        let subjects = self.generic_status_subject_names_at(subjects, index)?;
+        self.status_for_subject_names_at(subjects, index, history, claims)
+    }
+
+    pub fn generic_status_subject_names_at(
+        &self, mut subjects: BTreeSet<String>, index: u64,
+    ) -> Result<BTreeSet<String>> {
+        subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
+        if subjects.is_empty() { return Ok(subjects); }
+        let connection = self.readers.get();
+        let mut query = connection.prepare_cached(
+            "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
+             JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2",
+        )?;
+        for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
+            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
+            let (subject,kind) = row?;
+            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+        }
+        Ok(subjects)
     }
 
     pub fn status_for_subject_names_at(
@@ -5333,6 +5446,56 @@ impl Store {
         })?
     }
 
+    /// A serving reduction must omit the whole subject if reserved facts contributed to it.
+    /// This does not change internal reductions or authoritative claim availability.
+    pub fn generic_status_subject_visible_at(&self, subject: &str, cut: u64) -> Result<bool> {
+        if fractal_schema::notice::is_reserved_subject(subject) {
+            return Ok(false);
+        }
+        let connection = self.readers.get();
+        let mut query = connection.prepare(
+            "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND store_index<=?2",
+        )?;
+        for kind in query.query_map(params![subject,cut], |row| row.get::<_,String>(0))? {
+            if fractal_schema::notice::is_reserved_kind(&kind?) { return Ok(false); }
+        }
+        Ok(true)
+    }
+
+    /// Generic serving status must not reduce reserved facts into fields or claim identities.
+    /// Keep internal status and authoritative replication readers unchanged.
+    pub fn status_for_generic_reads(
+        &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
+        history: bool,
+    ) -> Result<StatusResponse> {
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let cut = selected_index(current_index(&connection)?, at).map_err(anyhow::Error::new)?;
+            let mut excluded = BTreeSet::new();
+            let status_query = if selected.is_some() {
+                "SELECT DISTINCT subject,kind FROM claims WHERE subject=?2 AND store_index<=?1"
+            } else {
+                "SELECT DISTINCT subject,kind FROM claims WHERE store_index<=?1 AND ?2 IS NULL"
+            };
+            let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hdacaab2c061c owner=fractal_store::store TODO=trace-statement-and-value-representation */ status_query)?;
+            for row in query.query_map(params![cut,selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+                let (subject,kind) = row?;
+                if fractal_schema::notice::is_reserved_subject(&subject) || fractal_schema::notice::is_reserved_kind(&kind) {
+                    excluded.insert(subject);
+                }
+            }
+            if selected.is_some_and(|s| fractal_schema::notice::is_reserved_subject(s) || excluded.contains(s)) {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
+                ).with_detail("reason", "notices-unavailable")));
+            }
+            self.status_at_view_for_names_in_snapshot(
+                selected, owner, at, history,
+                StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
+            )
+        })
+    }
+
     fn status_at_view(
         &self,
         selected: Option<&str>,
@@ -5368,7 +5531,7 @@ impl Store {
                 selected_owner_run,
                 at_index,
                 include_history,
-                selected_names,
+                StatusSubjects { names: selected_names, excluded: None },
                 claims,
             )
         })
@@ -5380,9 +5543,10 @@ impl Store {
         selected_owner_run: Option<&str>,
         at_index: Option<u64>,
         include_history: bool,
-        selected_names: Option<BTreeSet<String>>,
+        subjects: StatusSubjects<'_>,
         claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
+        let StatusSubjects { names: selected_names, excluded } = subjects;
         let connection = self.readers.get();
         let current = current_index(&connection)?;
         let store_index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
@@ -5397,6 +5561,10 @@ impl Store {
             let rows = statement.query_map([store_index], |row| row.get::<_, String>(0))?;
             subject_names.extend(rows.collect::<Result<Vec<_>, _>>()?);
             drop(statement);
+            if let Some(excluded) = excluded {
+                subject_names.retain(|subject| !excluded.contains(subject)
+                    && !fractal_schema::notice::is_reserved_subject(subject));
+            }
             if !include_history {
                 // Without a snapshot the reduction reads owners from the run tables, so only
                 // what a runtime's own claims decide leaves it out.
@@ -5418,6 +5586,10 @@ impl Store {
         let mut subjects = Vec::new();
         let mut pending_actions = Vec::new();
         for subject in subject_names {
+            if excluded.is_some_and(|excluded| excluded.contains(&subject))
+                || (excluded.is_some() && fractal_schema::notice::is_reserved_subject(&subject)) {
+                continue;
+            }
             if subject.starts_with("glass/") || subject.starts_with("arrangement/") {
                 continue;
             }
@@ -13659,9 +13831,12 @@ pub fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<
 
 const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
 
+/// Graph mail in canonical order, then stream items in shard order
+/// ([`messages_shard::mailbox_reads::mail_order`]): a stream item has no graph claim to key it.
 pub fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::<String, canonical::ClaimKey>::new();
-    for chunk in messages.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
+    let graph = messages.iter().filter(|message| !messages_shard::mailbox_reads::is_stream_item(message)).collect::<Vec<_>>();
+    for chunk in graph.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
         let subjects = serde_json::to_string(
             &chunk.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
         )?;
@@ -13684,7 +13859,7 @@ pub fn sort_messages_canonically(connection: &Connection, messages: &mut [Messag
         anyhow::ensure!(rows.next()?.is_none(), "duplicate canonical message key row");
     }
     // Gather every key successfully before changing the caller's message vector.
-    messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
+    messages.sort_by(|left, right| messages_shard::mailbox_reads::mail_order(&keys, left, right));
     Ok(())
 }
 
@@ -18708,8 +18883,9 @@ pub struct RecordedSeatMove {
     pub view: SeatQueueMoveView,
 }
 
-/// The durable facts that order one seat's queue: when each run joined, every
-/// recorded move in graph order, and which joined runs are still live.
+/// The durable facts that order one seat's queue: when each live run and each
+/// finished run the live order depends on joined, every recorded move in graph
+/// order, and which joined runs are still live.
 #[derive(Default)]
 pub struct SeatQueueInputs {
     pub joins: Vec<QueueJoin>,
@@ -18806,8 +18982,9 @@ pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
 /// Read seat-queue inputs for one seat or the whole roster. A live run is queued
 /// while its current generation has a step for the seat, and it keeps the join
 /// time of its first such step in any generation. Runs that are no longer
-/// queued are read only when a move names them, because a run that never
-/// anchors or receives a move cannot change the relative order of the others.
+/// queued are read only when the live order can depend on them
+/// ([`seat_queue::order_anchors`]): a seat that has moved its queue a thousand
+/// times names hundreds of finished runs, and a claim reads this under the writer.
 pub fn seat_queue_inputs_tx(
     connection: &Connection,
     agent: Option<&str>,
@@ -18828,7 +19005,7 @@ pub fn named_run_probes() -> usize {
 }
 
 /// [`seat_queue_inputs_tx`], keeping only `seats` when given: every move and join is still read
-/// in one pass, but only those seats' named runs are probed, one query each.
+/// in one pass, but only those seats' order anchors are probed, one query each.
 pub fn seat_queue_inputs_of_tx(
     connection: &Connection,
     agent: Option<&str>,
@@ -18909,16 +19086,12 @@ pub fn seat_queue_inputs_of_tx(
         seats.retain(|seat, _| only.contains(seat));
     }
     for (seat, inputs) in &mut seats {
-        let named = inputs
+        let moves = inputs
             .moves
             .iter()
-            .flat_map(|recorded| {
-                std::iter::once(recorded.movement.run.clone())
-                    .chain(recorded.movement.anchor.clone())
-            })
-            .filter(|run| !inputs.live.contains(run))
-            .collect::<BTreeSet<_>>();
-        for run in named {
+            .map(|recorded| recorded.movement.clone())
+            .collect::<Vec<_>>();
+        for run in seat_queue::order_anchors(&moves, &inputs.live) {
             let Some(run_id) = run.strip_prefix("mission-run/") else {
                 continue;
             };

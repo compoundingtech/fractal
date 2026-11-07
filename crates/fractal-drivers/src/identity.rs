@@ -237,18 +237,6 @@ pub fn resolve_local_first<'a>(
     }
 }
 
-/// The routable address book of a discovered catalog.
-///
-/// A subject with no explicit `id` contributes its effective ID — the legacy bus identity migration
-/// freezes — so resolution works identically before and after migration.
-pub fn address_book(specs: &[agent_spec::AgentSpec], this_host: &str) -> Vec<AddressBookEntry> {
-    specs
-        .iter()
-        .filter(|spec| !spec.desired_state.is_retired())
-        .map(|spec| AddressBookEntry::of(spec, this_host))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

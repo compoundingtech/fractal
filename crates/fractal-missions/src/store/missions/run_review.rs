@@ -145,7 +145,6 @@ fn validate_reviewer_boundary(
             if boundary.is_some_and(|root| !expected.contains(root)) {
                 return Err(unresolved(&generation));
             }
-            agentless &= pinned_agentless(&definition, None, &selected);
             if let Some(root) = boundary {
                 let mut path = root;
                 while let Some(parent) = crate::mission::parent_step_path(&definition, path) {
@@ -212,6 +211,11 @@ fn validate_reviewer_boundary(
             for step in specs.iter().filter(|step| selected(&step.path)) {
                 if let Some(spec) = step.loop_spec.as_deref() {
                     validate_loop_history(connection, &generation, &step.path, spec, &children)?;
+                } else {
+                    agentless &= view
+                        .steps
+                        .iter()
+                        .any(|row| row.step == step.path && row.agentless);
                 }
             }
             pending.extend(children);
@@ -221,24 +225,6 @@ fn validate_reviewer_boundary(
         responsible_agents: excluded,
         reviewer: resolve_reference_conn(connection, reviewer)?,
         agentless,
-    })
-}
-
-fn pinned_agentless(
-    mission: &crate::model::MissionSpec,
-    inherited: Option<&crate::model::WorkSelector>,
-    selected: &impl Fn(&str) -> bool,
-) -> bool {
-    let selector = mission.work_selector.as_ref().or(inherited);
-    mission.steps.values().all(|step| {
-        let selector = step.work_selector.as_ref().or(selector);
-        (!selected(&step.path)
-            || step.loop_spec.is_some()
-            || matches!(selector, Some(crate::model::WorkSelector::Agentless)))
-            && step
-                .nested_mission
-                .as_ref()
-                .is_none_or(|nested| pinned_agentless(nested, selector, selected))
     })
 }
 
