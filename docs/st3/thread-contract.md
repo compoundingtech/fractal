@@ -22,9 +22,9 @@ reference from other resources explicit. The cost is a durable thread projection
 rules for mutations and links.
 
 Every message still has its own message ID and ordinary sender attribution. Its thread
-reference is explicit. A reply to a specific message retains an `in_reply_to` edge whose parent is in the
-same thread. The reply can be shown in an agent conversation and in the thread while remaining
-one message. Clients use authoritative order, current conversation visibility and stable cursors.
+reference is explicit. A reply to a specific message records a thread quote whose parent belongs
+to the same thread. Ordinary `in_reply_to` retains its request settlement behavior. The reply can
+appear in the agent conversation and in the thread as one message. Clients use authoritative order, current conversation visibility and stable cursors.
 Subjects, titles, text similarity, and agent incarnation are presentation or context data.
 
 ## Links and lifecycle
@@ -34,9 +34,9 @@ to an existing thread when authorized on both sides. A reply in the thread and a
 are separate operations. An ask created from a thread can carry the thread reference explicitly.
 An ask created elsewhere must explicitly attach to that thread. Closing, answering or replacing
 one ask leaves the thread and the other asks intact. A fresh ask may link to a closed thread
-and show its full history without reopening it. A related ask can record an explicit predecessor
-and the reason for revisiting a decision. The initial release presents this history. Any
-conditional activation continues to use existing mission step gates.
+and show its full history without reopening it. An explicit predecessor and reason can support
+a future decision-history view. Existing mission step gates own dependency trees and
+conditional activation.
 
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
 threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
@@ -135,11 +135,11 @@ convergence and retry behavior.
 | TUI, web and iOS | Start inline in Inbox, type and reply to a message, show a fresh linked ask with full discussion, and answer that ask independently. Use the same thread in Inbox, agent session, mission and a dedicated tab or screen. Compact embeds start collapsed. Web and terminal can reveal Reply on hover with accessible keyboard equivalents. Mobile supplies an equivalent touch action. |
 | TUI, web and iOS | Rename, close, list under Recently closed threads, read replies while closed, reopen, and retain selection and draft destination across navigation. State and unread progress agree when another authorized client changes them. |
 | MCP | The current conversation read grant permits bounded discovery, summary and timeline reads for all threads in every conversation that grant can already read, within its existing owner and visibility scope. Each request selects one exact conversation. Revalidate grant and visibility on every request, page and cursor. Reuse the daemon's thread projection. A context link does not expand the grant. |
-| MCP writes | Use the same typed daemon actions and idempotency, with the existing assistant grant checks. A conversation send grant confers no lifecycle or link authority. Preserve assistant attribution. Production write issuance follows the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Expose only capabilities the current grant and daemon support. |
+| MCP writes | Production writes remain gated on a separate scope decision, the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and the [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Future write capabilities must preserve existing authority and assistant attribution through typed daemon actions. |
 
-Implement and review behind capability negotiation. TUI, web, iOS and MCP are part of one
-release acceptance rather than independently inventing thread protocols. The MCP authorization
-gate remains separate from client parity and must pass before granting production writes.
+Implement and review behind capability negotiation. TUI, web, iOS and MCP reads share one
+release acceptance and the same thread protocol. Production MCP writes have their own
+authorization review.
 Existing conversation read grants apply to existing and future threads in all conversations
 they already authorize, including fleet-wide access where the existing grant has that breadth.
 Thread reads add no grant or scope and convey no write authority.
