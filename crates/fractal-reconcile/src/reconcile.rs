@@ -14950,11 +14950,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
         let message_subject = format!("message/{message_id}");
-        if self
-            .store
-            .latest_claim(&message_subject, Some("message.sent"))?
-            .is_some()
-        {
+        if self.store.message_sent(&message_subject)? {
             return Ok(false);
         }
         let expected = missing
@@ -19984,10 +19980,7 @@ pub fn append_fault_message(
     let idempotency_key = format!("st3-fault:{agent}:{}:{}", fault.subject, fault.episode);
     let message_id = &hex::encode(sha2::Sha256::digest(idempotency_key.as_bytes()))[..16];
     let subject = format!("message/{message_id}");
-    if store
-        .latest_claim(&subject, Some("message.sent"))?
-        .is_some()
-    {
+    if store.message_sent(&subject)? {
         return Ok(());
     }
     let inspect = fault

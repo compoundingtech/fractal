@@ -257,6 +257,9 @@ pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
+pub mod message_sent;
+#[cfg(test)]
+mod message_sent_tests;
 #[cfg(test)]
 mod message_outbox_tests;
 pub mod relayed_closes;
@@ -4147,11 +4150,20 @@ impl Store {
         )
     }
 
+    /// Append `input` to the graph; a repeat replays (false). A `message.sent` the messages shard
+    /// already holds, by idempotency key or subject, replays the stream item instead, so a send
+    /// retried down the graph path never writes a message twice (see [`message_sent`]).
     pub fn append_claim_outcome(
         &self,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
-        self.graph.append_claim_outcome(input)
+        if input.kind != "message.sent" {
+            return self.graph.append_claim_outcome(input);
+        }
+        message_sent::gated(self, input, || match message_sent::sent_to_stream(self, input)? {
+            Some(item) => Ok((item, false)),
+            None => self.graph.append_claim_outcome(input),
+        })
     }
 
     pub fn claims_page(
@@ -4593,20 +4605,27 @@ impl Store {
             .transpose()
     }
 
+    /// The claim written under the idempotency key `key`: the graph's, or the stream item this
+    /// member's own stream send wrote under it, which the shard's `stream_operations` records. A
+    /// key names one request wherever it went, so a sender asking whether it already sent finds
+    /// either.
     pub fn operation_claim(&self, key: &str) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         let operation_id = operation_id_for_key(key);
-        connection
+        let graph = connection
             .query_row(
                 "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
                         claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
                  FROM operations JOIN claims ON claims.id=operations.canonical_claim_id
                  WHERE operations.id=?1 AND operations.state='active'",
-                [operation_id],
+                [&operation_id],
                 claim_from_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        match (graph, messages_shard::shard(self)) {
+            (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
+            (graph, _) => Ok(graph),
+        }
     }
 
     /// Daemon-only evidence captured while holding the runtime spawn locks.

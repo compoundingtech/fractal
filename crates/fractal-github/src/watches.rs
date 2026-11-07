@@ -357,6 +357,8 @@ impl WatchesStore for Store {
                     && latest_claim_id_tx(transaction, &wake.subject)
                         .map_err(internal)?
                         .is_none()
+                    && !crate::store::message_sent::message_sent_tx(transaction, &wake.subject)
+                        .map_err(internal)?
                 {
                     append_claim_tx(
                         transaction,

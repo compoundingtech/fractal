@@ -180,7 +180,7 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
     };
     // A drain that appended and stopped before the delete, or a peer's copy, already put it there.
     if super::messages_shard::holds(graph, subject)? || graph_holds()? {
-        remove(graph, subject)?;
+        mirrored_remove(graph, subject)?;
         return Ok(true);
     }
     let input = match serde_json::from_str::<ClaimInput>(claim) {
@@ -198,7 +198,7 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
     };
     match appended {
         Ok(()) => {
-            remove(graph, subject)?;
+            mirrored_remove(graph, subject)?;
             Ok(true)
         }
         Err(error) => {
@@ -206,6 +206,14 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
             Ok(false)
         }
     }
+}
+
+/// Remove a row whose message a store now holds, once the graph's mirror of the shard has it, so
+/// a sender checking the graph file ([`super::message_sent::message_sent_tx`]) finds the
+/// message in the outbox or the mirror at every moment, never in neither.
+fn mirrored_remove(graph: &Store, subject: &str) -> Result<()> {
+    super::stream_mirror::mirror(graph)?;
+    remove(graph, subject)
 }
 
 fn remove(graph: &Store, subject: &str) -> Result<()> {

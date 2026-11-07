@@ -485,6 +485,24 @@ pub fn advertising_hosts(
     graph: &super::Store,
     configured_peers: &[String],
 ) -> anyhow::Result<BTreeSet<String>> {
+    hosts_advertising(graph, configured_peers, "messages_stream")
+}
+
+/// The hosts whose daemon advertises a complete stream inbox, `features.messages_stream_inbox=1`,
+/// read as [`advertising_hosts`] reads the shard's feature: a member that lists, counts and
+/// dedupes stream mail as it does graph mail, so a sender may route its seats' mail to the
+/// stream. A host that rolls back to a build without it stops counting once its new start
+/// replicates. Nothing routes on it in this build; the writers move to it in 4c-2b.
+pub fn inbox_hosts(graph: &super::Store, configured_peers: &[String]) -> anyhow::Result<BTreeSet<String>> {
+    hosts_advertising(graph, configured_peers, "messages_stream_inbox")
+}
+
+/// The hosts whose current start sets `features.<feature>` to 1.
+fn hosts_advertising(
+    graph: &super::Store,
+    configured_peers: &[String],
+    feature: &'static str,
+) -> anyhow::Result<BTreeSet<String>> {
     let membership = graph.graph.fleet_membership()?;
     let mut hosts = membership
         .incarnations()
@@ -504,13 +522,13 @@ pub fn advertising_hosts(
         .query_row(/* sqlite-large-value: allow-for-now lv-h98a9e19b2202 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
     let key = (hosts.clone(), newest_start);
     let kept = graph.extension::<AdvertisingHosts>();
-    if let Some((kept_key, answer)) = kept.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+    if let Some((kept_key, answer)) = kept.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(feature)
         && *kept_key == key
     {
         return Ok(answer.clone());
     }
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbe3ddc31e72e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical_sql(
-        "SELECT json_extract(claims.body,'$.fields.features.messages_stream')=1
+        "SELECT json_extract(claims.body,'$.fields.features.' || ?4)=1
          FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
              AND batches.replica_sequence>=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
@@ -518,19 +536,19 @@ pub fn advertising_hosts(
     let mut advertising = BTreeSet::new();
     for (host, start) in hosts {
         let holds: Option<Option<bool>> = statement
-            .query_row(/* sqlite-large-value: allow-for-now lv-h516c5fb23a80 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ rusqlite::params![format!("daemon/{host}"), host, start], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h516c5fb23a80 owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ rusqlite::params![format!("daemon/{host}"), host, start, feature], |row| row.get(0))
             .optional()?;
         if holds.flatten() == Some(true) {
             advertising.insert(host);
         }
     }
-    *kept.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, advertising.clone()));
+    kept.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(feature, (key, advertising.clone()));
     Ok(advertising)
 }
 
-/// The last [`advertising_hosts`] answer, with what it was read for.
+/// The last answer for each feature, with what it was read for.
 #[derive(Default)]
-struct AdvertisingHosts(std::sync::Mutex<Option<(AdvertisingRead, BTreeSet<String>)>>);
+struct AdvertisingHosts(std::sync::Mutex<BTreeMap<&'static str, (AdvertisingRead, BTreeSet<String>)>>);
 
 /// What an [`advertising_hosts`] answer was read for: each member asked, from its start, and the
 /// newest `daemon.started` there was.
@@ -572,7 +590,10 @@ pub fn open(graph: &Arc<super::Store>, root: &Path) -> anyhow::Result<Arc<GraphS
     let stores = ShardStores::open(
         root,
         &graph.graph.origin,
-        |_| Box::new(MessagesRuntime),
+        {
+            let graph = Arc::downgrade(graph);
+            move |_| Box::new(MessagesRuntime(graph.clone()))
+        },
         [id.clone()],
     )?;
     let shard = stores.get(&id).expect("the shard just opened").clone();
@@ -600,8 +621,9 @@ const ASSISTANT_FIELDS: &[&str] = &[
     "assistant_session_actor",
 ];
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MessagesRuntime;
+/// The shard's runtime, holding the graph it opened beside, which a stream append checks first.
+#[derive(Clone, Debug, Default)]
+pub struct MessagesRuntime(std::sync::Weak<super::Store>);
 
 /// Refuse anything the stream may not carry, before the schema checks the fields.
 fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), FractalError> {
@@ -646,6 +668,40 @@ fn validate_input(input: &ClaimInput) -> Result<(), FractalError> {
         .validate_claim(&input.subject, &input.kind, &input.fields)
         .map(|_| ())
         .map_err(|error| FractalError::new(error.code, error.message))
+}
+
+/// Append a stream item to the shard: the shard's own replay of an idempotency key first, as the
+/// graph replays one, so the same request returns the item it wrote and another request under
+/// the key is refused.
+fn append_item(store: &GraphStore, input: &ClaimInput) -> Result<(ClaimRecord, bool), FractalError> {
+    let operation = smallclaims::store::claim_operation(input)?;
+    let body = json!({ "fields": input.fields, "evidence": input.evidence });
+    store
+        .connection
+        .batched(|transaction| {
+            if let Some((operation_id, request_digest)) = &operation
+                && let Some(claim) = stream_operations::replay_tx(transaction, operation_id, request_digest)?
+            {
+                return Ok((claim, false));
+            }
+            let claim = append_claim_record_tx(
+                transaction,
+                &store.origin,
+                &input.subject,
+                &input.kind,
+                input.actor.as_deref(),
+                &body,
+                &[],
+                None,
+            )
+            .map_err(smallclaims::error::typed)?;
+            if let Some((operation_id, request_digest)) = &operation {
+                stream_operations::record_tx(transaction, operation_id, request_digest, &claim.id)
+                    .map_err(smallclaims::error::typed)?;
+            }
+            Ok((claim, true))
+        })
+        .map_err(|error| FractalError::new("internal", error))?
 }
 
 impl Runtime for MessagesRuntime {
@@ -696,36 +752,19 @@ impl Runtime for MessagesRuntime {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
         validate_input(input)?;
-        // An idempotency key replays as it does in the graph: the same request returns the claim it
-        // wrote, and another request under the key is refused.
-        let operation = smallclaims::store::claim_operation(input)?;
-        let body = json!({ "fields": input.fields, "evidence": input.evidence });
-        store
-            .connection
-            .batched(|transaction| {
-                if let Some((operation_id, request_digest)) = &operation
-                    && let Some(claim) = stream_operations::replay_tx(transaction, operation_id, request_digest)?
-                {
-                    return Ok((claim, false));
+        // A message the graph already holds, by key or subject, replays the graph's claim, so a
+        // send retried down the stream path never writes it twice. The gate holds the graph's
+        // check and this write together (see `message_sent`). Once the graph has closed nothing
+        // sends through it, so there is nothing to check.
+        match self.0.upgrade() {
+            Some(graph) => super::message_sent::gated(&graph, input, || {
+                match super::message_sent::sent_to_graph(&graph, input)? {
+                    Some(claim) => Ok((claim, false)),
+                    None => append_item(store, input),
                 }
-                let claim = append_claim_record_tx(
-                    transaction,
-                    &store.origin,
-                    &input.subject,
-                    &input.kind,
-                    input.actor.as_deref(),
-                    &body,
-                    &[],
-                    None,
-                )
-                .map_err(smallclaims::error::typed)?;
-                if let Some((operation_id, request_digest)) = &operation {
-                    stream_operations::record_tx(transaction, operation_id, request_digest, &claim.id)
-                        .map_err(smallclaims::error::typed)?;
-                }
-                Ok((claim, true))
-            })
-            .map_err(|error| FractalError::new("internal", error))?
+            }),
+            None => append_item(store, input),
+        }
     }
 
     fn apply_repair_tx(
@@ -1109,6 +1148,49 @@ mod tests {
         // This host never counts itself.
         advertise(&alder, 1);
         assert!(advertising_hosts(&alder, &["alder".to_owned()]).unwrap().is_empty());
+    }
+
+    /// A start with `features`, under its own key `start`.
+    fn start_with(store: &Store, start: &str, features: Value) {
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("daemon/{}", store.graph.origin),
+                kind: "daemon.started".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({"status": "running", "features": features})).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("daemon-start:{}:{start}", store.graph.origin)),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_host_counts_as_an_inbox_only_while_its_current_start_says_so() {
+        let alder = Store::open_memory("alder").unwrap();
+        let birch = Store::open_memory("birch").unwrap();
+        for store in [&alder, &birch] {
+            store.bind_fleet(FLEET).unwrap();
+        }
+        let peers = ["birch".to_owned()];
+        let birch_only = BTreeSet::from(["birch".to_owned()]);
+        // Holding the shard is not a complete inbox.
+        start_with(&birch, "shard", json!({"messages_stream": 1, "messages_stream_mirror": 1}));
+        replicate(&birch, &alder);
+        assert_eq!(advertising_hosts(&alder, &peers).unwrap(), birch_only);
+        assert!(inbox_hosts(&alder, &peers).unwrap().is_empty());
+        start_with(&birch, "inbox", json!({"messages_stream": 1, "messages_stream_inbox": 1}));
+        replicate(&birch, &alder);
+        assert_eq!(inbox_hosts(&alder, &peers).unwrap(), birch_only);
+        assert_eq!(advertising_hosts(&alder, &peers).unwrap(), birch_only, "each feature keeps its own answer");
+        // Rolled back to a build that holds the shard without the inbox.
+        start_with(&birch, "rolled-back", json!({"messages_stream": 1}));
+        replicate(&birch, &alder);
+        assert!(inbox_hosts(&alder, &peers).unwrap().is_empty());
+        assert_eq!(advertising_hosts(&alder, &peers).unwrap(), birch_only);
+        // This host never counts itself.
+        start_with(&alder, "inbox", json!({"messages_stream": 1, "messages_stream_inbox": 1}));
+        assert!(inbox_hosts(&alder, &["alder".to_owned()]).unwrap().is_empty());
     }
 
     /// The answer is kept between reads while no member starts and the members asked stay the

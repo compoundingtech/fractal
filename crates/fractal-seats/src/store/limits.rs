@@ -471,10 +471,8 @@ impl LimitsStore for Store {
                 &canonical_hash(&key).map_err(internal)?[..20]
             );
             self.connection.batched(|tx| {
-                let recorded = tx.query_row(
-                    "SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent' LIMIT 1",
-                    [&subject], |_| Ok(()),
-                ).optional().map_err(internal)?.is_some();
+                // Sent as a graph claim, a mirrored stream item or a queued outbox row.
+                let recorded = fractal_store::store::message_sent::message_sent_tx(tx, &subject).map_err(internal)?;
                 if !recorded {
                     append_claim_tx(tx, &self.origin, &subject, "message.sent", Some(LIMITS_ACTOR),
                         &json!({"fields": {
