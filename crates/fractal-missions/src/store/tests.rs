@@ -566,7 +566,7 @@ mission "clock-parent" state="ready" {
 mission "clock-worker" state="ready" {
   goal "Start the loop clock when work is claimed."
   concurrent-runs max=20
-  step "work" { assigned-to "agent/worker" }
+  step "work" { assigned-to "agent/node.worker" }
   step "automatic" { agentless }
 }
 mission "clock-automatic" state="ready" {
@@ -655,7 +655,7 @@ mission "clock-automatic" state="ready" {
             .append_claim(&ClaimInput {
                 subject: step.subject.clone(),
                 kind: "work.claimed".into(),
-                actor: Some("agent/worker".into()),
+                actor: Some("agent/node.worker".into()),
                 fields: BTreeMap::from([("attempt".into(), Value::from(index + 1))]),
                 evidence: Vec::new(),
                 expected_subject: None,
@@ -1099,10 +1099,10 @@ version 2
   mission "held-work" state="ready" {
     goal "Hold some steps."
     concurrent-runs max=2
-    step "active" { assigned-to "agent/worker" }
-    step "expired" { assigned-to "agent/worker" }
-    step "ready" { assigned-to "agent/worker" }
-    step "pending" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/node.worker" }
+    step "expired" { assigned-to "agent/node.worker" }
+    step "ready" { assigned-to "agent/node.worker" }
+    step "pending" { assigned-to "agent/node.worker" }
     step "watch" { agentless }
   }
 
@@ -5797,7 +5797,7 @@ fn terminal_roots_reap_nested_orphans_idempotently_across_restart_and_replicatio
         r#"version 2
  mission "tree-child" state="ready" {
    goal "Expose nested work."
-   step "work" { assigned-to "agent/worker" }
+   step "work" { assigned-to "agent/source.worker" }
  }"#,
         "terminal-tree-child",
     );
@@ -6331,7 +6331,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
   mission "bootstrap" state="ready" {
     goal "Complete mission bootstrap."
     step "compile" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       produces-mission "project/work"
       mission "work" { goal "Complete mission work."; step "publish" { } }
     }
@@ -8589,7 +8589,7 @@ version 2
   mission "revision" state="ready" {
     goal "Complete mission revision."
     agent "worker" { workspace "."; command "true" }
-    step "owned" { assigned-to "agent/worker"; goal "First goal." }
+    step "owned" { assigned-to "agent/${ST_MISSION_RUN}/worker"; goal "First goal." }
     step "unrelated" { }
     step "join" { depends-on { step "owned" completed; step "unrelated" completed } }
   }
@@ -8622,7 +8622,7 @@ version 2
     goal "Complete mission revision."
     agent "worker" { workspace "."; command "true" }
     step "owned" {
-      assigned-to "agent/worker"
+      assigned-to "agent/${ST_MISSION_RUN}/worker"
       goal "First goal."
       constraint "Do not push."
     }
@@ -9043,7 +9043,7 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
     let store = Store::open_memory("node").unwrap();
     let source = CARRY_SOURCE.replace(
         "step \"other\"",
-        "step \"done\" { assigned-to \"agent/worker\"; goal \"Finish the work.\" }\n    step \"other\"",
+        "step \"done\" { assigned-to \"agent/node.worker\"; goal \"Finish the work.\" }\n    step \"other\"",
     );
     publish_carry(&store, &source, "notes-one");
     let run = store
@@ -9359,7 +9359,7 @@ version 2
   mission "carry" state="ready" {{
     goal "Keep submitted work across a gate revision."
     step "work" {{
-      assigned-to "agent/worker"
+      assigned-to "agent/node.worker"
       goal {goal:?}
       gate "checked" {{ exec {gate:?}; host "node"; workspace "/tmp" }}
     }}
@@ -9570,7 +9570,7 @@ version 2
     goal "Test protected revision."
      agent "worker" {{ workspace "."; command "true" }}
     step "work" revisions="human-only" revision-reviewer="person/step-reviewer" {{
-      assigned-to "agent/worker"
+      assigned-to "agent/${{ST_MISSION_RUN}}/worker"
       goal {goal:?}
     }}
   }}
@@ -9883,7 +9883,7 @@ version 2
   agent "worker" { workspace "."; command "true" }
   mission "drain-child" state="ready" {
     goal "Keep descendant work in the idle boundary."
-    step "active" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/node.worker" }
   }
 
 "#;

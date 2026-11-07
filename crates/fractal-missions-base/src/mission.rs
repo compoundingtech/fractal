@@ -3131,15 +3131,15 @@ mod tests {
     #[test]
     fn assignees_canonicalize_legacy_slash_ids() {
         for (input, expected) in [
-            ("fleet/worker", "agent/fleet/worker"),
-            ("agent/fleet/worker", "agent/fleet/worker"),
+            ("example/worker", "agent/example/worker"),
+            ("agent/example/worker", "agent/example/worker"),
             ("person/reviewer", "person/reviewer"),
             ("daemon/scheduler", "daemon/scheduler"),
             ("worker", "agent/host.worker"),
         ] {
             assert_eq!(super::normalize_assignee(input, "host").unwrap(), expected);
         }
-        assert!(super::normalize_assignee("fleet/worker name", "host").is_err());
+        assert!(super::normalize_assignee("example/worker name", "host").is_err());
     }
 
     #[test]

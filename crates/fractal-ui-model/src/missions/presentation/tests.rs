@@ -211,16 +211,16 @@ fn a_failed_step_offers_a_retry_and_names_its_seat() {
 
 #[test]
 fn legacy_assignees_and_claimants_resolve_the_canonical_roster_seat() {
-    let mut agents = Agents::default().with("agent/fleet/keeper", "stopped", None, &[]);
-    agents.seats.get_mut("agent/fleet/keeper").unwrap().label = "Roster keeper".into();
+    let mut agents = Agents::default().with("agent/example/keeper", "stopped", None, &[]);
+    agents.seats.get_mut("agent/example/keeper").unwrap().label = "Roster keeper".into();
     for holder in [
-        json!({"assignee": "fleet/keeper"}),
-        json!({"claimant": "fleet/keeper", "assignee": "agent/fleet/other"}),
+        json!({"assignee": "example/keeper"}),
+        json!({"claimant": "example/keeper", "assignee": "agent/example/other"}),
     ] {
         let mission = mission("running", vec![step("fix", "failed", holder)]);
         let shown = present(&mission, &[], &agents);
         let owner = Actor::Agent {
-            agent: "agent/fleet/keeper".into(),
+            agent: "agent/example/keeper".into(),
             label: "Roster keeper".into(),
         };
         assert_eq!(shown.who, owner);
@@ -228,7 +228,7 @@ fn legacy_assignees_and_claimants_resolve_the_canonical_roster_seat() {
         assert_eq!(
             shown.stuck.unwrap().agent.unwrap(),
             SeatRef {
-                id: "agent/fleet/keeper".into(),
+                id: "agent/example/keeper".into(),
                 label: "Roster keeper".into(),
                 state: "stopped".into(),
             }
@@ -238,7 +238,7 @@ fn legacy_assignees_and_claimants_resolve_the_canonical_roster_seat() {
             .iter()
             .filter(|action| matches!(action.id, Offer::RestartAgent | Offer::Chat))
         {
-            assert_eq!(action.target, "agent/fleet/keeper");
+            assert_eq!(action.target, "agent/example/keeper");
         }
     }
 }
@@ -246,20 +246,20 @@ fn legacy_assignees_and_claimants_resolve_the_canonical_roster_seat() {
 #[test]
 fn legacy_assignees_and_claimants_have_canonical_fallbacks() {
     for holder in [
-        json!({"assignee": "fleet/keeper"}),
-        json!({"claimant": "fleet/keeper"}),
+        json!({"assignee": "example/keeper"}),
+        json!({"claimant": "example/keeper"}),
     ] {
         let mission = mission("running", vec![step("fix", "failed", holder)]);
         let shown = present(&mission, &[], &Agents::default());
         let owner = Actor::Agent {
-            agent: "agent/fleet/keeper".into(),
-            label: "fleet/keeper".into(),
+            agent: "agent/example/keeper".into(),
+            label: "example/keeper".into(),
         };
         assert_eq!(shown.who, owner);
         assert_eq!(shown.steps[0].owner, owner);
         assert_eq!(
             shown.stuck.unwrap().agent.unwrap().id,
-            "agent/fleet/keeper"
+            "agent/example/keeper"
         );
     }
 }
@@ -268,26 +268,26 @@ fn legacy_assignees_and_claimants_have_canonical_fallbacks() {
 fn legacy_queued_seats_emit_canonical_agent_ids() {
     let mission = mission("running", vec![step("build", "ready", json!({}))]);
     let agents = Agents::default().with(
-        "fleet/keeper",
+        "example/keeper",
         "running",
         Some(("mission/fleet/example/ship", "deploy")),
         &["step-run/audit/build"],
     );
     let shown = present(&mission, &[], &agents);
     let owner = Actor::Agent {
-        agent: "agent/fleet/keeper".into(),
-        label: "fleet/keeper".into(),
+        agent: "agent/example/keeper".into(),
+        label: "example/keeper".into(),
     };
     assert_eq!(shown.word, Word::Queued);
     assert_eq!(shown.who, owner);
     assert_eq!(shown.steps[0].owner, owner);
-    assert_eq!(shown.stuck.unwrap().agent.unwrap().id, "agent/fleet/keeper");
-    assert_eq!(shown.queued_behind.unwrap().agent, "agent/fleet/keeper");
+    assert_eq!(shown.stuck.unwrap().agent.unwrap().id, "agent/example/keeper");
+    assert_eq!(shown.queued_behind.unwrap().agent, "agent/example/keeper");
 }
 
 #[test]
 fn invalid_or_non_agent_holders_never_emit_agent_actors() {
-    for id in ["", "keeper", "fleet/keep er", "agent/", "person/avery", "daemon/st"] {
+    for id in ["", "keeper", "example/keep er", "agent/", "person/avery", "daemon/st"] {
         for holder in [json!({"assignee": id}), json!({"claimant": id})] {
             let mission = mission("running", vec![step("fix", "failed", holder)]);
             let agents = Agents::default().with(id, "stopped", None, &[]);

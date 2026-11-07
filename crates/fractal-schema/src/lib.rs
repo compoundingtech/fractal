@@ -56,14 +56,14 @@ mod canonical_agent_actor_tests {
 
     #[test]
     fn preserves_actor_kinds_and_prefixes_legacy_agent_ids() {
-        for id in ["agent/fleet/worker", "person/reviewer", "daemon/scheduler"] {
+        for id in ["agent/example/worker", "person/reviewer", "daemon/scheduler"] {
             assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
         }
         assert_eq!(
-            canonical_agent_actor("fleet/worker").as_deref(),
-            Some("agent/fleet/worker")
+            canonical_agent_actor("example/worker").as_deref(),
+            Some("agent/example/worker")
         );
-        for id in ["", "worker", "agent/", "person/", "/worker", "fleet/worker name"] {
+        for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
             assert!(canonical_agent_actor(id).is_none(), "{id:?}");
         }
     }
