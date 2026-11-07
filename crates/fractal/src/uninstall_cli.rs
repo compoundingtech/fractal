@@ -321,6 +321,34 @@ mod instance_uninstall_tests {
         assert_eq!(fs::read_to_string(custom).unwrap(), "keep");
     }
 
+    #[tokio::test]
+    async fn uninstall_removes_the_bound_legacy_socket_at_the_path_limit() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
+        for (primary, legacy) in [("fractal.sock", "st3.sock"), ("fractal-client.sock", "st3-client.sock")] {
+            let padding = limit - legacy.len() - root.path().as_os_str().as_bytes().len() - 3;
+            let parent = root.path().join("x".repeat(padding));
+            let socket = parent.join(primary);
+            let alias = parent.join(legacy);
+            assert!(fractal_daemon::config::validate_unix_socket_path(&socket, "--socket").is_err());
+            fractal_daemon::config::validate_unix_socket_path(&alias, "--socket").unwrap();
+            let reserved = fractal_daemon::api::reserve_unix_socket(&socket, None).await.unwrap();
+            let lock = fractal_daemon::api::unix_reservation_path(&alias);
+            // Both the core and alias reservations are empty today; nonempty files
+            // remain protected by the foreign-entry control below.
+            assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
+            drop(reserved);
+            let paths = uninstall_socket_paths(&socket).unwrap();
+            remove_uninstall_paths(&paths, &[], &state, std::time::Instant::now()).unwrap();
+            for path in [socket, alias, lock] {
+                assert!(fs::symlink_metadata(&path).is_err(), "uninstall left {}", path.display());
+            }
+        }
+    }
+
     #[test]
     fn uninstall_preserves_foreign_entries_at_legacy_socket_names() {
         use std::os::unix::fs::symlink;

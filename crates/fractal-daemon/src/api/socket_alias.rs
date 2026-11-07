@@ -52,9 +52,9 @@ fn socket_names(socket: &Path) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Compatibility entries published beside a default socket, inspected by uninstall
-/// after its daemon has stopped. The alias's lock keeps its own name even when
-/// the alias resolves to the primary socket.
+/// Compatibility entries published beside a default socket. Uninstall classifies
+/// them when listing paths and removes them after the daemon releases its state.
+/// The alias's lock keeps its own name even when it resolves to the primary socket.
 pub fn legacy_socket_paths(socket: &Path) -> Vec<PathBuf> {
     let Some((_, legacy)) = socket_names(socket) else { return Vec::new(); };
     let alias = socket.with_file_name(legacy);
