@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Validate signed replicated notice claims against current writer-bound graph designation and pinned source dependencies before admitting them.",
+  "replay": { "status": "changed", "detail": "Reserved subjects and claim kinds bypass the unbound classifier. Writer-bound admission checks current designation, authenticated author, pinned manifest and immutable source lineage. Missing manifest, registration or source prerequisites remain outside admitted claims with missing-claim-dependencies and an explicit notices-unavailable reason; normal backlog retries after dependency projection. Wrong roles, hashes and links are invalid, not dependency gaps. This establishes no historical authorization or cross-partition revocation guarantee; an epoch, cut or equivalent handover contract remains pending." },
+  "schema": { "status": "none", "detail": "No persisted schema or envelope format changes." },
+  "rules": { "status": "changed", "detail": "Graph publishers designate one runtime under the accepted designation trust model. Only that actor writes snapshots and only the independently pinned person recipient writes controls. A trusted member asserting the designated runtime or recipient actor is not detected. It is the same fleet-member trust as the existing relay, and end-to-end actor authentication is out of scope." },
+  "compatibility": { "status": "changed", "detail": "Generic notice rows remain denied or absent, including while dependencies are unavailable. Full-state owner backup and proof-preserving export, and member-authenticated internal replication, remain unfiltered because filtering would corrupt restore, proofs or convergence. Older members cannot provide this build's notice admission guarantee; publication rollout is still gated on the unresolved handover contract." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "No manual migration is required." },
+  "recovery": { "status": "changed", "detail": "Deliver pinned dependencies to release dependency quarantine through normal replication admission. Explicit replica repair uses an independently admitted replacement. Recipient-native product views, control operations and delivery behavior remain later slices." }
+}

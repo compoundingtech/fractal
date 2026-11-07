@@ -163,6 +163,95 @@ pub(super) fn refuse_second_holder(
     Ok(())
 }
 
+pub(super) fn requires_stateful(claim: &ClaimRecord) -> bool {
+    notice::is_reserved_subject(&claim.subject) || notice::is_reserved_kind(&claim.kind)
+        || claim.kind == fractal_schema::custom::REGISTERED
+}
+
+fn invalid_admission(error: impl std::fmt::Display) -> FractalError {
+    FractalError::new("invalid-replicated-claim", format!("notice authority: {error}"))
+}
+
+fn pending_admission(reason: &str) -> Result<ReplicatedClaimAdmission, FractalError> {
+    Ok(ReplicatedClaimAdmission::PendingDependencies { message: format!("notices unavailable: {reason}") })
+}
+
+/// Current writer-bound authority only. Historical admission and revocation await B2b.
+pub(super) fn classify_replicated(
+    connection: &Connection, claim: &ClaimRecord,
+) -> Result<ReplicatedClaimAdmission, FractalError> {
+    if !requires_stateful(claim) { return Ok(ReplicatedClaimAdmission::Valid); }
+    let fields = custom::fields(claim);
+    if claim.kind == fractal_schema::custom::REGISTERED {
+        let reference = fields.get("document").and_then(Value::as_str)
+            .ok_or_else(|| invalid_admission("missing manifest reference"))?;
+        let (name, hash) = split_document_ref(reference).map_err(invalid_admission)?;
+        let bytes: Option<Option<Vec<u8>>> = connection.query_row(
+            "SELECT CASE WHEN length(b.bytes)<=?3 THEN b.bytes END FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2",
+            params![name, hash, fractal_schema::custom::MAX_BYTES], |row| row.get(0),
+        ).optional().map_err(internal)?;
+        let Some(bytes) = bytes else { return pending_admission("manifest document is not admitted"); };
+        let bytes = bytes.ok_or_else(|| invalid_admission("manifest exceeds the registration byte bound"))?;
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(invalid_admission)?;
+        notice::validate_registration(&manifest, hash).map_err(invalid_admission)?;
+        if notice::pinned_hash(&manifest).is_some() && manifest.subject() != claim.subject {
+            return Err(invalid_admission("manifest registration subject mismatch"));
+        }
+        return Ok(ReplicatedClaimAdmission::Valid);
+    }
+    let manifest = notice::manifests().iter()
+        .find(|manifest| claim.subject.starts_with(&manifest.subject_prefix))
+        .ok_or_else(|| invalid_admission("reserved kind outside its pinned notice prefix"))?;
+    let Some(spec) = manifest.claims.get(&claim.kind) else {
+        return Ok(ReplicatedClaimAdmission::UnknownKind);
+    };
+    if fields.keys().any(|field| !spec.fields.contains_key(field)
+        && field != "_registration" && field != "_basis" && !spec.additional_fields) {
+        return Ok(ReplicatedClaimAdmission::UnknownField);
+    }
+    let hash = fields.get("_registration").and_then(Value::as_str)
+        .ok_or_else(|| invalid_admission("missing registration pin"))?;
+    if notice::pinned_hash(manifest) != Some(hash) {
+        return Err(invalid_admission("claim pins another notice registration"));
+    }
+    let Some((registered_hash, _, state)) = custom::registration(connection, &claim.subject).map_err(internal)? else {
+        return pending_admission("pinned registration is not admitted");
+    };
+    if registered_hash != hash || state != "ready" {
+        return Err(invalid_admission("registration is conflicting or mismatched"));
+    }
+    match runtime(connection) {
+        Ok(_) => {}
+        Err(error) if error.code == "notices-unavailable" => return pending_admission(&error.message),
+        Err(error) => return Err(error),
+    }
+    if !claim.subject.starts_with(notice::SOURCE_PREFIX) {
+        let source_id = fields.get("source_id").and_then(Value::as_str)
+            .ok_or_else(|| invalid_admission("missing source link"))?;
+        let creation = fields.get("creation_claim").and_then(Value::as_str)
+            .ok_or_else(|| invalid_admission("missing source creation pin"))?;
+        let Some(source) = claim_by_id_tx(connection, creation).map_err(internal)? else {
+            return pending_admission("source creation is not admitted");
+        };
+        if source.subject != source_id || source.kind != "custom.attention.notice-created" {
+            return Err(invalid_admission("pinned source creation has another identity"));
+        }
+        if custom::registration(connection, source_id).map_err(internal)?.is_none() {
+            return pending_admission("source registration is not admitted");
+        }
+    }
+    let history = custom::claims(connection, &claim.subject).map_err(internal)?;
+    let creation = if claim.kind == manifest.creation_kind { None } else {
+        let Some(creation) = history.iter().find(|prior| prior.kind == manifest.creation_kind) else {
+            return pending_admission("notice creation is not admitted");
+        };
+        Some(creation)
+    };
+    custom::validate_fact(connection, &claim.subject, manifest, &claim.kind,
+        claim.actor.as_deref(), &fields, creation).map_err(invalid_admission)?;
+    Ok(ReplicatedClaimAdmission::Valid)
+}
+
 pub(super) fn validate(
     connection: &Connection, subject: &str, manifest: &Manifest, kind: &str,
     actor: &str, fields: &BTreeMap<String, Value>, creation: Option<&ClaimRecord>,

@@ -429,11 +429,14 @@ impl Runtime for FractalRuntime {
 
     fn classify_replicated_claim(
         &self,
-        _connection: &Connection,
+        connection: &Connection,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, FractalError> {
-        classify_replicated_claim_with_registry(claim, self.claim_registry())
+        match classify_replicated_claim_with_registry(claim, self.claim_registry())? {
+            ReplicatedClaimAdmission::Valid => notice_authority::classify_replicated(connection, claim),
+            other => Ok(other),
+        }
     }
 
     fn classify_replicated_claim_unbound(
@@ -441,7 +444,8 @@ impl Runtime for FractalRuntime {
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
-        // The registry is this build's schema, fixed for the process.
+        // Reserved authority depends on admitted prerequisites under the writer.
+        if notice_authority::requires_stateful(claim) { return None; }
         Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
 

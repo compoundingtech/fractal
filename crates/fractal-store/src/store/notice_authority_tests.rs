@@ -337,3 +337,219 @@ fn notice_runtime_identity_fences_match_rebuild_without_declaration_changes() {
         }).unwrap().unwrap();
     }
 }
+
+fn notice_replication_pair() -> (Store, Store) {
+    use super::fleet_admission_tests_shared_delivery::{fleet, key, sync};
+    let (_, _, mut members) = fleet(&[("example", &key()), ("reader", &key())]);
+    let reader = members.pop().unwrap();
+    let writer = members.pop().unwrap();
+    designate(&writer, "example/runtime").unwrap();
+    sync(&writer, &reader);
+    for manifest in notice::manifests() {
+        writer.register_custom_kind(&RegistrationRequest {
+            manifest: manifest.clone(), actor: "person/example".into(),
+        }).unwrap();
+    }
+    (writer, reader)
+}
+
+fn notice_replication_source(writer: &Store) -> ClaimRecord {
+    let (_, fixture) = setup();
+    writer.append_claim(&input(SOURCE, &fixture.kind, "agent/example/producer",
+        serde_json::to_value(custom::fields(&fixture)).unwrap())).unwrap()
+}
+
+fn notice_replication_parity(store: &Store) -> [Option<Value>; 3] {
+    for subject in [SOURCE, SNAPSHOT, CONTROL] { assert!(store.custom_subject(subject).is_err()); }
+    assert!(store.custom_subjects(None, None, None, 10).unwrap().is_empty());
+    store.connection.batched(|tx| -> Result<_> {
+        let before = [SOURCE, SNAPSHOT, CONTROL].map(|subject| custom::source(tx, subject).unwrap());
+        custom::rebuild(tx)?;
+        assert_eq!([SOURCE, SNAPSHOT, CONTROL].map(|subject| custom::source(tx, subject).unwrap()), before);
+        Ok(before)
+    }).unwrap().unwrap()
+}
+
+fn notice_quarantined(store: &Store, claim: &ClaimRecord, state: &str) -> String {
+    assert!(store.claim_by_id(&claim.id).unwrap().is_none(), "quarantine is not admission");
+    let records = store.replica_records(false).unwrap();
+    let record = records.iter().find(|record| record.claim_id.as_deref() == Some(&claim.id)).unwrap();
+    assert_eq!(record.state, state);
+    if state == "unknown" {
+        assert_eq!(record.error_code.as_deref(), Some("missing-claim-dependencies"));
+    } else {
+        assert_ne!(record.error_code.as_deref(), Some("missing-claim-dependencies"));
+    }
+    record.record_ref.clone()
+}
+
+#[test]
+fn notice_reordered_signed_dependencies_quarantine_then_converge_and_replay() {
+    use super::fleet_admission_tests_shared_delivery::FLEET;
+    let (writer, reader) = notice_replication_pair();
+    let source = notice_replication_source(&writer);
+    let snapshot = writer.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created",
+        RUNTIME, linked(&source, false))).unwrap();
+    let control = writer.append_claim(&input(CONTROL, "custom.attention.control-created",
+        "person/example", linked(&source, true))).unwrap();
+    let exchange = writer.export_replication_exchange(FLEET, &reader.replication_inventory().unwrap()).unwrap();
+    let mut groups: [Vec<ReplicaEnvelope>; 6] = Default::default();
+    for envelope in &exchange.envelopes {
+        assert!(envelope.signature.is_some());
+        let payload: ReplicaEnvelopePayload = ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+        let group = if payload.batch.claims.iter().any(|claim| claim.id == control.id) { 1 }
+            else if payload.batch.claims.iter().any(|claim| claim.id == snapshot.id) { 2 }
+            else if payload.batch.claims.iter().any(|claim| claim.id == source.id) { 5 }
+            else if payload.batch.claims.iter().any(|claim| claim.kind == fractal_schema::custom::REGISTERED) { 3 }
+            else if payload.batch.claims.iter().any(|claim| claim.kind == "doc.bound") { 4 }
+            else { 0 };
+        groups[group].push(envelope.clone());
+    }
+    for claim in [&source, &snapshot, &control] {
+        assert!(writer.claim_signature(&claim.id).unwrap().is_some(), "actor signature travels with claim");
+        assert!(reader.claim_by_id(&claim.id).unwrap().is_none());
+    }
+    assert!(notice_replication_parity(&reader).iter().all(Option::is_none));
+    for (stage, envelopes) in groups.into_iter().enumerate() {
+        assert!(!envelopes.is_empty(), "fixture must exercise delivery stage {stage}");
+        let mut delivery = exchange.clone();
+        delivery.envelopes = envelopes;
+        reader.receive_replication_exchange("example", FLEET, &delivery).unwrap();
+        // Dependency admission can require projection between retry passes.
+        for _ in 0..4 {
+            reader.validate_replication_backlog().unwrap();
+            reader.project_replication_backlog().unwrap();
+        }
+        if stage == 3 {
+            let registrations: Vec<_> = reader.replica_records(true).unwrap().into_iter()
+                .filter(|record| record.kind.as_deref() == Some(fractal_schema::custom::REGISTERED)).collect();
+            assert_eq!(registrations.len(), notice::manifests().len());
+            for record in registrations {
+                assert_eq!(record.state, "unknown");
+                assert_eq!(record.error_code.as_deref(), Some("missing-claim-dependencies"));
+                assert!(reader.claim_by_id(record.claim_id.as_deref().unwrap()).unwrap().is_none());
+            }
+        }
+        if (1..5).contains(&stage) {
+            notice_quarantined(&reader, &control, "unknown");
+            if stage >= 2 { notice_quarantined(&reader, &snapshot, "unknown"); }
+            assert!(reader.claim_by_id(&source.id).unwrap().is_none());
+            assert!(notice_replication_parity(&reader).iter().all(Option::is_none));
+        } else {
+            notice_replication_parity(&reader);
+        }
+    }
+    for claim in [&source, &snapshot, &control] {
+        assert!(reader.claim_by_id(&claim.id).unwrap().is_some());
+        assert_eq!(reader.claim_signature(&claim.id).unwrap(), writer.claim_signature(&claim.id).unwrap());
+    }
+    let ready = notice_replication_parity(&reader);
+    assert!(ready.iter().all(|row| row.as_ref().unwrap()["state"] == "ready"));
+    // Duplicate transport and a full canonical replay must preserve the converged projection.
+    reader.receive_replication_exchange("example", FLEET, &exchange).unwrap();
+    reader.validate_replication_backlog().unwrap();
+    reader.project_replication_backlog().unwrap();
+    assert_eq!(notice_replication_parity(&reader), ready);
+    reader.replay_replication_graph().unwrap();
+    assert_eq!(notice_replication_parity(&reader), ready);
+}
+
+#[test]
+fn notice_signed_wrong_roles_hashes_and_cross_member_forgery_are_invalid_and_repairable() {
+    use super::fleet_admission_tests_shared_delivery::{FLEET, sync};
+    for forgery in ["snapshot-role", "control-role", "registration-hash", "cross-member"] {
+        let (writer, reader) = notice_replication_pair();
+        let source = notice_replication_source(&writer);
+        sync(&writer, &reader);
+        // Registration admission follows manifest projection, then source admission.
+        for _ in 0..2 {
+            reader.validate_replication_backlog().unwrap();
+            reader.project_replication_backlog().unwrap();
+        }
+        assert!(reader.claim_by_id(&source.id).unwrap().is_some());
+        let (subject, kind, actor, mut fields) = match forgery {
+            "control-role" => (CONTROL, "custom.attention.control-created", RUNTIME, linked(&source, true)),
+            "snapshot-role" => (SNAPSHOT, "custom.attention.snapshot-created", "agent/example/producer", linked(&source, false)),
+            "cross-member" => (SNAPSHOT, "custom.attention.snapshot-created", "agent/reader/forger", linked(&source, false)),
+            _ => (SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false)),
+        };
+        let replacement = writer.append_claim(&input(subject, kind,
+            if subject == CONTROL { "person/example" } else { RUNTIME }, linked(&source, subject == CONTROL))).unwrap();
+        writer.seal_local_batches().unwrap();
+        let manifest = notice::manifests().iter().find(|manifest| subject.starts_with(&manifest.subject_prefix)).unwrap();
+        fields["_registration"] = json!(notice::pinned_hash(manifest).unwrap());
+        let author = if forgery == "cross-member" { &reader } else { &writer };
+        let target = if forgery == "cross-member" { &writer } else { &reader };
+        if forgery == "registration-hash" { fields["_registration"] = json!("0".repeat(64)); }
+        // An older writer can sign a claim that its current local notice policy would refuse.
+        // Only the receiving member's real signed admission path is evidence of rejection.
+        author.ensure_principal_key(actor).unwrap();
+        let forged = author.connection.batched(|tx| append_claim_tx(tx, &author.origin, subject,
+            kind, Some(actor), &json!({"fields":fields}), &[], None)).unwrap().unwrap();
+        let mut exchange = author.export_replication_exchange(FLEET, &target.replication_inventory().unwrap()).unwrap();
+        exchange.envelopes.retain(|envelope| {
+            let payload: ReplicaEnvelopePayload = ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+            !payload.batch.claims.iter().any(|claim| claim.id == replacement.id)
+        });
+        assert!(exchange.envelopes.iter().all(|envelope| envelope.signature.is_some()));
+        target.receive_replication_exchange(&author.origin, FLEET, &exchange).unwrap();
+        target.validate_replication_backlog().unwrap();
+        target.project_replication_backlog().unwrap();
+        assert!(author.claim_signature(&forged.id).unwrap().is_some());
+        let record = notice_quarantined(target, &forged, "invalid");
+        let before = notice_replication_parity(target);
+        if forgery != "cross-member" { assert!(before[if subject == CONTROL { 2 } else { 1 }].is_none()); }
+        target.replay_replication_graph().unwrap();
+        notice_quarantined(target, &forged, "invalid");
+        assert_eq!(notice_replication_parity(target), before);
+        // Repair points at an independently admitted, correctly authored replacement.
+        if forgery != "cross-member" { sync(&writer, &reader); }
+        target.repair_replica_record(&record, &replacement.id, "Replace refused notice",
+            "person/example", "notice-repair").unwrap();
+        target.apply_replication_repairs().unwrap();
+        target.project_replication_backlog().unwrap();
+        assert_eq!(target.replica_record(&record).unwrap().unwrap().state, "repaired");
+        assert!(target.claim_by_id(&forged.id).unwrap().is_none());
+        let repaired = notice_replication_parity(target);
+        assert_eq!(repaired[if subject == CONTROL { 2 } else { 1 }].as_ref().unwrap()["state"], "ready");
+        target.replay_replication_graph().unwrap();
+        assert_eq!(notice_replication_parity(target), repaired);
+    }
+}
+
+#[test]
+fn notice_unknown_kind_and_field_remain_schema_quarantine_not_dependency_or_invalid() {
+    use super::fleet_admission_tests_shared_delivery::sync;
+    for (kind, extra, code) in [
+        ("custom.attention.future-created", false, "unknown-claim-kind"),
+        ("custom.attention.snapshot-created", true, "unknown-claim-field"),
+    ] {
+        let (writer, reader) = notice_replication_pair();
+        let source = notice_replication_source(&writer);
+        sync(&writer, &reader);
+        // Establish the known dependencies before testing unknown vocabulary.
+        for _ in 0..2 {
+            reader.validate_replication_backlog().unwrap();
+            reader.project_replication_backlog().unwrap();
+        }
+        assert!(reader.claim_by_id(&source.id).unwrap().is_some());
+        let mut fields = linked(&source, false);
+        let manifest = notice::manifests().iter().find(|manifest| SNAPSHOT.starts_with(&manifest.subject_prefix)).unwrap();
+        fields["_registration"] = json!(notice::pinned_hash(manifest).unwrap());
+        if extra { fields["future_field"] = json!(true); }
+        writer.ensure_principal_key(RUNTIME).unwrap();
+        let unknown = writer.connection.batched(|tx| append_claim_tx(tx, &writer.origin, SNAPSHOT,
+            kind, Some(RUNTIME), &json!({"fields":fields}), &[], None)).unwrap().unwrap();
+        sync(&writer, &reader);
+        assert!(reader.claim_by_id(&unknown.id).unwrap().is_none());
+        let records = reader.replica_records(true).unwrap();
+        let record = records.iter().find(|record| record.claim_id.as_deref() == Some(&unknown.id)).unwrap();
+        assert_eq!(record.state, "unknown");
+        assert_eq!(record.error_code.as_deref(), Some(code));
+        let before = notice_replication_parity(&reader);
+        assert!(before[1].is_none());
+        reader.replay_replication_graph().unwrap();
+        assert_eq!(notice_replication_parity(&reader), before);
+        assert_eq!(reader.replica_record(&record.record_ref).unwrap().unwrap().error_code.as_deref(), Some(code));
+    }
+}

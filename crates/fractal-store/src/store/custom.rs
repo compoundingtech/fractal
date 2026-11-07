@@ -378,7 +378,7 @@ pub fn prepare(
         .map_err(|e| fail(e.to_string()))?;
     Ok(Some(f))
 }
-fn validate_fact(
+pub(super) fn validate_fact(
     connection: &Connection,
     subject: &str,
     m: &Manifest,
