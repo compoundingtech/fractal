@@ -511,6 +511,153 @@ async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_na
 }
 
 #[tokio::test]
+async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
+    use crate::store::thread_metadata::{self, Edit};
+
+    let mut allowed = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
+    let (session, _, _) = content_source(&mut allowed, &"Agent conversation ".repeat(512));
+    let selection = format!("agent_id=agent%2Freads-codex&session_id={}", urlencoding::encode(&session));
+    for (id, person, agent) in [
+        ("thread/owned", OWNER, "agent/reads-codex"),
+        ("thread/other", "person/other", "agent/reads-codex"),
+        ("thread/no-conversation", OWNER, "agent/unobserved"),
+    ] {
+        thread_metadata::apply(
+            &allowed.state.store,
+            person,
+            id,
+            &format!("create-{id}"),
+            Edit::Create { agent, title: "Private subject" },
+        ).unwrap();
+    }
+    for (id, expected) in [
+        ("owned", StatusCode::OK),
+        ("other", StatusCode::NOT_FOUND),
+        ("no-conversation", StatusCode::NOT_FOUND),
+    ] {
+        let query = format!("?{selection}&thread_id=thread%2F{id}&max_response_bytes=16384");
+        let payload = allowed.payload("thread-detail", &query);
+        let header = allowed.header(&payload, &allowed.attestor);
+        let (status, value, bytes) = allowed
+            .request(&format!("/v1/client/assistant/thread-detail{query}"), Some(&header))
+            .await;
+        assert_eq!(status, expected, "{value}");
+        if status == StatusCode::OK {
+            assert_eq!(value["value"]["id"], "thread/owned");
+            assert_eq!(value["value"]["title"], "Private subject");
+            assert!(bytes <= MAX_RESPONSE_BYTES);
+        } else {
+            assert!(!value.to_string().contains("Private subject"));
+        }
+    }
+
+    projection_read_mode(&mut allowed, "caller-bound-allow").await;
+    let (status, value, _) = allowed
+        .request(&format!("/v1/client/assistant/thread-detail?{selection}&thread_id=thread%2Fowned"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["id"], "thread/owned");
+
+    let wrong_principal = fixture(SCOPES, true).await;
+    let (status, value, _) = wrong_principal
+        .request(&format!("/v1/client/assistant/thread-detail?{selection}&thread_id=thread%2Fowned"), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    assert!(value.to_string().contains("assistant/mcp"));
+
+    let denied = fixture_principal(&SCOPES[..4], true, MCP_PRINCIPAL).await;
+    let query = &format!("?{selection}&thread_id=thread%2Fowned");
+    let payload = denied.payload("thread-detail", query);
+    let header = denied.header(&payload, &denied.attestor);
+    let (status, value, _) = denied
+        .request(&format!("/v1/client/assistant/thread-detail{query}"), Some(&header))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+}
+
+#[tokio::test]
+async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revisions() {
+    use crate::store::thread_metadata::{self, Edit};
+
+    let mut fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
+    let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
+    projection_read_mode(&mut fixture, "caller-bound-allow").await;
+    for id in ["thread/first", "thread/second"] {
+        let (created, _) = thread_metadata::apply(
+            &fixture.state.store, OWNER, id, &format!("create-{id}"),
+            Edit::Create { agent: "agent/reads-codex", title: "Thread" },
+        ).unwrap();
+        let (closed, _) = thread_metadata::apply(
+            &fixture.state.store, OWNER, id, &format!("close-{id}"),
+            Edit::Close { revision: &created.id },
+        ).unwrap();
+        thread_metadata::apply(
+            &fixture.state.store, OWNER, id, &format!("reopen-{id}"),
+            Edit::Reopen { revision: &closed.id },
+        ).unwrap();
+    }
+
+    for (id, person, agent) in [
+        ("thread/foreign-owner", "person/other", "agent/reads-codex"),
+        ("thread/foreign-agent", OWNER, "agent/other"),
+    ] {
+        thread_metadata::apply(
+            &fixture.state.store, person, id, &format!("create-{id}"),
+            Edit::Create { agent, title: "Private foreign title" },
+        ).unwrap();
+    }
+    let list = format!(
+        "/v1/client/assistant/threads?agent_id=agent%2Freads-codex&session_id={}&limit=1",
+        urlencoding::encode(&session),
+    );
+    let (status, value, _) = fixture.request(&list, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["items"][0]["id"], "thread/first");
+    let list_cursor = urlencoding::encode(value["value"]["next_cursor"].as_str().unwrap());
+    let list_continuation = format!("{list}&cursor={list_cursor}");
+    let (status, value, _) = fixture.request(&list_continuation, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["items"][0]["id"], "thread/second");
+    assert!(value["value"]["next_cursor"].is_null());
+    let (status, value, _) = fixture.request(&list_continuation.replace("agent%2Freads-codex", "agent%2Fother"), None).await;
+    assert!(!status.is_success(), "{value}");
+    assert!(value.get("value").is_none());
+
+    let endpoint = "/v1/client/assistant/thread-timeline?agent_id=agent%2Freads-codex";
+    let first = format!("{endpoint}&session_id={}&thread_id=thread%2Ffirst&limit=1", urlencoding::encode(&session));
+    let (status, value, _) = fixture.request(&first, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["items"].as_array().unwrap().len(), 1);
+    let cursor = urlencoding::encode(value["value"]["next_cursor"].as_str().unwrap());
+    let continuation = format!("{first}&cursor={cursor}");
+    let (status, value, _) = fixture.request(&continuation, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(value["value"]["next_cursor"].is_null());
+
+    for path in [
+        continuation.replace("thread%2Ffirst", "thread%2Fsecond"),
+        continuation.replace(urlencoding::encode(&session).as_ref(), "session%2Fwrong"),
+        continuation.replace("agent%2Freads-codex", "agent%2Fother"),
+        format!("{continuation}tampered"),
+        format!("{first}&cursor={list_cursor}"),
+    ] {
+        let (status, value, _) = fixture.request(&path, None).await;
+        assert!(!status.is_success(), "{value}");
+        assert!(value.get("value").is_none());
+    }
+    projection_read_mode(&mut fixture, "caller-bound-allow").await;
+    let (status, value, _) = fixture.request(&continuation, None).await;
+    assert!(!status.is_success(), "{value}");
+    let _ = super::super::revoke(
+        State(fixture.state.clone()),
+        Extension(ClientSession::local(Some(OWNER)).unwrap()),
+        AxumPath(fixture.grant.clone()),
+    ).await.unwrap();
+    assert_eq!(fixture.request(&continuation, None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(fixture.request(&list_continuation, None).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn discovery_authenticates_payload_before_snapshot_or_handle_disclosure() {
     let mut fixture = fixture(SCOPES, true).await;
     content_source(&mut fixture, &format!("PRIVATE discovery source {}", "word ".repeat(1900)));

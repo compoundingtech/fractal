@@ -901,6 +901,9 @@ export type AssistantProjection =
   | "conversation-detail"
   | "conversation-timeline"
   | "conversation-search"
+  | "thread-detail"
+  | "thread-timeline"
+  | "threads"
 ;
 
 export type AssistantReadTrust = {
@@ -973,6 +976,30 @@ export type AssistantTerminalContentRequest = {
   max_response_bytes?: AssistantResponseBytes;
   screen_revision: Revision;
   terminal_id: TerminalId;
+};
+
+export type AssistantThreadDetailRequest = {
+  agent_id: AgentId;
+  max_response_bytes?: AssistantResponseBytes;
+  session_id: Id;
+  thread_id: string;
+};
+
+export type AssistantThreadTimelineRequest = {
+  agent_id: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+  session_id: Id;
+  thread_id: string;
+};
+
+export type AssistantThreadsRequest = {
+  agent_id: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+  session_id: Id;
 };
 
 export type Attachment = {

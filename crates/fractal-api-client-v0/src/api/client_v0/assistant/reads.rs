@@ -33,6 +33,8 @@ pub async fn project_with_context(
     match projection {
         "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
             conversation_reads::project_bound_with_context(state, snapshot, projection, parameters, max_bytes, binding, context).await,
+        "threads" | "thread-detail" | "thread-timeline" =>
+            thread_read(state, projection, parameters, max_bytes, binding).await,
         "conversation-content" => {
             let mut parameters = parameters.clone();
             let reference = required(&parameters, "reference")?;
@@ -45,6 +47,102 @@ pub async fn project_with_context(
         _ => project_lower(state, snapshot, projection, parameters, max_bytes, binding, context).await,
     }
 }
+/// The assistant gateway revalidates the grant before serving each response. All
+/// thread data and the exact conversation identity use one store snapshot.
+async fn thread_read(
+    state: &AppState,
+    projection: &str,
+    parameters: &BTreeMap<String, String>,
+    max_bytes: usize,
+    binding: &str,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    use crate::store::thread_metadata;
+
+    let list = projection == "threads";
+    let timeline = projection == "thread-timeline";
+    let mut fields = vec!["agent_id", "session_id", "max_response_bytes"];
+    if !list {
+        fields.push("thread_id");
+    }
+    if list || timeline {
+        fields.extend(["cursor", "limit"]);
+    }
+    allow(parameters, &fields, max_bytes)?;
+    let agent = required(parameters, "agent_id")?.to_owned();
+    if !agent.starts_with("agent/") || agent == "agent/" || ident(Some(&agent)).is_none() {
+        return Err(validation("agent_id must name an agent"));
+    }
+    let session = required(parameters, "session_id")?.to_owned();
+    let unavailable = || ApiError::not_found("the thread is unavailable");
+    let id = (!list).then(|| required(parameters, "thread_id")).transpose()?;
+    if let Some(id) = id {
+        let Some(suffix) = id.strip_prefix("thread/") else {
+            return Err(unavailable());
+        };
+        if suffix.is_empty()
+            || suffix.len() > 128
+            || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(unavailable());
+        }
+    }
+    let id = id.map(str::to_owned);
+    let person = owner(state)?;
+    let collection = format!("assistant.{projection}:{}:", credential_digest(
+        &serde_json::to_string(&(binding, &person, &agent, &session, &id))
+            .map_err(ApiError::internal)?,
+    ));
+    let cursor = parameters.get("cursor")
+        .map(|cursor| conversation_reads::timeline_cursor(cursor, &collection)).transpose()?;
+    let limit = parameters.get("limit").map_or(Ok(10), |limit| {
+        limit.parse::<usize>().ok().filter(|limit| (1..=50).contains(limit))
+            .ok_or_else(|| validation("limit must be between 1 and 50"))
+    })?;
+    let state = state.clone();
+    blocking_store(move || {
+        state.store.read_snapshot(|index| {
+            let result = (|| {
+                let conversation = state.store.conversation_owner_at(&agent, index)
+                    .map_err(ApiError::internal)?;
+                let incarnation = conversation.as_ref().and_then(|owner| {
+                    owner.incarnation.as_deref().or(owner.runtime.as_deref())
+                });
+                if !incarnation.is_some_and(|incarnation| client_session_id(&agent, incarnation) == session) {
+                    return Err(unavailable());
+                }
+                let store_error = |error: FractalError| match error.code {
+                    "thread-unavailable" => unavailable(),
+                    "stale-thread-cursor" => stale(&error.message),
+                    _ => ApiError::bad(error),
+                };
+                let bind = |cursor: Option<&str>| {
+                    cursor.map(|cursor| conversation_reads::bind_cursor(cursor, &collection)).transpose()
+                };
+                let value = if let Some(id) = id.as_deref() {
+                    let summary = thread_metadata::summary(&state.store, &person, id).map_err(store_error)?;
+                    if summary.agent_id != agent {
+                        return Err(unavailable());
+                    }
+                    if timeline {
+                        let page = thread_metadata::history(&state.store, &person, id, cursor.as_deref(), limit)
+                            .map_err(store_error)?;
+                        json!({"items":page.items,"next_cursor":bind(page.next_cursor.as_deref())?})
+                    } else {
+                        json!(summary)
+                    }
+                } else {
+                    let page = thread_metadata::list_conversation(&state.store, &person, &agent, cursor.as_deref(), limit)
+                        .map_err(store_error)?;
+                    json!({"items":page.items,"next_cursor":bind(page.next_cursor.as_deref())?})
+                };
+                Ok((client_snapshot_at(&state, index), value))
+            })();
+            Ok(result)
+        })
+    })
+    .await?
+}
+
 #[cfg(test)]
 #[path = "reads_tests.rs"]
 pub mod tests;

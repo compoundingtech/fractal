@@ -1249,7 +1249,10 @@ export const AssistantProjection = /*#__PURE__*/ (() => Schema.Literals([
   "conversations",
   "conversation-detail",
   "conversation-timeline",
-  "conversation-search"
+  "conversation-search",
+  "thread-detail",
+  "thread-timeline",
+  "threads"
 ]).annotate({ identifier: "AssistantProjection" }))()
 export type AssistantProjection = typeof AssistantProjection.Type
 export type AssistantProjectionEncoded = typeof AssistantProjection.Encoded
@@ -1268,6 +1271,36 @@ export const AssistantSummaryRequest = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "AssistantSummaryRequest", description: "Summary query: only the response budget; the person is always the grant issuer." }))()
 export type AssistantSummaryRequest = typeof AssistantSummaryRequest.Type
 export type AssistantSummaryRequestEncoded = typeof AssistantSummaryRequest.Encoded
+
+export const AssistantThreadDetailRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "session_id": Id,
+  "thread_id": Schema.String.check(Schema.isPattern(new RegExp("^thread/[A-Za-z0-9_-]{1,128}$", "u")))
+}).annotate({ identifier: "AssistantThreadDetailRequest" }))()
+export type AssistantThreadDetailRequest = typeof AssistantThreadDetailRequest.Type
+export type AssistantThreadDetailRequestEncoded = typeof AssistantThreadDetailRequest.Encoded
+
+export const AssistantThreadTimelineRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "cursor": optionalKey(Cursor),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "session_id": Id,
+  "thread_id": Schema.String.check(Schema.isPattern(new RegExp("^thread/[A-Za-z0-9_-]{1,128}$", "u")))
+}).annotate({ identifier: "AssistantThreadTimelineRequest" }))()
+export type AssistantThreadTimelineRequest = typeof AssistantThreadTimelineRequest.Type
+export type AssistantThreadTimelineRequestEncoded = typeof AssistantThreadTimelineRequest.Encoded
+
+export const AssistantThreadsRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "cursor": optionalKey(Cursor),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "session_id": Id
+}).annotate({ identifier: "AssistantThreadsRequest" }))()
+export type AssistantThreadsRequest = typeof AssistantThreadsRequest.Type
+export type AssistantThreadsRequestEncoded = typeof AssistantThreadsRequest.Encoded
 
 export const AttentionBlocked = /*#__PURE__*/ (() => Schema.Struct({
   "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
