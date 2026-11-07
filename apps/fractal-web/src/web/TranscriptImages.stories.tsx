@@ -412,40 +412,41 @@ const keyboardNavigateAway = async (root: HTMLElement, key: Key) => {
   await expect(elsewhere).toHaveFocus()
 }
 
-export const Loading: Story = { tags: ['critical'], args: { fixture: 'loading' }, play: async ({ canvasElement }) => showLoading(canvasElement) }
-export const LoadingPhone: Story = { tags: ['critical'], args: { fixture: 'loading', width: 'phone' }, play: async ({ canvasElement }) => showLoading(canvasElement) }
+// Contract batches attachment probes per commit; keep individual state/phone/key-depth cases at merge.
+export const Loading: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loading' }, play: async ({ canvasElement }) => showLoading(canvasElement) }
+export const LoadingPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loading', width: 'phone' }, play: async ({ canvasElement }) => showLoading(canvasElement) }
 export const Loaded: Story = {
-  tags: ['critical'], args: { fixture: 'loaded' },
+  tags: ['critical', 'both-widths'], args: { fixture: 'loaded' },
   play: async ({ canvasElement }) => { await showLoaded(canvasElement); await openAndCloseViewer(canvasElement) },
 }
 export const LoadedPhone: Story = {
-  tags: ['critical'], args: { fixture: 'loaded', width: 'phone' },
+  tags: ['critical', 'merge-only'], args: { fixture: 'loaded', width: 'phone' },
   play: async ({ canvasElement }) => { await showLoaded(canvasElement); await openAndCloseViewer(canvasElement) },
 }
-export const Unauthorized: Story = { tags: ['critical'], args: { fixture: 'unauthorized' }, play: async ({ canvasElement }) => showUnauthorized(canvasElement) }
-export const UnauthorizedPhone: Story = { tags: ['critical'], args: { fixture: 'unauthorized', width: 'phone' }, play: async ({ canvasElement }) => showUnauthorized(canvasElement) }
-export const Failed: Story = { tags: ['critical'], args: { fixture: 'failed' }, play: async ({ canvasElement }) => showFailed(canvasElement) }
-export const FailedPhone: Story = { tags: ['critical'], args: { fixture: 'failed', width: 'phone' }, play: async ({ canvasElement }) => showFailed(canvasElement) }
-export const Unavailable: Story = { tags: ['critical'], args: { fixture: 'unavailable' }, play: async ({ canvasElement }) => showUnavailable(canvasElement) }
-export const UnavailablePhone: Story = { tags: ['critical'], args: { fixture: 'unavailable', width: 'phone' }, play: async ({ canvasElement }) => showUnavailable(canvasElement) }
-export const DecodeFailed: Story = { tags: ['critical'], args: { fixture: 'decode-failed' }, play: async ({ canvasElement }) => showDecodeFailed(canvasElement) }
-export const DecodeFailedPhone: Story = { tags: ['critical'], args: { fixture: 'decode-failed', width: 'phone' }, play: async ({ canvasElement }) => showDecodeFailed(canvasElement) }
+export const Unauthorized: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'unauthorized' }, play: async ({ canvasElement }) => showUnauthorized(canvasElement) }
+export const UnauthorizedPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'unauthorized', width: 'phone' }, play: async ({ canvasElement }) => showUnauthorized(canvasElement) }
+export const Failed: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'failed' }, play: async ({ canvasElement }) => showFailed(canvasElement) }
+export const FailedPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'failed', width: 'phone' }, play: async ({ canvasElement }) => showFailed(canvasElement) }
+export const Unavailable: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'unavailable' }, play: async ({ canvasElement }) => showUnavailable(canvasElement) }
+export const UnavailablePhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'unavailable', width: 'phone' }, play: async ({ canvasElement }) => showUnavailable(canvasElement) }
+export const DecodeFailed: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'decode-failed' }, play: async ({ canvasElement }) => showDecodeFailed(canvasElement) }
+export const DecodeFailedPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'decode-failed', width: 'phone' }, play: async ({ canvasElement }) => showDecodeFailed(canvasElement) }
 
 // Received rows: the same cards, reads and viewer on an assistant answer and on the paired body of incoming mail.
-export const AssistantImage: Story = { tags: ['critical'], args: { fixture: 'loaded', row: 'assistant' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
-export const AssistantImagePhone: Story = { tags: ['critical'], args: { fixture: 'loaded', row: 'assistant', width: 'phone' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
-export const MailboxImage: Story = { tags: ['critical'], args: { fixture: 'loaded', row: 'mailbox' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
-export const MailboxImagePhone: Story = { tags: ['critical'], args: { fixture: 'loaded', row: 'mailbox', width: 'phone' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
+export const AssistantImage: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', row: 'assistant' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
+export const AssistantImagePhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', row: 'assistant', width: 'phone' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
+export const MailboxImage: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', row: 'mailbox' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
+export const MailboxImagePhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', row: 'mailbox', width: 'phone' }, play: async ({ canvasElement }) => showReceived(canvasElement) }
 
 // Keyboard focus lifecycle over held reads. Each width presses Enter and Space between its stories.
-export const KeyboardLoaded: Story = { tags: ['critical'], args: { fixture: 'loaded', gated: true }, play: async ({ canvasElement }) => keyboardLoaded(canvasElement, 'Enter') }
-export const KeyboardLoadedPhone: Story = { tags: ['critical'], args: { fixture: 'loaded', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardLoaded(canvasElement, 'Space') }
-export const KeyboardFailed: Story = { tags: ['critical'], args: { fixture: 'failed', gated: true }, play: async ({ canvasElement }) => keyboardFailed(canvasElement, 'Enter', 'Space') }
-export const KeyboardFailedPhone: Story = { tags: ['critical'], args: { fixture: 'failed', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardFailed(canvasElement, 'Space', 'Enter') }
-export const KeyboardUnauthorized: Story = { tags: ['critical'], args: { fixture: 'unauthorized', gated: true }, play: async ({ canvasElement }) => keyboardUnauthorized(canvasElement, 'Space') }
-export const KeyboardUnauthorizedPhone: Story = { tags: ['critical'], args: { fixture: 'unauthorized', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardUnauthorized(canvasElement, 'Enter') }
-export const KeyboardNavigateAway: Story = { tags: ['critical'], args: { fixture: 'loaded', gated: true }, play: async ({ canvasElement }) => keyboardNavigateAway(canvasElement, 'Enter') }
-export const KeyboardNavigateAwayPhone: Story = { tags: ['critical'], args: { fixture: 'loaded', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardNavigateAway(canvasElement, 'Space') }
+export const KeyboardLoaded: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', gated: true }, play: async ({ canvasElement }) => keyboardLoaded(canvasElement, 'Enter') }
+export const KeyboardLoadedPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardLoaded(canvasElement, 'Space') }
+export const KeyboardFailed: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'failed', gated: true }, play: async ({ canvasElement }) => keyboardFailed(canvasElement, 'Enter', 'Space') }
+export const KeyboardFailedPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'failed', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardFailed(canvasElement, 'Space', 'Enter') }
+export const KeyboardUnauthorized: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'unauthorized', gated: true }, play: async ({ canvasElement }) => keyboardUnauthorized(canvasElement, 'Space') }
+export const KeyboardUnauthorizedPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'unauthorized', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardUnauthorized(canvasElement, 'Enter') }
+export const KeyboardNavigateAway: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', gated: true }, play: async ({ canvasElement }) => keyboardNavigateAway(canvasElement, 'Enter') }
+export const KeyboardNavigateAwayPhone: Story = { tags: ['critical', 'merge-only'], args: { fixture: 'loaded', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardNavigateAway(canvasElement, 'Space') }
 
 /**
  * The commit lane checks the complete attachment contract with one Storybook bootstrap, remounting a fresh viewer

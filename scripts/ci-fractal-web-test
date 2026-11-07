@@ -106,6 +106,15 @@ for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
             unexpected.append(path)
 assert not unexpected, f"incorrect web input classification: {unexpected}"
 
+# A new app story folder is owned automatically; unrelated app modules remain outside kit scope.
+new_folder_stories = [
+    "apps/fractal-web/src/new-feature/nested/Example.stories.tsx",
+    "apps/fractal-web/src/Example.stories.tsx",
+]
+assert detector_contract["kit_paths"](new_folder_stories) == new_folder_stories
+assert not detector_contract["kit_paths"](["apps/fractal-web/src/new-feature/nested/Example.tsx"])
+print("passed: new app story folders select kit lanes without enumerating files")
+
 # Static kit scope must cover every declared workspace dependency, including transitive ones.
 package_paths = subprocess.run(["git", "ls-files", "--", "package.json", "*/package.json"],
                                cwd=root, check=True, capture_output=True, text=True).stdout.splitlines()

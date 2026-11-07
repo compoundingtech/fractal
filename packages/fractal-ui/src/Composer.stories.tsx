@@ -572,15 +572,15 @@ const footerWidthBudget = (composerWidth: 320 | 360 | 451): Story => ({
     }, { timeout: 10_000 })
   },
 })
-export const FooterWidthBudgetNarrow: Story = { ...footerWidthBudget(320), tags: ['critical'] }
-export const FooterWidthBudgetNarrowLight: Story = { ...FooterWidthBudgetNarrow, args: { scheme: 'light', state: 'running', effort: 'supported' } }
-export const FooterWidthBudgetMedium: Story = { ...footerWidthBudget(360), tags: ['critical'] }
-export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium, args: { scheme: 'light', state: 'running', effort: 'supported' } }
-export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical'] }
-export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetNarrow: Story = { ...footerWidthBudget(320), tags: ['critical', 'both-widths'] }
+export const FooterWidthBudgetNarrowLight: Story = { ...FooterWidthBudgetNarrow, tags: ['critical', '!both-widths'], args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetMedium: Story = { ...footerWidthBudget(360), tags: ['critical', 'both-widths'] }
+export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium, tags: ['critical', '!both-widths'], args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical', 'both-widths'] }
+export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, tags: ['critical', '!both-widths'], args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
 /** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab (the pending shape pick). */
-export const LayoutShapes: Story = { tags: ['critical'],
+export const LayoutShapes: Story = { tags: ['critical', 'both-widths'],
   beforeEach: clearDrafts,
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.shapeGallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.shapeLane)}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
@@ -625,7 +625,7 @@ function LabelResize({ scheme }: { readonly scheme: Scheme }) {
     </EmbraceRuntimeProvider>
   </div></Surface>
 }
-export const KitLabelResize: Story = { tags: ['critical'],
+export const KitLabelResize: Story = { tags: ['critical', 'both-widths'],
   render: args => <LabelResize scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
     const form = canvasElement.querySelector('form')!

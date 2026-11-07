@@ -180,9 +180,9 @@ const meta = {
 export default meta
 
 type Story = StoryObj<Args>
-export const Served: Story = { tags: ['critical'], name: 'Served · rows, menu and expand', play: servedPlay }
+export const Served: Story = { tags: ['critical', 'both-widths'], name: 'Served · rows, menu and expand', play: servedPlay }
 /** A sidebar shorter than the feed: the list is its own bounded scroll region inside a `minHeight: 0` panel. */
-export const BoundedScroll: Story = { tags: ['critical'], args: { bounded: true }, name: 'Bounded · scrolls in a short sidebar', play: boundedPlay }
+export const BoundedScroll: Story = { tags: ['critical', 'both-widths'], args: { bounded: true }, name: 'Bounded · scrolls in a short sidebar', play: boundedPlay }
 
 export const Empty: Story = { args: { attention: 'none' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)

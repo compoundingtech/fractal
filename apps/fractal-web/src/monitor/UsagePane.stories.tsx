@@ -41,6 +41,7 @@ type Story = StoryObj<typeof meta>
 const pane = (canvas: HTMLElement, read: UsageRead) => within(canvas.querySelector<HTMLElement>(`[data-usage-read="${read}"]`)!)
 
 export const AllStates: Story = {
+  tags: ['both-widths'],
   args: { reads: usageReads },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
@@ -63,6 +64,7 @@ export const AllStates: Story = {
 }
 
 export const Populated: Story = {
+  tags: ['both-widths'],
   play: async ({ canvasElement }) => {
     const usage = within(canvasElement)
     const body = await usage.findByTestId('usage-pane')
