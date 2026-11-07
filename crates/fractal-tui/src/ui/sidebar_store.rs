@@ -1,6 +1,6 @@
 //! Unwired host executor. Activation must serialize events per scope and supply a client
 //! authenticated as the staged actor. Endpoint identities must be credential-free.
-use fractal_sidebar::{client, edits::{Edits, Effect, Event}, paging::Scope};
+use fractal_sidebar::{client, edits::{Edits, Effect, Event, Persistence}, paging::Scope};
 use fractal_client::{ActionRequest, ActionResult, ClientError, Envelope};
 use std::{collections::VecDeque, fs, io::{self, Write}, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
@@ -76,7 +76,11 @@ impl Store {
             };
             if let Err(error) = result {
                 self.blocked = true;
-                self.edits.reduce(Event::StorageFailed);
+                if let Some(request) = self.edits.request() {
+                    let identity = request.identity.clone();
+                    let phase = match effect { Effect::PersistPending => Persistence::Pending, Effect::PersistCompletion => Persistence::Completion, Effect::PersistRemoval => Persistence::Removal, _ => unreachable!("only persistence effects fail storage") };
+                    self.edits.reduce(Event::StorageFailed { identity, phase });
+                }
                 return Err(error);
             }
             let next = match effect {
