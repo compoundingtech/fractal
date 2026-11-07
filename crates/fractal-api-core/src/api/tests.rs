@@ -13464,6 +13464,10 @@ async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() 
     roster_fixture_append(&owner.store, "exec/example-summary", "runtime.observed", json!({"status":"running", "incarnation_id":"exec-incarnation"}));
     let (_, host) = get_request(app.clone(), "/v1/status?subject=exec/example-summary&summary=true").await;
     assert!(!host["subjects"][0]["claims"].as_array().unwrap().is_empty(), "{host}");
+    // A read by owner keeps its filter: this seat belongs to no run, so it is left out.
+    let (status, owned) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true&owner_run=mission-run/example-other")).await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    assert_eq!(owned["subjects"], json!([]), "{owned}");
 }
 
 #[tokio::test]
