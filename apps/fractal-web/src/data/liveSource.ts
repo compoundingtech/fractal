@@ -45,6 +45,7 @@ import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
 import { readAuthorization } from './source.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
+import { browserPtySocket, browserSocket } from './sdk-browser/trace.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -152,6 +153,7 @@ export const liveSource = ({
   readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider> | undefined
 }): LiveSource => {
   const { baseUrl } = options
+  const clientName = options.client
   const origin = typeof location === 'undefined' ? new URL(baseUrl).origin : location.origin
   const transportFetch = options.fetch ?? globalThis.fetch.bind(globalThis)
   const fetch = instrumentFetch({
@@ -197,9 +199,10 @@ export const liveSource = ({
   setDebug('Wf.freshnessConsumers', 0)
   const client = new FractalClient({
     baseUrl,
+    ...(options.client === undefined ? {} : { client: options.client }),
     // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
-    ...(options.socket === undefined ? {} : { socket: options.socket }),
+    socket: options.socket ?? browserSocket,
   })
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
@@ -211,16 +214,17 @@ export const liveSource = ({
   const resources = gatewayResources({
     baseUrl,
     fetchImpl: fetch,
+    ...(options.client === undefined ? {} : { client: options.client }),
   })
   const subjectReads = gatewaySubjectReads({
-    options: { baseUrl, fetchImpl: fetch },
+    options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) },
     resource: subjectReaderFromAtom({ feed: resources.byId, registry }),
     discovery: client,
     registry,
   })
-  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const followInterests = new Map<string, () => boolean>()
-  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -1294,13 +1298,21 @@ export const liveSource = ({
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
         open: (options) => loadPty.pipe(
-          Effect.flatMap(({ openPtySession }) => openPtySession({ ...options, baseUrl, fetch })),
+          Effect.flatMap(({ openPtySession }) => openPtySession({
+            ...options, baseUrl,
+            fetch: (input, init) => {
+              const headers = new Headers(init?.headers)
+              if (clientName !== undefined) headers.set('x-st3-client', clientName)
+              return fetch(input, { ...init, headers })
+            },
+            socket: browserPtySocket(clientName),
+          })),
         ),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.
-        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl, ...(options.client === undefined ? {} : { client: options.client }) }),
         transport: fetch,
         snapshot: async () => {
           const current = await messageSnapshot()
