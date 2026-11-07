@@ -36,7 +36,9 @@ export interface AgentDetailsPanelProps {
   readonly variants?: DetailsVariants
   /** The composition's subagent-activity feed; defaults to the build-time extension. Fixed for the panel's lifetime. */
   readonly detailsSupplement?: UseDetailsSupplement
-  /** Reports each user tab selection; the panel still owns its selection, starting on Details at every mount. */
+  /** Where each mount starts, so a host can carry the selection across agents; Details without one. */
+  readonly initialView?: InspectorView
+  /** Reports each user tab selection; the panel still owns its selection after mounting. */
   readonly onSelectedViewChange?: (view: InspectorView) => void
 }
 
@@ -44,9 +46,9 @@ export interface AgentDetailsPanelProps {
  * One fixed row: Changes and Details tabs, Details' status/section controls, then the dock's close.
  * In the phone sheet (`fill`) the sheet header owns the only close. Hidden tabs unmount, releasing reader demand.
  */
-export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement, onSelectedViewChange }: AgentDetailsPanelProps) {
+export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement, initialView = 'details', onSelectedViewChange }: AgentDetailsPanelProps) {
   const narrow = React.useContext(NarrowLayoutContext)
-  const [selected, setSelected] = React.useState<InspectorView>('details')
+  const [selected, setSelected] = React.useState<InspectorView>(initialView)
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
   // Details portals its sync status and Visible sections into this row, as it does into a kit pane header.
   const [accessoryHost, setAccessoryHost] = React.useState<HTMLDivElement | null>(null)

@@ -30,9 +30,7 @@ export const Embed = ({ fragment, scheme = 'dark' }: { readonly fragment: EmbedF
   const [registry] = React.useState(() => {
     const value = AtomRegistry.make()
     value.set(persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' }), scheme)
-    value.set(persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' }), embedAgent)
     value.set(persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false }), false)
-    value.set(persistedAtom({ key: `round2.panes.${embedAgent}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }), [])
     return value
   })
   React.useEffect(() => () => registry.dispose(), [registry])

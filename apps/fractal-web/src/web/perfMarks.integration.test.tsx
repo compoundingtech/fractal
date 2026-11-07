@@ -13,6 +13,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+
 // This is a warm selection/paint test; lazy-loading behavior has its own integration suite.
 import './ConversationPane.tsx'
 import { cancelMeasure, markStart, workflows } from './perfMarks.ts'
@@ -31,6 +32,8 @@ it.each(['switch completion', 'switch abandonment', 'direct-open abandonment'] a
   let id = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++id, callback); return id })
   vi.stubGlobal('cancelAnimationFrame', (frame: number) => frames.delete(frame))
+  // React Aria uses CSS.escape for generated collection keys; jsdom does not supply it.
+  vi.stubGlobal('CSS', { escape: (value: string) => value })
   window.localStorage.clear()
   window.history.replaceState(null, '', direct ? '/w/agent/second' : '/w/agent/first')
   timing.clearMeasures('fractal:switch_to_tail')
@@ -76,8 +79,7 @@ it.each(['switch completion', 'switch abandonment', 'direct-open abandonment'] a
       expect(timing.getEntriesByName('fractal:open_transcript:start')).toHaveLength(0)
       // Data arrives while the transcript is abandoned. Returning is not a new start.
       await act(async () => registry.set(secondConversation, observed({ value: { items: [], hasOlder: false, observation: { empty: true } } })))
-      const thread = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Thread')!
-      await act(async () => thread.click())
+      await act(async () => { window.history.pushState(null, '', '/w/agent/second'); window.dispatchEvent(new PopStateEvent('popstate')) })
     }
     for (let frame = 0; frame < 5; frame++) await flushPaint()
     expect(timing.getEntriesByName('fractal:switch_to_tail', 'measure')).toHaveLength(abandoned ? 0 : 1)

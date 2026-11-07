@@ -25,7 +25,6 @@ const flatCommand: fc.Arbitrary<Command> = fc.oneof(
   fc.record({ _tag: fc.constant('Close' as const), id: ids }),
   fc.constant({ _tag: 'ReopenClosed' as const }),
   fc.record({ _tag: fc.constant('SetView' as const), id: ids, view: fc.record({ scrollTop: fc.integer({ min: 0, max: 1000 }), terminal: fc.boolean() }) }),
-  fc.record({ _tag: fc.constant('SetPanel' as const), panel: fc.record({ open: fc.boolean() }) }),
 )
 const received: fc.Arbitrary<ReceivedLayout> = fc.letrec<{ node: ReceivedLayout }>(tie => ({
   node: fc.oneof(
@@ -39,6 +38,8 @@ const command: fc.Arbitrary<Command> = fc.oneof(
   { arbitrary: fc.record({ _tag: fc.constant('Open' as const), pane: fc.constantFrom(...panes), at: drop }), weight: 2 },
   { arbitrary: fc.record({ _tag: fc.constant('Move' as const), id: ids, to: drop }), weight: 3 },
   { arbitrary: fc.record({ _tag: fc.constant('FocusGroup' as const), group: groupIds }), weight: 1 },
+  { arbitrary: fc.record({ _tag: fc.constant('CloseOthers' as const), id: ids }), weight: 1 },
+  { arbitrary: fc.record({ _tag: fc.constant('Replace' as const), id: ids, pane: fc.constantFrom(...panes) }), weight: 2 },
   { arbitrary: fc.record({ _tag: fc.constant('SetRatio' as const), node: fc.integer({ min: 0, max: 4 }), ratio: fc.double({ min: -1, max: 2, noNaN: true }) }), weight: 1 },
   { arbitrary: fc.record({ _tag: fc.constant('Receive' as const), layout: received }), weight: 1 },
 )
@@ -147,7 +148,6 @@ describe('workspace transitions', () => {
       { _tag: 'FocusGroup', group: 'main' },
       { _tag: 'SetRatio', node: 0, ratio: 0.5 },
       { _tag: 'SetView', id: 'missing', view: { scrollTop: 1 } },
-      { _tag: 'SetPanel', panel: { open: false } },
       { _tag: 'Receive', layout: { tabs: [{ pane: 'agent:agent/a' }] } },
     ] satisfies readonly Command[]) expect(transition(state, step, context), step._tag).toBe(state)
   })
@@ -185,6 +185,34 @@ describe('workspace transitions', () => {
     const state = run(open('agent:agent/a'), [{ _tag: 'Open', pane: 'agent:agent/b', activate: false }], fresh())
     expect(paneList(state)).toEqual(['agent:agent/a', 'agent:agent/b'])
     expect(activeTab(state)?.pane).toBe('agent:agent/a')
+  })
+})
+
+describe('closing others and replacing', () => {
+  it('closes the rest of the group, remembers them, and shows the kept tab', () => {
+    let state = open('agent:agent/a', 'agent:agent/b', 'list:home')
+    state = run(state, [{ _tag: 'CloseOthers', id: tabOf(state, 'agent:agent/b').id }])
+    expect(paneList(state)).toEqual(['agent:agent/b'])
+    expect(activeTab(state)?.pane).toBe('agent:agent/b')
+    expect(state.closed).toHaveLength(2)
+  })
+
+  it('gives a tab to the next alert in place, leaving nothing to reopen', () => {
+    let state = open('agent:agent/a', 'home:one', 'list:home')
+    state = run(state, [{ _tag: 'Open', pane: 'home:one' }, { _tag: 'SetView', id: tabOf(state, 'home:one').id, view: { scrollTop: 5 } }], fresh())
+    const replaced = tabOf(state, 'home:one').id
+    state = run(state, [{ _tag: 'Replace', id: replaced, pane: 'home:two' }], fresh())
+    expect(paneList(state)).toEqual(['agent:agent/a', 'home:two', 'list:home'])
+    expect(activeTab(state)?.pane).toBe('home:two')
+    expect(state.closed).toEqual([])
+    expect(state.views[replaced]).toBeUndefined()
+  })
+
+  it('shows the subject\'s own tab when it has one, and the replaced tab goes', () => {
+    let state = open('home:one', 'home:two')
+    state = run(state, [{ _tag: 'Replace', id: tabOf(state, 'home:two').id, pane: 'home:one' }], fresh())
+    expect(paneList(state)).toEqual(['home:one'])
+    expect(state.closed).toEqual([])
   })
 })
 
@@ -227,16 +255,6 @@ describe('one tab per agent', () => {
     state = run(state, [{ _tag: 'SetView', id: tab.id, view: { terminal: false } }])
     expect(showsTerminal(tab, state.views[tab.id])).toBe(false)
     expect(glassBody({ layout: state.layout, name: 'Web' }).layout).toEqual({ tabs: [{ pane: 'terminal:agent/a' }] })
-  })
-})
-
-describe('the right sidebar', () => {
-  it('stays as it is across every tab change', () => {
-    let state = open('agent:agent/a', 'agent:agent/b')
-    state = run(state, [{ _tag: 'SetPanel', panel: { open: true, tab: 'changes', width: 420 } }])
-    const panel = state.panel
-    state = run(state, [{ _tag: 'Open', pane: 'agent:agent/a' }, { _tag: 'Cycle', by: 1 }, { _tag: 'Open', pane: 'list:home' }, { _tag: 'Close', id: tabOf(state, 'agent:agent/a').id }], fresh())
-    expect(state.panel).toBe(panel)
   })
 })
 

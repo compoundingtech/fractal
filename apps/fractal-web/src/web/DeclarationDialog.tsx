@@ -36,6 +36,16 @@ export const DeclarationDialog = ({ subject, isOpen, onOpenChange }: {
     </Aria.ModalOverlay>
   </ThemePortal>
 
+const loadDeclarationPane = deferredLoader<{ readonly subject: string }>(() => import('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx').then(module => ({
+  default: ({ subject }: { readonly subject: string }) => <DeclarationContents subject={subject} Panel={module.DeclarationPanel} close={null} />,
+})))
+
+/** The same declaration as a tab's whole content. */
+export const DeclarationPane = ({ subject }: { readonly subject: string }) =>
+  <section aria-label={`Declaration of ${subject}`} data-testid="declaration-pane" {...stylex.props(styles.pane)}>
+    <DeferredSurfaceBoundary load={loadDeclarationPane} surfaceProps={{ subject }} pending={null} fallback={<p role="alert">This declaration view could not load.</p>} />
+  </section>
+
 const DeclarationContents = ({ subject, close, Panel }: DeclarationContentsProps) => {
   const parsed = declarationSubject(subject)
   return parsed._tag === 'Agent' ? <AgentDeclaration subject={subject} close={close} Panel={Panel} />
@@ -57,5 +67,6 @@ const styles = stylex.create({
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', justifyContent: 'flex-end', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { width: 736, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize, outline: 'none' },
   dialog: { height: '100%', outline: 'none' },
+  pane: { flexGrow: 1, minHeight: 0, minWidth: 0, overflow: 'auto' },
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
 })

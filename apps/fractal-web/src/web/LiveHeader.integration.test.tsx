@@ -191,20 +191,27 @@ describe('live header parity', () => {
     expect(panel.textContent).not.toContain('private diagnostic')
     expect(within(panel).queryByRole('button', { name: 'Refresh resources' })).toBeNull()
   })
-  it('opens the agent canonical KDL from the header in a labelled dialog that Escape closes', async () => {
+  const declarationPane = async () => {
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="declaration-pane"] h2')).not.toBeNull())
+    return document.querySelector<HTMLElement>('[data-testid="declaration-pane"]')!
+  }
+  const backToAgent = async () => {
+    await act(async () => { window.history.pushState(null, '', '/w/agent/example'); window.dispatchEvent(new PopStateEvent('popstate')) })
+  }
+  it('opens the agent canonical KDL from the header as a new tab, and focuses that tab the next time', async () => {
     await click('View KDL')
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"][data-testid="declaration-dialog"]')
-    expect(dialog).not.toBeNull()
-    const heading = dialog!.querySelector('h2')
-    expect(heading?.textContent).toBe(agent.id)
-    expect(dialog!.getAttribute('aria-labelledby')).toBe(heading?.id)
-    expect([...dialog!.querySelectorAll('[data-line] code')].map(line => line.textContent).join('\n')).toBe(kdl.trimEnd())
-    expect(dialog!.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('KDL')
-    expect(dialog!.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('revision rev-1')
-    // React Aria defers virtual-click dialog focus until the next animation frame.
-    await vi.waitFor(() => expect(dialog!.contains(document.activeElement)).toBe(true))
-    await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    const pane = await declarationPane()
+    expect(pane.querySelector('h2')?.textContent).toBe(agent.id)
+    expect([...pane.querySelectorAll('[data-line] code')].map(line => line.textContent).join('\n')).toBe(kdl.trimEnd())
+    expect(pane.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('KDL')
+    expect(pane.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('revision rev-1')
     expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
+    expect(window.location.pathname).toBe(`/w/declaration/${agent.id}`)
+    const tabs = () => document.querySelectorAll('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]').length
+    expect(tabs()).toBe(2)
+    await backToAgent()
+    await click('View KDL')
+    expect(tabs()).toBe(2)
   })
   it('keeps secondary actions functional in the constrained-header overflow menu', async () => {
     const choose = async (label: string) => {
@@ -214,8 +221,8 @@ describe('live header parity', () => {
       await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
     }
     await choose('View KDL')
-    expect(document.querySelector('[data-testid="declaration-dialog"] h2')?.textContent).toBe(agent.id)
-    await click('Close declaration')
+    expect((await declarationPane()).querySelector('h2')?.textContent).toBe(agent.id)
+    await backToAgent()
     await choose('Resources')
     expect(document.querySelector('aside[aria-label="Agent resources"]')?.textContent).toContain('Observed project notes')
     await click('Close resources')
@@ -224,11 +231,9 @@ describe('live header parity', () => {
     await click('Actions for Example Agent')
     const item = await within(document.body).findByRole('menuitem', { name: 'View KDL' })
     await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    const dialog = document.querySelector('[role="dialog"][data-testid="declaration-dialog"]')
-    expect(dialog?.querySelector('h2')?.textContent).toBe(agent.id)
-    expect(dialog?.textContent).toContain('GH_TOKEN')
-    await click('Close declaration')
-    expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
+    const pane = await declarationPane()
+    expect(pane.querySelector('h2')?.textContent).toBe(agent.id)
+    expect(pane.textContent).toContain('GH_TOKEN')
   })
 })
 

@@ -8,6 +8,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as PaneModule from './ConversationPane.tsx'
 import type * as WorkspaceModule from './LiveAgentWorkspace.tsx'
+import type * as BodyModule from '../workspace/WorkspaceBody.tsx'
 import type * as FallbackModule from './ConversationPaneFallback.tsx'
 import type * as LazyChunkModule from '@fractal/ui/lazy-chunk'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -72,6 +73,9 @@ vi.mock('../data/react.tsx', () => ({
 }))
 
 let workspace: typeof WorkspaceModule
+let body: typeof BodyModule
+/** The body hosting one agent's tab, on the face asked for. */
+const bodyFor = (agent: string, terminal = false, others: readonly string[] = []) => <body.WorkspaceBody tabs={[agent, ...others].map(id => ({ id, pane: `agent:${id}` }))} active={agent} tiers={new Map([[agent, 'active' as const], ...others.map(id => [id, 'mounted' as const] as const)])} views={terminal ? { [agent]: { terminal: true } } : {}} names={new Map([agent, ...others].map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} empty={null} />
 let root: Root
 let container: HTMLDivElement
 let resolveImport: () => void
@@ -162,6 +166,7 @@ beforeEach(async () => {
     return { AlertsTab: () => <div data-alerts-loaded="">Inline answers</div> }
   })
   workspace = await import('./LiveAgentWorkspace.tsx')
+  body = await import('../workspace/WorkspaceBody.tsx')
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -283,6 +288,7 @@ describe('terminal import intent', () => {
     const idle: (() => void)[] = []
     vi.stubGlobal('requestIdleCallback', (callback: () => void) => { idle.push(callback); return 1 })
     vi.stubGlobal('cancelIdleCallback', vi.fn())
+    window.history.replaceState(null, '', '/w/agent/example')
     terminalRoster()
     await renderShell()
     expect(terminalRequested).not.toHaveBeenCalled()
@@ -290,7 +296,8 @@ describe('terminal import intent', () => {
     await paintShellFrame()
     await act(async () => { for (const task of paintTasks.splice(0)) task() })
     expect(terminalRequested).not.toHaveBeenCalled()
-    expect(idle).toHaveLength(2)
+    // The changelog, the terminal, and the workspace's warm budget.
+    expect(idle).toHaveLength(3)
     await act(async () => { for (const task of idle) task() })
     expect(changelogPrefetch).toHaveBeenCalledTimes(1)
     expect(terminalRequested).toHaveBeenCalledTimes(1)
@@ -308,7 +315,7 @@ describe('terminal import intent', () => {
     expect(terminalRequested).toHaveBeenCalledTimes(1)
   })
   it('renders a loaded terminal in the reopen commit without a lazy fallback', async () => {
-    const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
+    const show = bodyFor('agent/example', true)
     await act(async () => root.render(show))
     await act(async () => resolveTerminal())
     await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-terminal-loaded]')).not.toBeNull()) })
@@ -322,7 +329,7 @@ describe('terminal import intent', () => {
     expect(terminalRequested).toHaveBeenCalledTimes(1)
   })
   it('retries a rejected terminal chunk in the same document with a fresh lazy identity', async () => {
-    const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
+    const show = bodyFor('agent/example', true)
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       await act(async () => root.render(show))
@@ -341,7 +348,7 @@ describe('terminal import intent', () => {
     } finally { errors.mockRestore() }
   })
   it('offers Reload and retry only after the same-document retry also rejects', async () => {
-    const show = <workspace.WorkspaceBody current="agent/example" rosterRefs={[]} view={{ _tag: 'Terminal', ref: 'terminal/example' }} agentName="Example" onOpenTool={() => {}} />
+    const show = bodyFor('agent/example', true)
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       await act(async () => root.render(show))
@@ -443,7 +450,7 @@ describe('conversation import boundary', () => {
   })
 
   it('requests an initially selected thread immediately and suspends only its retained pane', async () => {
-    const show = (current: string) => <workspace.WorkspaceBody current={current} rosterRefs={['agent/a', 'agent/b']} view={{ _tag: 'Thread' }} agentName={current} onOpenTool={() => {}} />
+    const show = (current: string) => bodyFor(current, false, ['agent/a', 'agent/b'].filter(ref => ref !== current))
     await act(async () => root.render(show('agent/a')))
     // No frame or post-paint task has run: a selected thread cannot wait a second frame.
     expect(requested).toHaveBeenCalledTimes(1)
@@ -495,8 +502,9 @@ describe('conversation import boundary', () => {
     await paintShellFrame()
     // rAF precedes paint; module work must wait for the posted post-paint task.
     expect(requested).not.toHaveBeenCalled()
-    expect(paintTasks).toHaveLength(1)
-    await act(async () => paintTasks.shift()?.())
+    // The prefetch, and the workspace's warm budget.
+    expect(paintTasks).toHaveLength(2)
+    await act(async () => { for (const task of paintTasks.splice(0)) task() })
     expect(requested).toHaveBeenCalledTimes(1)
 
     await act(async () => {
@@ -581,7 +589,7 @@ describe('conversation import boundary', () => {
   })
 
   it('retries a rejected pane in the same document, then offers Reload and retry after a second rejection', async () => {
-    const show = <workspace.WorkspaceBody current="agent/a" rosterRefs={['agent/a']} view={{ _tag: 'Thread' }} agentName="agent/a" onOpenTool={() => {}} />
+    const show = bodyFor('agent/a')
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       await act(async () => root.render(show))

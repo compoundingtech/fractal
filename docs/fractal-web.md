@@ -704,21 +704,50 @@ pnpm --dir apps/fractal-web exec vitest run src/data/projections.unit.test.ts
 pnpm exec tsc --noEmit -p apps/fractal-web
 ```
 
+## Fractal web workspace tabs
+
+`apps/fractal-web/src/workspace/` owns what is open. A tab's identity is the Fractal TUI's pane
+key (`crates/fractal-tui/src/ui/pane.rs`); this client adds no keys of its own, and a key it
+cannot render stays as a tab so it still reaches other clients. The state is the TUI's glass
+shape, a tree of splits over groups of tabs (`layout.rs`), driven by a pure reducer
+(`model.ts`) inside an Effect store (`store.ts`) that persists to this browser's storage.
+A second window's change is adopted wholesale, as the TUI's `glasses_from_graph` does, so a tab
+opened here in the moment before that window's write arrives is discarded. Splits and dragging
+are in the reducer; the strip renders one group until their UI lands.
+
+Every surface opens through one verb, `open(ref)` from `openable.ts`, and `useOpenable(ref)` gives
+a surface click, Cmd-click for behind, Alt+Enter and Alt+Shift+Enter for a split, and the drag
+payload together. The kit receives those as props and never learns a route or the store.
+`registry.ts` maps a subject to its kind's data policy and view. An unknown ref opens a generic
+resource tab, and a contributed kind may claim such refs by declaring them; overlapping claims
+fail when the registry is built, and a contribution cannot claim a core subject.
+
+The URL names the active subject and nothing else. Arriving at a URL opens or focuses its
+subject, which is the one rule for Back after a close: Back reopens the closed tab. `?open=` links
+from before tabs still parse. The right panel's open state, width and active tab are one app-wide
+setting (`web/rightPanel.ts`, outside the per-gateway tab document), so they stay as they are across
+tabs and windows. A phone has the same flat strip, with the panel
+as a sheet that closes on a switch. An answered alert gives its tab to the next alert, and closes
+it when none is left. Right-click on a tab, or Alt+Shift+W, closes the others.
+
+Hidden tabs keep their DOM within a budget (`resources.ts`) but hold no feed demand: a visible
+follow is never evicted, so a hidden one could pin a gateway's only slot.
+
 ## Fractal web terminal attachment
 
 The header's control swaps the main pane between the agent's conversation and its terminal,
 each replacing the other: **Show terminal** with a terminal glyph, then **Show conversation**
 with a message glyph and the active fill. The name carries the state, so the control has no
-`aria-pressed`. Terminal mode hides the workspace tabs; a terminal is never a tab. The URL
-(`?open=terminal/<ref>:detail`) restores the view on reload, and this page also remembers per
-agent, in memory, which agents were left on their terminal. Opening an agent from an alert or
-a mission always shows its conversation.
+`aria-pressed`. An agent has one tab, and the terminal is that tab's other face: the tab
+remembers which face it shows, across reloads, however the agent is reached again. A link to
+`/w/terminal/<ref>` or `?open=terminal/<ref>:detail` opens the agent's tab on its terminal; the
+URL then names the agent.
 
-The conversation is retained behind the terminal like any hidden pane. The selected agent's
-terminal stays mounted and connected once shown: while hidden it has `content-visibility:
-hidden` and `inert`, accepts no input, releases its projected follow and paints no new frames,
-while its raw session keeps feeding the emulator so the reveal needs no reattach. Leaving the
-agent closes it. A wide window moves focus to the shown view on an explicit switch: the
+The conversation is retained behind the terminal like any hidden pane. A tab's terminal stays
+mounted and connected once shown: while hidden it has `content-visibility: hidden` and `inert`,
+accepts no input, releases its projected follow and paints no new frames, while its raw session
+keeps feeding the emulator so the reveal needs no reattach. Leaving the tab closes the connection
+and keeps the grid. A wide window moves focus to the shown view on an explicit switch: the
 composer, or the terminal pane rather than its grid, because focusing a live grid arms typing.
 A phone keeps focus on the toggle, so a switch raises no keyboard.
 

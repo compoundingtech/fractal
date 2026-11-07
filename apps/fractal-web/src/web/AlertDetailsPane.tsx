@@ -43,7 +43,9 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
   const advance = () => {
     const at = open.findIndex((each) => each.id === id)
     const next = open[at + 1] ?? open[at - 1]
-    if (next !== undefined) onOpenAlert(next.id)
+    // With nothing left to advance to, an answered alert's own view is done.
+    if (next === undefined) onClose()
+    else onOpenAlert(next.id)
   }
   // Opening a row brings the keyboard here; a draft being written anywhere else keeps it.
   React.useEffect(() => {

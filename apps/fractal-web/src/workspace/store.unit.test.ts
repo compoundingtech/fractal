@@ -30,7 +30,7 @@ const sharedDocument = () => {
 const panes = (layout: Layout) => tabsOf(layout).map(tab => tab.pane)
 
 describe('workspace store', () => {
-  it('survives a reload: splits, each group\'s tab, focus, view state and the panel', () => {
+  it('survives a reload: splits, each group\'s tab, focus, view state', () => {
     let saved: string | undefined
     const layer = Layer.succeed(WorkspaceStorage, WorkspaceStorage.of({
       load: Effect.sync(() => saved),
@@ -43,7 +43,6 @@ describe('workspace store', () => {
     const home = activeTab(first.getState())!
     first.dispatch({ _tag: 'SetView', id: home.id, view: { scrollTop: 120 } })
     first.dispatch({ _tag: 'Move', id: home.id, to: { _tag: 'Edge', group: first.getState().focus, side: 'right', first: false } })
-    first.dispatch({ _tag: 'SetPanel', panel: { open: true, tab: 'changes' } })
     first.flush()
     first.dispose()
     const second = createWorkspaceStore(layer, { debounceMs: 1 })
@@ -51,7 +50,6 @@ describe('workspace store', () => {
     expect(groupsOf(state.layout).map(group => group.tabs.map(tab => tab.pane))).toEqual([['agent:agent/a'], ['list:home']])
     expect(activeTab(state)?.pane).toBe('list:home')
     expect(state.views[activeTab(state)!.id]?.scrollTop).toBe(120)
-    expect(state.panel).toEqual({ open: true, tab: 'changes' })
     second.dispose()
   })
 
@@ -85,7 +83,7 @@ describe('workspace store', () => {
     const tab = { id: 'x', pane: 'list:home' }
     const document = JSON.stringify({
       layout: { split: 'right', children: [{ id: 'left', tabs: [tab], active: 'gone' }, { id: 'right', tabs: [{ id: 'y', pane: 'list:home' }], active: 'y' }] },
-      focus: 'gone', mru: ['gone'], closed: [], views: { gone: {} }, panel: { open: false, tab: 'details' },
+      focus: 'gone', mru: ['gone'], closed: [], views: { gone: {} },
     })
     const store = createWorkspaceStore(memoryStorage(document))
     const state = store.getState()

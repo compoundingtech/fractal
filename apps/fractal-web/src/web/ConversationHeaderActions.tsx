@@ -45,7 +45,8 @@ export const retainedResourceAtoms = (source: DataSource): ResourceAtoms => {
 }
 
 /** Conversation controls stay in the responsive header; the workspace supplies the desktop dock. */
-export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
+export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock, onViewDeclaration }: {
+  readonly onViewDeclaration?: () => void
   readonly agentRef: string
   readonly ux?: UxTelemetry
   readonly resourcesDock?: { readonly host: HTMLElement | null; readonly open: boolean; readonly onOpenChange: (open: boolean) => void }
@@ -62,6 +63,8 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
   const [standaloneResourcesOpen, setStandaloneResourcesOpen] = React.useState(false)
   const resourcesOpen = resourcesDock?.open ?? standaloneResourcesOpen
   const [declarationOpen, setDeclarationOpen] = React.useState(false)
+  // A workspace opens it as a tab; on its own, this header shows the sheet.
+  const viewDeclaration = onViewDeclaration ?? (() => setDeclarationOpen(true))
   const [syncDetailsOpen, setSyncDetailsOpen] = React.useState(false)
   const conversation = useConversation(agentRef)
   const sync = useConversationSync(agentRef)
@@ -106,7 +109,7 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
     {resourcesDock === undefined ? panel : resourcesDock.host === null ? null : <RegisteredPortal container={resourcesDock.host}>{panel}</RegisteredPortal>}
     <span {...stylex.props(styles.secondary, narrow && styles.secondaryHidden)}>
       <Tooltip label="View KDL">
-        <Aria.Button aria-label="View KDL" onPress={() => setDeclarationOpen(true)} {...stylex.props(styles.button, styles.declarationButton)}>
+        <Aria.Button aria-label="View KDL" onPress={viewDeclaration} {...stylex.props(styles.button, styles.declarationButton)}>
           <span {...stylex.props(styles.declarationIcon)}><Icon name="checklist" /></span>
           <span {...stylex.props(styles.declarationLabel)}>View KDL</span>
         </Aria.Button>
@@ -124,7 +127,7 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
     <Aria.MenuTrigger>
       <ChromeControl icon="gear" label="Conversation menu" />
       <Aria.Popover {...stylex.props(styles.popover)}>
-        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true); else if (key === 'sync-details') setSyncDetailsOpen(true) }} {...stylex.props(styles.menu)}>
+        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') viewDeclaration(); else if (key === 'sync-details') setSyncDetailsOpen(true) }} {...stylex.props(styles.menu)}>
           <Aria.MenuSection selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))}>
             <Aria.MenuItem id="system" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Show all system events</Aria.MenuItem>
           </Aria.MenuSection>

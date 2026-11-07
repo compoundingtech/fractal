@@ -34,6 +34,8 @@ export interface EditorTabItem {
   /** Gateway harness id, drawn as its brand mark after `detail`. */
   readonly harness?: string
   readonly icon?: ReactNode
+  /** Presentation identity for `data-tab-kind`, derived from the subject and never from the title. */
+  readonly kind?: string
   /** Unsaved local state (e.g. a composer draft); replaces the close glyph with a dot. */
   readonly dirty?: boolean
   /** `live`: following a working subject; `unavailable`: stale or absent (dimmed). */
@@ -69,6 +71,10 @@ export interface EditorTabsProps {
   readonly actions?: ReactNode
   /** The active editor, rendered as the RAC `TabPanel`. */
   readonly children: ReactNode
+  /** One panel across activations: its children keep their identity and show the active tab themselves. */
+  readonly stablePanel?: boolean
+  /** 44px targets for a coarse pointer. */
+  readonly touch?: boolean
 }
 
 const styles = stylex.create({
@@ -115,6 +121,9 @@ const styles = stylex.create({
     outlineStyle: 'none',
   },
   listCompact: { alignItems: 'center', gap: '2px' },
+  stripTouch: { height: '2.75rem' },
+  tabTouch: { height: '2.5rem', flexShrink: 0 },
+  trailingTouch: { width: '1.75rem', height: '1.75rem' },
   listVertical: {
     flexDirection: 'column',
     overflowX: 'hidden',
@@ -125,6 +134,7 @@ const styles = stylex.create({
     gridRow: 2,
     maxHeight: '140px',
   },
+  dropHost: { display: 'flex', flexGrow: 1, minWidth: 0, gridColumn: '1 / -1' },
   listDropTarget: { backgroundColor: tokens['--ds-gray-alpha-100'] },
   tab: {
     position: 'relative',
@@ -366,6 +376,8 @@ export const EditorTabs = ({
   onMove,
   actions,
   children,
+  stablePanel = false,
+  touch = false,
 }: EditorTabsProps) => {
   const list = useRef<HTMLDivElement>(null)
   const [drop, setDrop] = useState<{ readonly index: number; readonly offset: number } | null>(null)
@@ -375,9 +387,10 @@ export const EditorTabs = ({
   // Keep the active tab visible when it changes (keyboard cycling, quick-open, overflow menu).
   useEffect(() => {
     if (activeId === null) return
-    list.current
-      ?.querySelector(`[data-tab-id="${CSS.escape(activeId)}"]`)
-      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const active = [...(list.current?.querySelectorAll('[data-tab-id]') ?? [])].find(
+      (node) => node.getAttribute('data-tab-id') === activeId,
+    )
+    active?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
   }, [activeId])
 
   /** Insertion index and indicator offset for a point relative to the strip (react-aria drop coordinates). */
@@ -442,6 +455,7 @@ export const EditorTabs = ({
             : variant === 'compact'
               ? styles.stripCompact
               : styles.stripVertical,
+          touch && styles.stripTouch,
         )}
       >
         {vertical ? (
@@ -450,6 +464,8 @@ export const EditorTabs = ({
             <span>{tabs.length}</span>
           </div>
         ) : null}
+        {/* RAC's TabList filters drag handlers out of its DOM props; drops bubble to a host of the same box. */}
+        <div {...definedProps(dropProps)} {...stylex.props(styles.dropHost)}>
         <TabList
           ref={list}
           aria-label={label}
@@ -457,7 +473,6 @@ export const EditorTabs = ({
             if (!vertical && list.current !== null && event.deltaY !== 0)
               list.current.scrollLeft += event.deltaY
           }}
-          {...definedProps(dropProps)}
           {...stylex.props(
             styles.list,
             variant === 'compact' && styles.listCompact,
@@ -478,9 +493,11 @@ export const EditorTabs = ({
               dragType={dragType}
               onClose={onClose}
               onReorder={reorder}
+              touch={touch}
             />
           ))}
         </TabList>
+        </div>
         {drop === null ? null : (
           <span
             aria-hidden="true"
@@ -523,7 +540,11 @@ export const EditorTabs = ({
           {announcement}
         </span>
       </div>
-      {activeId === null ? (
+      {stablePanel ? (
+        <TabPanel key="stable" id={activeId ?? ''} shouldForceMount {...stylex.props(styles.panel)}>
+          {children}
+        </TabPanel>
+      ) : activeId === null ? (
         children
       ) : (
         <TabPanel key={activeId} id={activeId} {...stylex.props(styles.panel)}>
@@ -545,6 +566,7 @@ interface TabItemProps {
   readonly dragType: string
   readonly onClose: (id: string) => void
   readonly onReorder: (move: { readonly tab: EditorTabItem; readonly to: number }) => void
+  readonly touch: boolean
 }
 
 const TabItem = ({
@@ -558,6 +580,7 @@ const TabItem = ({
   dragType,
   onClose,
   onReorder,
+  touch,
 }: TabItemProps) => {
   const [hovered, setHovered] = useState(false)
   const { dragProps, isDragging } = useDrag({
@@ -581,6 +604,7 @@ const TabItem = ({
     <Tab
       id={tab.id}
       data-tab-id={tab.id}
+      data-tab-kind={tab.kind}
       aria-label={`${tab.title}${tab.detail === undefined && tab.harness === undefined ? '' : `, ${[tab.detail, tab.harness].filter((part) => part !== undefined).join(' · ')}`}${tab.attention === true ? ', needs attention' : ''}${tab.status === 'live' ? ', live' : tab.status === 'unavailable' ? ', unavailable' : ''}`}
       aria-keyshortcuts={`Enter Delete Alt+Shift+${back} Alt+Shift+${forward}`}
       onHoverChange={setHovered}
@@ -624,6 +648,7 @@ const TabItem = ({
           active && variant === 'classic' && isGroupFocused && styles.tabClassicFocused,
           tab.attention === true && styles.attention,
           tab.status === 'unavailable' && styles.unavailable,
+          touch && styles.tabTouch,
           isDragging && styles.dragging,
           isFocusVisible && styles.focusVisible,
         ).className ?? ''
@@ -659,6 +684,7 @@ const TabItem = ({
             }}
             {...stylex.props(
               styles.trailing,
+              touch && styles.trailingTouch,
               tab.dirty === true || active || hovered ? styles.closeShown : styles.closeHidden,
             )}
           >

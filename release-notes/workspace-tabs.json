@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web app's main area becomes a persisted tab strip over the workspace tab model, replacing its per-agent panes and phone tabs",
+  "replay": { "status": "none", "detail": "Web client only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No server schema changes. The browser starts a new device-local tab document; the old selected-agent, per-agent pane and phone-tab keys are no longer read, so open tabs start empty once." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "Old `/w/...?open=` links still open their subject. Pane keys match the terminal client's; no wire changes." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the previous shell; the tab document is ignored." }
+}

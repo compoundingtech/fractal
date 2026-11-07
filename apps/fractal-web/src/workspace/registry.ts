@@ -22,7 +22,7 @@ export type DataResource =
 export interface KindPolicy {
   /** Data this kind reads while visible. */
   readonly resources: (subject: Subject) => readonly DataResource[]
-  /** Whether resources stay held while hidden. */
+  /** Whether resources stay held once its hidden DOM is gone. A mounted tab always holds them. */
   readonly keepWarm: boolean
   /** Budget units a retained hidden DOM subtree costs; 0 means it is cheap enough never to retain. */
   readonly domCost: number
