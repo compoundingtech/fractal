@@ -47,7 +47,7 @@ fn invalid_contract_fixtures_are_refused() {
         include_bytes!("host-envelope/missing-field.json").as_ref(),
         include_bytes!("host-envelope/unknown-coverage.json").as_ref(),
         include_bytes!("host-envelope/unit-error.json").as_ref(),
-        include_bytes!("host-envelope/two-cpu-kinds.json").as_ref(),
+        include_bytes!("host-envelope/cpu-weight-out-of-range.json").as_ref(),
         include_bytes!("host-envelope/darwin-enforced.json").as_ref(),
     ] {
         assert!(HostEnvelope::parse(bytes).is_err());
@@ -71,7 +71,8 @@ fn coverage_is_required_for_each_resource_and_unknown_fields_are_errors() {
         "/slice_psi/cpu",
         "/slices/0/memory/max",
         "/slices/0/memory/high",
-        "/slices/0/cpu",
+        "/slices/0/cpu/max",
+        "/slices/0/cpu/weight",
         "/slices/0/io",
         "/slices/0/swap/max",
         "/slices/0/tasks/max",
@@ -100,7 +101,7 @@ fn coverage_is_required_for_each_resource_and_unknown_fields_are_errors() {
 #[test]
 fn advisory_platform_cpu_weight_and_all_named_psi_windows_are_supported() {
     let mut value: Value = serde_json::from_slice(CAPPED).unwrap();
-    value["slices"][0]["cpu"] = json!({"coverage":"enforced","value":{"weight":100}});
+    value["slices"][0]["cpu"]["weight"] = json!({"coverage":"enforced","value":100});
     value["slices"][0]["io"] = json!({"coverage":"enforced","value":{"weight":100}});
     for window in ["avg10", "avg60", "avg300"] {
         value["slice_psi"]["cpu"] = json!({"coverage":"enforced","value":{
@@ -122,6 +123,20 @@ fn advisory_platform_cpu_weight_and_all_named_psi_windows_are_supported() {
     advisory(&mut value);
     value["platform"] = json!("darwin-advisory");
     assert!(parse(&value).is_ok());
+    for (field, resource) in [
+        (
+            "max",
+            json!({"quota_micros":2000000,"period_micros":100000}),
+        ),
+        ("weight", json!(20)),
+    ] {
+        let mut enforced_cpu = value.clone();
+        enforced_cpu["slices"][0]["cpu"][field] = json!({"coverage":"enforced","value":resource});
+        assert!(
+            parse(&enforced_cpu).is_err(),
+            "Darwin cannot enforce CPU {field}"
+        );
+    }
     value["slices"][0]["io"] = json!({"coverage":"enforced","value":{"weight":100}});
     assert!(parse(&value).is_err());
 }
@@ -151,6 +166,30 @@ fn enforced_memory_high_cannot_exceed_max_in_bytes() {
         "coverage":"not-enforced","reason":"no configured soft limit"
     });
     assert!(parse(&value).is_ok());
+}
+
+#[test]
+fn cpu_max_and_weight_apply_independently_with_strict_ranges() {
+    let bytes = include_bytes!("host-envelope/both-cpu-fields.json");
+    let envelope = HostEnvelope::parse(bytes).unwrap();
+    assert!(envelope.slices[0].cpu.max.enforced());
+    assert!(envelope.slices[0].cpu.weight.enforced());
+    let base: Value = serde_json::from_slice(bytes).unwrap();
+    for weight in [0, 10001] {
+        let mut value = base.clone();
+        value["slices"][0]["cpu"]["weight"]["value"] = json!(weight);
+        assert!(parse(&value).is_err());
+    }
+    for weight in [1, 10000] {
+        let mut value = base.clone();
+        value["slices"][0]["cpu"]["weight"]["value"] = json!(weight);
+        assert!(parse(&value).is_ok());
+    }
+    for field in ["quota_micros", "period_micros"] {
+        let mut value = base.clone();
+        value["slices"][0]["cpu"]["max"]["value"][field] = json!(0);
+        assert!(parse(&value).is_err());
+    }
 }
 
 #[test]

@@ -38,12 +38,16 @@
         }
       },
       "cpu": {
-        "coverage": "enforced",
-        "value": {
-          "max": {
+        "max": {
+          "coverage": "enforced",
+          "value": {
             "quota_micros": 2000000,
             "period_micros": 100000
           }
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
         }
       },
       "swap": {
@@ -76,12 +80,16 @@
         }
       },
       "cpu": {
-        "coverage": "enforced",
-        "value": {
-          "max": {
+        "max": {
+          "coverage": "enforced",
+          "value": {
             "quota_micros": 2400000,
             "period_micros": 100000
           }
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
         }
       },
       "swap": {

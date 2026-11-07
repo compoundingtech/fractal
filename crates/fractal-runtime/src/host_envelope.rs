@@ -82,12 +82,10 @@ object!(CpuMax {
     quota_micros: NonZeroU64 => "quota_micros",
     period_micros: NonZeroU64 => "period_micros",
 });
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
-pub enum Cpu {
-    Max(CpuMax),
-    Weight(NonZeroU16),
-}
+object!(Cpu {
+    max: Coverage<CpuMax> => "max",
+    weight: Coverage<NonZeroU16> => "weight",
+});
 object!(Io { weight: NonZeroU16 => "weight" });
 object!(Memory {
     max: Coverage<Size> => "max",
@@ -101,7 +99,7 @@ object!(Tasks { max: Coverage<NonZeroU64> => "max" });
 pub struct Slice {
     pub name: String,
     pub memory: Memory,
-    pub cpu: Coverage<Cpu>,
+    pub cpu: Cpu,
     pub io: Coverage<Io>,
     pub swap: Swap,
     pub tasks: Tasks,
@@ -219,12 +217,11 @@ impl HostEnvelope {
             {
                 return Err(invalid("memory.high must not exceed memory.max"));
             }
-            check(slice.cpu.enforced(), slice.cpu.reason())?;
+            check(slice.cpu.max.enforced(), slice.cpu.max.reason())?;
+            check(slice.cpu.weight.enforced(), slice.cpu.weight.reason())?;
             check(slice.swap.max.enforced(), slice.swap.max.reason())?;
             check(slice.tasks.max.enforced(), slice.tasks.max.reason())?;
-            if let Coverage::Enforced {
-                value: Cpu::Weight(weight),
-            } = &slice.cpu
+            if let Coverage::Enforced { value: weight } = &slice.cpu.weight
                 && weight.get() > 10_000
             {
                 return Err(invalid("CPU weight must be 1..10000"));
@@ -306,20 +303,12 @@ impl<T: Schema> Schema for Coverage<T> {
         ]})
     }
 }
-impl Schema for Cpu {
-    fn schema() -> Value {
-        json!({"oneOf":[
-            {"type":"object","additionalProperties":false,"required":["max"],"properties":{"max":CpuMax::schema()}},
-            {"type":"object","additionalProperties":false,"required":["weight"],"properties":{"weight":NonZeroU16::schema()}}
-        ]})
-    }
-}
 impl Schema for Slice {
     fn schema() -> Value {
         json!({"type":"object","additionalProperties":false,
             "required":["name","memory","cpu","io","swap","tasks"],
             "properties":{"name":{"type":"string","pattern":"^[^/\\s]+\\.slice$"},
-                "memory":Memory::schema(),"cpu":Coverage::<Cpu>::schema(),"io":Coverage::<Io>::schema(),
+                "memory":Memory::schema(),"cpu":Cpu::schema(),"io":Coverage::<Io>::schema(),
                 "swap":Swap::schema(),"tasks":Tasks::schema()}})
     }
 }
@@ -338,7 +327,7 @@ pub fn json_schema() -> Value {
         "slice_psi":{"properties":{"memory":advisory,"cpu":advisory}},
         "slices":{"items":{"properties":{
             "memory":{"properties":{"max":advisory,"high":advisory}},
-            "cpu":advisory,"io":advisory,
+            "cpu":{"properties":{"max":advisory,"weight":advisory}},"io":advisory,
             "swap":{"properties":{"max":advisory}},"tasks":{"properties":{"max":advisory}}
         }}}
     }}}]);

@@ -36,8 +36,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -69,8 +75,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 20
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -102,8 +114,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "controller not enabled in parent"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "controller not enabled in parent"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "controller not enabled in parent"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -135,8 +153,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 20
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -168,8 +192,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "controller not enabled in parent"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "controller not enabled in parent"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "controller not enabled in parent"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -201,8 +231,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -234,8 +270,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 30
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -267,8 +309,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -300,8 +348,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -333,8 +387,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 1000
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -366,8 +426,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 1000
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -399,12 +465,16 @@
         }
       },
       "cpu": {
-        "coverage": "enforced",
-        "value": {
-          "max": {
+        "max": {
+          "coverage": "enforced",
+          "value": {
             "quota_micros": 2400000,
             "period_micros": 100000
           }
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 500
         }
       },
       "io": {
@@ -437,8 +507,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "unset (`max 100000`)"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max 100000`)"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "default weight"
+        }
       },
       "io": {
         "coverage": "not-enforced",
@@ -470,8 +546,14 @@
         }
       },
       "cpu": {
-        "coverage": "not-enforced",
-        "reason": "inactive; no cgroup"
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        },
+        "weight": {
+          "coverage": "not-enforced",
+          "reason": "inactive; no cgroup"
+        }
       },
       "io": {
         "coverage": "not-enforced",

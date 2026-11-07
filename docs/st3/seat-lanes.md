@@ -428,11 +428,15 @@ including each slice's `io`, are required; unmeasured resources explicitly decla
 Host fields are `schema_version`, `host`, `platform`, `mem_available_floor`,
 `slice_psi` (memory and CPU), and `slices`. PSI values name `window` (`avg10`,
 `avg60`, `avg300`), `percent`, and `target_slice`, referring to a declared
-user-manager slice unit. Each slice names `memory.max`, `memory.high`, `cpu`,
-`io`, `swap.max`, and `tasks.max` (nested objects, not dotted JSON keys).
-CPU values contain exactly one of `max: {quota_micros, period_micros}` or
-`weight`; IO values contain a `weight`. Weights are 1..10000; max quota, period,
-and task counts are positive integers. Memory and swap values use the shared
+user-manager slice unit. Each slice names `memory.max`, `memory.high`, `cpu.max`,
+`cpu.weight`, `io`, `swap.max`, and `tasks.max` (nested objects, not dotted JSON keys).
+The `cpu` object requires independent coverage for both `max` and `weight`: cgroup
+v2 applies the hard quota and proportional scheduler share simultaneously.
+Enforced `max` values contain `{quota_micros, period_micros}`; enforced `weight`
+values are integers 1..10000. Both may be enforced, neither may be enforced on
+`darwin-advisory`, and neither may be omitted. A scheduler share is not a hard cap.
+IO values contain a `weight` in 1..10000; max quota, period, and task counts are
+positive integers. Memory and swap values use the shared
 binary SIZE parser: byte counts or whole numbers ending in K, M, G, T, fitting
 u64 bytes; `"0"` expresses zero swap. JSON Schema checks structural constraints;
 the Rust reader additionally checks SIZE overflow, slice uniqueness, PSI references,
@@ -442,3 +446,9 @@ All example thresholds and capacities in the generic-host fixtures are test data
 not production defaults. Host values require an operator decision; activation
 requires separate host acceptance and rollout approval. This contract defines no
 IO start rule, and remote-only work is not charged local envelope capacity by it.
+
+CPU fixture coverage follows measured max and non-default weights independently.
+A default scheduler weight is declared `not-enforced` with reason `default weight`;
+inactive units and absent controllers retain their observed reasons. This fixture
+policy distinguishes an explicitly configured share from a default share; it does
+not imply that the kernel ignores default scheduler weights.

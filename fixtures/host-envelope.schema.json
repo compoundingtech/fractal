@@ -42,8 +42,19 @@
               "properties": {
                 "cpu": {
                   "properties": {
-                    "coverage": {
-                      "const": "not-enforced"
+                    "max": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
+                    },
+                    "weight": {
+                      "properties": {
+                        "coverage": {
+                          "const": "not-enforced"
+                        }
+                      }
                     }
                   }
                 },
@@ -289,85 +300,107 @@
         "additionalProperties": false,
         "properties": {
           "cpu": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "coverage": {
-                    "const": "enforced"
-                  },
-                  "value": {
-                    "oneOf": [
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "max": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "period_micros": {
-                                "maximum": 18446744073709551615,
-                                "minimum": 1,
-                                "type": "integer"
-                              },
-                              "quota_micros": {
-                                "maximum": 18446744073709551615,
-                                "minimum": 1,
-                                "type": "integer"
-                              }
-                            },
-                            "required": [
-                              "quota_micros",
-                              "period_micros"
-                            ],
-                            "type": "object"
-                          }
-                        },
-                        "required": [
-                          "max"
-                        ],
-                        "type": "object"
+            "additionalProperties": false,
+            "properties": {
+              "max": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
                       },
-                      {
+                      "value": {
                         "additionalProperties": false,
                         "properties": {
-                          "weight": {
-                            "maximum": 10000,
+                          "period_micros": {
+                            "maximum": 18446744073709551615,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "quota_micros": {
+                            "maximum": 18446744073709551615,
                             "minimum": 1,
                             "type": "integer"
                           }
                         },
                         "required": [
-                          "weight"
+                          "quota_micros",
+                          "period_micros"
                         ],
                         "type": "object"
                       }
-                    ]
-                  }
-                },
-                "required": [
-                  "coverage",
-                  "value"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "coverage": {
-                    "const": "not-enforced"
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
                   },
-                  "reason": {
-                    "pattern": "\\S",
-                    "type": "string"
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
                   }
-                },
-                "required": [
-                  "coverage",
-                  "reason"
-                ],
-                "type": "object"
+                ]
+              },
+              "weight": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "enforced"
+                      },
+                      "value": {
+                        "maximum": 10000,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "coverage": {
+                        "const": "not-enforced"
+                      },
+                      "reason": {
+                        "pattern": "\\S",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "coverage",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
               }
-            ]
+            },
+            "required": [
+              "max",
+              "weight"
+            ],
+            "type": "object"
           },
           "io": {
             "oneOf": [
