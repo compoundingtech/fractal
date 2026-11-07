@@ -322,7 +322,9 @@ pub fn validate(
 pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), FractalError> {
     for desired in intent.subjects.values() {
         let scope = Scope(&desired.kind, &desired.subject);
-        let canonical = scope.desired(&desired.desired)?;
+        let canonical = (desired.kind == "agent")
+            .then(|| scope.desired(&desired.desired))
+            .transpose()?;
         if let Some(member) = &desired.member {
             let (priority, lane, budgets) = (
                 member.declared_priority.as_ref(),
@@ -330,9 +332,11 @@ pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), FractalErro
                 member.declared_budgets.as_ref(),
             );
             scope.validate(priority, lane, budgets)?;
-            let typed =
-                DeclaredAdmission::from_declaration(priority, lane, budgets).unwrap_or_default();
-            scope.consistent(&typed, &canonical)?;
+            if let Some(canonical) = &canonical {
+                let typed =
+                    DeclaredAdmission::from_declaration(priority, lane, budgets).unwrap_or_default();
+                scope.consistent(&typed, canonical)?;
+            }
         }
     }
     for mission in intent.missions.values() {
@@ -423,9 +427,14 @@ pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), Fra
                     .unwrap_or("agent"),
                 subject,
             );
-            let canonical = scope.desired(payload.get("desired").unwrap_or(&Value::Null))?;
+            let canonical = (payload.get("kind").and_then(Value::as_str) == Some("agent"))
+                .then(|| scope.desired(payload.get("desired").unwrap_or(&Value::Null)))
+                .transpose()?;
             if let Some(member) = payload.get("member").filter(|v| !v.is_null()) {
-                scope.consistent(&scope.fields(member)?, &canonical)?;
+                let typed = scope.fields(member)?;
+                if let Some(canonical) = &canonical {
+                    scope.consistent(&typed, canonical)?;
+                }
             }
         }
         "mission.published" => validate_mission_json(subject, payload)?,
