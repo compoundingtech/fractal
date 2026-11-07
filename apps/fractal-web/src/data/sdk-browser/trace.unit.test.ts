@@ -1,7 +1,7 @@
 import type { CollectionSocketFactory } from '@fractal/client'
 import { expect, it, vi } from 'vitest'
 
-import { browserSocket, traceQuerySocket, wrapTraceFetch } from './trace.ts'
+import { browserPtySocket, browserSocket, traceQuerySocket, wrapTraceFetch } from './trace.ts'
 
 const TRACEPARENT = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01'
 
@@ -90,4 +90,18 @@ it('does not add query context for invalid upgrade traceparents', () => {
   const headers = { traceparent: 'invalid', tracestate: 'wf=1' }
   traceQuerySocket(inner)('wss://gateway.test/collections', [], headers)
   expect(inner).toHaveBeenCalledExactlyOnceWith('wss://gateway.test/collections', [], headers)
+})
+
+it('carries the client label on browser collection and PTY upgrades without sending credentials in URLs', () => {
+  const urls: URL[] = []
+  vi.stubGlobal('WebSocket', class {
+    constructor(url: URL) { urls.push(url) }
+  })
+  try {
+    browserSocket('wss://gateway.test/collections?cursor=a%2Fb', [], { 'x-st3-client': 'fractal-web 0.1.0+build', Authorization: 'Bearer secret' })
+    browserPtySocket('fractal-web 0.1.0+build')('wss://gateway.test/raw-stream?incarnation=one', [])
+    expect(urls.map(url => url.searchParams.get('client'))).toEqual(['fractal-web 0.1.0+build', 'fractal-web 0.1.0+build'])
+    expect(urls[0]!.searchParams.get('cursor')).toBe('a/b')
+    expect(urls.every(url => !url.href.includes('secret'))).toBe(true)
+  } finally { vi.unstubAllGlobals() }
 })

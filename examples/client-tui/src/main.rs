@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var_os("ST3_ENDPOINT").map(Into::into));
     let identity = discover_unix_identity(explicit)?;
     set_client_name(format!(
-        "smalltalk-example-tui {}",
+        "fractal-client-tui {}",
         env!("CARGO_PKG_VERSION")
     ));
     let (updates, incoming) = mpsc::channel();
