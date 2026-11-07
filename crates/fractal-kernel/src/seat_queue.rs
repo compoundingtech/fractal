@@ -478,7 +478,7 @@ mod tests {
         assert!(reached_through_parent(&nested, &[first, nested]));
         let submitted = SeatStep { status: "verifying", ..first };
         assert!(submitted_with_ready_nested_work(&submitted, &[submitted, nested]));
-        for other in ["daemon/node/worker", "person/node/worker", "host/node/worker"] {
+        for other in ["daemon/node/worker", "person/test", "host/node/worker"] {
             assert!(select(other, &[first, second], &order).ready.is_empty());
             assert!(!nests_under(&SeatStep { assignee: Some(other), ..first }, &nested));
         }
