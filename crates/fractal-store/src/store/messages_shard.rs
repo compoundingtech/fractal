@@ -668,6 +668,12 @@ fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<
             "a person's message stays a graph claim: its device signature is judged there",
         ));
     }
+    if fractal_schema::threads::MESSAGE_RELATION_FIELDS.iter().any(|field| fields.get(field).is_some()) {
+        return Err(FractalError::new(
+            "shard-kind-refused",
+            "a thread message stays a graph claim: its conversation and quote are admitted there",
+        ));
+    }
     if ASSISTANT_FIELDS.iter().any(|field| fields.get(field).is_some()) {
         return Err(FractalError::new(
             "shard-kind-refused",

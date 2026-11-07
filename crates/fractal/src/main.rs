@@ -7458,6 +7458,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::sekrets::client::socket_path(),
     );
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
+    if config.thread_writes {
+        store.configure_thread_write_rollout(config.peers.iter().map(|peer| peer.name.clone()));
+    }
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),

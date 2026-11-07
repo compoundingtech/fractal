@@ -138,6 +138,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
         pairing_grant: Some(granted.subject.clone()),
         pairing_completion: None,
+        bound_agent: None,
         // An assistant grant is not a device pairing: it never registers push tokens.
         pairing_issued_here: false,
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,

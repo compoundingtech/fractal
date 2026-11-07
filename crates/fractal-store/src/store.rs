@@ -259,7 +259,10 @@ pub mod message_marks;
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
+pub mod thread_delivery;
+pub mod thread_links;
 pub mod thread_metadata;
+pub mod thread_rollout;
 #[cfg(test)]
 mod message_routing_tests;
 pub mod message_sent;
@@ -792,6 +795,9 @@ WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
 WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
+ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -2298,6 +2304,8 @@ pub struct Store {
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
+    /// Startup attestation of the reader rollout, with configured peers to check at each write.
+    thread_write_peers: std::sync::OnceLock<BTreeSet<String>>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2739,6 +2747,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2762,6 +2771,7 @@ impl Store {
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2786,6 +2796,7 @@ impl Store {
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -22528,6 +22539,7 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     /// Current authority required for both a new append and replay of an existing receipt.
     pub authority: Option<&'a ClaimAdmission<'a>>,
+    pub thread_delivery: bool,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Write the claim as a build from before its kind became a local observation did: a
@@ -22545,7 +22557,9 @@ pub fn append_claim_with_commit_context(
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
-    refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
+    if !context.thread_delivery {
+        refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
+    }
     let admission = |connection: &Connection| {
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());
