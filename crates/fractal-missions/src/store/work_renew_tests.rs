@@ -783,7 +783,9 @@ fn work_renewal_matches_legacy_and_canonical_holders() {
                 continue;
             }
             let renewed = step.store.work_action(&step.subject, "renew", &renew).unwrap();
-            assert_eq!(renewed.claimant.as_deref(), Some(actor));
+            // Main's quiet renewal writes only the operational lease, not a new claim
+            // or a replacement claimant spelling in the projected step.
+            assert_eq!(renewed.claimant.as_deref(), Some(holder));
             assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
         }
     }
@@ -819,7 +821,8 @@ fn work_renew_release_and_completion_match_legacy_and_canonical_holders() {
                 }
                 let finished = step.store.work_action(&step.subject, action, &finish).unwrap();
                 assert_eq!(finished.status, expected_status, "{actor} / {holder} / {action}");
-                let expected_holder = (action == "renew").then_some(actor);
+                // A quiet renewal retains the projected claimant; release/complete clear it.
+                let expected_holder = (action == "renew").then_some(holder);
                 assert_eq!(finished.claimant.as_deref(), expected_holder);
                 if action == "renew" {
                     assert_eq!(finished.claim_incarnation, claim.incarnation);

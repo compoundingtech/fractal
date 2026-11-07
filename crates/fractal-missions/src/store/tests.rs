@@ -9589,9 +9589,18 @@ fn carried_claim_successor_matches_legacy_and_canonical_holders() {
             ).unwrap();
             let mut renew = carry_request("one", "alias-carry-renew");
             renew.actor = Some(actor.into());
+            if !actor.starts_with("agent/") {
+                let error = store.work_action(old, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "invalid-work-actor");
+                assert_eq!(
+                    store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
+                    Some(holder),
+                );
+                continue;
+            }
             let renewed = store.work_action(old, "renew", &renew).unwrap();
             assert_eq!(&renewed.subject, carried);
-            assert_eq!(renewed.claimant.as_deref(), Some("agent/node/worker"));
+            assert_eq!(renewed.claimant.as_deref(), Some(holder));
             assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
         }
     }
