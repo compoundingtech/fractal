@@ -37,12 +37,12 @@ agent "example/child" { command "true"; workspace "/tmp" }
 agent "example/requester" { command "true"; workspace "/tmp" }
 agent "example/originator" { command "true"; workspace "/tmp" }
 mission "parent" state="ready" { goal "Check the complete run boundary."
-  step "start" { assigned-to "agent/example/parent" }; step "other" { agentless } }
+  step "start" { assigned-to "agent/example/parent" }; step "other" {} }
 mission "child" state="ready" { goal "Check child responsibility."
   step "work" { assigned-to "agent/example/child" } }
 mission "pool" state="ready" { goal "Keep raw responsibility."
   step "work" { available-to "agent/example/requester"; available-to "agent/example/free" } }
-mission "source" state="ready" { goal "Keep carried requesters."; step "work" { agentless } }
+mission "source" state="ready" { goal "Keep carried requesters."; step "work" {} }
 mission "looping" state="ready" { goal "Review every round."
   loop "repeat" { max-rounds 2; round { completion { when "all-steps-exhausted" }; step "work" { agentless } } } }
 mission "nested-loop" state="ready" { goal "Review nested loop history."
@@ -375,4 +375,138 @@ fn agent_review_run_carried_source_requester() {
         );
         assert_eq!(check(&store, &child.subject, FREE), CONFLICT);
     }
+}
+
+fn snapshot(
+    store: &Store,
+    owner: &str,
+    reviewer: &str,
+) -> Result<ReviewOwnerSnapshot, FractalError> {
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    review_owner_snapshot(
+        &Scope {
+            run: BTreeSet::new(),
+            intent: None,
+        },
+        &transaction,
+        owner,
+        reviewer,
+    )
+}
+
+#[test]
+fn agent_review_owner_snapshot_step_children_not_siblings() {
+    let (store, parent, child) = fixture();
+    let start = &step(&parent, "start").subject;
+    let other = &step(&parent, "other").subject;
+    progress(&store, other, FREE);
+    let boundary = snapshot(&store, start, FREE).unwrap();
+    for agent in [PARENT, CHILD, REQUESTER, ORIGINATOR] {
+        assert!(boundary.responsible_agents.contains(agent), "{agent}");
+    }
+    assert!(!boundary.responsible_agents.contains(FREE));
+    assert!(!boundary.agentless);
+    assert_eq!(boundary.reviewer, FREE);
+    assert_eq!(
+        snapshot(&store, &child.subject, PARENT).err().unwrap().code,
+        CONFLICT
+    );
+    assert_eq!(snapshot(&store, start, CHILD).err().unwrap().code, CONFLICT);
+    assert_eq!(
+        snapshot(&store, &parent.subject, FREE).err().unwrap().code,
+        CONFLICT
+    );
+    use fractal_store::store::identities::{IdentityKind, IdentityStore, RenameRequest};
+    let alias = "agent/example/child-alias";
+    store
+        .rename_identity(
+            IdentityKind::Agent,
+            &RenameRequest {
+                from: CHILD.into(),
+                to: alias.into(),
+                actor: PERSON.into(),
+                reason: "Retain responsibility across a rename".into(),
+                expected_naming_revision: None,
+                expected_declaration: None,
+                idempotency_key: "rename-child".into(),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(snapshot(&store, start, alias).err().unwrap().code, CONFLICT);
+}
+
+#[test]
+fn agent_review_owner_snapshot_default_agentless_and_unknown_owner() {
+    let (store, parent, _) = fixture();
+    let other = &step(&parent, "other").subject;
+    assert!(snapshot(&store, other, FREE).unwrap().agentless);
+    for s in [
+        WorkSelector::Assigned {
+            agent: PARENT.into(),
+        },
+        WorkSelector::Available {
+            agents: vec![PARENT.into()],
+        },
+    ] {
+        let (store, parent, _) = fixture();
+        let other = &step(&parent, "other").subject;
+        let req = request("source");
+        let run = store
+            .create_child_mission_run(&req, &parent, other, Some(&s))
+            .unwrap();
+        let inherited = &step(&run, "work").subject;
+        assert!(!snapshot(&store, inherited, FREE).unwrap().agentless);
+    }
+    let assigned = &step(&parent, "start").subject;
+    assert!(!snapshot(&store, assigned, FREE).unwrap().agentless);
+    for owner in [
+        "step-run/missing/work",
+        "loop-run/missing/work",
+        "person/operator",
+    ] {
+        assert_eq!(snapshot(&store, owner, FREE).err().unwrap().code, UNKNOWN);
+    }
+}
+
+#[test]
+fn agent_review_owner_snapshot_loop_reuses_round_history() {
+    let (store, run, loop_subject, earlier) = loop_fixture("looping");
+    let result = snapshot(&store, &loop_subject, FREE);
+    let expected = check(&store, &run.subject, FREE);
+    assert_eq!(
+        result.as_ref().map_or_else(|error| error.code, |_| "ok"),
+        expected
+    );
+    let boundary = result.unwrap();
+    assert!(boundary.agentless);
+    progress(&store, &earlier.steps[0].subject, FREE);
+    assert_eq!(
+        snapshot(&store, &loop_subject, FREE).err().unwrap().code,
+        CONFLICT
+    );
+}
+
+#[test]
+fn agent_review_owner_snapshot_nested_parent_and_incomplete_history() {
+    let (store, run, subject, _) = loop_fixture("nested-loop");
+    assert!(snapshot(&store, &subject, FREE).is_ok());
+    progress(&store, &step(&run, "outer").subject, FREE);
+    assert_eq!(
+        snapshot(&store, &subject, FREE).err().unwrap().code,
+        CONFLICT
+    );
+    let (store, _, subject, _) = loop_fixture("looping");
+    event(
+        &store,
+        &subject,
+        "loop.state",
+        PERSON,
+        json!({"fields":{"round":3,"status":"completed"}}),
+    );
+    assert_eq!(
+        snapshot(&store, &subject, FREE).err().unwrap().code,
+        UNKNOWN
+    );
 }
