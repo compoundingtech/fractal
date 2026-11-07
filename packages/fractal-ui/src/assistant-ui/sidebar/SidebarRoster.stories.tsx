@@ -47,7 +47,8 @@ export const scenarioExemptions: readonly string[] = [
 type Story = StoryObj<typeof meta>
 
 /** Observe the actual render task and its first 1.5s of fitting, not Storybook module/bootstrap work. */
-export const HundredAgentRender: Story = { tags: ['critical'], render: () => <RosterRender />, play: async ({ canvasElement }) => {
+// About 10 s of case time measures hundred-agent render cost rather than a per-commit kit contract.
+export const HundredAgentRender: Story = { tags: ['critical', 'merge-only'], render: () => <RosterRender />, play: async ({ canvasElement }) => {
   await document.fonts.ready
   await expect(PerformanceObserver.supportedEntryTypes).toContain('longtask')
   performance.clearMarks('sidebar-roster-render-start')
