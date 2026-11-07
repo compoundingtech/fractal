@@ -265,6 +265,8 @@ mod relayed_closes_tests;
 pub mod stream_mirror;
 #[cfg(test)]
 mod stream_mirror_tests;
+#[cfg(test)]
+mod stream_selector_tests;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -2267,6 +2269,12 @@ pub struct Store {
 /// How often the daemon audits the operation projection against the claim log and counts the
 /// fleet admission residue. Doctor calls a result older than two periods stale.
 pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// How long after it starts the daemon defers whole-store maintenance reads: its first
+/// operation audit and the sealing frontier's recovery search. Every client and peer reconnects
+/// in the first minute after a restart, and those reads (66 s of SQL and a 14 s batch walk on a
+/// busy host's store) made each of their requests wait on the same disk.
+pub const STARTUP_MAINTENANCE_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// One finished background audit: when it finished, how long it took and what it found.
 #[derive(Clone, Debug)]
@@ -13659,9 +13667,12 @@ pub fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<
 
 const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
 
+/// Graph mail in canonical order, then stream items in shard order
+/// ([`messages_shard::mailbox_reads::mail_order`]): a stream item has no graph claim to key it.
 pub fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::<String, canonical::ClaimKey>::new();
-    for chunk in messages.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
+    let graph = messages.iter().filter(|message| !messages_shard::mailbox_reads::is_stream_item(message)).collect::<Vec<_>>();
+    for chunk in graph.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
         let subjects = serde_json::to_string(
             &chunk.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
         )?;
@@ -13684,7 +13695,7 @@ pub fn sort_messages_canonically(connection: &Connection, messages: &mut [Messag
         anyhow::ensure!(rows.next()?.is_none(), "duplicate canonical message key row");
     }
     // Gather every key successfully before changing the caller's message vector.
-    messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
+    messages.sort_by(|left, right| messages_shard::mailbox_reads::mail_order(&keys, left, right));
     Ok(())
 }
 
