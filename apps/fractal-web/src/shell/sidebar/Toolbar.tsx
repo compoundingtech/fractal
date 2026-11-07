@@ -13,7 +13,7 @@ import {
   MenuPopover,
   MenuTrigger,
 } from '../../ui-compat/components.tsx'
-import { tokens } from '../../ui-compat/tokens.stylex.ts'
+
 import { spaceVars as space } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { sortModes, type SortMode } from './filter.ts'
@@ -138,7 +138,7 @@ const styles = stylex.create({
     boxSizing: 'border-box',
     width: '100%',
     borderRadius: 6,
-    ':focus-visible': { outline: `2px solid ${tokens['--ds-focus-color']}`, outlineOffset: 2 },
+    ':focus-visible': { outline: `2px solid ${interaction.focusRing}`, outlineOffset: 2 },
   },
   // Desktop density: the field shares the controls' height and text size on the one line.
   searchWithHint: { height: g.controlMd, paddingBlock: 0, paddingInlineEnd: g.controlSm, fontSize: t.metaSize },
