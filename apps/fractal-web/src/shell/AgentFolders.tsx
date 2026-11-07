@@ -36,7 +36,7 @@ import { SubjectAddress } from '../resources/contract.ts'
 import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.tsx'
 import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
-import { useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
+import { outsideFilterMenu, showRowFacts, useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
 import { sameFolderFleet } from './sameFolderFleet.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
@@ -276,11 +276,12 @@ const LegacyAgentFolders = React.memo(
       rows: rows,
       sort: filters.sort,
     })
-    // Faceted Show counts: visibility under every other filter, folder-context text matches included.
+    // Faceted Filter counts: what lies outside the menu, folder-context text matches included. The counts apply the menu's own filters.
     const othersQuery = { ...parsedQuery, asking: false, machines: [] }
+    const othersFilters = outsideFilterMenu(filters)
     const othersVisible = new Set(
       view.unfiled.filter((id) =>
-        matchesRow({ row: rows.get(id)!, filters: filters, query: othersQuery }),
+        matchesRow({ row: rows.get(id)!, filters: othersFilters, query: othersQuery }),
       ),
     )
     const collectVisible = (items: readonly ProjectedFolder[]) => {
@@ -289,11 +290,12 @@ const LegacyAgentFolders = React.memo(
         collectVisible(folder.folders)
       }
     }
-    collectVisible(filterFolders({ folders: view.folders, rows: rows, filters: filters, sort: 'manual', query: othersQuery }))
+    collectVisible(filterFolders({ folders: view.folders, rows: rows, filters: othersFilters, sort: 'manual', query: othersQuery }))
     const showRows = workspaces.map((workspace) => ({
       host: workspace.host,
       asking: asking.has(workspace.id),
       others: othersVisible.has(workspace.id),
+      ...showRowFacts(rows.get(workspace.id)!),
     }))
     const searching = parsedQuery.text !== ''
     // Any typed query term, including facet-only and machine-only searches, reveals matches and

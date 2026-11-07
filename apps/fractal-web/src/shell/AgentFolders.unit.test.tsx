@@ -9,6 +9,7 @@ import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
+import { act } from 'react'
 import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
@@ -225,6 +226,62 @@ describe('AgentFolders row styling', () => {
     } finally {
       tree.unmount()
     }
+  })
+})
+
+describe('AgentFolders Filter menu counts', () => {
+  const world = (() => {
+    const [retired, ended, ...rest] = fixtureProjections.agents
+    return { ...fixtureProjections, agents: [{ ...retired!, state: 'retired' }, { ...ended!, state: 'stopped' }, ...rest.map((agent) => ({ ...agent, state: 'running' }))] as typeof fixtureProjections.agents }
+  })()
+  const openMenu = async (container: HTMLElement) => {
+    // React Aria uses CSS.escape for generated collection keys; jsdom does not supply it.
+    vi.stubGlobal('CSS', { escape: (value: string) => value })
+    const trigger = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('Filter'))!
+    await act(async () => trigger.click())
+    await vi.waitFor(() => expect(document.body.querySelector('[role="menu"]')).not.toBeNull())
+  }
+  const counts = () => Object.fromEntries([...document.body.querySelectorAll('[role="menuitemcheckbox"]')].map((item) => {
+    const [, label, count] = /^(.*), (\d+)$/.exec(item.getAttribute('aria-label') ?? '')!
+    return [label!, Number(count)]
+  }))
+  const mountWith = (filters: SidebarFilters) => mountTree({ source: fixtureSource({ world }), filters })
+
+  it('counts status and finished agents from reported facts', async () => {
+    const tree = mountWith(defaultFilters)
+    try {
+      await openMenu(tree.container)
+      await vi.waitFor(() => expect(counts()).toMatchObject({ 'Show ended': 1, 'Show retired': 1 }))
+    } finally { tree.unmount() }
+  })
+
+  it('keeps a hidden agent counted on its own entry, and a status from zeroing the other sections', async () => {
+    const hidden = mountWith({ ...defaultFilters, hideEnded: true, hideRetired: true })
+    try {
+      await openMenu(hidden.container)
+      await vi.waitFor(() => expect(counts()).toMatchObject({ 'Show ended': 1, 'Show retired': 1 }))
+    } finally { hidden.unmount() }
+    const baseline = mountWith(defaultFilters)
+    let unfiltered: Record<string, number> = {}
+    try {
+      await openMenu(baseline.container)
+      await vi.waitFor(() => expect(counts()['Show ended']).toBe(1))
+      unfiltered = counts()
+    } finally { baseline.unmount() }
+    const selected = Object.keys(unfiltered).find((label) => label !== 'Show ended' && label !== 'Show retired' && !label.startsWith('Waiting') && (unfiltered[label] ?? 0) > 0 && ['Working', 'Idle', 'Needs you'].includes(label))!
+    const status = ({ Working: 'working', Idle: 'idle', 'Needs you': 'waiting' } as Record<string, string>)[selected]!
+    const narrowed = mountWith({ ...defaultFilters, statuses: [status] })
+    try {
+      await openMenu(narrowed.container)
+      await vi.waitFor(() => {
+        const now = counts()
+        // The selected status still counts itself, and machines count only the agents it leaves.
+        expect(now[selected]).toBe(unfiltered[selected])
+        const machineTotal = Object.entries(now).filter(([label]) => !['Waiting for answer', 'Working', 'Needs you', 'Idle', 'Failed', 'Show ended', 'Show retired'].includes(label)).reduce((sum, [, count]) => sum + count, 0)
+        expect(machineTotal).toBe(unfiltered[selected])
+        expect(now['Show ended']).toBe(0)
+      })
+    } finally { narrowed.unmount() }
   })
 })
 

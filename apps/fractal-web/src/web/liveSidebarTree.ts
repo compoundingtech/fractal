@@ -1,7 +1,7 @@
 import type { Agent } from '../data/source.ts'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { isSidebarFiltering, matchesRow, parseSidebarQuery, sortMembers, type SidebarMatchRow } from '../shell/sidebar/filter.ts'
-import type { ShowRow } from '../shell/sidebar/show.ts'
+import { outsideFilterMenu, showRowFacts, type ShowRow } from '../shell/sidebar/show.ts'
 import type { SidebarFilters } from '../shell/sidebar/state.ts'
 import { sidebarRow, subagentRowId } from './sidebarRow.ts'
 
@@ -34,14 +34,11 @@ export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
   readonly stale: boolean
 }): readonly ShowRow[] => {
   const others = { ...parseSidebarQuery(filters.query), asking: false, machines: [] }
-  const outsideMenu = { ...filters, hideEnded: false, hideRetired: false, statuses: [] }
+  const outsideMenu = outsideFilterMenu(filters)
   const rows = matchRows({ agents, needsYou, asking, stale })
   return agents.map(agent => {
     const row = rows.get(agent.ref)!
-    return {
-      host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row, filters: outsideMenu, query: others }),
-      status: row.status, ended: row.status === 'ended' || agent.state === 'done', retired: row.status === 'retired',
-    }
+    return { host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row, filters: outsideMenu, query: others }), ...showRowFacts(row) }
   })
 }
 
