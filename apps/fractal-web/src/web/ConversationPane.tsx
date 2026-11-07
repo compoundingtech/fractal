@@ -206,6 +206,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     // An answer for an older run must not touch the current run's refusal.
     if (result._tag === 'Refused' && runId !== undefined && currentRun.current === runId) setStopRefusal({ runId, detail: result.detail })
   }, [agentControls, agentRef, runId])
+  // Per-response model, tokens and cost stay out of the reading lane until system events are shown.
+  const showTurnFacts = useAtomValue(systemEventsPreference)
   const retryConversation = source.retryConversation
   // Only a failed (or not-yet-found) read can recover by re-acquiring the follow; refusals cannot.
   const retryUnavailable = state._tag === 'Unavailable' && retryConversation !== undefined && (state.classification === 'failed' || state.classification === 'not-found')
@@ -237,7 +239,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
       renderToolDetail={renderSemanticDetail}
-      renderTurnFooter={nativeTurnFooter}
+      renderTurnFooter={showTurnFacts ? nativeTurnFooter : undefined}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
