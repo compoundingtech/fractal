@@ -7771,6 +7771,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
+    let receipts_started = Instant::now();
     tokio::select! {
         flushed = receipts.shutdown() => if let Err(error) = flushed {
             stderr_message("fractal", format_args!("assistant read receipts failed to commit at shutdown: {}", error.message));
@@ -7778,9 +7779,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    stderr_message("fractal", format_args!("shutdown: receipt drain stage finished in {} ms", receipts_started.elapsed().as_millis()));
     // Leave the replication inventory for the next start, which extends it instead of reading
     // every envelope while its peers reconnect. A second stop signal skips it.
     let saving = store.clone();
+    let inventories_started = Instant::now();
     tokio::select! {
         saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
             stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
@@ -7788,7 +7791,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
     }
+    stderr_message("fractal", format_args!("shutdown: replication inventory save stage finished in {} ms", inventories_started.elapsed().as_millis()));
+    let telemetry_started = Instant::now();
     telemetry.shutdown();
+    stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
