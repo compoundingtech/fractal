@@ -7382,11 +7382,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
-                    // says nothing about routing: `messages_stream_inbox` will (4c-2a-3).
+                    // says nothing about routing: `messages_stream_inbox` does.
                     "messages_stream_mirror": u8::from(messages_shard.is_ok()),
                     // Lists its stream mail in client message pages (GET /v1/client/messages)
                     // and its other mail lists. Informational too.
-                    "messages_stream_selectors": u8::from(messages_shard.is_ok())}),
+                    "messages_stream_selectors": u8::from(messages_shard.is_ok()),
+                    // A complete stream inbox: it counts and lists stream mail as graph mail,
+                    // and its senders find a message in either store before they send it, so
+                    // mail to its seats may go to the stream (`messages_shard::inbox_hosts`).
+                    // Nothing routes on it in this build; the writers move to it in 4c-2b.
+                    "messages_stream_inbox": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
