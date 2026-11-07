@@ -3,7 +3,7 @@ import type { Arrangement, OrderedMembership } from '@fractal/client'
 import { Schema } from 'effect'
 import vectors from '../../../../fixtures/clients/sidebar/behavior-v2.json'
 import { loadSidebarBehavior } from '../../../../scripts/sidebar-behavior-fixtures.mjs'
-import { planMembershipMove, spreadMembershipKeys, membershipWriteRequest, type MembershipIntent } from './sidebarAdapter.ts'
+import { planMembershipMove, projectMemberships, spreadMembershipKeys, membershipWriteRequest, type MembershipIntent } from './sidebarAdapter.ts'
 import { MembershipEditor } from './edit.ts'
 import { SidebarJournal } from './sidebarJournal.ts'
 
@@ -20,7 +20,7 @@ for (const vector of vectors.cases) it(`v2 planner ${vector.name}`, () => {
   for (const [eventIndex, event] of vector.events.entries()) {
     for (const [index, move] of event.moves.entries()) {
       const intent = { node: node(move.node), parent: 'id' in move.parent ? move.parent.id! : null, before: move.before === null ? null : node(move.before) }
-      const plan = planMembershipMove(base, vector.initial.memberships.map(row => ({ ...row, id: `${row.container}/${row.member}` })), intent)
+      const plan = planMembershipMove(projectMemberships(base, vector.initial.memberships.map(row => ({ ...row, id: `${row.container}/${row.member}` }))), intent)
       expect(plan).toEqual(vector.checkpoints[eventIndex]!.moves[index])
       if (plan._tag !== 'PlannedV2') continue
       const scope = { owner: base.owner, container: base.id, endpoint: 'endpoint/test', host: 'host/test', projection: '1' }
@@ -46,7 +46,7 @@ it('exact capacity includes short prefix plus descendant', () => {
   expect(spreadMembershipKeys('a0', 'a0', 1)).toBeUndefined()
 })
 it('ties use minimal forward one-sided rekey and Place only', () => {
-  const result = planMembershipMove(base, [member('machine/a', 'a0'), member('machine/b', 'a0'), member('machine/mover', 'a1', null)], intent)
+  const result = planMembershipMove(projectMemberships(base, [member('machine/a', 'a0'), member('machine/b', 'a0'), member('machine/mover', 'a1', null)]), intent)
   expect(result).toEqual({ _tag: 'PlannedV2', edit: { folders: [], memberships: [
     { op: 'place', member: 'machine/mover', bucket: folder, key: 'aL' },
     { op: 'place', member: 'machine/b', bucket: folder, key: 'af' },
@@ -54,17 +54,17 @@ it('ties use minimal forward one-sided rekey and Place only', () => {
 })
 it('no-op, cycle, invalid ancestry and incomplete projections refuse', () => {
   const rows = [member('machine/mover', 'a0')]
-  expect(planMembershipMove(base, rows, { ...intent, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'NoChange' })
-  expect(planMembershipMove(base, rows, { node: { kind: 'folder', id: folder }, parent: folder, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Self' })
+  expect(planMembershipMove(projectMemberships(base, rows), { ...intent, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'NoChange' })
+  expect(planMembershipMove(projectMemberships(base, rows), { node: { kind: 'folder', id: folder }, parent: folder, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Self' })
   const child = Object.keys(base.body.folders)[1]!
-  expect(planMembershipMove(base, rows, { node: { kind: 'folder', id: folder }, parent: child, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Cycle' })
-  expect(planMembershipMove({ ...base, resolved: undefined }, rows, intent)).toEqual({ _tag: 'RefusedV2', refusal: 'NotReady' })
-  expect(planMembershipMove(base, [member('machine/mover', 'a0', 'missing')], intent)).toEqual({ _tag: 'RefusedV2', refusal: 'InvalidResolution' })
+  expect(planMembershipMove(projectMemberships(base, rows), { node: { kind: 'folder', id: folder }, parent: child, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Cycle' })
+  expect(planMembershipMove(projectMemberships({ ...base, resolved: undefined }, rows), intent)).toEqual({ _tag: 'RefusedV2', refusal: 'NotReady' })
+  expect(planMembershipMove(projectMemberships(base, [member('machine/mover', 'a0', 'missing')]), intent)).toEqual({ _tag: 'RefusedV2', refusal: 'InvalidResolution' })
 })
 it('operation and encoded UTF-8 byte budgets refuse oversized edits', () => {
   const rows = Array.from({ length: 2048 }, (_, i) => member(`machine/${i.toString().padStart(4, '0')}`, 'a0'))
   const move: MembershipIntent = { ...intent, before: { kind: 'subject', subject: rows[1024]!.member } }
-  expect(planMembershipMove(base, [...rows, member('machine/mover', 'a1', null)], move)).toEqual({ _tag: 'RefusedV2', refusal: 'TooManyOperations' })
+  expect(planMembershipMove(projectMemberships(base, [...rows, member('machine/mover', 'a1', null)]), move)).toEqual({ _tag: 'RefusedV2', refusal: 'TooManyOperations' })
   const long = `machine/${'界'.repeat(350000)}`
-  expect(planMembershipMove(base, [member(long, 'a0', null)], { node: { kind: 'subject', subject: long }, parent: folder, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'TooManyBytes' })
+  expect(planMembershipMove(projectMemberships(base, [member(long, 'a0', null)]), { node: { kind: 'subject', subject: long }, parent: folder, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'TooManyBytes' })
 })
