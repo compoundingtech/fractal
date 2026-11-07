@@ -302,6 +302,17 @@ def main():
         return 0
     # The previous release must have reached main before cutting its successor.
     run('python3', str(repo / 'scripts/compat-baseline-release'), 'check', '--source', sha, '--require-latest')
+    # Validate the interval before any release listing, download or mutation. Only
+    # the generated version labels depend on drafts; classify this source once.
+    provisional_tag = args.tag or next_tag([])
+    if not SEMVER.fullmatch(provisional_tag):
+        raise CommandFailed('candidate tag must be vMAJOR.MINOR.PATCH')
+    try:
+        rendered, impact = render(repo, previous, sha, provisional_tag,
+                                  os.environ.get('GH_REPO', 'compoundingtech/fractal'), since)
+    except ImpactError as error:
+        say(str(error))
+        return 1
     drafts = stable_drafts()
     tag = args.tag or next_tag(drafts)
     if not SEMVER.fullmatch(tag):
@@ -313,7 +324,14 @@ def main():
         say(f'{tag} already exists; refusing to reuse a tag')
         return 1
     try:
-        rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/fractal'), since)
+        if tag != provisional_tag:
+            # Retag only the two generated labels, not classification prose or
+            # operator summaries that may themselves mention another version.
+            rendered = rendered.replace(f'Fractal {provisional_tag} at `{sha}`.',
+                                        f'Fractal {tag} at `{sha}`.', 1)
+            rendered = rendered.replace(
+                f'From **{previous}** (`{since}`) to **{provisional_tag}** (`{sha}`).',
+                f'From **{previous}** (`{since}`) to **{tag}** (`{sha}`).', 1)
         if args.summary:
             rendered = f'## Operator impact summary\n\n{args.summary}\n\n' + rendered
         body = release_body(rendered, impact)

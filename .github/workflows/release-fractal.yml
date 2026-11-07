@@ -8,7 +8,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && fo
 on:
   push:
     branches: [main]
-    tags: ['**', '!edge', '!embed-*', '!evidence/**']
+    tags: ["**", "!edge", "!embed-*", "!evidence/**"]
   workflow_dispatch:
     inputs:
       sha:
@@ -410,7 +410,7 @@ jobs:
           CACHE_REASON: Only reads organization runner metadata; checks out and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   installer:
-    name: 'installer (${{ matrix.runner }})'
+    name: "installer (${{ matrix.runner }})"
     needs: validate-source
     strategy:
       fail-fast: false
@@ -456,7 +456,7 @@ jobs:
           ref: ${{ inputs.sha || github.sha }}
       - uses: actions/cache@v4
         with:
-          path: '${{ runner.temp }}/pnpm-store'
+          path: "${{ runner.temp }}/pnpm-store"
           key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}"
         id: cache-1
       - # v3.24.1
@@ -477,14 +477,14 @@ jobs:
           summarize: true
       - name: Materialize megarepo members
         env:
-          MEGAREPO_STORE: '${{ runner.temp }}/megarepo'
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
           python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - name: Build the offline embed and capture four posters
         env:
-          pnpm_config_store_dir: '${{ runner.temp }}/pnpm-store'
-        run: 'nix develop .#web --command node scripts/release-fractal-embed.mjs dist'
+          pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
+        run: "nix develop .#web --command node scripts/release-fractal-embed.mjs dist"
       - uses: actions/upload-artifact@v4
         with:
           name: release-web-embed
@@ -532,20 +532,20 @@ jobs:
   build:
     needs: [pick-runner, validate-source]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
-    name: 'release-build (${{ matrix.target }})'
+    name: "release-build (${{ matrix.target }})"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}'
+          - runner: "namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}"
             target: x86_64-unknown-linux-gnu
           - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}
     timeout-minutes: 90
     env:
-      MACOSX_DEPLOYMENT_TARGET: '15.0'
-      CI_NATIVE_SNAPSHOT: '1'
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      CI_NATIVE_SNAPSHOT: "1"
       RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
@@ -567,7 +567,7 @@ jobs:
       - if: env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          key: 'release-${{ matrix.target }}'
+          key: "release-${{ matrix.target }}"
           cache-on-failure: true
         id: cache-4
       - name: Restore the pinned Zig compiler
@@ -575,7 +575,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CI_ZIG_CACHE_DIR }}
-          key: 'zig-tool-v1-${{ runner.os }}-${{ runner.arch }}-0.15.2'
+          key: "zig-tool-v1-${{ runner.os }}-${{ runner.arch }}-0.15.2"
         id: cache-5
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -630,7 +630,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: '${{ runner.temp }}/ci-build-snapshot/build.tar.zst'
+          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
@@ -646,14 +646,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: '${{ runner.temp }}/ci-build-snapshot/build.tar.zst'
+          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
           overwrite: true
       - uses: actions/upload-artifact@v4
         with:
-          name: 'release-${{ matrix.target }}'
+          name: "release-${{ matrix.target }}"
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -719,7 +719,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       SOURCE_SHA: ${{ github.sha }}
-      RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -772,13 +772,23 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
     env:
+      GH_TOKEN: ${{ github.token }}
       CANCELLED_RUN: ${{ github.run_id }}
       REPOSITORY: ${{ github.repository }}
     steps:
-      - name: Fail visibly and explain original-event re-dispatch
+      - name: Fail visibly with cancelled publisher job-ID recovery commands
         run: |
-          echo "::error::A release publisher was cancelled; the shared mutation queue may replace pending jobs. Check edge/embed release state, then re-dispatch the original event with: gh run rerun $CANCELLED_RUN --repo $REPOSITORY. A new workflow_dispatch only builds and does not run push-only publishers."
+          set -euo pipefail
+          echo "::error::A release publisher was cancelled. Check edge/embed state, then run only the cancelled publisher job IDs printed below; do not rebuild successful embed artifacts."
+          gh api --paginate --slurp "repos/$REPOSITORY/actions/runs/$CANCELLED_RUN/jobs?filter=latest&per_page=100" |
+            jq -er --arg repo "$REPOSITORY" '
+              [.[].jobs[]
+                | select(.conclusion == "cancelled")
+                | select(.name == "release-publish-web-embed" or .name == "release-publish-edge")
+                | "gh run rerun --job " + (.id | tostring) + " --repo " + $repo]
+              | if length == 0 then error("No cancelled publisher job IDs found; inspect the original run before retrying.") else .[] end'
           exit 1
       - name: Report job cache coverage
         if: always()

@@ -27,7 +27,7 @@ on:
         required: false
         type: string
       sha:
-        description: 'Candidate: exact first-parent main source SHA; publish: exact candidate SHA approved for publication'
+        description: "Candidate: exact first-parent main source SHA; publish: exact candidate SHA approved for publication"
         required: false
         type: string
       go_ref:
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     concurrency:
-      group: 'fractal-daily-release-build-${{ inputs.sha }}'
+      group: "fractal-daily-release-build-${{ inputs.sha }}"
       cancel-in-progress: false
     permissions:
       contents: read

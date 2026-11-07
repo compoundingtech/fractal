@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Exercise cancellation groups from generated workflows with real event distinctions."""
 import ast
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tempfile
+import textwrap
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -126,9 +132,35 @@ assert re.search(r'^    needs: \[publishEmbed, publishEdge\]$', observer, re.M),
 assert 'always()' in observer and "contains(needs.*.result, 'cancelled')" in observer
 assert not re.search(r'^    concurrency:', observer, re.M)
 assert not re.search(r'^      [\w-]+: write$', observer, re.M)
-assert 'exit 1' in observer and 'gh run rerun $CANCELLED_RUN --repo $REPOSITORY' in observer
-assert 'workflow_dispatch only builds' in observer
-print('passed: development publishers are ordered; ungrouped cancellation observer fails with original-event re-dispatch')
+assert 'exit 1' in observer and 'gh run rerun --job ' in observer
+assert 'actions: read' in observer
+assert 'gh run rerun $CANCELLED_RUN' not in observer
+recovery = textwrap.dedent(re.search(r'^        run: \|\n((?:          .*\n|\n)+)', observer, re.M).group(1))
+with tempfile.TemporaryDirectory() as temporary:
+    fake = Path(temporary) / 'gh'
+    fake.write_text(f'#!{sys.executable}\nimport os, sys\n'
+                    'assert sys.argv[1:] == ["api", "--paginate", "--slurp", '
+                    '"repos/example/project/actions/runs/987/jobs?filter=latest&per_page=100"], sys.argv\n'
+                    'print(os.environ["RECOVERY_JOBS"])\n')
+    fake.chmod(0o755)
+    cancelled = [
+        {'id': 1123, 'name': 'release-publish-web-embed', 'conclusion': 'cancelled'},
+        {'id': 1124, 'name': 'release-publish-edge', 'conclusion': 'cancelled'}]
+    ignored = [
+        {'id': 1125, 'name': 'release-publish-web-embed', 'conclusion': 'success'},
+        {'id': 1126, 'name': 'unrelated-job', 'conclusion': 'cancelled'}]
+    for selected in (cancelled, cancelled[1:], []):
+        result = subprocess.run(['bash', '-c', recovery], text=True, capture_output=True, env=dict(
+            os.environ, PATH=temporary + os.pathsep + os.environ['PATH'], REPOSITORY='example/project',
+            CANCELLED_RUN='987', RECOVERY_JOBS=json.dumps([{'jobs': selected + ignored}])))
+        commands = [line for line in result.stdout.splitlines() if line.startswith('gh run rerun')]
+        assert commands == [f'gh run rerun --job {job["id"]} --repo example/project' for job in selected], result
+        assert result.returncode != 0, result
+        if selected:
+            assert result.returncode == 1 and not result.stderr, result
+        else:
+            assert 'No cancelled publisher job IDs found' in result.stderr, result
+print('passed: ordered publishers; read-only observer prints exact cancelled job-ID reruns without rebuilding successful jobs')
 
 # A non-main dispatch must not execute any daily job holding write permission.
 for job, block in daily_jobs.items():

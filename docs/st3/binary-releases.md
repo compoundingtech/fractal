@@ -269,9 +269,16 @@ published. Do not interpret cancellation as GO or successful publication.
 
 **Fractal tag release** has its own ungrouped, non-mutating `always()` observer for both
 development publishers. A cancelled embed or edge publisher makes that observer fail with
-re-dispatch instructions. Check edge/embed state, then re-run the original main-push event:
-`gh run rerun RUN_ID --repo compoundingtech/fractal`. A fresh `workflow_dispatch` is not
-an equivalent recovery: it builds but deliberately skips the push-only publishers.
+recovery instructions. It reads the original run's latest job metadata with Actions read
+permission and prints exact `gh run rerun --job JOB_DATABASE_ID --repo compoundingtech/fractal`
+commands for each cancelled publisher, substituting its real database ID. Check edge/embed
+state, then run those printed commands. Do **not** rerun the whole workflow: rebuilding a
+successful immutable embed changes its captured timestamp and can violate its release pin.
+[GitHub documents](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)
+that specific-job reruns rerun dependents while retaining successful upstream outputs.
+Its docs do not explicitly guarantee that `--failed` includes cancelled jobs, so recovery
+uses the cancelled job IDs instead. A fresh `workflow_dispatch` is not equivalent: it
+builds but deliberately skips the push-only publishers.
 
 Only after a newer candidate has been successfully created with its complete assets and
 notes does daily cleanup delete older semantic-version unpublished drafts marked as owned

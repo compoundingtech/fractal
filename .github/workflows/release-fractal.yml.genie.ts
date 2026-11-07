@@ -363,14 +363,24 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       if: "always() && contains(needs.*.result, 'cancelled')",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
-      permissions: { contents: 'read' },
+      permissions: { contents: 'read', actions: 'read' },
       env: {
+        GH_TOKEN: '${{ github.token }}',
         CANCELLED_RUN: '${{ github.run_id }}',
         REPOSITORY: '${{ github.repository }}',
       },
       steps: [{
-        name: 'Fail visibly and explain original-event re-dispatch',
-        run: 'echo "::error::A release publisher was cancelled; the shared mutation queue may replace pending jobs. Check edge/embed release state, then re-dispatch the original event with: gh run rerun $CANCELLED_RUN --repo $REPOSITORY. A new workflow_dispatch only builds and does not run push-only publishers."\nexit 1',
+        name: 'Fail visibly with cancelled publisher job-ID recovery commands',
+        run: `set -euo pipefail
+echo "::error::A release publisher was cancelled. Check edge/embed state, then run only the cancelled publisher job IDs printed below; do not rebuild successful embed artifacts."
+gh api --paginate --slurp "repos/$REPOSITORY/actions/runs/$CANCELLED_RUN/jobs?filter=latest&per_page=100" |
+  jq -er --arg repo "$REPOSITORY" '
+    [.[].jobs[]
+      | select(.conclusion == "cancelled")
+      | select(.name == "release-publish-web-embed" or .name == "release-publish-edge")
+      | "gh run rerun --job " + (.id | tostring) + " --repo " + $repo]
+    | if length == 0 then error("No cancelled publisher job IDs found; inspect the original run before retrying.") else .[] end'
+exit 1`,
       }],
     }
   }
