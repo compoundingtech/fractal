@@ -12,7 +12,7 @@ import { syncLineNextChange } from '@fractal/ui/assistant-ui/sync-status'
 import { earliestChange, formatRelative, nextRelativeChange } from '@fractal/ui/human-time/format'
 import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts'
 import type { UseDetailsSupplement } from '../extensions/contract.ts'
-import type { Feed } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 import { useNativeDetails } from './useNativeDetails.ts'
 import { detailsWithSupplement } from './detailsSupplement.ts'
 import { ChangesInspector } from './ChangesInspector.tsx'
@@ -72,12 +72,14 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
 
 /** Plain reasons for a refused or failed subagent-activity read; the source's own detail is diagnostic only. */
 const supplementUnavailableReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable' }>['reason'], string> = {
+  unauthorized: credentialExpiredMessage,
   ungranted: "This device doesn't have access to subagent activity.",
   unsupported: "Subagent activity isn't reported for this session.",
   failed: "Subagent activity couldn't be loaded.",
 }
 /** Why retained subagent activity is shown instead of a newer read. */
 const supplementStaleReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable' }>['reason'], string> = {
+  unauthorized: credentialExpiredMessage,
   ungranted: 'This device no longer has access to newer subagent activity, so earlier activity is shown.',
   unsupported: "Newer subagent activity isn't reported for this session, so earlier activity is shown.",
   failed: "The latest update couldn't be loaded, so earlier activity is shown.",

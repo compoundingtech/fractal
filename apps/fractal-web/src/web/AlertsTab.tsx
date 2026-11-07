@@ -7,11 +7,12 @@ import { promptAnswers } from '../../../../clients/typescript/fractal-views/home
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { AgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import type { AlertAction, AlertActionResult } from '../conversation/alerts/alert-action-port.ts'
 import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
 import { useAttention, useDataSource, useNow } from '../data/react.tsx'
-import type { Feed } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
@@ -99,7 +100,9 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
       {...stylex.props(styles.scroll)}
     >
       {feed._tag === 'Waiting' ? <p ref={message} role="status" tabIndex={-1} {...stylex.props(styles.empty)}>Loading alerts…</p>
-        : feed._tag === 'Unavailable' ? (
+        : feed._tag === 'Unavailable' ? feed.reason === 'unauthorized'
+          ? <SystemNotice scope="rail" kind="error" connection title={credentialExpiredMessage} />
+          : (
           <p ref={message} role="alert" tabIndex={-1} {...stylex.props(styles.empty)}>
             {feed.reason === 'ungranted' ? 'Read access to alerts has not been granted.'
               : feed.reason === 'unsupported' ? 'This connection does not support alerts.'
