@@ -17,11 +17,13 @@ pub enum Error {
 pub struct Store { path: PathBuf, scope: Scope, pub edits: Edits, blocked: bool }
 impl Store {
     pub fn path(scope: &Scope) -> Result<PathBuf, Error> {
-        use std::hash::{Hash, Hasher};
         let (dir, _) = super::glass_store::person_state(&scope.owner).ok_or(Error::NoStateDirectory)?;
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_vec(scope).map_err(Error::Codec)?.hash(&mut hash);
-        Ok(dir.join(format!("sidebar-journal-v1-{:016x}.json", hash.finish())))
+        Ok(dir.join(Self::filename(scope)?))
+    }
+    fn filename(scope: &Scope) -> Result<String, Error> {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(serde_json::to_vec(scope).map_err(Error::Codec)?);
+        Ok(format!("sidebar-journal-v1-{digest:x}.json"))
     }
     pub fn new(path: PathBuf, edits: Edits) -> Self { Self { path, scope: edits.scope().clone(), edits, blocked: false } }
     /// Missing means no pending edit; every other read/restore failure is explicit.
@@ -262,5 +264,10 @@ mod tests {
             let (restored, _) = Store::restore(path.clone(), &scope()).unwrap().unwrap();
             assert_eq!(restored.edits.request(), Some(&exact)); lost(wire)
         }).await.unwrap();
+    }
+    #[test]
+    fn sidebar_store_filename_is_stable_across_toolchains() {
+        assert_eq!(Store::filename(&scope()).unwrap(),
+            "sidebar-journal-v1-b0811e24e3c295beee364ec8f1d7475b415a8eb5e61ce603b3467ad639b24cbf.json");
     }
 }
