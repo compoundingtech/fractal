@@ -141,9 +141,10 @@ pub(super) fn validate_claim(
     .any(|payload| match kind {
         "intent.desired" => {
             declares_fields(payload)
-                || declares_children(payload)
                 || payload.get("member").is_some_and(declares_fields)
-                || payload.get("desired").is_some_and(declares_children)
+                || (payload.get("kind").and_then(Value::as_str) == Some("agent")
+                    && (declares_children(payload)
+                        || payload.get("desired").is_some_and(declares_children)))
         }
         "mission.published" => declares_mission_json(payload),
         _ => false,
