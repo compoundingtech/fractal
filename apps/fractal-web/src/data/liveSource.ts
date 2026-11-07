@@ -1,3 +1,4 @@
+import { gatewayThreads } from '../threads/threadSource.ts'
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
@@ -1223,6 +1224,20 @@ export const liveSource = ({
       pins: sidebarPins(client),
       subjectReads,
       nativeDetails,
+      threads: gatewayThreads(client, registry, {
+        summaries: ({ cursor: _cursor, limit, ...context }) => receive => {
+          const fiber = runtime.runFork(Effect.flatMap(Fractal, fractal => fractal.followThreadSummaries({
+            _tag: 'ThreadSummary', context, limit: limit ?? 40,
+          }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
+          return () => { runtime.runFork(Fiber.interrupt(fiber)) }
+        },
+        timeline: thread => receive => {
+          const fiber = runtime.runFork(Effect.flatMap(Fractal, fractal => fractal.followThreadTimeline({
+            _tag: 'ThreadTimeline', thread, limit: 40,
+          }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
+          return () => { runtime.runFork(Fiber.interrupt(fiber)) }
+        },
+      }),
       objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,

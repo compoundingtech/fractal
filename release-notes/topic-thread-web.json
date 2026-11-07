@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Show live Fractal threads in web Inbox, agent, mission, and tab views",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The web client uses the current daemon’s thread capability and authenticated collection connection for context discovery, updates, and scoped thread actions. Its thread surfaces stay hidden with an older daemon."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual upgrade step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  }
+}
