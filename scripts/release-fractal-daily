@@ -78,14 +78,20 @@ def newest_verified_main_run():
     return (rows[0]['databaseId'], rows[0]['headSha']) if rows else (None, None)
 
 
-def verified_main_run(run_id):
+def verified_main_run(run_id, candidate_sha=''):
     row = json.loads(run('gh', 'run', 'view', str(run_id), '--json',
-                         'databaseId,headSha,headBranch,event,status,conclusion,workflowName'))
-    if (row['databaseId'] != run_id or row['headBranch'] != 'main' or row['event'] != 'push'
+                         'databaseId,headSha,headBranch,event,status,conclusion,workflowName,displayTitle'))
+    exact_dispatch = (candidate_sha and row['event'] == 'workflow_dispatch'
+                      and row['displayTitle'].startswith(f'Fractal candidate {candidate_sha} '))
+    if (row['databaseId'] != run_id or row['headBranch'] != 'main'
+            or (row['event'] != 'push' and not exact_dispatch)
             or row['status'] != 'completed' or row['conclusion'] != 'success'
             or row['workflowName'] != 'Fractal tag release'):
-        raise CommandFailed(f'run {run_id} is not a successful Fractal tag release push run on main')
-    return row['databaseId'], row['headSha']
+        raise CommandFailed(f'run {run_id} is not a successful Fractal tag release push run on main or exact candidate build')
+    source = candidate_sha if exact_dispatch else row['headSha']
+    if candidate_sha and source != candidate_sha:
+        raise CommandFailed('selected build run differs from requested candidate SHA')
+    return row['databaseId'], source
 
 
 def require_main_first_parent(sha, repo):
@@ -183,9 +189,13 @@ def cleanup_superseded_drafts(tag, drafts):
     for row in drafts:
         if ('<!-- fractal-daily-candidate -->' in (row.get('body') or '')
                 and tuple(map(int, SEMVER.fullmatch(row['tag_name']).groups())) < version):
-            state = release_state(row['tag_name'])
-            if state is not None and state['isDraft']:
-                gh('release', 'delete', row['tag_name'], '--yes')
+            repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
+            endpoint = f'repos/{repository}/releases/{row["id"]}'
+            # Re-read immediately before deleting this ID, never resolve the tag a second time.
+            state = json.loads(run('gh', 'api', endpoint))
+            if (state['draft'] and state['tag_name'] == row['tag_name']
+                    and '<!-- fractal-daily-candidate -->' in (state.get('body') or '')):
+                gh('api', '--method', 'DELETE', endpoint)
 
 
 def release_body(rendered, impact):
@@ -255,19 +265,25 @@ def main():
     parser.add_argument('--run', type=int, help='successful main tag-release run ID; default is the newest')
     parser.add_argument('--summary', default='', help='operator-impact summary preserved in candidate and published notes')
     parser.add_argument('--sha', default='', help='build an exact main first-parent source in an isolated run')
+    parser.add_argument('--build-only', action='store_true', help='build exact source and emit build_run, without release mutations')
     args = parser.parse_args()
     repo = pathlib.Path(__file__).resolve().parent.parent
 
+    if args.build_only:
+        if not args.sha or args.dry_run or args.run is not None:
+            raise CommandFailed('--build-only requires --sha and cannot use --run or --dry-run')
+        require_main_first_parent(args.sha, repo)
+        run_id, sha = build_exact_candidate(args.sha)
+        if output := os.environ.get('GITHUB_OUTPUT'):
+            with open(output, 'a') as stream:
+                stream.write(f'build_run={run_id}\n')
+        say(f'verified build {run_id} at {sha}; no release was mutated')
+        return 0
     if args.sha:
         require_main_first_parent(args.sha, repo)
-        if args.dry_run and args.run is None:
-            raise CommandFailed('--dry-run --sha requires an already successful --run; no build was dispatched')
         if args.run is None:
-            run_id, sha = build_exact_candidate(args.sha)
-        else:
-            run_id, sha = verified_main_run(args.run)
-            if sha != args.sha:
-                raise CommandFailed('selected build run differs from requested candidate SHA')
+            raise CommandFailed('--sha requires an already successful --run; use the isolated build job first')
+        run_id, sha = verified_main_run(args.run, args.sha)
     else:
         run_id, sha = verified_main_run(args.run) if args.run is not None else newest_verified_main_run()
     if sha is None:

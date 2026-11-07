@@ -239,19 +239,35 @@ gh workflow run release-daily.yml --repo compoundingtech/fractal --ref main \
 
 The full lowercase SHA must belong to main's first-parent history. This path dispatches
 a separate **Fractal tag release** build on that exact source, waits for success, then
-creates the same draft from its verified archives. Both the candidate orchestration and
-its build use SHA-keyed concurrency groups with cancellation disabled; newer main pushes
+creates the same draft from its verified archives. Build-only orchestration and its native
+build use SHA-keyed concurrency groups with cancellation disabled; newer main pushes
 cannot cancel them. The build rechecks source eligibility before executing source scripts.
-`--dry-run --sha` never dispatches a build and requires an already successful `--run`.
+The later mutation job revalidates the successful build identity. `--dry-run --sha`
+never dispatches a build and requires an already successful `--run`.
 The optional `summary` input (`scripts/release-fractal-daily --summary "$SUMMARY"`) adds
 the operator's summary to the draft notes; it defaults to empty. Publication preserves
 that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
 prints the candidate notes without creating a tag or draft.
 
+Candidate version selection, draft creation, cleanup, and publication share one job-level
+`fractal-release-mutation` concurrency group, with cancellation disabled. Builds never hold
+this mutation lock. Publication needs Contents write and Actions read only; its Actions
+access inspects the successful build and downloads proof, not dispatches.
+
+GitHub concurrency allows one running and one pending job, not an unbounded queue: a third
+arrival can cancel the older pending job even when `cancel-in-progress` is false. An
+always-running cancellation observer makes this a **failed workflow with an explicit
+error**, never a silently dropped publication. If a build or mutation is cancelled, the
+release operator must re-dispatch with all original inputs (`mode`, `tag`, `run`, `summary`,
+`sha`, `go_ref`, `allow_superseded`), after checking whether the release is already
+published. Do not interpret cancellation as GO or successful publication.
+
 Only after a newer candidate has been successfully created with its complete assets and
 notes does daily cleanup delete older semantic-version unpublished drafts marked as owned
-by this daily workflow, rechecking that each remains unpublished. Published releases,
-prereleases and unmarked drafts are untouched; failed creation never removes older drafts.
+by this daily workflow. Immediately before deletion, cleanup reads that release by its
+immutable release ID and confirms draft status, tag and ownership marker, then deletes
+that same ID. Published releases, prereleases and unmarked drafts are untouched; failed
+creation never removes older drafts.
 
 Publication waits for an explicit product release GO on that **exact full source SHA**.
 After the Fractal Product Lead records the GO in a PR, comment, or message, the

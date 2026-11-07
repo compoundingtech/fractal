@@ -314,19 +314,55 @@ for conclusion in ('success', 'failure'):
                         '-f', f'sha={source}', '-f', 'request_id=request')
     assert ('gh', 'run', 'watch', '9', '--exit-status', '--interval', '15') in calls
 
+# The build phase emits its result and never enters release selection/mutation.
+with tempfile.TemporaryDirectory() as temporary:
+    output = Path(temporary) / 'output'
+    with mock.patch.object(sys, 'argv', ['release-fractal-daily', '--build-only', '--sha', source]), \
+            mock.patch.dict(os.environ, GITHUB_OUTPUT=str(output)), \
+            mock.patch.object(module, 'require_main_first_parent') as eligible, \
+            mock.patch.object(module, 'build_exact_candidate', return_value=(9, source)), \
+            mock.patch.object(module, 'latest_release_tag') as release_selection:
+        assert module.main() == 0
+        eligible.assert_called_once()
+        release_selection.assert_not_called()
+        assert output.read_text() == 'build_run=9\n'
+
+# The mutation phase revalidates successful dispatch identity before reusing its artifacts.
+row = dict(databaseId=9, headSha='b' * 40, headBranch='main', event='workflow_dispatch',
+           status='completed', conclusion='success', workflowName='Fractal tag release',
+           displayTitle=f'Fractal candidate {source} request')
+with mock.patch.object(module, 'run', return_value=json.dumps(row)):
+    assert module.verified_main_run(9, source) == (9, source)
+row['displayTitle'] = f'Fractal candidate {"c" * 40} request'
+with mock.patch.object(module, 'run', return_value=json.dumps(row)):
+    try:
+        module.verified_main_run(9, source)
+    except module.CommandFailed:
+        pass
+    else:
+        raise AssertionError('mutation must reject another dispatched source')
+
 # Draft tags participate in numbering without being created in Git.
 with mock.patch.object(module, 'run', return_value='v0.3.17'):
     assert module.next_tag([{'tag_name': 'v0.3.20'}]) == 'v0.3.21'
 # Cleanup removes only older drafts owned by this daily workflow, never unmarked/newer/published.
-drafts = [{'tag_name': tag, 'body': body} for tag, body in (
+drafts = [{'id': index, 'tag_name': tag, 'body': body} for index, (tag, body) in enumerate((
     ('v0.3.18', '<!-- fractal-daily-candidate -->'),
     ('v0.3.19', '<!-- fractal-daily-candidate -->'),
     ('v0.3.20', 'manually prepared candidate'),
-    ('v0.3.22', '<!-- fractal-daily-candidate -->'))]
-with mock.patch.object(module, 'release_state', side_effect=lambda tag: {'isDraft': tag != 'v0.3.19'}), \
+    ('v0.3.22', '<!-- fractal-daily-candidate -->')), start=18)]
+def cleanup_state(*args):
+    release_id = int(args[-1].rsplit('/', 1)[1])
+    return json.dumps(dict(draft=release_id != 19, tag_name=f'v0.3.{release_id}',
+                           body='<!-- fractal-daily-candidate -->'))
+with mock.patch.dict(os.environ, GH_REPO='example/project'), \
+        mock.patch.object(module, 'run', side_effect=cleanup_state) as reread, \
         mock.patch.object(module, 'gh') as github:
     module.cleanup_superseded_drafts('v0.3.21', drafts)
-    github.assert_called_once_with('release', 'delete', 'v0.3.18', '--yes')
+    github.assert_called_once_with('api', '--method', 'DELETE', 'repos/example/project/releases/18')
+    assert reread.call_args_list == [
+        mock.call('gh', 'api', 'repos/example/project/releases/18'),
+        mock.call('gh', 'api', 'repos/example/project/releases/19')]
 
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.
 assert module.release_body('x' * module.RELEASE_BODY_LIMIT, {}) == 'x' * module.RELEASE_BODY_LIMIT
