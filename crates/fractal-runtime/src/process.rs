@@ -339,10 +339,12 @@ impl ExecRuntime {
         if let Some(unit) = generation.scope_unit.as_deref() {
             let join = crate::isolate::await_join(unit, pid, self.scope_join_limit, || {
                 process_generation_alive(pid, start_token)
-            })?;
-            if join == crate::isolate::Join::TimedOut {
-                // It is still `systemd-run`, alone in the session it started.
+            });
+            if !matches!(join, Ok(crate::isolate::Join::Joined | crate::isolate::Join::Exited)) {
+                // A failed spawn leaves nothing that could still die with this process. Unjoined,
+                // the leader is still `systemd-run`, alone in the session it started.
                 unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                join?;
                 anyhow::bail!(
                     "the exec did not join its scope {unit} within {}ms, so it was ended",
                     self.scope_join_limit.as_millis()
