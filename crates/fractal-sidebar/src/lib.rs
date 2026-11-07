@@ -3,6 +3,7 @@
 
 #[cfg(feature = "client")]
 pub mod client;
+pub mod edits;
 pub mod keys;
 pub mod model;
 pub mod paging;
