@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { getDebug } from './measurement/index.ts'
-import { instrumentFetch, readRequestLog } from './transport.ts'
+import { instrumentFetch, readRequestLog, subscribeRequestLog } from './transport.ts'
 
 const parent = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01'
 const child = '00-0123456789abcdef0123456789abcdef-abcdef0123456789-01'
@@ -65,5 +65,60 @@ describe('latency instrumentation', () => {
     await fetch(`${origin}/v1/client/usage/quota?token=secret`)
     expect(readRequestLog().errors).toMatchObject([{ path: '/v1/client/usage/quota', outcome: 404 }])
     expect(readRequestLog().slowest).toMatchObject([{ path: '/v1/client/usage/quota', outcome: 404 }])
+  })
+})
+
+describe('request log publication', () => {
+  const instrumented = (fetchImpl: typeof fetch) => instrumentFetch({ fetchImpl, origin })
+
+  it('notifies on each change, keeps the snapshot stable between them, and stops on unsubscribe', async () => {
+    const fetch = instrumented(async () => new Response(undefined, { status: 500 }))
+    let notified = 0
+    const unsubscribe = subscribeRequestLog(() => { notified++ })
+    const before = readRequestLog()
+    expect(readRequestLog()).toBe(before)
+
+    await fetch(`${origin}/a`)
+    // One response records an error and a slowest entry, each its own published change.
+    expect(notified).toBe(2)
+    const after = readRequestLog()
+    expect(after).not.toBe(before)
+    expect(after.errors).toMatchObject([{ path: '/a', outcome: 500 }])
+    expect(before.errors).toEqual([])
+
+    unsubscribe()
+    await fetch(`${origin}/b`)
+    expect(notified).toBe(2)
+    expect(readRequestLog().errors).toHaveLength(2)
+  })
+
+  it('does not republish a response too quick to enter a full slowest list', async () => {
+    let durationMs = 1000
+    let now = 0
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const fetch = instrumented(async () => {
+      now += durationMs
+      return new Response(undefined, { status: 204 })
+    })
+    for (let index = 0; index < 8; index++) await fetch(`${origin}/slow`)
+    const full = readRequestLog()
+    let notified = 0
+    const unsubscribe = subscribeRequestLog(() => { notified++ })
+    durationMs = 1
+    await fetch(`${origin}/quick`)
+    expect(notified).toBe(0)
+    expect(readRequestLog()).toBe(full)
+    unsubscribe()
+    clock.mockRestore()
+  })
+
+  it('publishes the reset when a new source instruments fetch', async () => {
+    await instrumented(async () => new Response(undefined, { status: 500 }))(`${origin}/a`)
+    let notified = 0
+    const unsubscribe = subscribeRequestLog(() => { notified++ })
+    instrumented(async () => new Response(undefined, { status: 204 }))
+    expect(notified).toBe(1)
+    expect(readRequestLog()).toEqual({ errors: [], slowest: [] })
+    unsubscribe()
   })
 })

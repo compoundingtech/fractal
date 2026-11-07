@@ -9,7 +9,7 @@ import { Effect } from 'effect'
 import * as React from 'react'
 
 import { getDebug } from './measurement/index.ts'
-import { readRequestLog, readSocketObservation, subscribeSocketObservation } from './transport.ts'
+import { readRequestLog, readSocketObservation, subscribeRequestLog, subscribeSocketObservation } from './transport.ts'
 import type { RequestRecord, SocketObservation } from './transport.ts'
 
 /** What one sampling pass observed; an instrument that has not measured never reads as zero. */
@@ -326,12 +326,7 @@ const requestLine = ({ method, path, outcome, durationMs }: RequestRecord): stri
 
 /** What the numbers are made of: an error count or a p95 alone cannot say which route to look at. */
 export const RequestDetails = () => {
-  const [, refresh] = React.useReducer((tick: number) => tick + 1, 0)
-  React.useEffect(() => {
-    const timer = setInterval(refresh, 1000)
-    return () => clearInterval(timer)
-  }, [])
-  const { errors, slowest } = readRequestLog()
+  const { errors, slowest } = React.useSyncExternalStore(subscribeRequestLog, readRequestLog, readRequestLog)
   return (
     <pre aria-label="Recent HTTP errors and slowest responses" {...stylex.props(styles.details)}>
       {`Latest errors\n${errors.map(requestLine).join('\n') || 'none'}\n\nSlowest responses since load\n${slowest.map(requestLine).join('\n') || 'none'}`}
