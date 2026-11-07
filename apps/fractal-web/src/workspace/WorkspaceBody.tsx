@@ -1,10 +1,12 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { RegistryContext } from '@effect/atom-react'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { cancelMeasure } from '../web/perfMarks.ts'
+import { persistedFolds } from '../state/cells/view.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { workspaceKinds } from './kinds.ts'
 import { showsTerminal, type Tab, type TabView } from './model.ts'
@@ -123,7 +125,9 @@ const TabSurface = React.memo(function TabSurface({ tab, shown, covered, name, v
  * switch; the outgoing pane stays covered through the switch frame, since locking it costs O(its rows).
  */
 export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, focusShownFace, ux, empty }: WorkspaceBodyProps) {
-  const [viewportStore] = React.useState(() => new ViewportStore())
+  // Work-log folds outlive the surface and reload; reading positions stay with this surface.
+  const registry = React.useContext(RegistryContext)
+  const [viewportStore] = React.useState(() => new ViewportStore({ folds: persistedFolds(registry) }))
   React.useEffect(() => {
     viewportStore.open()
     return () => viewportStore.dispose()

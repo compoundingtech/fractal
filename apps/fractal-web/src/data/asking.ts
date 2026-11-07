@@ -27,7 +27,13 @@ export const currentMissionIds = (row: AgentRow | undefined): ReadonlySet<string
  * `ask` only while `blocked_on` is `human` (fractal-drivers harness_state), so `ask` alone decides. */
 export const asksQuestion = (row: AgentRow): boolean => Option.getOrUndefined(row.ask) === 'question'
 
-/** "Waiting for answer" reads only Fractal: an ask-tool question OR open attention, never Fractal's status heuristics. */
+/** Open attention that is the agent's own ask: it raised or requested the card, or the card is shown in its conversation.
+ * A card on a mission the agent merely works on is the mission's question, not this agent's. */
+export const ownAttention = ({ card, ref }: { readonly card: Attention; readonly ref: string }): boolean =>
+  attentionAboutAgent({ card: { ...card, mission_id: undefined }, ref, missionIds: new Set() })
+
+/** "Waiting for answer" reads only Fractal: an ask-tool question OR the agent's own open attention, never Fractal's status
+ * heuristics and never a card it only shares through a mission. */
 export const askingAgentRefs = ({
   rows,
   attention,
@@ -39,10 +45,7 @@ export const askingAgentRefs = ({
   const asking = new Set<string>()
   for (const row of rows) {
     if (asksQuestion(row)) asking.add(row.id)
-    else if (open.length > 0) {
-      const missionIds = currentMissionIds(row)
-      if (open.some((card) => attentionAboutAgent({ card, ref: row.id, missionIds }))) asking.add(row.id)
-    }
+    else if (open.some((card) => ownAttention({ card, ref: row.id }))) asking.add(row.id)
   }
   return asking
 }

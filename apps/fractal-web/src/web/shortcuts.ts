@@ -18,8 +18,8 @@ export const shortcuts = {
   showMissions: { action: 'Show Missions', chords: [['g', 'm']] },
   switchSidebarTab: { action: 'Switch focused sidebar tabs', chords: [['left'], ['right']] },
   toggleSidebar: { action: 'Toggle sidebar', chords: [['mod+b']] },
-  focusComposer: { action: 'Focus the message box', chords: [['/'], ['mod+l']] },
-  focusSearch: { action: 'Focus sidebar search when no message box is open', chords: [['/']] },
+  focusComposer: { action: 'Focus the message box', chords: [['mod+l']] },
+  focusSearch: { action: 'Focus sidebar search', chords: [['/']] },
   showShortcuts: { action: 'Show shortcuts', chords: [['?']] },
   toggleDevBar: { action: 'Toggle devbar', chords: [['mod+shift+b']], devOnly: true },
 } as const satisfies Record<string, ShortcutDefinition>

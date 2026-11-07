@@ -17,7 +17,7 @@ vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: v
 import { AgentAlerts } from './AgentAlerts.tsx'
 import { AnswerAlert } from './AnswerAlert.tsx'
 import { alertChoices, answeredLabel, canSend, conversationAlerts, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
-import { contextOf, isPlainHeading, sameWords } from './decisionText.ts'
+import { contextOf, isPlainHeading, repeatsHeading, sameWords } from './decisionText.ts'
 import { gatewayAlertActions } from './alert-action-port.ts'
 
 const seat = 'agent/example/atlas'
@@ -189,7 +189,10 @@ describe('what a card shows of the choices', () => {
     expect(isPlainHeading('Merge it?')).toBe(true)
     expect(isPlainHeading('Recommend: yes\nWhy: tests')).toBe(false)
     expect(isPlainHeading('Build finished {"status":"failed"}')).toBe(false)
-    expect(contextOf('**Short.**')).toEqual({ line: 'Short.', overflows: false })
+    // Near-repeats of the heading go too, however differently worded the punctuation or order.
+    expect(repeatsHeading('Delete 118 archived legacy worklog folders (mbp2025, dev4)', 'Delete 118 archived legacy worklog folders on mbp2025 (114) and dev4 (4)?')).toBe(true)
+    expect(repeatsHeading('Q24: Interview on structural principles', 'Keep or drop P5?')).toBe(false)
+    expect(contextOf('# **Short.**')).toEqual({ line: '**Short.**', overflows: false })
     expect(contextOf('One.\nTwo.').overflows).toBe(true)
   })
 })
@@ -221,7 +224,8 @@ describe('AnswerAlert', () => {
     expect(html).toContain('Recommended')
     expect(html).toContain('Tests and review passed.')
     expect(html).toContain('It joins the merge queue.')
-    expect(html).toContain('Why you: You own the release.')
+    expect(html).toContain('Why you')
+    expect(html).toContain('You own the release.')
     expect(html.indexOf('>Merge<')).toBeLessThan(html.indexOf('>Hold<'))
     expect(html).toMatch(/type="radio"[^>]*checked=""/)
   })
@@ -245,10 +249,11 @@ describe('AnswerAlert', () => {
       { kind: 'link', label: 'Inline page', url: 'data:text/html,<b>x</b>' },
       { kind: 'document', label: 'Notes', url: '/relative/notes', ref: 'doc/notes' },
     ] } })} onAct={sent} now={now} />)
-    expect(html).toContain('<a href="https://example.com/pull/1" target="_blank" rel="noopener noreferrer">The pull request</a>')
+    expect(html).toMatch(/<a href="https:\/\/example\.com\/pull\/1" target="_blank" rel="noopener noreferrer">.*The pull request/)
     expect(html).not.toMatch(/href="(javascript|data):/i)
     expect(html).not.toContain('href="/relative/notes"')
-    expect(html).toContain('<li>Run this</li>')
+    expect(html).toContain('Run this')
+    expect(html).toContain('Inline page')
     expect(html).toContain('aria-label="Copy doc/notes"')
   })
 

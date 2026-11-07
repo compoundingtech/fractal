@@ -7,8 +7,6 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 
-import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
-
 import { fixtureSource } from '../../data/fixtureSource.ts'
 import { DataSourceProvider, useSubjectList } from '../../data/react.tsx'
 import { fixtureProjections } from '../../fixtures/projections.ts'
@@ -21,20 +19,21 @@ import { dailyDriver } from '../fixtures/layouts.ts'
 import { createWindow, projectWorkspaces, reduceWindow, type WindowAction } from '../workspaces.ts'
 import { defaultFilters, fixtureSidebarState, type SidebarFilters } from './state.ts'
 import { StatusIcon, statuses, type AgentStatus } from './StatusIcon.tsx'
+import { borderVars, surfaceVars, spaceVars } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   sidebar: {
     width: '340px',
     maxWidth: '100%',
     minHeight: '100vh',
-    backgroundColor: tokens['--ds-background-100'],
+    backgroundColor: surfaceVars.canvas,
     borderInlineEndWidth: '1px',
     borderInlineEndStyle: 'solid',
-    borderInlineEndColor: tokens['--ds-gray-alpha-400'],
+    borderInlineEndColor: borderVars.borderStrong,
   },
   narrow: { width: '280px' },
-  statusGrid: { display: 'flex', flexWrap: 'wrap', gap: scale.space4, padding: scale.space4 },
-  status: { display: 'flex', alignItems: 'center', gap: scale.space2, fontSize: '0.75rem' },
+  statusGrid: { display: 'flex', flexWrap: 'wrap', gap: spaceVars.xl, padding: spaceVars.xl },
+  status: { display: 'flex', alignItems: 'center', gap: spaceVars.md, fontSize: '0.75rem' },
 })
 const treeWorld = {
   ...fixtureProjections,

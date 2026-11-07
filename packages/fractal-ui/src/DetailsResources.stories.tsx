@@ -58,7 +58,7 @@ const styles = stylex.create({
 })
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Details Resources',
+  id: 'fractal-ui-details-resources', title: 'Surfaces/Details/Resources',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Production DetailsPane mounted in Workbench. Cases preserve inherited chart, resource, scope and geometry gates without the former ExploreDetails or DetailsWorkbench harness. Host counters observe Details callbacks only; terminal drawers, split-tree wiring and sidebar selection are intentionally not rendered.' } } },
   args: { resources: workbenchResources, layout: group([{ uri: 'agent:worker-1', view: 'details' }]), workspaceId: 'details-resources', scheme: 'dark', cases: [example('busy')], comparison: false },

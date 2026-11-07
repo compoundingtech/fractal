@@ -3,7 +3,6 @@ import * as stylex from '@stylexjs/stylex'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 
-import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 import { RenderProfiler } from '../telemetry/meters.tsx'
 
 import { attentionRefs } from '../data/projections.ts'
@@ -15,6 +14,7 @@ import { AgentFolders } from './AgentFolders.tsx'
 import { useOpen, useSubjects } from './context.tsx'
 import { inboxEmptyText } from './inboxEmpty.ts'
 import type { Workspace, WindowAction } from './workspaces.ts'
+import { accentVars, borderVars, statusVars, surfaceVars, textVars, radiusVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** The workbench's only navigation column: sessions, every attention card and ordinary resources. */
 export const Sidebar = React.memo(
@@ -279,18 +279,18 @@ const styles = stylex.create({
     flexGrow: 1,
     minHeight: 0,
     overflowY: 'auto',
-    backgroundColor: tokens['--ds-background-200'],
+    backgroundColor: surfaceVars.raised,
   },
   heading: {
     display: 'flex',
     alignItems: 'center',
     height: '1.75rem',
     flexShrink: 0,
-    paddingInline: scale.space3,
+    paddingInline: spaceVars.lg,
     fontWeight: 600,
     borderBottomWidth: '1px',
     borderBottomStyle: 'solid',
-    borderBottomColor: tokens['--ds-gray-alpha-400'],
+    borderBottomColor: borderVars.borderStrong,
   },
   section: { fontWeight: 500, flexGrow: 1 },
   name: {
@@ -300,35 +300,35 @@ const styles = stylex.create({
     minWidth: 0,
     flexGrow: 1,
   },
-  meta: { color: tokens['--ds-gray-900'], fontSize: '0.6875rem' },
+  meta: { color: textVars.fg, fontSize: '0.6875rem' },
   inboxState: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: scale.space2,
-    color: tokens['--ds-gray-900'],
+    gap: spaceVars.md,
+    color: textVars.fg,
     flexShrink: 0,
   },
   unreadDot: {
     width: '5px',
     height: '5px',
-    borderRadius: scale.radiusFull,
-    backgroundColor: tokens['--ds-blue-900'],
+    borderRadius: radiusVars.full,
+    backgroundColor: accentVars.primary,
   },
   badge: {
-    color: tokens['--ds-amber-900'],
-    backgroundColor: tokens['--ds-amber-200'],
-    borderRadius: scale.radiusFull,
+    color: statusVars.attention,
+    backgroundColor: surfaceVars.message,
+    borderRadius: radiusVars.full,
     minWidth: '1.125rem',
-    paddingInline: scale.space1,
+    paddingInline: spaceVars.xs,
     textAlign: 'center',
     fontSize: '0.6875rem',
   },
-  count: { color: tokens['--ds-gray-900'], fontSize: '0.6875rem' },
+  count: { color: textVars.fg, fontSize: '0.6875rem' },
   note: {
-    paddingInline: scale.space3,
-    paddingBlock: scale.space2,
+    paddingInline: spaceVars.lg,
+    paddingBlock: spaceVars.md,
     margin: 0,
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
     fontSize: '0.6875rem',
     lineHeight: 1.5,
   },

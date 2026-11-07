@@ -254,7 +254,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     />}
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
-    {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} />}
+    {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
@@ -279,6 +279,10 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
   const now = paused ?? snapshot
   const observation = useConversationSync(agentRef)
   const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
-  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
+  const sync = transcriptSyncStatus(observation, feed, now)
+  // The header says nothing about a healthy or merely stale conversation: the connection band covers stale and
+  // reconnecting, and Details has the full story. Only load progress and a failure with its Retry stay.
+  const headerStatusHost = sync._tag === 'Failed' || sync._tag === 'Progress' ? headerActionsHost : undefined
+  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerStatusHost} sync={sync} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
 

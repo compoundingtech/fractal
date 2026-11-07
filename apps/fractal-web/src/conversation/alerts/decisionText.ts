@@ -12,6 +12,13 @@ export const sameWords = (one: string, other: string, within = false): boolean =
   return a === b || (within && a !== '' && b.includes(a))
 }
 
+/** A title saying nothing the heading does not: its words all appear there, give or take one. */
+export const repeatsHeading = (title: string, heading: string): boolean => {
+  const words = new Set(normalized(heading).split(' '))
+  const own = normalized(title).split(' ').filter(Boolean)
+  return own.filter((word) => !words.has(word)).length <= Math.min(1, Math.floor(own.length / 4))
+}
+
 const HEADING_MAX = 200
 
 /** A question short enough to be the card's heading; a long or structured one is the card's body under the title. */
@@ -22,12 +29,14 @@ export const isPlainHeading = (question: string): boolean =>
 export const firstLine = (text: string): string =>
   (text.trim().split('\n')[0] ?? '').replace(/[*_`]+/g, '').replace(/^#+\s*/, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').trim()
 
+/** One line of a field as inline Markdown: its markers stay for the renderer, a heading's `#` goes. */
+export const markdownLine = (text: string): string => (text.trim().split('\n')[0] ?? '').replace(/^#+\s*/, '').trim()
+
 const LINE_FITS = 90
 
-/** The one line a card shows, and whether reading it all takes more. */
+/** The one line a card shows, as inline Markdown, and whether reading it all takes more. */
 export const contextOf = (text: string): { readonly line: string; readonly overflows: boolean } => {
-  const line = firstLine(text)
-  return { line, overflows: text.trim().includes('\n') || line.length > LINE_FITS }
+  return { line: markdownLine(text), overflows: text.trim().includes('\n') || firstLine(text).length > LINE_FITS }
 }
 
 const ARM_MS = 4_000

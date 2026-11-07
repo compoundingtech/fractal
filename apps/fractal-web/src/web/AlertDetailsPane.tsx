@@ -5,6 +5,7 @@ import * as Aria from 'react-aria-components'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { InlineMarkdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { useAlertAnswersStore } from '../conversation/alerts/alertAnswers.ts'
@@ -14,6 +15,8 @@ import { useAlertAnswers } from '../conversation/alerts/useAlertAnswers.ts'
 import { useNow } from '../data/react.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { alertsTabRows } from './alertsTab.ts'
+
+const isOpenableRef = (ref: string): boolean => /^(?:doc|agent|mission)\//.test(ref)
 
 /**
  * One alert as the main area's content: the same decision card at its full density. Answering advances to the next
@@ -74,12 +77,12 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
             : row !== undefined
               ? row.item.attention_kind === 'harness-prompt'
                 ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} {...(onAnswer === undefined ? {} : { onAnswer })} />
-                : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} {...(onAct === undefined ? {} : { onAct })} />
+                : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} {...(onAct === undefined ? {} : { onAct })} />
               : <div {...stylex.props(styles.gone)}>
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined
                   ? <p {...stylex.props(styles.goneText)}>Nothing else needs you.</p>
-                  : <Aria.Link onPress={() => onOpenAlert(next.id)} {...stylex.props(styles.goneLink)}>Next: {next.title}</Aria.Link>}
+                  : <Aria.Link onPress={() => onOpenAlert(next.id)} {...stylex.props(styles.goneLink)}>Next: <InlineMarkdown text={next.title} /></Aria.Link>}
               </div>}
       </div>
     </div>

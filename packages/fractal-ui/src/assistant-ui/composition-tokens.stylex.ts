@@ -101,7 +101,7 @@ export const typeVars = stylex.defineVars({
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
 export const radiusVars = stylex.defineVars({
-  sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
+  xs: '2px', sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
   keyboard: '4px',
   full: '9999px', none: '0',
 })
@@ -151,6 +151,8 @@ export const geometryVars = stylex.defineVars({
   /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
   attachmentMax: { default: '180px', '@media (min-width: 600px)': '240px' },
   detailsValueMin: '120px',
+  /** The widest a line of supporting prose runs inside a wider card. */
+  readingMeasure: '68ch',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',

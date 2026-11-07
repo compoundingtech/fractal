@@ -1,17 +1,18 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomValue } from '@effect/atom-react'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, interactionVars as interaction, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useConnection, useDataSource } from '../data/react.tsx'
 import { devBarAvailable, toggleDevBar, useDevBarVisible } from '../telemetry/devBarPreference.ts'
+import { systemEventsPreference } from './conversationPreferences.ts'
 import { deviceAccess, type SettingsBuild } from './settingsModel.ts'
 import { shortcutCaps, shortcutList, type ShortcutDefinition } from './shortcuts.ts'
 
-export type SettingsScheme = 'dark' | 'light'
+export type SettingsScheme = 'dark' | 'light' | 'system'
 
 export interface SettingsControlProps {
   readonly scheme: SettingsScheme
@@ -39,6 +40,7 @@ export const SettingsControl = ({ scheme, onSchemeChange, build }: SettingsContr
               </header>
               <div {...stylex.props(styles.body)}>
                 <Section title="Appearance"><ThemeRow scheme={scheme} onSchemeChange={onSchemeChange} /></Section>
+                <Section title="Conversations"><SystemEventsRow /></Section>
                 <Section title="Keyboard shortcuts"><ShortcutList /></Section>
                 <Section title="Dev tools"><DevBarRow /></Section>
                 <Section title="Device and connection"><DeviceFacts build={build} /></Section>
@@ -60,11 +62,11 @@ const Section = ({ title, children }: { readonly title: string; readonly childre
 
 const ThemeRow = ({ scheme, onSchemeChange }: Pick<SettingsControlProps, 'scheme' | 'onSchemeChange'>) => {
   const touch = React.useContext(NarrowLayoutContext)
-  return <Aria.RadioGroup value={scheme} onChange={value => onSchemeChange(value === 'light' ? 'light' : 'dark')} orientation="horizontal" {...stylex.props(styles.row)}>
+  return <Aria.RadioGroup value={scheme} onChange={value => onSchemeChange(value === 'light' || value === 'system' ? value : 'dark')} orientation="horizontal" {...stylex.props(styles.row)}>
     <Aria.Label {...stylex.props(styles.rowLabel)}>Theme</Aria.Label>
     <div {...stylex.props(styles.segments)}>
-      {(['light', 'dark'] as const).map(option => <Aria.Radio key={option} value={option} {...stylex.props(styles.segment, touch && styles.touch, scheme === option && styles.segmentSelected)}>
-        {option === 'light' ? 'Light' : 'Dark'}
+      {(['light', 'dark', 'system'] as const).map(option => <Aria.Radio key={option} value={option} {...stylex.props(styles.segment, touch && styles.touch, scheme === option && styles.segmentSelected)}>
+        {option === 'light' ? 'Light' : option === 'dark' ? 'Dark' : 'System'}
       </Aria.Radio>)}
     </div>
   </Aria.RadioGroup>
@@ -83,6 +85,15 @@ const ShortcutKeys = ({ shortcut }: { readonly shortcut: ShortcutDefinition }) =
     {alternative === 0 ? null : <span {...stylex.props(styles.keyOr)}>or</span>}
     {chord.flat().map((cap, index) => <kbd key={index} {...stylex.props(styles.key)}>{cap}</kbd>)}
   </React.Fragment>)
+
+const SystemEventsRow = () => {
+  const [visible, setVisible] = useAtom(systemEventsPreference)
+  const touch = React.useContext(NarrowLayoutContext)
+  return <Aria.Switch isSelected={visible} onChange={setVisible} {...stylex.props(styles.row, styles.switchRow, touch && styles.touch)}>
+    <span {...stylex.props(styles.rowLabel)}>Show all system events</span>
+    <span aria-hidden="true" {...stylex.props(styles.track, visible && styles.trackOn)}><span {...stylex.props(styles.thumb, visible && styles.thumbOn)} /></span>
+  </Aria.Switch>
+}
 
 const DevBarRow = () => {
   const visible = useDevBarVisible()

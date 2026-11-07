@@ -164,7 +164,8 @@ describe('live captured Changes dock', () => {
     expect(titles).toHaveLength(1)
     expect(titles[0]?.textContent).toBe('Changes A')
     expect(host.querySelector('[data-testid="transcript-header"]')).toBeNull()
-    expect(host.querySelector('[data-testid="thread-header"] [data-testid="transcript-header-status"]')).not.toBeNull()
+    // A healthy conversation says nothing about sync in the header.
+    expect(host.querySelector('[data-testid="thread-header"] [data-testid="transcript-header-status"]')).toBeNull()
 
     await openChanges()
     expect(inspectorRequested).toHaveBeenCalledTimes(1)

@@ -257,6 +257,99 @@ describe('native closed transcript boundary', () => {
       const custom = project(entry([block('unknown', { source_type: 'custom', payload: { raw: { customType: 'future-custom' } } })]))
       expect(custom).toMatchObject([{ _tag: 'Unsupported', recordKind: 'future-custom' }])
     })
+    describe.each([
+      ['record first', (record: unknown, text: unknown) => [record, text]],
+      ['text first', (record: unknown, text: unknown) => [text, record]],
+    ])('beside visible text, %s', (_, order) => {
+      const mixed = (record: unknown, fields: object = {}, text = 'Visible words') => {
+        const blocks = [block('source_record', { visibility: 'internal', payload: { raw: session } }), ...order(record, block('text', { source_type: 'content', payload: { body_ref: true } }))]
+        return project(entry(blocks, { body: { text, media_type: 'text/plain', blocks }, ...fields }))
+      }
+      it.each([[false, ['Text']], [true, ['Event', 'Text']]])('keeps the prose with system events %s', (shown, tags) => {
+        const visible = lane(mixed(status('model_usage', usage)), shown)
+        expect(visible.map(item => item._tag)).toEqual(tags)
+        expect(visible.at(-1)).toMatchObject({ _tag: 'Text', text: 'Visible words' })
+      })
+      it('gives the record its own stable row', () => {
+        expect(mixed(status('model_usage', usage)).map(item => item.id)).toEqual(['timeline-entry/raw/1#block/status', 'timeline-entry/raw/1'])
+      })
+      it.each([false, true])('never carries the session prompt beside the prose, system events %s', shown => {
+        const items = mixed(status('session_init', session))
+        expect(items.map(item => item._tag)).toEqual(['Event', 'Text'])
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+        expect(JSON.stringify(lane(items, shown))).not.toMatch(/SENTINEL/)
+      })
+      it.each([
+        ['its bounded copy', `[omp session_init]\n${JSON.stringify(session)}`],
+        ['the prompt itself', 'Before SYSTEM_PROMPT_SENTINEL after'],
+      ])('does not read the body as prose when it is %s', (__, text) => {
+        const items = mixed(status('session_init', session), {}, text)
+        expect(items.map(item => item._tag)).toEqual(['Event'])
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it('keeps a quiet rule row visible beside the prose', () => {
+        expect(lane(mixed(status('ttsr_injection', { injectedRules: ['no-force-push'] })), false).map(item => 'text' in item ? item.text : item._tag))
+          .toEqual(['Rule applied: no-force-push', 'Visible words'])
+      })
+    })
+    describe.each([
+      ['record first', (record: unknown, other: unknown) => [record, other]],
+      ['other first', (record: unknown, other: unknown) => [other, record]],
+    ])('a body that repeats the record, beside another block, %s', (_, order) => {
+      const copy = `[omp session_init]\n${JSON.stringify(session)}`
+      const beside = (other: unknown, fields: object = {}) => {
+        const blocks = [block('source_record', { visibility: 'internal', payload: { raw: session } }), ...order(status('session_init', session), other)]
+        return project(entry(blocks, { body: { text: copy, media_type: 'text/plain', blocks, ...fields } }))
+      }
+      const failedJob = block('job', { source_type: 'content', view: { type: 'job', jobs: [{ id: 'j', state: 'failed' }] } })
+      it.each([false, true])('keeps a failed job, system events %s', shown => {
+        const items = beside(failedJob)
+        expect(items).toHaveLength(2)
+        expect(lane(items, shown)).toContainEqual(expect.objectContaining({ _tag: 'Event', kind: 'background-job', notice: expect.objectContaining({ state: 'failed' }) }))
+        expect(lane(items, shown).some(item => item._tag === 'Event' && item.notice?._tag === 'SystemRecord')).toBe(shown)
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it.each([
+        ['irc', block('irc', { source_type: 'content', view: { type: 'irc', from: 'peer', message: 'Hello', message_id: 'irc-1' } }), { _tag: 'Event', kind: 'irc' }],
+        ['compaction', block('status', { source_type: 'content', view: { type: 'compaction', summary: 'Short summary' } }), { _tag: 'Event', kind: 'compaction' }],
+        ['a model change', block('status', { source_type: 'status', view: { type: 'model_change', model: 'example/next', fallback: false } }), { _tag: 'Notice', text: 'Model changed to example/next' }],
+        ['an unknown block', block('future-kind', { source_type: 'future' }), { _tag: 'Unsupported', recordKind: 'future-kind' }],
+        ['an unknown record', status('future_record', { type: 'future_record' }), { _tag: 'Unsupported', recordKind: 'future_record' }],
+      ])('keeps %s', (__, other, expected) => {
+        const items = beside(other)
+        for (const shown of [false, true]) expect(lane(items, shown)).toContainEqual(expect.objectContaining(expected))
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it('keeps an attachment without reading the body as its text', () => {
+        const items = beside(block('image', { source_type: 'content' }), { attachment_id: 'blob/image' })
+        const text = items.find(item => item._tag === 'Text')
+        expect(text).toMatchObject({ text: '', attachments: [{ id: 'blob/image' }] })
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it.each([
+        ['text', block('text', { source_type: 'content' })],
+        ['reasoning', block('reasoning', { source_type: 'thinking' })],
+        ['a dropped view', block('status', { visibility: 'visible', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })],
+      ])('adds no empty row for %s', (__, other) => {
+        expect(beside(other)).toMatchObject([{ _tag: 'Event', id: 'timeline-entry/raw/1', notice: { _tag: 'SystemRecord' } }])
+      })
+      it('keeps a hidden block inspectable without the record or its copy', () => {
+        const items = beside(block('text', { visibility: 'internal' }))
+        expect(items.map(item => item._tag)).toEqual(['Event', 'UnknownEvent'])
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+    })
+    it('keeps a hidden body hidden beside a record, without the record inside its disclosure', () => {
+      const blocks = [status('session_init', session), block('text', { visibility: 'internal' })]
+      const items = project(entry(blocks, { body: { text: 'Internal words', media_type: 'text/plain', blocks } }))
+      expect(items.map(item => item._tag)).toEqual(['Event', 'UnknownEvent'])
+      expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      expect(lane(items, false)).toEqual([])
+    })
+    it('gives each of several records a row', () => {
+      expect(project(entry([status('model_usage', usage), { ...status('session_init', session), id: 'block/init' }])).map(item => item.id))
+        .toEqual(['timeline-entry/raw/1#block/init', 'timeline-entry/raw/1'])
+    })
     it('keeps a visible custom message that shares a record name as prose', () => {
       const blocks = [block('text', { source_type: 'content', view: { type: 'omp_event', kind: 'model_usage', content: 'Visible words' } })]
       expect(project(entry(blocks, { body: { text: 'Visible words', media_type: 'text/plain', blocks } }))).toMatchObject([{ _tag: 'Text', text: 'Visible words' }])

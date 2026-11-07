@@ -23,7 +23,7 @@ export const ompNoticeExcerpt = (payload: string): string => {
     } catch { prose = '' }
   }
   const line = prose.split('\n').map(line => line.trim()).find(line => line !== '' && !/^[#<>{}\[\]"`]/.test(line))
-  return (line ?? 'Full result available in details.').replace(/^#+\s+|^[-*]\s+/g, '').replaceAll('**', '').slice(0, 200)
+  return (line ?? 'Full result available in details.').replace(/^#+\s+|^[-*]\s+/g, '').slice(0, 200)
 }
 
 const taskNotice = (body: string, raw: string): Extract<HarnessNotice, { readonly _tag: 'SubagentResult' }> | undefined => {

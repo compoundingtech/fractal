@@ -12,19 +12,21 @@ import type { Grants } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { SidebarHeader } from './ResponsiveAgentSidebar.tsx'
-import { SettingsControl } from './SettingsDialog.tsx'
+import { SettingsControl, type SettingsScheme } from './SettingsDialog.tsx'
+import { useResolvedScheme } from './themePreference.ts'
 
 const readOnly: Grants = { actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
 const full: Grants = { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'granted', terminalControl: 'granted' }
 
 const SettingsSurface = ({ initialScheme = 'dark', grants = readOnly }: { readonly initialScheme?: 'dark' | 'light'; readonly grants?: Grants }) => {
-  const [scheme, setScheme] = React.useState<'dark' | 'light'>(initialScheme)
+  const [preference, setPreference] = React.useState<SettingsScheme>(initialScheme)
+  const scheme = useResolvedScheme(preference)
   const [registry] = React.useState(() => AtomRegistry.make())
   const [source] = React.useState(() => ({ ...fixtureSource({ world: fixtureProjections }), gateway: 'gateway.example:7411', grants: Atom.make(grants) }))
   return <DataSourceProvider source={source} registry={registry}>
     <main data-scheme={scheme} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
       <div {...stylex.props(styles.sidebar)}>
-        <SidebarHeader label="Collapse agents" onCollapse={() => undefined} actions={<SettingsControl scheme={scheme} onSchemeChange={setScheme} build={{ version: '0.1.0', revision: '250574f54abc', dirty: false }} />} />
+        <SidebarHeader label="Collapse agents" onCollapse={() => undefined} actions={<SettingsControl scheme={preference} onSchemeChange={setPreference} build={{ version: '0.1.0', revision: '250574f54abc', dirty: false }} />} />
       </div>
     </main>
   </DataSourceProvider>
@@ -36,7 +38,7 @@ const openEscapeReturn = async ({ canvasElement }: { readonly canvasElement: HTM
   const gear = canvas.getByRole('button', { name: 'Settings' })
   await userEvent.click(gear)
   const dialog = await within(document.body).findByRole('dialog', { name: 'Settings' })
-  for (const section of ['Appearance', 'Keyboard shortcuts', 'Dev tools', 'Device and connection']) await expect(within(dialog).getByRole('region', { name: section })).toBeVisible()
+  for (const section of ['Appearance', 'Conversations', 'Keyboard shortcuts', 'Dev tools', 'Device and connection']) await expect(within(dialog).getByRole('region', { name: section })).toBeVisible()
   await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
   for (let press = 0; press < 8; press += 1) {
     await userEvent.tab()

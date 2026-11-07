@@ -9,20 +9,23 @@ import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
-import { SettingsControl } from './SettingsDialog.tsx'
+import { SettingsControl, type SettingsScheme } from './SettingsDialog.tsx'
+import { useResolvedScheme } from './themePreference.ts'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
-const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark' }: {
+const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark', initialQuery = '' }: {
   readonly width?: number
   readonly viewport?: number
   readonly initialScheme?: 'dark' | 'light'
+  readonly initialQuery?: string
 }) => {
-  const [filters, setFilters] = React.useState(defaultFilters)
-  const [scheme, setScheme] = React.useState<'dark' | 'light'>(initialScheme)
+  const [filters, setFilters] = React.useState({ ...defaultFilters, query: initialQuery })
+  const [preference, setScheme] = React.useState<SettingsScheme>(initialScheme)
+  const scheme = useResolvedScheme(preference)
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   return <main data-sidebar-chrome-story="" style={{ width: viewport }} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
-    <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined} headerActions={<SettingsControl scheme={scheme} onSchemeChange={setScheme} />}>
+    <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined} headerActions={<SettingsControl scheme={preference} onSchemeChange={setScheme} />}>
       <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} showRows={[{ host: 'local', asking: false, others: true, status: 'idle' }]} />
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>Builder session</nav>
     </ResponsiveAgentSidebar>
@@ -38,6 +41,7 @@ const assertChrome = (sidebar: HTMLElement): void => {
   const field = search.getBoundingClientRect()
   const lastControl = canvas.getByRole('button', { name: /^Sort agents/ }).getBoundingClientRect()
   if (Math.abs(field.left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - lastControl.right - 8) > 0.1) throw new Error('Search row must have two 8px insets')
+  if (field.right > canvas.getByRole('button', { name: /^Filter/ }).getBoundingClientRect().left) throw new Error('Search must end before the Filter menu')
   if (getComputedStyle(search).borderRadius !== '6px') throw new Error('Search radius must be 6px')
   const wordmark = sidebar.querySelector('header strong')!
   if (getComputedStyle(wordmark).fontWeight !== '500') throw new Error('Wordmark weight must be 500')
@@ -70,6 +74,7 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   // Inject the reported failures into the real rendered nodes; the same criterion must reject each.
   for (const control of [
     { node: field, style: 'margin-left: -8px', error: 'Search row must have two 8px insets' },
+    { node: field, style: 'width: 400px', error: 'Search must end before the Filter menu' },
     { node: field, style: 'border-radius: 2px', error: 'Search radius must be 6px' },
     { node: wordmark, style: 'font-weight: 700', error: 'Wordmark weight must be 500' },
   ]) {
@@ -94,7 +99,7 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull())
 }
 
-const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and header over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and settings controls share the header row with decorative stroke icons at the 8px insets. The wordmark is weight 500. The sidebar has no footer; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
+const meta = { excludeStories: ['scenarioExemptions'], id: 'wf-sidebar-chrome', title: 'Surfaces/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and header over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'The sidebar search row, field then Filter then Sort, uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and settings controls share the header row with decorative stroke icons at the 8px insets. The wordmark is weight 500. The sidebar has no footer; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
@@ -103,12 +108,24 @@ export const scenarioExemptions: readonly string[] = [
   'At320:contract-fixture',
   'Light:contract-fixture',
   'NarrowDrawer:contract-fixture',
+  'WithSearchText:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 export const At256: Story = { args: { width: 256 }, play: chromePlay }
 export const At320: Story = { args: { width: 320 }, play: chromePlay }
 export const Light: Story = { args: { initialScheme: 'light' }, play: chromePlay }
 export const NarrowDrawer: Story = { args: { width: 240, viewport: 440 }, play: chromePlay }
+/** With text the `/` hint gives way to Clear search, which empties the field and leaves focus in it. */
+export const WithSearchText: Story = { args: { width: 256, initialQuery: 'builder machine:local' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const field = canvas.getByRole('textbox', { name: 'Search agents' })
+  await expect(canvasElement.querySelector('kbd')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: 'Clear search' }))
+  await expect(field).toHaveValue('')
+  await expect(field).toHaveFocus()
+  await expect(canvas.queryByRole('button', { name: 'Clear search' })).toBeNull()
+  await expect(canvasElement.querySelector('kbd')).toHaveTextContent('/')
+} }
 
 const styles = stylex.create({
   root: { display: 'flex', height: 480, maxWidth: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

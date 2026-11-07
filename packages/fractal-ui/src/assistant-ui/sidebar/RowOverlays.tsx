@@ -4,8 +4,9 @@ import * as stylex from '@stylexjs/stylex'
 import { Dialog, Popover, Text } from 'react-aria-components'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
+import { HumanClockProvider, HumanTime, fixedClock } from '../../time/HumanTime'
 import { borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import type { SidebarAgentRow as Row, SidebarMissionProgress, SidebarMissionStep } from './model'
+import { rowAttention, rowStatusLabel, type SidebarAgentRow as Row, type SidebarMissionInfo, type SidebarMissionProgress, type SidebarMissionStep } from './model'
 import type { AgentRowActionsProps } from './DeferredRowActions.tsx'
 import { sidebarRowTitle, sidebarSubagentObservationText, usageText, tokenCount, spendCount, openRow } from './rowPresentation.tsx'
 import { SidebarStatus } from './SidebarStatus'
@@ -19,7 +20,7 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
     <dt {...stylex.props(styles.detailLabel)}>Name</dt><dd {...stylex.props(styles.detailValue)}>{sidebarRowTitle(row)}</dd>
     <dt {...stylex.props(styles.detailLabel)}>ID</dt><dd {...stylex.props(styles.detailValue)}>{row.ref}</dd>
     {row.description !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Description</dt><dd {...stylex.props(styles.detailValue)}>{row.description}</dd></>}
-    {(!reportedStatusOnly || row.status !== 'unobserved') && <><dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{row.statusLabel}; {row.freshness} observation</dd></>}
+    {(!reportedStatusOnly || row.status !== 'unobserved') && <><dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{rowStatusLabel(row)}; {row.freshness} observation</dd></>}
     {row.statusSince !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Elapsed in status</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.statusSince} {...clock} />; since {new Date(row.statusSince).toISOString()}</dd></>}
     {row.lastActivityAt !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Last activity</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastActivityAt} {...clock} kind="activity" />; {new Date(row.lastActivityAt).toISOString()}</dd></>}
     <dt {...stylex.props(styles.detailLabel)}>Needs you</dt><dd {...stylex.props(styles.detailValue)}>{row.needsMe === undefined ? 'Unknown' : row.needsMe ? 'Yes' : 'No'}</dd><dt {...stylex.props(styles.detailLabel)}>Unread</dt><dd {...stylex.props(styles.detailValue)}>{row.unread ?? 'Unknown'}</dd>
@@ -56,9 +57,9 @@ export function AgentHoverCard({ row, reportedStatusOnly = false, ...clock }: { 
   const showStatus = !reportedStatusOnly || row.status !== 'unobserved'
   return <div data-testid="agent-hover-card" {...stylex.props(styles.card)}>
     <strong {...stylex.props(styles.cardTitle)}>{row.title}</strong>
-    <div {...stylex.props(styles.cardSummary)}>{showStatus && <><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="Agents" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span></>}<Icon name="gear" size={12} /><span>{row.host}</span></div>
+    <div {...stylex.props(styles.cardSummary)}>{showStatus && <><SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={rowAttention(row) === 'needs-you'} freshness={row.freshness} iconOnly /><span>{rowStatusLabel(row)}</span><span>·</span></>}<Icon name="gear" size={12} /><span>{row.host}</span></div>
     {row.description !== undefined && !cardMissionsSay(row, row.description) && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} />{row.description}</p>}
-    <CardMissions context={row.missionContext} />
+    <CardMissions context={row.missionContext} info={row.missionInfo} {...clock} />
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />{row.usage.usd === undefined ? 'Tokens' : 'Spend'}</dt><dd {...stylex.props(styles.detailValue)}>{row.usage.usd === undefined ? '' : `${spendCount.format(row.usage.usd)} · `}{tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : row.usage.scope === 'lifetime-incl-subagents' ? 'Lifetime · includes subagents' : 'Reported by agent'}</div></dd></>}
       <ContextDetails row={row} coarseTime />
@@ -83,13 +84,23 @@ const CardMission = ({ title, step, progress }: { readonly title: string; readon
     {step !== undefined && step !== title && <span {...stylex.props(styles.cardMissionStep)}>{step}</span>}
   </li>
 /** The missions this agent holds now, then those queued behind them, in reported order. */
-const CardMissions = ({ context }: { readonly context: Row['missionContext'] }) => {
+/** The missions below are the retained last observation when their feed is Stale or Failed, even under a live agent status. */
+const CardMissionInfoNote = ({ info, now }: { readonly info: SidebarMissionInfo } & SidebarClock) => {
+  if (info._tag === 'Live') return null
+  const note = <p data-testid="hover-missions-note" data-mission-info-note={info._tag.toLowerCase()} {...stylex.props(styles.cardMissionNote)}>
+    {info._tag === 'Stale' ? 'Mission info may be out of date.' : 'Couldn\u2019t refresh mission info.'}
+    {info.updatedAt !== undefined && <> Updated <HumanTime at={info.updatedAt} kind="elapsed" maxUnits={1} suffix=" ago" />.</>}
+  </p>
+  return now === undefined ? note : <HumanClockProvider clock={fixedClock(now)}>{note}</HumanClockProvider>
+}
+const CardMissions = ({ context, info, now }: { readonly context: Row['missionContext']; readonly info?: SidebarMissionInfo | undefined } & SidebarClock) => {
   if (context?._tag !== 'Mission') return null
   const others = (context.alsoCurrent ?? []).slice(0, cardMissionLimit - 1)
   const queued = context.queued.slice(0, cardMissionLimit - 1 - others.length)
   const more = (context.alsoCurrent?.length ?? 0) + context.queued.length - others.length - queued.length
   return <section aria-label="Missions" data-testid="hover-missions" {...stylex.props(styles.cardMissions)}>
     <div {...stylex.props(styles.cardLabel)}><Icon name="checklist" size={12} />Missions</div>
+    {info !== undefined && <CardMissionInfoNote info={info} now={now} />}
     <ul {...stylex.props(styles.cardMissionList)}>
       <CardMission title={context.title ?? context.slug} step={stepText(context.step)} progress={progressText(context.progress)} />
       {others.map(mission => <CardMission key={mission.id} title={mission.title ?? mission.slug} step={stepText(mission.step)} progress={progressText(mission.progress)} />)}
@@ -171,6 +182,7 @@ const styles = stylex.create({
   cardMissionTitle: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fg },
   cardMissionCount: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums' },
   cardMissionStep: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fgSoft, fontSize: t.denseSize },
+  cardMissionNote: { margin: s.zero, color: ink.fgSoft, fontSize: t.denseSize },
   cardQueuedLabel: { color: ink.fgSoft, fontSize: t.denseSize },
   cardChildren: { margin: s.zero, padding: s.zero, listStyleType: 'none', color: ink.fgSoft },
   detailLabel: { margin: s.zero, color: ink.fgSoft },

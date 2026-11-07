@@ -1,12 +1,16 @@
-import fc from 'fast-check'
-import { describe, expect, it } from 'vitest'
+import { it } from '@effect/vitest'
+import { Arbitrary, Schema } from 'effect'
+import { describe, expect } from 'vitest'
 import { activeTab, emptyWorkspace, tabsOf, transition, visibleTabIds, type Tab, type WorkspaceState } from './model.ts'
 import { corePolicies, type DataResource } from './registry.ts'
 import { defaultBudget, desiredHolds, makeResourceManager, planTiers, resourceKey, type Budget } from './resources.ts'
 import { parsePane } from './subject.ts'
 
+const between = (minimum: number, maximum: number) => Schema.Int.check(Schema.isBetween({ minimum, maximum }))
 const agents = Array.from({ length: 12 }, (_, index) => `agent:agent/a${index}`)
 const panes = [...agents, 'terminal:agent/a0', 'terminal:agent/a1', 'list:home', 'list:missions', 'mission:mission/m', 'usage:', 'document:doc/x', 'declaration:agent/a0', 'resource:mail/1', 'machine:machine/m']
+
+const pane = Arbitrary.schema(Schema.Literals(panes))
 
 const counter = () => {
   let next = 0
@@ -40,25 +44,23 @@ const fakeDriver = () => {
 }
 
 describe('planTiers', () => {
-  const scenario = fc.record({
-    open: fc.shuffledSubarray(panes, { minLength: 1 }),
-    dom: fc.integer({ min: 0, max: 6 }),
-    data: fc.integer({ min: 0, max: 12 }),
+  const scenario = Arbitrary.all({
+    open: Arbitrary.array(pane, { minLength: 1, maxLength: panes.length }).pipe(Arbitrary.map(open => [...new Set(open)])),
+    dom: Arbitrary.schema(between(0, 6)),
+    data: Arbitrary.schema(between(0, 12)),
   })
 
-  it('always shows the active tab and respects both budgets', () => {
-    fc.assert(fc.property(scenario, ({ open, dom, data }) => {
-      const state = workspace(open)
-      const budget: Budget = { dom, data }
-      const tiers = planTiers({ state, budget })
-      const tabs = tabsOf(state.layout)
-      expect(tiers.get(activeTab(state)!.id)).toBe('active')
-      expect(tiers.size).toBe(tabs.length)
-      const hidden = tabs.filter(tab => tab.id !== activeTab(state)!.id)
-      const cost = (tab: Tab, field: 'domCost' | 'dataCost') => corePolicies[parsePane(tab.pane)._tag][field]
-      expect(hidden.filter(tab => tiers.get(tab.id) === 'mounted').reduce((sum, tab) => sum + cost(tab, 'domCost'), 0)).toBeLessThanOrEqual(dom)
-      expect(hidden.filter(tab => ['mounted', 'warm'].includes(tiers.get(tab.id)!)).reduce((sum, tab) => sum + cost(tab, 'dataCost'), 0)).toBeLessThanOrEqual(data)
-    }))
+  it.prop('always shows the active tab and respects both budgets', { scenario }, ({ scenario: { open, dom, data } }) => {
+    const state = workspace(open)
+    const budget: Budget = { dom, data }
+    const tiers = planTiers({ state, budget })
+    const tabs = tabsOf(state.layout)
+    expect(tiers.get(activeTab(state)!.id)).toBe('active')
+    expect(tiers.size).toBe(tabs.length)
+    const hidden = tabs.filter(tab => tab.id !== activeTab(state)!.id)
+    const cost = (tab: Tab, field: 'domCost' | 'dataCost') => corePolicies[parsePane(tab.pane)._tag][field]
+    expect(hidden.filter(tab => tiers.get(tab.id) === 'mounted').reduce((sum, tab) => sum + cost(tab, 'domCost'), 0)).toBeLessThanOrEqual(dom)
+    expect(hidden.filter(tab => ['mounted', 'warm'].includes(tiers.get(tab.id)!)).reduce((sum, tab) => sum + cost(tab, 'dataCost'), 0)).toBeLessThanOrEqual(data)
   })
 
   it('evicts the least recently used conversation first, keeping the tab', () => {
@@ -110,23 +112,21 @@ describe('resource manager', () => {
     expect(manager.stats().held).toBe(0)
   })
 
-  it('stays balanced and bounded through any sequence of switches', () => {
-    fc.assert(fc.property(fc.array(fc.constantFrom(...panes), { minLength: 1, maxLength: 60 }), sequence => {
-      const fake = fakeDriver()
-      const manager = makeResourceManager(fake.driver)
-      const context = counter()
-      let state = emptyWorkspace
-      for (const pane of sequence) {
-        state = transition(state, { _tag: 'Open', pane }, context)
-        manager.reconcile(holdsOf(state))
-        for (const count of fake.mounts.values()) expect(count === 0 || count === 1).toBe(true)
-        // The budget, the one visible subject, and a terminal on screen.
-        expect(manager.stats().follows).toBeLessThanOrEqual(defaultBudget.data + 2)
-      }
-      manager.dispose()
-      for (const count of fake.mounts.values()) expect(count).toBe(0)
-      expect(manager.stats().acquired).toBe(manager.stats().released)
-    }))
+  it.prop('stays balanced and bounded through any sequence of switches', { sequence: Arbitrary.array(pane, { minLength: 1, maxLength: 60 }) }, ({ sequence }) => {
+    const fake = fakeDriver()
+    const manager = makeResourceManager(fake.driver)
+    const context = counter()
+    let state = emptyWorkspace
+    for (const pane of sequence) {
+      state = transition(state, { _tag: 'Open', pane }, context)
+      manager.reconcile(holdsOf(state))
+      for (const count of fake.mounts.values()) expect(count === 0 || count === 1).toBe(true)
+      // The budget, the one visible subject, and a terminal on screen.
+      expect(manager.stats().follows).toBeLessThanOrEqual(defaultBudget.data + 2)
+    }
+    manager.dispose()
+    for (const count of fake.mounts.values()) expect(count).toBe(0)
+    expect(manager.stats().acquired).toBe(manager.stats().released)
   })
 
   it('keeps a hidden mounted document held, so hiding and reactivating it neither releases nor reacquires', () => {

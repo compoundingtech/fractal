@@ -12,6 +12,7 @@ import { LiveAgentWorkspace } from '../web/LiveAgentWorkspace.tsx'
 import { DomTerminal } from '../terminal/DomTerminal.tsx'
 import { defaultTerminalPalette } from '../terminal/palette.ts'
 import { createEmbedNavigation } from './navigation.ts'
+import { schemePreference } from '../web/themePreference.ts'
 
 export const fragments = ['web', 'web-narrow', 'claude-code', 'codex'] as const
 export type EmbedFragment = typeof fragments[number]
@@ -29,7 +30,7 @@ export const Embed = ({ fragment, scheme = 'dark' }: { readonly fragment: EmbedF
   const headingId = React.useId()
   const [registry] = React.useState(() => {
     const value = AtomRegistry.make()
-    value.set(persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' }), scheme)
+    value.set(schemePreference, scheme)
     value.set(persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false }), false)
     return value
   })

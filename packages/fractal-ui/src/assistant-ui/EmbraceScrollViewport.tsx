@@ -38,17 +38,47 @@ export type ViewportAnchorHistory =
   | { readonly _tag: 'Complete'; readonly includes: (id: string) => boolean }
   | { readonly _tag: 'Partial' }
 
+/** Where fold choices live. A host may pass a persisted one; the kit never knows how it is stored. */
+export interface FoldMemory {
+  readonly get: (id: string) => boolean | undefined
+  readonly set: (id: string, expanded: boolean) => void
+}
+/** Most recent choices win; only recent turns are worth remembering. */
+export const maxRememberedFolds = 500
+const memoryFolds = (): FoldMemory & { readonly clear: () => void } => {
+  const folds = new Map<string, boolean>()
+  return {
+    get: (id) => folds.get(id),
+    set: (id, expanded) => {
+      folds.delete(id)
+      folds.set(id, expanded)
+      if (folds.size > maxRememberedFolds) folds.delete(folds.keys().next().value!)
+    },
+    clear: () => folds.clear(),
+  }
+}
+
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
   private readonly states = new Map<string, ViewportState>()
+  private readonly ownFolds = memoryFolds()
+  private readonly folds: FoldMemory
   private disposed = false
+  /** `folds`: a host-owned memory that outlives this surface; without it choices last as long as the store. */
+  constructor({ folds }: { readonly folds?: FoldMemory } = {}) { this.folds = folds ?? this.ownFolds }
   get size(): number { return this.states.size }
+  /** A reader's work-log fold choice by turn. */
+  foldChoice(id: string): boolean | undefined { return this.folds.get(id) }
+  rememberFold(id: string, expanded: boolean): void {
+    if (this.disposed) return
+    this.folds.set(id, expanded)
+  }
   get(key: string): ViewportState | undefined { return this.states.get(key) }
   save(key: string, state: ViewportState): void { if (!this.disposed) this.states.set(key, state) }
   retain(keys: ReadonlySet<string>): void { for (const key of this.states.keys()) if (!keys.has(key)) this.states.delete(key) }
   open(): void { this.disposed = false }
   /** Parent-first teardown must ignore late saves from unmounting viewports. */
-  dispose(): void { this.disposed = true; this.states.clear() }
+  dispose(): void { this.disposed = true; this.states.clear(); this.ownFolds.clear() }
 }
 
 /** Viewports outside a store-owning surface keep memory only for their own mount. */

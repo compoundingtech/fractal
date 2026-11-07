@@ -13,6 +13,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { credentialExpiredMessage, observed, unavailable, type Feed } from '../data/source.ts'
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+import { inspectorViewPreference } from './conversationPreferences.ts'
 import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
@@ -42,6 +43,16 @@ let host: HTMLDivElement
 const button = (name: string) => [...document.querySelectorAll('button')].find(node => (node.getAttribute('aria-label') ?? node.textContent?.trim()) === name)
 const click = async (name: string) => { const node = button(name); expect(node, name).toBeDefined(); await act(async () => node!.click()) }
 
+const openSettings = async () => { await click('Settings'); return within(document.body).getByRole('switch', { name: 'Show all system events' }) as HTMLInputElement }
+const closeSettings = () => click('Close settings')
+/** The right panel on its Resources tab. */
+const openResources = async () => {
+  await click('Toggle right panel')
+  await vi.waitFor(() => expect(host.querySelector('[data-testid="agent-details-panel"]')).not.toBeNull(), { timeout: 15_000 })
+  await act(async () => within(host).getByRole('tab', { name: /^Resources/ }).click())
+  return host.querySelector<HTMLElement>('[data-agent-resources]')!
+}
+
 beforeEach(async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
@@ -53,6 +64,7 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/example?open=thread')
   registry = AtomRegistry.make()
+  registry.set(inspectorViewPreference, 'details')
   registry.set(resources, observed({ value: { items: [resource], nextCursor: null } }))
   host = document.createElement('div')
   document.body.append(host)
@@ -62,42 +74,40 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals() })
 
 describe('live header parity', () => {
-  it('renders named Resources and Conversation controls in the owning header', async () => {
+  it('keeps only the overflow, terminal and panel controls in the owning header, with system events in Settings', async () => {
     const header = host.querySelector('[data-testid="thread-header"]')!
     const names = [...header.querySelectorAll('button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
-    expect(names).toEqual(['Actions for Example Agent', 'Resources', 'View KDL', 'Conversation menu', 'Show terminal', 'Toggle right panel'])
-    await click('Conversation menu')
-    const setting = document.querySelector('[role="menuitemcheckbox"]')
-    expect(setting?.textContent).toContain('Show all system events')
-    expect(setting?.getAttribute('aria-checked')).toBe('false')
+    expect(names).toEqual(['More actions', 'Show terminal', 'Toggle right panel'])
+    // A calm agent carries no status mark beside its title; only amber and red ones do.
+    expect(header.querySelector('[data-status]')).toBeNull()
+    const setting = await openSettings()
+    expect(setting.checked).toBe(false)
     // The conversation pane loads lazily; wait for its first transcript frame.
     await vi.waitFor(() => expect(host.querySelector('[data-testid="transcript-empty"]')).not.toBeNull(), { timeout: 15_000 })
-    await act(async () => setting?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    await click('Conversation menu')
-    expect(document.querySelector('[role="menuitemcheckbox"]')?.getAttribute('aria-checked')).toBe('true')
+    await act(async () => setting.click())
+    expect(setting.checked).toBe(true)
     expect(host.textContent?.match(/An event this view cannot show yet\./g)).toHaveLength(2)
     expect(host.textContent).not.toMatch(/credential_pin|future_kind|not-for-display/)
-    await act(async () => document.querySelector('[role="menuitemcheckbox"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await act(async () => setting.click())
     expect(host.textContent).not.toContain('An event this view cannot show yet.')
+    await closeSettings()
   }, 20_000)
   it('opens real resources and queue observations, and closes their inspector', async () => {
-    await click('Resources')
-    const dialog = document.querySelector('aside[aria-label="Agent resources"]')
+    const dialog = await openResources()
     expect(dialog?.textContent).toContain('Observed project notes')
-    expect(dialog?.getAttribute('data-side-panel-placement')).toBe('dock')
     expect(dialog?.closest('[data-dock]')).not.toBeNull()
-    expect(host.querySelector('[role="separator"][aria-label="Resize resources"]')).not.toBeNull()
-    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Conversation menu"]')).not.toBeNull()
     expect(host.querySelector('[data-testid="thread-header"]')?.contains(dialog)).toBe(false)
     const row = dialog?.querySelector('[aria-label="Observed resources"] li')
-    expect(row?.textContent).toContain('filesystem.file')
+    // The kind is named by its icon in words, never as the raw type.
+    expect(row?.querySelector('svg[aria-label="File"]')).not.toBeNull()
+    expect(row?.textContent).not.toContain('filesystem.file')
     expect(row?.textContent).toContain('open')
     expect(row?.querySelector('time')?.textContent).toBe(formatRelative(Date.parse('2026-10-04T12:00:00.000Z'), Date.parse('2026-10-06T12:00:00.000Z')))
     expect(row?.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-04T12:00:00.000Z')
     expect(dialog?.textContent).toContain('1 current work item')
     expect(dialog?.textContent).toContain('mission-run/example')
-    await click('Close resources')
-    expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
+    await click('Close agent inspector')
+    expect(host.querySelector('[data-agent-resources]')).toBeNull()
   })
   it('opens Details first and reaches successful change captures through the Changes tab', async () => {
     const timeline = new LiveTimeline()
@@ -122,9 +132,9 @@ describe('live header parity', () => {
       await click('Toggle right panel')
       await vi.waitFor(() => expect(host.querySelector('[data-testid="details-pane"]')).not.toBeNull(), { timeout: 15_000 })
       expect(within(host).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
-      expect(within(host).getByRole('tab', { name: 'Changes' }).getAttribute('aria-selected')).toBe('false')
+      expect(within(host).getByRole('tab', { name: /^Changes/ }).getAttribute('aria-selected')).toBe('false')
       expect(host.querySelector('aside[aria-label="Changes"]')).toBeNull()
-      await act(async () => within(host).getByRole('tab', { name: 'Changes' }).click())
+      await act(async () => within(host).getByRole('tab', { name: /^Changes/ }).click())
       await vi.waitFor(async () => {
         await act(async () => {})
         const inspector = host.querySelector('aside[aria-label="Changes"]')
@@ -148,8 +158,8 @@ describe('live header parity', () => {
     }
   })
   it('persists the system-event view preference without any connection or agent identity in storage keys', async () => {
-    await click('Conversation menu')
-    await act(async () => document.querySelector('[role="menuitemcheckbox"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    const setting = await openSettings()
+    await act(async () => setting.click())
     // The persistence boundary flushes on pagehide; no debounce sleeps are needed.
     window.dispatchEvent(new Event('pagehide'))
     const stored = window.localStorage.getItem('wf.ui@1') ?? ''
@@ -160,23 +170,18 @@ describe('live header parity', () => {
     expect(Object.keys(window.localStorage).join(' ')).not.toContain(agent.id)
     expect(Object.keys(window.localStorage).join(' ')).not.toContain(source.label)
     expect(Object.keys(window.localStorage).join(' ')).not.toContain(source.gateway)
-    await click('Conversation menu')
-    await act(async () => document.querySelector('[role="menuitemcheckbox"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await act(async () => setting.click())
+    await closeSettings()
   })
-  it('retains a disabled resources control with a human refusal reason', async () => {
-    await click('Resources')
+  it('names a refused resources read in plain words on the tab', async () => {
+    await openResources()
     await act(async () => registry.set(resources, unavailable({ reason: 'ungranted', detail: 'raw-denial-code' })))
-    // Focusable while disabled, so keyboard users reach the reason in the kit tooltip.
-    expect(button('Resources')?.getAttribute('aria-disabled')).toBe('true')
-    expect(button('Resources')?.disabled).toBe(false)
-    expect(button('Resources')?.closest('[title]')).toBeNull()
-    const reason = document.getElementById(button('Resources')!.getAttribute('aria-describedby')!)
-    expect(reason?.textContent).toBe('Read access to agent resources has not been granted.')
-    expect(reason?.hidden).toBe(true)
-    expect(host.querySelector('[data-testid="thread-header"]')?.textContent).not.toMatch(/raw-denial-code|Unknown/)
+    const panel = host.querySelector<HTMLElement>('[data-agent-resources]')!
+    expect(within(panel).getByRole('region', { name: 'Observed resources' }).textContent).toContain('Read access to agent resources has not been granted.')
+    expect(panel.textContent).not.toMatch(/raw-denial-code|Unknown/)
   })
   it.each(['resources', 'queue'] as const)('requires pairing, not refresh, after a rejected %s read', async (target) => {
-    await click('Resources')
+    await openResources()
     const denied = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
     await act(async () => {
       if (target === 'resources') registry.set(resources, denied)
@@ -186,7 +191,7 @@ describe('live header parity', () => {
         root.render(<DataSourceProvider source={next} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>)
       }
     })
-    const panel = document.querySelector<HTMLElement>('aside[aria-label="Agent resources"]')!
+    const panel = host.querySelector<HTMLElement>('[data-agent-resources]')!
     expect(within(panel).getByRole('region', { name: target === 'queue' ? 'Agent queue' : 'Observed resources' }).textContent).toContain(credentialExpiredMessage)
     expect(panel.textContent).not.toContain('private diagnostic')
     expect(within(panel).queryByRole('button', { name: 'Refresh resources' })).toBeNull()
@@ -198,8 +203,12 @@ describe('live header parity', () => {
   const backToAgent = async () => {
     await act(async () => { window.history.pushState(null, '', '/w/agent/example'); window.dispatchEvent(new PopStateEvent('popstate')) })
   }
-  it('opens the agent canonical KDL from the header as a new tab, and focuses that tab the next time', async () => {
-    await click('View KDL')
+  const viewKdl = async () => {
+    await click('More actions')
+    await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
+  }
+  it('opens the agent canonical KDL from the overflow menu as a new tab, and focuses that tab the next time', async () => {
+    await viewKdl()
     const pane = await declarationPane()
     expect(pane.querySelector('h2')?.textContent).toBe(agent.id)
     expect([...pane.querySelectorAll('[data-line] code')].map(line => line.textContent).join('\n')).toBe(kdl.trimEnd())
@@ -210,22 +219,8 @@ describe('live header parity', () => {
     const tabs = () => document.querySelectorAll('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]').length
     expect(tabs()).toBe(2)
     await backToAgent()
-    await click('View KDL')
+    await viewKdl()
     expect(tabs()).toBe(2)
-  })
-  it('keeps secondary actions functional in the constrained-header overflow menu', async () => {
-    const choose = async (label: string) => {
-      await click('Conversation menu')
-      const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === label)
-      expect(item, label).toBeDefined()
-      await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    }
-    await choose('View KDL')
-    expect((await declarationPane()).querySelector('h2')?.textContent).toBe(agent.id)
-    await backToAgent()
-    await choose('Resources')
-    expect(document.querySelector('aside[aria-label="Agent resources"]')?.textContent).toContain('Observed project notes')
-    await click('Close resources')
   })
   it('opens the same declaration from the agent row context menu', async () => {
     await click('Actions for Example Agent')

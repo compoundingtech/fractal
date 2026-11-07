@@ -8,6 +8,7 @@ import {
   parseSidebarQuery,
   printSidebarQuery,
   sidebarHostValue,
+  type SidebarMatchRow,
   type SidebarQuery,
 } from './filter.ts'
 import type { SidebarFilters } from './state.ts'
@@ -89,6 +90,12 @@ export interface ShowRow {
   readonly retired?: boolean
 }
 const noMenuFilters = { hideEnded: false, hideRetired: false, statuses: [] }
+/** A row's menu facts. `ended` also covers state done, as `hideEnded` does; both matchers share this reading. */
+export const showRowFacts = (row: Pick<SidebarMatchRow, 'status' | 'agent'>): Pick<ShowRow, 'status' | 'ended' | 'retired'> => ({
+  status: row.status, ended: row.status === 'ended' || row.agent?.state === 'done', retired: row.status === 'retired',
+})
+/** Settings with everything the menu owns removed, so `others` measures only free text and typed facets. */
+export const outsideFilterMenu = <T extends SidebarFilters>(filters: T): T => ({ ...filters, ...noMenuFilters })
 /** Faceted counts: each entry counts rows that pass every other filter and that entry. */
 export const showCounts = ({
   rows,

@@ -17,11 +17,12 @@ const answer = 'The composer uses a border for frame focus and a ring for focuse
 const source = 'const focus = "border"\n'
 const options = { messages: [], isRunning: false, onNew: async () => {} }
 /** `nested` renders one labelled region inside a shared main so the matrix keeps unique landmarks. */
-function ComposerCopyFeedback({ scheme, width, variant, nested = false }: { scheme: Scheme; width: 440 | 1440; variant: 'C2' | 'C3'; nested?: boolean }) {
+/** Without `width` the story fills the window, so the Viewport toolbar sets it; the matrix pins each cell. */
+function ComposerCopyFeedback({ scheme, width, variant, nested = false }: { scheme: Scheme; width?: 440 | 1440; variant: 'C2' | 'C3'; nested?: boolean }) {
   const [revision, setRevision] = React.useState(0)
   const [failure, setFailure] = React.useState(false)
   const Root = nested ? 'section' : 'main'
-  return <Root aria-label={nested ? `${scheme} ${width}` : undefined} data-scheme={scheme} data-revision={revision} {...stylex.props(styles.root, styles.width(width), ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
+  return <Root aria-label={nested ? `${scheme} ${width}` : undefined} data-scheme={scheme} data-revision={revision} {...stylex.props(styles.root, width !== undefined && styles.width(width), ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
     <div {...stylex.props(styles.toolbar)}><Button onPress={() => setRevision(value => value + 1)}>Rerender snapshot</Button><Button onPress={() => setFailure(value => !value)}>Toggle copy failure</Button></div>
     <EmbraceRuntimeProvider options={options}><EmbraceComposer variant={variant} history={['Review the composer focus treatment.']} /></EmbraceRuntimeProvider>
     <Markdown text={'```typescript\n' + source + '```'} />
@@ -37,16 +38,14 @@ const styles = stylex.create({
   toolbar: { display: 'flex', flexWrap: 'wrap', gap: s.sm },
   reference: { borderColor: interaction.composerFocusBorder, outlineColor: interaction.focusRing, outlineWidth: g.focusRing, outlineStyle: 'solid', position: 'absolute', visibility: 'hidden' },
 })
-const meta = { title: 'Fractal UI/Composer copy feedback', component: ComposerCopyFeedback, excludeStories: ['scenarioExemptions'], parameters: { scenario: { _tag: 'contract-fixture', reason: 'Local clipboard outcomes, focus geometry and acknowledgement timers isolate host-owned composer and copy contracts.' }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, variant: 'C3' }, argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, width: { control: 'radio', options: [440, 1440] }, variant: { control: 'radio', options: ['C2', 'C3'] } } } satisfies Meta<typeof ComposerCopyFeedback>
+const meta = { id: 'fractal-ui-composer-copy-feedback', title: 'Surfaces/Composer/Copy feedback', component: ComposerCopyFeedback, excludeStories: ['scenarioExemptions'], parameters: { scenario: { _tag: 'contract-fixture', reason: 'Local clipboard outcomes, focus geometry and acknowledgement timers isolate host-owned composer and copy contracts.' }, layout: 'fullscreen' }, args: { scheme: 'dark', variant: 'C3' }, argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, variant: { control: 'radio', options: ['C2', 'C3'] } } } satisfies Meta<typeof ComposerCopyFeedback>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'AllStates:contract-fixture',
-  'Dark1440:contract-fixture',
   'Dark440:contract-fixture',
   'Light1440:contract-fixture',
-  'Light440:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 
@@ -128,8 +127,6 @@ const play: Story['play'] = async ({ canvasElement, args }) => {
     else Object.defineProperty(navigator, 'clipboard', descriptor)
   }
 }
-export const Dark440: Story = { play }
-export const Light440: Story = { args: { scheme: 'light' }, play }
-export const Dark1440: Story = { args: { width: 1440 }, play }
-export const Light1440: Story = { args: { scheme: 'light', width: 1440, variant: 'C2' }, play }
+export const Dark440: Story = { name: 'Copy feedback', play }
+export const Light1440: Story = { name: 'C2 variant', args: { variant: 'C2' }, play }
 export const AllStates: Story = { render: () => <main>{(['light', 'dark'] as const).flatMap(scheme => ([440, 1440] as const).map(width => <ComposerCopyFeedback key={`${scheme}-${width}`} scheme={scheme} width={width} variant="C3" nested />))}</main> }

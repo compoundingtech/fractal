@@ -1,6 +1,7 @@
-import fc from 'fast-check'
-import { describe, expect, it } from 'vitest'
-import { activeTab, emptyWorkspace, focusedGroup, glassBody, groupsOf, isGroup, repairWorkspace, showsTerminal, tabsOf, transition, type Command, type Drop, type GlassLayout, type Layout, type ReceivedLayout, type WorkspaceState } from './model.ts'
+import { it } from '@effect/vitest'
+import { Arbitrary, Schema } from 'effect'
+import { describe, expect } from 'vitest'
+import { activeTab, Command, emptyWorkspace, focusedGroup, glassBody, groupsOf, isGroup, repairWorkspace, showsTerminal, Side, tabsOf, transition, WorkspaceState, type Drop, type GlassLayout, type Layout, type ReceivedLayout } from './model.ts'
 import { paneIdentity } from './subject.ts'
 
 const counter = () => {
@@ -8,41 +9,47 @@ const counter = () => {
   return { newId: () => `id-${next++}` }
 }
 
-const panes = ['agent:agent/a', 'agent:agent/b', 'terminal:agent/a', 'terminal:agent/c', 'list:home', 'list:missions', 'usage:', 'document:doc/x', 'declaration:agent/a', 'resource:mail/1', 'machine:machine/m', 'future-kind:x']
+const between = (minimum: number, maximum: number) => Schema.Int.check(Schema.isBetween({ minimum, maximum }))
+const looseRatio = Schema.Finite.check(Schema.isBetween({ minimum: -1, maximum: 2 }))
 
-const ids = fc.integer({ min: 0, max: 40 }).map(n => `id-${n}`)
-const groupIds = fc.oneof(ids, fc.constant('main'))
-const drop: fc.Arbitrary<Drop> = fc.oneof(
-  fc.record({ _tag: fc.constant('Strip' as const), group: groupIds, index: fc.integer({ min: -2, max: 12 }) }),
-  fc.record({ _tag: fc.constant('Edge' as const), group: groupIds, side: fc.constantFrom('right' as const, 'below' as const), first: fc.boolean() }),
-)
-const flatCommand: fc.Arbitrary<Command> = fc.oneof(
-  fc.record({ _tag: fc.constant('Open' as const), pane: fc.constantFrom(...panes), activate: fc.boolean() }),
-  fc.record({ _tag: fc.constant('Activate' as const), id: ids }),
-  fc.record({ _tag: fc.constant('Cycle' as const), by: fc.constantFrom(1 as const, -1 as const) }),
-  fc.record({ _tag: fc.constant('ActivateIndex' as const), index: fc.integer({ min: -1, max: 9 }) }),
-  fc.constant({ _tag: 'ActivatePrevious' as const }),
-  fc.record({ _tag: fc.constant('Close' as const), id: ids }),
-  fc.constant({ _tag: 'ReopenClosed' as const }),
-  fc.record({ _tag: fc.constant('SetView' as const), id: ids, view: fc.record({ scrollTop: fc.integer({ min: 0, max: 1000 }), terminal: fc.boolean() }) }),
-)
-const received: fc.Arbitrary<ReceivedLayout> = fc.letrec<{ node: ReceivedLayout }>(tie => ({
-  node: fc.oneof(
-    { depthSize: 'small', withCrossShrink: true },
-    fc.record({ tabs: fc.array(fc.constantFrom(...panes).map(pane => ({ pane })), { maxLength: 4 }) }),
-    fc.record({ split: fc.constantFrom('right' as const, 'below' as const), children: fc.array(tie('node'), { maxLength: 3 }), ratio: fc.option(fc.double({ min: -1, max: 2, noNaN: true }), { nil: undefined }) }),
-  ),
-})).node
-const command: fc.Arbitrary<Command> = fc.oneof(
-  { arbitrary: flatCommand, weight: 5 },
-  { arbitrary: fc.record({ _tag: fc.constant('Open' as const), pane: fc.constantFrom(...panes), at: drop }), weight: 2 },
-  { arbitrary: fc.record({ _tag: fc.constant('Move' as const), id: ids, to: drop }), weight: 3 },
-  { arbitrary: fc.record({ _tag: fc.constant('FocusGroup' as const), group: groupIds }), weight: 1 },
-  { arbitrary: fc.record({ _tag: fc.constant('CloseOthers' as const), id: ids }), weight: 1 },
-  { arbitrary: fc.record({ _tag: fc.constant('Replace' as const), id: ids, pane: fc.constantFrom(...panes) }), weight: 2 },
-  { arbitrary: fc.record({ _tag: fc.constant('SetRatio' as const), node: fc.integer({ min: 0, max: 4 }), ratio: fc.double({ min: -1, max: 2, noNaN: true }) }), weight: 1 },
-  { arbitrary: fc.record({ _tag: fc.constant('Receive' as const), layout: received }), weight: 1 },
-)
+/** The commands' own shapes over a small world, so that sequences keep hitting tabs and groups that exist. */
+const Pane = Schema.Literals(['agent:agent/a', 'agent:agent/b', 'terminal:agent/a', 'terminal:agent/c', 'list:home', 'list:missions', 'usage:', 'document:doc/x', 'declaration:agent/a', 'resource:mail/1', 'machine:machine/m', 'future-kind:x'])
+const Id = Schema.Literals(Array.from({ length: 16 }, (_, n) => `id-${n}`))
+const GroupId = Schema.Union([Id, Schema.Literal('main')])
+const NearDrop = Schema.TaggedUnion({
+  Strip: { group: GroupId, index: between(-2, 12) },
+  Edge: { group: GroupId, side: Side, first: Schema.Boolean },
+})
+const Received: Schema.Codec<ReceivedLayout> = Schema.Union([
+  Schema.Struct({ tabs: Schema.Array(Schema.Struct({ pane: Pane })).check(Schema.isMaxLength(4)) }),
+  Schema.Struct({
+    split: Side,
+    children: Schema.Array(Schema.suspend((): Schema.Codec<ReceivedLayout> => Received)).check(Schema.isMaxLength(3)),
+    ratio: Schema.optional(looseRatio),
+  }),
+])
+const FlatCommand = Schema.TaggedUnion({
+  Open: { pane: Pane, activate: Schema.Boolean },
+  Activate: { id: Id },
+  Cycle: { by: Schema.Literals([1, -1]) },
+  ActivateIndex: { index: between(-1, 9) },
+  ActivatePrevious: {},
+  Close: { id: Id },
+  ReopenClosed: {},
+  SetView: { id: Id, view: Schema.Struct({ scrollTop: between(0, 1000), terminal: Schema.Boolean }) },
+})
+const NearCommand = Schema.Union([
+  FlatCommand,
+  Schema.TaggedStruct('Open', { pane: Pane, at: NearDrop }),
+  Schema.TaggedStruct('Move', { id: Id, to: NearDrop }),
+  Schema.TaggedStruct('FocusGroup', { group: GroupId }),
+  Schema.TaggedStruct('CloseOthers', { id: Id }),
+  Schema.TaggedStruct('Replace', { id: Id, pane: Pane }),
+  Schema.TaggedStruct('SetRatio', { node: between(0, 4), ratio: looseRatio }),
+  Schema.TaggedStruct('Receive', { layout: Received }),
+])
+// Without a floor, generation stays near its small default size and a sequence rarely opens a tab and then acts on it.
+const sequences = <A>(item: Schema.Codec<A>) => Arbitrary.array(Arbitrary.schema(item), { minLength: 40, maxLength: 80 })
 
 const invariants = (state: WorkspaceState) => {
   const tabs = tabsOf(state.layout), groups = groupsOf(state.layout)
@@ -88,50 +95,63 @@ const fresh = () => {
 }
 
 describe('workspace transitions', () => {
-  it('keeps its invariants under any command sequence', () => {
-    fc.assert(fc.property(fc.array(command, { maxLength: 80 }), sequence => {
-      const context = counter()
-      let state = emptyWorkspace
-      for (const step of sequence) {
-        state = transition(state, step, context)
-        invariants(state)
-      }
-    }), { numRuns: 500 })
+  it.prop('keeps its invariants under any command sequence', { sequence: sequences<Command>(NearCommand) }, ({ sequence }) => {
+    const context = counter()
+    let state: WorkspaceState = emptyWorkspace
+    for (const step of sequence) {
+      state = transition(state, step, context)
+      invariants(state)
+    }
+  }, { arbitrary: { runs: 500 } })
+
+  it.prop('is total over every command its schema admits', { sequence: Arbitrary.array(Arbitrary.schema(Command), { maxLength: 20 }) }, ({ sequence }) => {
+    const context = counter()
+    let state: WorkspaceState = emptyWorkspace
+    for (const step of sequence) {
+      state = transition(state, step, context)
+      invariants(state)
+    }
   })
 
-  it('matches a naive reference model while there is one group', () => {
-    fc.assert(fc.property(fc.array(flatCommand, { maxLength: 80 }), sequence => {
-      const context = counter()
-      let state = emptyWorkspace
-      // The reference is a plain list of panes and an active pane: no ids, no recency.
-      let list: string[] = []
-      let shown: string | null = null
-      for (const step of sequence) {
-        const before = state
-        state = transition(state, step, context)
-        const paneOf = (id: string) => tabsOf(before.layout).find(tab => tab.id === id)?.pane
-        if (step._tag === 'Open') {
-          const key = paneIdentity(step.pane)
-          if (!list.includes(key)) list = [...list, key]
-          if (step.activate !== false || shown === null) shown = key
-        } else if (step._tag === 'Activate') {
-          shown = paneOf(step.id) ?? shown
-        } else if (step._tag === 'Close') {
-          const pane = paneOf(step.id)
-          if (pane !== undefined) {
-            const index = list.indexOf(pane)
-            list = list.filter(other => other !== pane)
-            if (shown === pane) shown = list[Math.min(index, list.length - 1)] ?? null
-          }
-        } else {
-          // Resynchronize after commands the reference does not model.
-          list = [...paneList(state)]
-          shown = activeTab(state)?.pane ?? null
+  it.prop('restores the invariants on any document the schema admits', { document: WorkspaceState }, ({ document }) => {
+    invariants(repairWorkspace(document, counter()))
+  })
+
+  it.prop('matches a naive reference model while there is one group', { sequence: sequences<Command>(FlatCommand) }, ({ sequence }) => {
+    const context = counter()
+    let state: WorkspaceState = emptyWorkspace
+    // The reference is a plain list of panes and an active pane: no ids, no recency.
+    let list: string[] = []
+    let shown: string | null = null
+    for (const step of sequence) {
+      const before = state
+      state = transition(state, step, context)
+      const paneOf = (id: string) => tabsOf(before.layout).find(tab => tab.id === id)?.pane
+      if (step._tag === 'Open') {
+        const key = paneIdentity(step.pane)
+        if (!list.includes(key)) list = [...list, key]
+        if (step.activate !== false || shown === null) shown = key
+      } else if (step._tag === 'Activate') {
+        shown = paneOf(step.id) ?? shown
+      } else if (step._tag === 'Cycle') {
+        if (list.length > 0) shown = list[(Math.max(shown === null ? -1 : list.indexOf(shown), 0) + step.by + list.length) % list.length]!
+      } else if (step._tag === 'ActivateIndex') {
+        shown = list[step.index] ?? shown
+      } else if (step._tag === 'Close') {
+        const pane = paneOf(step.id)
+        if (pane !== undefined) {
+          const index = list.indexOf(pane)
+          list = list.filter(other => other !== pane)
+          if (shown === pane) shown = list[Math.min(index, list.length - 1)] ?? null
         }
-        expect(paneList(state)).toEqual(list)
-        expect(activeTab(state)?.pane ?? null).toBe(shown)
+      } else {
+        // Resynchronize after commands the reference does not model.
+        list = [...paneList(state)]
+        shown = activeTab(state)?.pane ?? null
       }
-    }))
+      expect(paneList(state)).toEqual(list)
+      expect(activeTab(state)?.pane ?? null).toBe(shown)
+    }
   })
 
   it('returns the same reference when a command does not apply, so the URL adapter cannot loop', () => {
@@ -376,14 +396,12 @@ describe('the glass contract', () => {
     expect(glassBody({ layout, name: 'Web', ratios: true }).layout).toMatchObject({ ratio: 0.3 })
   })
 
-  it('round trips any layout through the wire, unknown keys included', () => {
-    fc.assert(fc.property(received, layout => {
-      const context = counter()
-      const first = transition(emptyWorkspace, { _tag: 'Receive', layout }, context)
-      const body = glassBody({ layout: first.layout, name: 'Web' })
-      const second = transition(emptyWorkspace, { _tag: 'Receive', layout: body.layout as ReceivedLayout }, context)
-      expect(glassBody({ layout: second.layout, name: 'Web' })).toEqual(body)
-    }))
+  it.prop('round trips any layout through the wire, unknown keys included', { layout: Received }, ({ layout }) => {
+    const context = counter()
+    const first = transition(emptyWorkspace, { _tag: 'Receive', layout }, context)
+    const body = glassBody({ layout: first.layout, name: 'Web' })
+    const second = transition(emptyWorkspace, { _tag: 'Receive', layout: body.layout as ReceivedLayout }, context)
+    expect(glassBody({ layout: second.layout, name: 'Web' })).toEqual(body)
   })
 
   it('adopts the other side\'s structure, keeping this device\'s ids, active tabs and focus where they apply', () => {

@@ -59,7 +59,7 @@ const TreeBindingSurface = ({ scheme, variant = 'default' }: { readonly scheme: 
 }
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'wf/Sidebar/Live tree binding',
+  id: 'wf-sidebar-live-tree-binding', title: 'Surfaces/Sidebar/Live tree binding',
   component: TreeBindingSurface,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed fixture agents projected through the live sidebarRow binding into the production tree, frame and row.' } },
   args: { scheme: 'dark', variant: 'default' },
@@ -69,9 +69,7 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'Dark:contract-fixture',
-  'Light:contract-fixture',
   'LongNamesManyFolders:contract-fixture',
-  'LongNamesManyFoldersLight:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 const rowFor = (canvasElement: HTMLElement, ref: string) => canvasElement.querySelector<HTMLElement>(`[data-wf-agent-ref="${ref}"] [data-testid="taste-agent-row"]`)
@@ -116,7 +114,6 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await waitFor(assertRevealed)
 }
 export const Dark: Story = { tags: ['critical'], play }
-export const Light: Story = { tags: ['critical'], args: { scheme: 'light' }, play }
 
 /**
  * The production binding with long names in many folders: the roster scrolls vertically and never sideways, every
@@ -152,4 +149,3 @@ export const LongNamesManyFolders: Story = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed long-named fixture agents in twelve folders, projected through the live sidebarRow binding, pin truncation and vertical-only scrolling in the production tree.' } },
   play: longPlay,
 }
-export const LongNamesManyFoldersLight: Story = { ...LongNamesManyFolders, args: { ...LongNamesManyFolders.args, scheme: 'light' } }

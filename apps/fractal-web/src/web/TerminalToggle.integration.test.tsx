@@ -119,7 +119,7 @@ describe('terminal navigation toggle', () => {
 describe('terminal failure stays local to the terminal pane', () => {
   const thread = () => host.querySelector('[data-testid="transcript-scroll"]')
   const composer = () => host.querySelector<HTMLTextAreaElement>('textarea')
-  const resources = () => host.querySelector('[data-testid="thread-header"] button[aria-label="Resources"]')
+  const resources = () => host.querySelector('[data-testid="thread-header"] button[aria-label="More actions"]')
   const breadcrumb = () => host.querySelector('[aria-label="Breadcrumb"]')
   const waitForThread = async () => {
     await vi.waitFor(async () => {
