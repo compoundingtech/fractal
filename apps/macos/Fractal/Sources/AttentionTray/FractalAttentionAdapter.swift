@@ -106,7 +106,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
     }
   }
 
-  func control(_ action: NoticeControl, notice: NoticeSnapshot) async throws {
+  func control(_ action: NoticeControl, notice: AttentionCore.NoticeSnapshot) async throws {
     // Intentionally no transport until fractal#3476 PR1 supplies typed fenced actions.
     // AttentionModel presents an explicit preview-only result, never optimistic success.
   }
