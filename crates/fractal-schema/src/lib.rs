@@ -4872,7 +4872,9 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        let current = registry();
+        // Reconstruct the registry at the principal transition, before usage observations.
+        let mut current = registry().clone();
+        current.claims.remove(usage_limits::KIND).unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

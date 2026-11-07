@@ -117,8 +117,8 @@ pub struct AccountLimit {
     pub host: String,
     /// Every seat whose newest reading names this account.
     pub seats: Vec<String>,
-    /// Observational windows. These never drive the seat-stopping policy.
-    #[serde(default)]
+    /// Internal SLO evidence, not the public `/usage` UsageLimit wire contract or policy input.
+    #[serde(skip)]
     pub windows: Vec<LimitWindow>,
 }
 
@@ -223,7 +223,7 @@ fn observation_readings(body: Value) -> Vec<Value> {
 // version 1 build that opens this store can still fold into them after it empties them.
 const LIMITS_PROJECTION_VERSION: &str = "3";
 const LIMITS_CURSOR: &str = "account_limits_through_index";
-const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h36d2fcc0cc4f owner=fractal_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
+const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h378c085e7f15 owner=fractal_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS account_limit_readings (
     driver TEXT NOT NULL,
     account TEXT NOT NULL,
@@ -367,11 +367,11 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
         let weekly = limit.weekly_percent.is_some();
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-hf1ac321eba1a owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
+                /* sqlite-large-value: allow-for-now lv-hc5e915a080c9 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
                  (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body, head_key, window)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-hc848209c8c7f owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-h74f21ec21fc9 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 limit.driver,
                 limit.account,
                 account_ref,
@@ -414,13 +414,13 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
     for (driver, account, account_ref, weekly, window) in touched {
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-heddd3ac44bac owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
+                /* sqlite-large-value: allow-for-now lv-h4c42a6f25b57 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
                  WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6
                    AND measured_at_unix_ms < (
                        SELECT MAX(measured_at_unix_ms) FROM account_limit_readings
                        WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6) - ?5",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-heeda99e2cde0 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-h1b2eebf5b2d5 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 driver,
                 account,
                 account_ref,
@@ -765,6 +765,8 @@ use super::*;
         assert_eq!(weekly.host, "cedar");
         // The old enforcement input remains harness-only.
         assert_eq!(limits[0].weekly_percent, Some(95.0));
+        // SLO metadata stays out of the closed public UsageLimit wire contract.
+        assert!(serde_json::to_value(&limits[0]).unwrap().get("windows").is_none());
         read(&store, "agent/b", Some("claude/example"), 10.0, 4_000);
         let limits = account_limits_at(&store.readers.get()).unwrap();
         let weekly = limits[0].windows.iter().find(|window| window.window == "weekly").unwrap();

@@ -1804,9 +1804,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v16 shifts shared RNG draws through kind selection and optional action fields.
-/// All 32 fixed seeds converge; 30 trim. Preserve exact equality with the measured never-trim set.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Corpus v16, including observed usage credits, shifts shared RNG draws through kind selection.
+/// Hosted run 42417346519 observed all 32 fixed seeds trimming; preserve exact equality.
+const NEVER_TRIMS: &[u64] = &[];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
