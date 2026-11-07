@@ -195,6 +195,9 @@ async fn native_mount_sends_and_closes_through_the_real_daemon_socket() {
         fractal_daemon::store::Store::open(&root.path().join("graph.db"), "native-thread-test")
             .unwrap(),
     );
+    // This disposable member has no peers. Production enables the writer at daemon startup
+    // only after the fleet reader rollout has been verified.
+    store.configure_thread_write_rollout([]);
     let intent = fractal_daemon::graph::parse_intent(
         r#"version 2
 agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
