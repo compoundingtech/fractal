@@ -3,6 +3,9 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
 
+/// Strict fleet rollout barrier for the temporary migration-opened authority rule.
+pub const DECISION_IMPORT_OPENED_FEATURE: &str = "decision-tree-import-opened";
+
 /// Whole-history admission limits: decision snapshots are refused, never truncated.
 pub const DECISION_INPUTS_MAX_CLAIMS: u64 = 10_000;
 pub const DECISION_INPUTS_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
@@ -444,6 +447,8 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
 pub fn prepare(
     tx: &Transaction<'_>,
     input: &ClaimInput,
+    origin: &str,
+    peers: &[String],
 ) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if input.subject.starts_with(schema::REGISTRY_PREFIX) || input.kind == schema::REGISTERED {
         return Err(FractalError::new(
@@ -488,10 +493,20 @@ pub fn prepare(
     }
     if decision_import_opening(&input.subject, &input.kind, input.actor.as_deref(), &f)
         .map_err(|e| fail(e.to_string()))?
-        && tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1)",
-            [&input.subject], |row| row.get::<_, bool>(0)).map_err(internal)?
     {
-        return Err(fail("decision import requires no earlier claim on the subject"));
+        if tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1)",
+            [&input.subject], |row| row.get::<_, bool>(0)).map_err(internal)?
+        {
+            return Err(fail("decision import requires no earlier claim on the subject"));
+        }
+        let blockers = super::marks_switch::feature_blockers(
+            tx, origin, peers, DECISION_IMPORT_OPENED_FEATURE,
+        ).map_err(internal)?;
+        if !blockers.is_empty() {
+            return Err(FractalError::new("member-version-unproven",
+                format!("decision import requires {DECISION_IMPORT_OPENED_FEATURE}=1: {}",
+                    blockers.join("; "))));
+        }
     }
     validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation)
         .map_err(|e| fail(e.to_string()))?;

@@ -233,6 +233,11 @@ claims. Replicated validation and reader recognition enforce only the stateless 
 arrival order must not change acceptance. Seat-authored openings must omit `import`.
 The exception is for `opened` only; all later owner and recipient authority rules are unchanged.
 
+Every daemon advertises `decision-tree-import-opened=1` in `daemon.started`. Local import-opened
+admission reuses the strict fleet feature barrier in the append transaction: current members,
+unfenced external writers, and configured peers must each advertise the feature in their own
+newest start. Non-empty blockers produce typed `member-version-unproven` with all blockers
+listed. Replication and reader recognition remain stateless and do not apply the local barrier.
 Upgrade every fleet member before importer writes; the importer must preflight that rollout.
 The previous immutable opened schema rejects `import` as an unknown field. An old binary
 given the new manifest may admit the generic object field; this is not a binary capability

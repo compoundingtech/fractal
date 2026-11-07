@@ -22550,6 +22550,7 @@ pub struct ClaimCommitContext<'a> {
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
+    pub feature_barrier_peers: &'a [String],
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Write the claim as a build from before its kind became a local observation did: a
@@ -22827,7 +22828,8 @@ pub fn append_claim_with_commit_context(
             {
                 return Ok((existing, false));
             }
-            let mut stored_fields = custom::prepare(transaction, input)?;
+            let mut stored_fields = custom::prepare(transaction, input, &graph.origin,
+                context.feature_barrier_peers)?;
             if let Some(fields) = normalize_resource_observation(transaction, input)? {
                 stored_fields = Some(fields);
             }

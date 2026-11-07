@@ -328,6 +328,20 @@ fn decision_import_replication_and_reader_use_stateless_checks() {
     source.register_custom_kind(&RegistrationRequest {
         manifest: import_tree_manifest(), actor: SEAT.into(),
     }).unwrap();
+    let error = import_tree_claim(&source, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert_eq!(error.code, "member-version-unproven");
+    assert!(error.to_string().contains("host/birch"));
+    assert!(error.to_string().contains("decision-tree-import-opened=1"));
+    for store in [&source, &replica] {
+        store.append_claim(&ClaimInput {
+            subject: format!("daemon/{}", store.origin), kind: "daemon.started".into(),
+            fields: serde_json::from_value(json!({"status":"running",
+                "features":{DECISION_IMPORT_OPENED_FEATURE:1}})).unwrap(),
+            ..empty_input()
+        }).unwrap();
+    }
+    signed_sync(&replica, &source);
     let opened = import_tree_claim(&source, IMPORT_TREE, "opened", IMPORT_ACTOR,
         import_opening_fields()).unwrap();
     signed_sync(&source, &replica);
@@ -360,6 +374,16 @@ fn decision_reader_without_import_exception_refuses_foreign_creation_actor() {
         json!({"seat": SEAT, "recipient": DECIDER})).unwrap();
     assert!(store.decision_inputs(TREE).unwrap_err().to_string()
         .contains("creation actor, seat, and subject identity must match"));
+}
+
+#[test]
+fn decision_import_barrier_includes_unheard_configured_peers() {
+    let store = import_tree_store();
+    store.fractal.feature_barrier_peers.set(vec!["unheard".into()]).unwrap();
+    let error = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert_eq!(error.code, "member-version-unproven");
+    assert!(error.to_string().contains("unheard: exchanges with this member"));
 }
 
 fn audit_custom_dirty(store: &Store) {
