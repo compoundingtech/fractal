@@ -621,6 +621,14 @@ const ASSISTANT_FIELDS: &[&str] = &[
     "assistant_session_actor",
 ];
 
+/// Test support: write `input` as a stream item without asking the graph, as a peer's item
+/// arrives by replication whatever this member's graph holds. A send never does this.
+#[cfg(feature = "test-support")]
+pub fn append_replicated_copy(shard: &GraphStore, input: &ClaimInput) -> Result<(ClaimRecord, bool), FractalError> {
+    validate_input(input)?;
+    append_item(shard, input)
+}
+
 /// The shard's runtime, holding the graph it opened beside, which a stream append checks first.
 #[derive(Clone, Debug, Default)]
 pub struct MessagesRuntime(std::sync::Weak<super::Store>);

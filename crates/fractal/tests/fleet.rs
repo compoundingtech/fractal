@@ -6045,6 +6045,31 @@ async fn append_stream_item(node: &Node, subject: &str) {
         .unwrap();
 }
 
+/// The message `append_stream_item` writes, as a peer's replicated copy arrives in `node`'s
+/// shard: even under a subject the graph holds, which a send would replay instead.
+async fn append_stream_copy(node: &Node, subject: &str) {
+    let _: Value = node
+        .client()
+        .post(
+            "/v1/internal/test/messages-shard/copy",
+            &ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/fleet-sender".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "agent/fleet-sender", "to": "agent/fleet-reader",
+                    "content": "through the stream", "status": "sent"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
 /// How many claims `node`'s messages shard holds about `subject`.
 async fn stream_items(node: &Node, subject: &str) -> usize {
     let items: Vec<Value> = node
@@ -6420,8 +6445,13 @@ async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_ac
     o.binary = PathBuf::from(st3());
     o.start().await;
     let stream = ["message/0000000000000e01", "message/0000000000000e02", "message/0000000000000e03"];
+    // The graph's two arrive as copies: a send of a subject the graph holds replays its claim.
     for subject in [stream[0], graph[2].as_str(), stream[1], stream[2], graph[3].as_str()] {
-        append_stream_item(&o, subject).await;
+        if graph.iter().any(|held| held == subject) {
+            append_stream_copy(&o, subject).await;
+        } else {
+            append_stream_item(&o, subject).await;
+        }
     }
     for shared in &graph[2..4] {
         assert_eq!(stream_items(&o, shared).await, 1);
