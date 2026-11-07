@@ -142,16 +142,16 @@ it('keeps conversation actions in the header and gives the Details sheet only on
     expect(sheet.querySelectorAll('button[aria-label^="Close"]')).toHaveLength(1)
     expect(sheet.querySelector('button[aria-label="Close agent details"]')).not.toBeNull()
     expect(sheet.querySelector('[data-narrow-actions]')).toBeNull()
-    expect(sheet.querySelector('button[aria-label="Conversation menu"]')).toBeNull()
-    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Conversation menu"]')).not.toBeNull()
+    expect(sheet.querySelector('button[aria-label="More actions"]')).toBeNull()
+    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="More actions"]')).not.toBeNull()
   }, { timeout: 15_000 })
 })
 
 // The tab row holds the Workspace views tab list and, fixed after it, the labelled Terminal toggle.
 const workspaceTabs = () => host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace views"]')!
 const phoneTerminal = () => workspaceTabs().parentElement!.querySelector<HTMLButtonElement>('button[aria-label="Show terminal"], button[aria-label="Show conversation"]')!
-const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Toggle terminal drawer', 'Agent details'].includes(name ?? ''))
-const phoneHeaderNames = ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Agent details']
+const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'More actions', 'Agent details', 'Resources', 'Conversation menu'].includes(name ?? ''))
+const phoneHeaderNames = ['Expand sidebar', 'More actions', 'Agent details']
 /** One Terminal on the phone: outside the header and outside the tab list, beside it in the tab row. */
 const assertTerminalInTabRow = () => {
   expect(headerOrder()).toEqual(phoneHeaderNames)

@@ -185,15 +185,18 @@ export function ThreadHeader({
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <ChromeControl ref={sidebarToggleRef} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
-      <nav aria-label={breadcrumbLabel} {...stylex.props(styles.breadcrumb)}>
+      {/* The status mark sits beside the title, outside the breadcrumb landmark so the crumb reads as names only. */}
+      <div {...stylex.props(styles.titleGroup)}>
+      <nav aria-label={breadcrumbLabel} {...stylex.props(styles.breadcrumb, styles.breadcrumbFit)}>
         {folder !== undefined ? <>
           <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink, !narrow && styles.desktopFolder)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash, !narrow && styles.desktopFolder)}>/</span>
         </> : null}
         <span role={narrow ? undefined : 'heading'} aria-level={narrow ? undefined : 2} {...stylex.props(styles.crumbTitle)}>{title}</span>
       </nav>
+      {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
+      </div>
       <div {...stylex.props(styles.actions)}>
-        {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
         {elapsed !== undefined ? <span role="timer" aria-label="Current conversation turn elapsed">{elapsed}</span> : null}
         <div data-testid="native-action-slot" ref={actionPortalRef} {...stylex.props(styles.actionSlot)}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Open <Icon name="chevron-down" size={12} /></button>}
@@ -256,6 +259,8 @@ const styles = stylex.create({
   desktopFolder: { display: { default: 'inline', '@container thread-header (max-width: 560px)': 'none' } },
   // A landscape phone's notch sits beside the header; the gutter stays the minimum.
   headerNarrow: { paddingInlineStart: `max(${g.gutter}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${g.gutter}, env(safe-area-inset-right, 0px))` },
+  titleGroup: { display: 'flex', flex: '1 1 0', alignItems: 'center', gap: 6, minWidth: 0 },
+  breadcrumbFit: { flex: '0 1 auto' },
   breadcrumb: { display: 'flex', flex: '1 1 0', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
