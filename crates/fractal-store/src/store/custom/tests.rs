@@ -22,6 +22,14 @@ fn decision_inputs_reject_unregistered_person_answer() {
 fn decision_inputs_require_recipient_authority_in_immutable_registration() {
     let store = Store::open_memory("example").unwrap();
     let mut manifest = decision_tree();
+    // Keep attention's recipient mapping and a schema-valid recipient-only reply,
+    // while weakening the distinct answer claim consumed by the decision reader.
+    let reply_kind = "custom.decision.tree.v1.reply";
+    manifest.claims.insert(
+        reply_kind.into(),
+        manifest.claims["custom.decision.tree.v1.answered"].clone(),
+    );
+    manifest.attention.as_mut().unwrap().reply.kind = reply_kind.into();
     manifest.claims.get_mut("custom.decision.tree.v1.answered").unwrap().authority = Authority::Owner;
     store.register_custom_kind(&RegistrationRequest {
         manifest, actor: SEAT.into(),

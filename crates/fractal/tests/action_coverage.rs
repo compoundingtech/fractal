@@ -6461,7 +6461,7 @@ fn decision_v2_sync(source: &Store, target: &Store) {
     let exchange = source.export_replication_exchange(
         DECISION_V2_FLEET, &target.replication_inventory().unwrap(),
     ).unwrap();
-    target.receive_replication_exchange("decision-fixture", DECISION_V2_FLEET, &exchange).unwrap();
+    target.receive_replication_exchange(source.origin(), DECISION_V2_FLEET, &exchange).unwrap();
     target.validate_replication_backlog().unwrap();
     target.project_replication_backlog().unwrap();
 }
@@ -6564,6 +6564,7 @@ async fn decision_reader_rejects_unregistered_or_unauthorized_approval() {
         // Retained-history damage is injected below admission, deliberately leaving the cached
         // source ready so the reader must independently re-establish recipient and pin authority.
         let connection = rusqlite::Connection::open(daemon.root.path().join("graph.db")).unwrap();
+        fractal_daemon::store::configure_projection_writer(&connection).unwrap();
         match corruption {
             "missing-creation" => {
                 connection.execute("DELETE FROM claims WHERE subject=?1 AND kind='custom.decision.tree.v2.opened'",
@@ -6633,6 +6634,7 @@ async fn decision_reader_excludes_repaired_originals() {
         // Simulate detection/quarantine of already-retained damaged records. The replacement
         // and the repair itself still pass the real CLI admission and repair projection path.
         let connection = rusqlite::Connection::open(target.root.path().join("graph.db")).unwrap();
+        fractal_daemon::store::configure_projection_writer(&connection).unwrap();
         let record: String = connection.query_row(
             "SELECT record_ref FROM replica_records WHERE claim_id=?1", [original], |row| row.get(0),
         ).unwrap();

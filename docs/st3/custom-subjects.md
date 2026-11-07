@@ -280,6 +280,9 @@ status-driven attention contract; it is not a substitute for folding all request
 verbatim provenance `body.fields`, in canonical effective-history order; repaired originals
 are excluded. `basis` is the existing subject/kinds/revision token for those inputs. No
 client-side pagination or before/after token race is needed for this snapshot read.
+This complete-history endpoint intentionally has work and response size proportional to the
+selected tree's history; it is not a bounded latest-state page. The route-cost inventory
+records that explicit contract rather than imposing a constant-history budget.
 The reader requires a ready matching registration, matching registration pins, a valid
 creation and source, and exact addressed-recipient answer authority. Invalid, conflicting,
 or unregistered histories are rejected rather than classified as approval evidence.
