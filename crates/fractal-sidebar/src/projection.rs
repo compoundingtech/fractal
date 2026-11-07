@@ -165,6 +165,13 @@ fn build_input(
                 children: Vec::new(),
             });
     }
+    unavailable.extend(invalid_ancestry(&tree));
+    tree.nodes.retain(|key, _| !unavailable.contains_key(key));
+    order_rows(&mut tree);
+    Ok(AvailableProjection { tree, unavailable })
+}
+pub(crate) fn invalid_ancestry(tree: &SidebarTree) -> BTreeMap<String, ProjectionError> {
+    let mut unavailable = BTreeMap::new();
     // Walk each ancestry once. A visiting state detects cycles without recursive stack growth.
     let mut states = BTreeMap::<&str, Option<bool>>::new();
     let mut path = Vec::new();
@@ -201,7 +208,11 @@ fn build_input(
             unavailable.insert(key.to_owned(), ProjectionError::InvalidResolution);
         }
     }
-    tree.nodes.retain(|key, _| !unavailable.contains_key(key));
+    unavailable
+}
+/// Rebuild visible child lists after validated projected position changes.
+pub(crate) fn order_rows(tree: &mut SidebarTree) {
+    for node in tree.nodes.values_mut() { node.children.clear(); }
     let mut ordered: Vec<_> = tree.nodes.values().collect();
     ordered.sort_by(|a, b| {
         fn rank(node: &ProjectedNode) -> u8 {
@@ -232,7 +243,6 @@ fn build_input(
                 .children = children;
         }
     }
-    Ok(AvailableProjection { tree, unavailable })
 }
 
 
