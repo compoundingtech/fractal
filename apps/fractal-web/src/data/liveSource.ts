@@ -697,44 +697,58 @@ export const liveSource = ({
     return retained
   }
 
-  const rosterDecode = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
-  /** Decode metadata belongs to an observation and is published only with its accepted rows. */
-  const rosterEvidence = new WeakMap<readonly DecodedAgent[], RosterDecode>()
   const sameUndecodable = (left: readonly Undecodable[], right: readonly Undecodable[]) =>
     left.length === right.length && left.every((entry, index) => {
       const other = right[index]!
       return entry._tag === other._tag && entry.id === other.id && entry.path === other.path && entry.reason === other.reason
     })
-  const recordRosterDecode = (next: RosterDecode) => {
-    const current = registry.get(rosterDecode)
-    if (current.decodeStale === next.decodeStale && sameUndecodable(current.undecodable, next.undecodable)) return
-    registry.set(rosterDecode, next.undecodable.length === 0 && !next.decodeStale ? decodedRoster : next)
+  /** Decode metadata belongs to an observation and is published only with its accepted rows. */
+  const decodeEvidence = <TRow,>() => {
+    const atom = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
+    const evidence = new WeakMap<readonly TRow[], RosterDecode>()
+    return {
+      atom,
+      record: (value: readonly TRow[], decode: RosterDecode) => evidence.set(value, decode),
+      prepareObservation: (value: readonly TRow[], previous: Feed<readonly TRow[]>) => {
+        const decode = evidence.get(value) ?? decodedRoster
+        if (!decode.decodeStale || value.length > 0 || previous._tag !== 'Observed') return value
+        const retained = [...previous.value]
+        evidence.set(retained, decode)
+        return retained
+      },
+      onCommit: (value: readonly TRow[]) => {
+        const next = evidence.get(value) ?? decodedRoster
+        const current = registry.get(atom)
+        if (current.decodeStale === next.decodeStale && sameUndecodable(current.undecodable, next.undecodable)) return
+        registry.set(atom, next.undecodable.length === 0 && !next.decodeStale ? decodedRoster : next)
+      },
+      observedFreshness: (value: readonly TRow[]): 'stale' | 'live' =>
+        evidence.get(value)?.decodeStale ? 'stale' : 'live',
+    }
   }
+  const rosterEvidence = decodeEvidence<DecodedAgent>()
+  const rosterDecode = rosterEvidence.atom
+  const missionsEvidence = decodeEvidence<Mission>()
+  const missionsDecode = missionsEvidence.atom
   const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
     initialRead: (fractal) => fractal.readAgents.pipe(
       Effect.map(({ value, hasMore, undecodable, decodeStale }) => {
         const rows = [...value]
-        rosterEvidence.set(rows, { undecodable, decodeStale })
+        rosterEvidence.record(rows, { undecodable, decodeStale })
         return { value: rows, hasMore }
       }),
     ),
-    prepareObservation: (value, previous) => {
-      const evidence = rosterEvidence.get(value) ?? decodedRoster
-      if (!evidence.decodeStale || value.length > 0 || previous._tag !== 'Observed') return value
-      const retained = [...previous.value]
-      rosterEvidence.set(retained, evidence)
-      return retained
-    },
-    onCommit: (value) => recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster),
-    observedFreshness: (value) => rosterEvidence.get(value)?.decodeStale ? 'stale' : 'live',
+    prepareObservation: rosterEvidence.prepareObservation,
+    onCommit: rosterEvidence.onCommit,
+    observedFreshness: rosterEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
         Stream.map((event) => {
           if (event._tag !== 'Observed') return event
           const { items, undecodable, decodeStale } = event.value
           const value = items.filter((row): row is DecodedAgent => row.kind === 'agent')
-          rosterEvidence.set(value, { undecodable, decodeStale })
+          rosterEvidence.record(value, { undecodable, decodeStale })
           return { _tag: 'Observed' as const, value }
         }),
       ),
@@ -742,16 +756,18 @@ export const liveSource = ({
   const agents = agentsRetained.atom
   const missionsRetained = retain<readonly Mission[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'missions', limit: 100 }),
+    prepareObservation: missionsEvidence.prepareObservation,
+    onCommit: missionsEvidence.onCommit,
+    observedFreshness: missionsEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter((row): row is Mission => row.kind === 'mission'),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is Mission => row.kind === 'mission')
+          missionsEvidence.record(value, { undecodable, decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const missions = missionsRetained.atom
@@ -1224,6 +1240,7 @@ export const liveSource = ({
       rosterDecode,
       retryAgents: () => agentsRetained.retry(),
       missions,
+      missionsDecode,
       attention,
       conversation,
       conversationInterest: (ref) => retainConversation(ref).interest,
