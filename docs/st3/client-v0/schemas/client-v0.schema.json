@@ -4434,7 +4434,7 @@
         "retryable": { "type": "boolean" },
         "retry_after_ms": { "x-st-codec": "duration-ms", "type": "integer", "minimum": 0 },
         "applied": { "type": "string", "enum": ["none", "unknown"] },
-        "details": { "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
+        "details": { "$comment": "HTTP 403 forbidden uses reason credential-rejected for unknown, expired or revoked paired-device credentials, not missing scopes. Older daemons may omit it; details remains open.", "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
       }
     },
     "SubscribeTraceContext": {

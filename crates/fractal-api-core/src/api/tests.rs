@@ -13,6 +13,87 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
+    let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
+    for (ancestor, expected) in [
+        (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
+        (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
+        (None, HarnessAncestry::Unavailable),
+    ] {
+        let result = walk_harness_ancestry(pid, Some(&peer), |candidate| {
+            if candidate == pid {
+                Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)) })
+            } else {
+                ancestor
+            }
+        }, |candidate| {
+            assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
+            Some(HarnessAncestry::Person)
+        });
+        assert_eq!(result, expected);
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> HarnessAncestry {
+    let mut child = std::process::Command::new("sleep").arg("10").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let process = local_harness_process(pid).unwrap();
+    let mut inspection = 0;
+    let result = walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+        let mut current = process;
+        if changed_at == Some(inspection) {
+            current.generation.as_mut().unwrap().1 =
+                current.generation.unwrap().1.wrapping_add(1);
+        }
+        inspection += 1;
+        Some(current)
+    }, |_| Some(HarnessAncestry::Bound("agent/fixture/worker".into())));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_connector_generation_mismatch_is_unavailable() {
+    for inspection in [0, 1, 2] {
+        assert_eq!(captured_connector_case(true, Some(inspection)), HarnessAncestry::Unavailable);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_failed_connector_capture_is_unavailable() {
+    assert_eq!(captured_connector_case(false, None), HarnessAncestry::Unavailable);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_matching_connector_capture_binds() {
+    assert_eq!(captured_connector_case(true, None),
+        HarnessAncestry::Bound("agent/fixture/worker".into()));
+}
+
+// A real serving-boundary probe for manual person-CLI integration checks.
+#[tokio::test]
+async fn person_cli_probe_server() {
+    let Ok(socket) = std::env::var("FRACTAL_PERSON_CLI_PROBE_SOCKET") else { return; };
+    let socket = PathBuf::from(socket);
+    let state = state(socket.parent().unwrap());
+    let app = Router::new().fallback(|| async { Json(json!({"person_admitted": true})) });
+    serve_unix_with_ancestor_ready(&socket, None, app, Some(state.store), harness_ancestor,
+        || println!("PERSON_CLI_PROBE_READY")).await.unwrap();
+}
+
 #[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let root = tempfile::tempdir().unwrap();
@@ -22,7 +103,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        reserved, router(state), Some(store.clone()), |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -42,6 +123,120 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
         assert_eq!(store.index().unwrap(), before);
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
+    use http_body_util::BodyExt as _;
+    for ancestry in [HarnessAncestry::Unavailable, HarnessAncestry::Person] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let socket = root.path().join("bound.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
+            |_, _| HarnessAncestry::Unavailable
+        } else {
+            |_, _| HarnessAncestry::Person
+        };
+        let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
+        let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+            reserved, app, Some(state.store), lookup,
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        tokio::spawn(connection);
+        for (method, path, person, body, sensitive) in [
+            ("GET", "/v1/health", false, "{}", false),
+            ("POST", "/v1/example", false, "{}", false),
+            ("GET", "/v1/backup", false, "{}", true),
+            ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/internal/example", false, "{}", true),
+            ("GET", "/v1/client/session", true, "{}", true),
+            ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
+            ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
+        ] {
+            let mut request = Request::builder().method(method).uri(path).header("host", "local");
+            if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+            let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
+            let refused = sensitive && ancestry == HarnessAncestry::Unavailable;
+            assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
+            response.into_body().collect().await.unwrap();
+        }
+        server.abort();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, body: Value) {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (primary, legacy) in [
+        (Some(""), None),
+        (None, Some("")),
+        (Some(""), Some("agent/fixture/worker")),
+        (Some("agent/fixture/worker"), Some("")),
+        (Some("person/example"), None),
+        (Some("agent/"), None),
+        (Some("agent/fixture/worker"), Some("agent/fixture/other")),
+    ] {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("10").env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
+        if let Some(value) = primary { command.env("ST_AGENT", value); }
+        if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
+        let mut child = command.spawn().unwrap();
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(child.id()).unwrap();
+        let ancestry = harness_ancestor(child.id(), Some(&peer));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(ancestry, HarnessAncestry::Unavailable);
+        let mut request = Request::builder().method(method).uri(path);
+        if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+        let mut request = request.body(Body::from(body.to_string())).unwrap();
+        request.extensions_mut().insert(ancestry);
+        let error = guard_bound_request(request, None, &state.store).await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{path}: {primary:?} {legacy:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_backup_export() {
+    assert_masked_identity_refused("GET", "/v1/backup", false, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_person_session() {
+    assert_masked_identity_refused("GET", "/v1/client/session", true, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_foreign_actor() {
+    assert_masked_identity_refused("POST", "/v1/fleet/transports", false, json!({"actor": "agent/other"})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_harness_descendant_without_agent_environment_is_bound() {
+    use std::io::{BufRead as _, Write as _};
+    let mut harness = std::process::Command::new("sh")
+        .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sh -c 'echo $$; read answer'; :"])
+        .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent")
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut pid = String::new();
+    std::io::BufReader::new(harness.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+    let pid: u32 = pid.trim().parse().unwrap();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    // The child announces readiness after exec, then stays alive until inspection ends.
+    harness.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    harness.wait().unwrap();
+    assert_eq!(ancestry, HarnessAncestry::Bound("agent/fixture/parent".into()));
 }
 
 #[tokio::test]
@@ -793,7 +988,7 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_unix_peer_is_bound_to_its_harness_environment() {
     // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
@@ -804,15 +999,16 @@ fn a_unix_peer_is_bound_to_its_harness_environment() {
         .env("ST_AGENT", "agent/fixture/worker")
         .spawn()
         .unwrap();
-    let mut bound = None;
+    let mut bound = HarnessAncestry::Unavailable;
     for _ in 0..50 {
-        bound = harness_ancestor(child.id());
-        if bound.is_some() {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(child.id()).unwrap();
+        bound = harness_ancestor(child.id(), Some(&peer));
+        if bound.agent().is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert_eq!(bound.as_deref(), Some("agent/fixture/worker"));
+    assert_eq!(bound.agent(), Some("agent/fixture/worker"));
     child.kill().unwrap();
     child.wait().unwrap();
 }
@@ -1926,6 +2122,23 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+#[test]
+fn doctor_reports_work_wake_copy_progress_and_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for complete in [false, true] {
+        state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-he79e179dc71c owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_wake_backfill SET cursor=12, ceiling=34, complete=?1 WHERE singleton=1",
+            [complete],
+        ).unwrap();
+        let check = work_wake_index_check(&state);
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains(&format!("cursor=12 ceiling=34 done={complete}")));
+        assert_eq!(check.message.contains("indexed tags only"), complete);
+        assert_eq!(check.message.contains("unindexed historical tail"), !complete);
+    }
+}
+
 /// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
 /// what holds them off: here a configured peer whose start has not reached it.
 #[test]
@@ -2851,9 +3064,9 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     use http_body_util::{BodyExt as _, Empty};
     use hyper::client::conn::http1::SendRequest;
 
-    fn slow_ancestor(_pid: u32) -> Option<String> {
+    fn slow_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
         std::thread::sleep(Duration::from_millis(500));
-        None
+        HarnessAncestry::Person
     }
 
     async fn health(sender: &mut SendRequest<Empty<axum::body::Bytes>>) {
@@ -2910,8 +3123,8 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
 async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
     use http_body_util::{BodyExt as _, Full};
 
-    fn ancestor(_pid: u32) -> Option<String> {
-        Some("agent/example-bound-original/worker".into())
+    fn ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+        HarnessAncestry::Bound("agent/example-bound-original/worker".into())
     }
 
     let root = tempfile::tempdir().unwrap();
@@ -13483,6 +13696,52 @@ async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() 
         assert!(refused.to_string().contains("notices-unavailable"), "{path}: {refused}");
     }
 }
+
+#[tokio::test]
+async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot_pin() {
+    for exact in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let owner = state(root.path());
+        let store = owner.store.clone();
+        let subject = "agent/example-owner/worker";
+        for incarnation in ["before", "after"] {
+            roster_fixture_append(&store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":owner.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let through = store.index().unwrap();
+        let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+            .subjects.remove(0).actual_claim.unwrap();
+        assert_eq!(store.conversation_owners_at(through).unwrap()[subject].incarnation.as_deref(), Some("after"));
+        let repair_store = store.clone();
+        MANAGED_OWNER_AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    // Repair changes retained-prefix meaning without advancing its claim cut.
+                    repair_store.connection.write().execute(
+                        /* sqlite-large-value: allow-for-now lv-h7dc166900806 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
+                        [&repaired],
+                    ).unwrap();
+                    smallclaims::Runtime::forget_views(repair_store.fractal.as_ref());
+                    let rebuilt = repair_store.conversation_owners_at(through).unwrap();
+                    assert_eq!(rebuilt[subject].incarnation.as_deref(), Some("before"));
+                }).join().unwrap();
+            }));
+        });
+        let session = managed_session_id(subject, "after");
+        let found = if exact {
+            managed_session_owner_for_subject_at(&store, through, &session, subject)
+        } else {
+            managed_session_owner_at(&store, through, &session)
+        }.unwrap().expect("the pinned prefix still contains the unrepaired incarnation");
+        assert!(MANAGED_OWNER_AFTER_PIN.with(|hook| hook.borrow().is_none()));
+        assert_eq!(found.1.as_deref(), Some("after"));
+        assert!(managed_session_owner_at(&store, through, &session).unwrap().is_none());
+        assert!(managed_session_owner_for_subject_at(&store, through, &session, subject).unwrap().is_none());
+    }
+}
+
 
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {

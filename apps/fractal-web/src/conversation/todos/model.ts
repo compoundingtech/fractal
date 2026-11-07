@@ -3,12 +3,13 @@ import type { DecodedAgent, Open } from '@fractal/sdk/read'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 
-import type { DataSource, Feed } from '../../data/source.ts'
+import { credentialNotice, type DataSource, type Feed } from '../../data/source.ts'
 import type { FeedSyncObservation } from '../../data/feedSync.ts'
 
 /** Todo observation availability or accepted progress with phase, source totals and freshness. */
 export type TodoState =
   | { readonly _tag: 'Waiting' }
+  | { readonly _tag: 'Unauthorized' }
   | { readonly _tag: 'Unavailable'; readonly detail: string }
   | { readonly _tag: 'Missing' }
   | {
@@ -30,6 +31,7 @@ export const projectTodos = ({
   agentRef: string
   sync?: FeedSyncObservation['status']
 }): TodoState => {
+  if (credentialNotice(feed)) return { _tag: 'Unauthorized' }
   if (feed._tag !== 'Observed') return feed
   const agent = feed.value.find((row) => row.id === agentRef)
   const todo = agent === undefined ? undefined : Option.getOrUndefined(agent.todo)

@@ -25,12 +25,13 @@ import type {
   ConversationSearch,
   SubagentSummary,
 } from '@fractal/client/schema'
-import type { ErrorEnvelope, SubagentDriver } from '@fractal/client'
+import { ClientError, type ErrorEnvelope, type SubagentDriver } from '@fractal/client'
 import type { Timestamp } from '@fractal/client/schema'
 import type { ConnectionState, DecodedAgent, DecodedUsageSummary, Undecodable } from '@fractal/sdk/read'
 import type { MessageSendInput } from '@fractal/sdk/mutations'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
+import { Option, Schema } from 'effect'
 
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ProposedMissionFields } from '../missions/model.ts'
@@ -50,6 +51,24 @@ import type { SubjectReads } from './subjectReadPort.ts'
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { ObjectivesSource } from './objectivesSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
+
+/** Fixed recovery copy for a rejected browser credential; never expose the server's diagnostic. */
+export const credentialExpiredMessage = "This browser's access to the daemon has expired or was revoked. Pair the device again."
+
+const rejectedCredential = Schema.Struct({
+  status: Schema.Literal(403),
+  response: Schema.Struct({ code: Schema.Literal('forbidden'), details: Schema.Struct({ reason: Schema.Literal('credential-rejected') }) }),
+})
+/** Only the structured discriminator distinguishes re-pairing from a missing grant. */
+export const readAuthorization = (error: { readonly status: number; readonly response: unknown }): 'unauthorized' | 'ungranted' | undefined =>
+  Option.isSome(Schema.decodeUnknownOption(rejectedCredential)(error)) ? 'unauthorized'
+    : error.status === 403 || error.status === 401 ? 'ungranted' : undefined
+export const clientReadAuthorization = (error: unknown) => error instanceof ClientError ? readAuthorization(error) : undefined
+
+/** Recovery notices and controls agree, including refusals attached to retained values. */
+export const credentialNotice = (feed: Feed<unknown> | undefined): string | undefined =>
+  (feed?._tag === 'Unavailable' ? feed.reason : feed?._tag === 'Observed' ? feed.error?.reason : undefined) === 'unauthorized' ? credentialExpiredMessage : undefined
+
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
  * pins); live derives it from the SDK's `Observed<A>` (`value` + `freshness`) and follow errors.
@@ -68,14 +87,14 @@ export type Feed<A> =
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
       readonly error?: {
-        readonly reason: 'ungranted' | 'unsupported' | 'failed'
+        readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
         readonly detail: string
       }
     }
   | {
       readonly _tag: 'Unavailable'
-      /** `ungranted`: the paired device lacks the scope (the read-only dev device); `unsupported`: the gateway lacks the capability. */
-      readonly reason: 'ungranted' | 'unsupported' | 'failed'
+      /** `unauthorized`: the browser credential expired or was revoked; `ungranted`: missing scope; `unsupported`: missing capability. */
+      readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
       /** Terminal feeds display this source-owned reason; other feeds treat it as diagnostic detail. */
       readonly detail: string
       /** The read error's machine code (for example `not-found`): classification and data-wf-* diagnostics only, never display copy. */
@@ -421,7 +440,7 @@ export const unavailable = ({
   code,
   retryable,
 }: {
-  readonly reason: 'ungranted' | 'unsupported' | 'failed'
+  readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
   readonly detail: string
   readonly code?: string | undefined
   readonly retryable?: boolean | undefined

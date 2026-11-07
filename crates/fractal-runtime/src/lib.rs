@@ -54,7 +54,7 @@ pub use lane::{
 };
 pub use peer_process::PeerProcessIdentity;
 #[cfg(target_os = "macos")]
-pub use peer_process::macos_process_identity;
+pub use peer_process::{macos_process_identity, macos_process_owner};
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token, process_generation_alive,
 };
