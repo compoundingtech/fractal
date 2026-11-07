@@ -406,7 +406,8 @@ const adopt = (state: WorkspaceState, received: ReceivedLayout, context: Transit
     ?? groups[0]!.id
   const ids = new Set(tabsOf(layout).map(tab => tab.id))
   const shown = activeTab({ layout, focus })?.id
-  const known = state.mru.filter(id => ids.has(id))
+  // A stored document can repeat an id; recency keeps its first, most recent, mention.
+  const known = [...new Set(state.mru)].filter(id => ids.has(id))
   const recent = shown === undefined ? known : touch(known, shown)
   return {
     ...state,
