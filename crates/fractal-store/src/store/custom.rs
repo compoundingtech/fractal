@@ -910,28 +910,49 @@ impl Store {
 }
 /// Metadata of the canonical, registration-pinned creation that owns the custom projection.
 /// Replies and repaired claims cannot change the source publisher.
-pub(super) fn attention_creation_owner(
+pub(super) fn attention_creation_owners(
     connection: &Connection,
-    subject: &str,
-) -> Result<Option<(String, Option<String>)>> {
-    let Some((hash, manifest, state)) = registration(connection, subject)? else {
-        return Ok(None);
-    };
-    if state != "ready" {
-        return Ok(None);
+    subjects: &BTreeSet<String>,
+) -> Result<BTreeMap<String, (String, Option<String>)>> {
+    if subjects.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    Ok(connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-hc6d9629e0a8a owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT claims.origin, claims.actor FROM claims
-             JOIN batches ON batches.id=claims.batch_id
-             WHERE claims.subject=?1 AND claims.kind=?2
-               AND json_extract(claims.body, '$.fields._registration')=?3
-               AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
-             ORDER BY CANONICAL_ASC(claims) LIMIT 1",
+    let mut registrations = connection.prepare(
+        "SELECT requested.value, hash, manifest, state
+         FROM json_each(?1) requested JOIN custom_registrations registration
+           ON registration.subject=(SELECT subject FROM custom_registrations
+             WHERE substr(requested.value,1,length(prefix))=prefix ORDER BY subject LIMIT 1)",
+    )?;
+    let rows = registrations.query_map([serde_json::to_string(subjects)?], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+    })?;
+    let mut pinned = Vec::new();
+    for row in rows {
+        let (subject, hash, manifest, state) = row?;
+        // Decode even an unready registration, as the keyed reader does.
+        let manifest: Manifest = serde_json::from_str(&manifest)?;
+        if state == "ready" {
+            pinned.push(json!({"subject": subject, "kind": manifest.creation_kind, "hash": hash}));
+        }
+    }
+    let mut statement = connection.prepare(
+        /* sqlite-large-value: allow-for-now lv-hf5c43701d222 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */
+        &canonical_sql(
+            "SELECT claims.subject, claims.origin, claims.actor FROM json_each(?1) requested
+             JOIN claims ON claims.id=(
+               SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
+               WHERE claims.subject=json_extract(requested.value,'$.subject')
+                 AND claims.kind=json_extract(requested.value,'$.kind')
+                 AND json_extract(claims.body,'$.fields._registration')=json_extract(requested.value,'$.hash')
+                 AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+               ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
         ),
-        params![subject, manifest.creation_kind, hash],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()?)
+    )?;
+    let owners = statement.query_map([serde_json::to_string(&pinned)?], |row| {
+        Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+    })?.collect::<rusqlite::Result<_>>()?;
+    Ok(owners)
 }
 
 /// One canonical custom source, shared by the collection reader and keyed maintenance.

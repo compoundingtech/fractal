@@ -536,77 +536,126 @@ impl Store {
     /// Fleet-global asks, launches and custom sources use their canonical creation's origin,
     /// never the origin of a later answer or the replica reading them. Missing authority is
     /// an error so a population refresh cannot publish a partial attention count.
-    pub fn attention_source_origin(&self, item: &AttentionItemView) -> Result<String> {
+    pub fn attention_source_origins(&self, items: &[&AttentionItemView]) -> Result<Vec<String>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
         let connection = self.readers.get();
-        let member_origin = |subject: &str| -> Result<Option<String>> {
-            Ok(connection.query_row(
-                "SELECT json_extract(member, '$.host') FROM desired
-                 WHERE subject=?1 AND kind='agent'",
-                [subject],
-                |row| row.get::<_, Option<String>>(0),
-            ).optional()?.flatten().filter(|host| !host.is_empty()))
+        let run_subject = |item: &AttentionItemView| {
+            item.mission_run.as_deref().map(|run| {
+                if run.starts_with("mission-run/") { run.to_owned() }
+                else { format!("mission-run/{run}") }
+            })
         };
-        let creation_origin = |subject: &str, kind: &str| -> Result<Option<String>> {
-            Ok(connection.query_row(
-                /* sqlite-large-value: allow-for-now lv-hfadf744ed3d8 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
-                    "SELECT origin FROM claims WHERE subject=?1 AND kind=?2
-                       AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
-                     ORDER BY CANONICAL_ASC(claims) LIMIT 1",
-                ),
-                params![subject, kind],
-                |row| row.get(0),
-            ).optional()?)
+        let mut sources = BTreeSet::new();
+        let mut custom_subjects = BTreeSet::new();
+        let mut actors = BTreeSet::new();
+        for item in items {
+            match item.kind.as_str() {
+                "person-step" | "agent-request" => {
+                    sources.insert((item.subject.clone(), "work.person-asked"));
+                    if let Some(run) = run_subject(item) {
+                        sources.insert((run, "mission-run.created"));
+                    }
+                }
+                "human-gate" | "revision-approval" => {
+                    if let Some(run) = run_subject(item) {
+                        sources.insert((run, "mission-run.created"));
+                    }
+                }
+                "launch-approval" => {
+                    sources.insert((item.subject.clone(), "planning-session.started"));
+                }
+                "fault" if item.mission_run.is_some() => {
+                    if let Some(run) = run_subject(item) {
+                        sources.insert((run, "mission-run.created"));
+                    }
+                }
+                "harness-login" | "harness-prompt" | "fault" => {
+                    actors.insert(item.subject.clone());
+                }
+                kind if kind.starts_with("custom.") => {
+                    custom_subjects.insert(item.subject.clone());
+                }
+                _ => {}
+            }
+        }
+        // Select one canonical row per distinct source inside a single statement. Ask
+        // metadata intentionally retains request()'s treatment of repaired records.
+        let mut statement = connection.prepare(
+            /* sqlite-large-value: allow-for-now lv-h849fcd9021e0 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */
+            &canonical_sql(
+                "SELECT claims.subject, claims.kind, claims.origin, claims.actor
+                 FROM json_each(?1) requested JOIN claims ON claims.id=(
+                   SELECT claims.id FROM claims
+                   WHERE claims.subject=json_extract(requested.value,'$[0]')
+                     AND claims.kind=json_extract(requested.value,'$[1]')
+                     AND (claims.kind='work.person-asked' OR NOT EXISTS(
+                       SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))
+                   ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+            ),
+        )?;
+        let metadata = statement.query_map([serde_json::to_string(&sources)?], |row| {
+            Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                (row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))
+        })?.collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        let custom = custom::attention_creation_owners(&connection, &custom_subjects)?;
+        let asks = metadata.iter().filter(|((_, kind), _)| kind == "work.person-asked")
+            .map(|(_, value)| value);
+        for (_, actor) in asks.chain(custom.values()) {
+            if let Some(actor) = actor.as_deref().filter(|actor| actor.starts_with("agent/")) {
+                actors.insert(actor.to_owned());
+            }
+        }
+        let mut statement = connection.prepare(
+            "SELECT subject, json_extract(member,'$.host') FROM desired
+             WHERE kind='agent' AND subject IN (SELECT value FROM json_each(?1))",
+        )?;
+        let members = statement.query_map([serde_json::to_string(&actors)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?.collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        let member_origin = |subject: &str| members.get(subject).cloned().flatten();
+        let source_index: BTreeMap<_, _> = metadata.iter()
+            .map(|((subject, kind), value)| ((subject.as_str(), kind.as_str()), value))
+            .collect();
+        let source = |subject: &str, kind: &str| source_index.get(&(subject, kind)).copied();
+        let owner = |creation: Option<&(String, Option<String>)>| {
+            creation.and_then(|(origin, actor)| {
+                if let Some(actor) = actor.as_deref().filter(|actor| actor.starts_with("agent/")) {
+                    member_origin(actor)
+                } else { Some(origin.clone()) }
+            })
         };
-        let run_origin = || -> Result<Option<String>> {
-            let Some(run) = item.mission_run.as_deref() else { return Ok(None); };
-            let subject = if run.starts_with("mission-run/") {
-                run.to_owned()
-            } else {
-                format!("mission-run/{run}")
+        items.iter().map(|item| {
+            let run_origin = || run_subject(item)
+                .and_then(|run| source(&run, "mission-run.created").map(|(origin, _)| origin.clone()));
+            let origin = match item.kind.as_str() {
+                "person-step" | "agent-request" => {
+                    if let Some(ask) = source(&item.subject, "work.person-asked") {
+                        owner(Some(ask))
+                    } else { run_origin() }
+                }
+                "human-gate" | "revision-approval" => run_origin(),
+                "launch-approval" => source(&item.subject, "planning-session.started")
+                    .map(|(origin, _)| origin.clone()),
+                "harness-login" | "harness-prompt" => member_origin(&item.subject),
+                "fault" => {
+                    if item.mission_run.is_some() { run_origin() }
+                    else { member_origin(&item.subject) }
+                }
+                kind if kind.starts_with("custom.") => owner(custom.get(&item.subject)),
+                _ => None,
             };
-            creation_origin(&subject, "mission-run.created")
-        };
-        let origin = match item.kind.as_str() {
-            "person-step" | "agent-request" => {
-                if let Some(ask) = person_work::request(&connection, &item.subject)? {
-                    if let Some(actor) = ask.actor.as_deref().filter(|actor| actor.starts_with("agent/")) {
-                        member_origin(actor)?
-                    } else {
-                        // Standalone person asks also materialize a synthetic run, but have
-                        // no mission-run.created claim. The ask itself is their source.
-                        Some(ask.origin)
-                    }
-                } else {
-                    run_origin()?
-                }
-            }
-            "human-gate" | "revision-approval" => run_origin()?,
-            "launch-approval" => creation_origin(&item.subject, "planning-session.started")?,
-            "harness-login" | "harness-prompt" => member_origin(&item.subject)?,
-            "fault" => {
-                if item.mission_run.is_some() { run_origin()? }
-                else { member_origin(&item.subject)? }
-            }
-            kind if kind.starts_with("custom.") => {
-                match custom::attention_creation_owner(&connection, &item.subject)? {
-                    Some((origin, actor)) => {
-                        if let Some(actor) = actor.as_deref().filter(|actor| actor.starts_with("agent/")) {
-                            member_origin(actor)?
-                        } else {
-                            Some(origin)
-                        }
-                    }
-                    None => None,
-                }
-            }
-            // Unread messages have no approved attention source. New source projections
-            // must establish ownership here before an exporter may include them.
-            _ => None,
-        };
-        origin.filter(|origin| !origin.is_empty()).ok_or_else(|| anyhow::anyhow!(
-            "attention source ownership unavailable: kind={}, source={}, person={}, episode={}",
-            item.kind, item.subject, item.person, item.episode,
-        ))
+            origin.filter(|origin| !origin.is_empty()).ok_or_else(|| anyhow::anyhow!(
+                "attention source ownership unavailable: kind={}, source={}, person={}, episode={}",
+                item.kind, item.subject, item.person, item.episode,
+            ))
+        }).collect()
+    }
+
+    #[cfg(test)]
+    fn attention_source_origin(&self, item: &AttentionItemView) -> Result<String> {
+        Ok(self.attention_source_origins(&[item])?.remove(0))
     }
 
     /// Keep the items requested by `as_of` whose run is still current, then order them.
@@ -1717,12 +1766,47 @@ mod population_attention_ownership_tests {
     }
 
     #[test]
+    fn attention_source_shared_requester_and_run_has_constant_statement_growth() {
+        let store = Store::open_memory("replica").unwrap();
+        place(&store, "agent/requester", "seat-host");
+        source_claim(&store, "run-host", "mission-run/shared", "mission-run.created", "person/reviewer");
+        let mut items = Vec::new();
+        for index in 0..50 {
+            let subject = format!("step-run/ask-{index}");
+            source_claim(&store, "ask-writer", &subject, "work.person-asked", "agent/requester");
+            items.push(item("person-step", &subject, Some("mission-run/shared")));
+            items.push(item("human-gate", &format!("step-run/gate-{index}"), Some("shared")));
+        }
+        // Match the refresher: acquire one read snapshot before counting ownership
+        // statements, excluding one-time reader/snapshot setup from either sample.
+        store.read_snapshot(|_| {
+            let measure = |items: &[AttentionItemView]| {
+                let refs: Vec<_> = items.iter().collect();
+                let before = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+                let owners = store.attention_source_origins(&refs).unwrap();
+                let statements = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before;
+                for (item, origin) in items.iter().zip(owners) {
+                    assert_eq!(origin, if item.kind == "person-step" { "seat-host" } else { "run-host" });
+                }
+                statements
+            };
+            let small = measure(&items[..2]);
+            let large = measure(&items);
+            assert_eq!(small, 2, "ownership uses canonical metadata and member placement batches");
+            assert_eq!(large, small, "shared requester/run ownership must use batch statements");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
     fn custom_source_uses_registered_creation_owner() {
         let store = Store::open_memory("replica").unwrap();
         custom::tests_shared_delivery::registration(&store);
         let creation = custom::tests_shared_delivery::request(&store, "custom/garden/review/v1/attention-owner");
         place(&store, creation.actor.as_deref().unwrap(), "custom-owner-host");
-        let selected = custom::attention_creation_owner(&store.readers.get(), &creation.subject).unwrap().unwrap();
+        let selected = custom::attention_creation_owners(
+            &store.readers.get(), &BTreeSet::from([creation.subject.clone()]),
+        ).unwrap().remove(&creation.subject).unwrap();
         assert_eq!(selected, (creation.origin.clone(), creation.actor.clone()));
         let rows = store.custom_attention_items(None).unwrap();
         assert_eq!(rows.len(), 1);

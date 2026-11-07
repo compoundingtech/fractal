@@ -16,7 +16,18 @@ pub type Counts = [(&'static str, u64); 10];
 /// complete refresh rather than silently treating an unowned item as zero.
 pub fn summarize(store: &Store, now: u128) -> anyhow::Result<Counts> {
     let items = store.attention_snapshot(None, now)?;
-    count_items(&items, store.origin(), |item| store.attention_source_origin(item))
+    let mut seen = HashSet::with_capacity(items.len());
+    let sources: Vec<_> = items.iter().filter(|item| {
+        item.kind != "unread-message"
+            && seen.insert((item.subject.as_str(), item.person.as_str(), item.episode.as_str()))
+    }).collect();
+    let origins = store.attention_source_origins(&sources)?;
+    let origins: std::collections::HashMap<_, _> = sources.into_iter().zip(origins)
+        .map(|(item, origin)| ((item.subject.as_str(), item.kind.as_str(), item.mission_run.as_deref()), origin))
+        .collect();
+    count_items(&items, store.origin(), |item| {
+        Ok(origins[&(item.subject.as_str(), item.kind.as_str(), item.mission_run.as_deref())].clone())
+    })
 }
 
 fn count_items(

@@ -83,7 +83,9 @@ fn classify(card: &Value) -> (&'static str, &'static str) {
             Some("review") => "review", _ => "unattributed",
         });
     }
-    if card["blocked_on"].as_str().is_some_and(|blocked| !blocked.is_empty()) {
+    // Driver sentinels "none" and "unknown" do not establish a wait. A blocked
+    // activity interval does; otherwise positive work/idle evidence remains decisive.
+    if card["harness_state"] == "blocked" {
         return ("waiting", "unattributed");
     }
     match card["harness_state"].as_str() {
@@ -242,9 +244,11 @@ mod tests {
         assert_eq!(classify(&card), ("asking", "permission"));
         card["ask"] = json!("new-subtype");
         assert_eq!(classify(&card), ("asking", "unattributed"));
-        card["blocked_on"] = json!("agent");
+        card["blocked_on"] = json!("unknown");
+        card["harness_state"] = json!("blocked");
         assert_eq!(classify(&card), ("waiting", "unattributed"));
-        card["blocked_on"] = Value::Null;
+        card["blocked_on"] = json!("none");
+        card["harness_state"] = json!("working");
         assert_eq!(classify(&card), ("working", "unattributed"));
         card["harness_state"] = json!("idle");
         assert_eq!(classify(&card), ("idle", "none"));
@@ -392,5 +396,40 @@ mod membership_tests {
         let statements = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before;
         assert_eq!(attention.iter().map(|(_, count)| count).sum::<u64>(), 50);
         eprintln!("population refresh query inventory: 47 declared members, 50 open agent requests, {statements} SQL statements");
+    }
+
+    #[test]
+    fn population_metrics_real_driver_blocking_fields_survive_store_to_summary() {
+        let store = Store::open_memory("example").unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"example.worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n",
+            "example",
+        ).unwrap();
+        store.apply_internal(&intent, "population-blocking-fields").unwrap();
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&crate::model::ClaimInput {
+                subject: "agent/example.worker".into(), kind: kind.into(), actor: None,
+                fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one", "runtime_id":"wrapper"}));
+        for (activity, blocking, ask, expected) in [
+            ("working", "none", "none", ("working", "unattributed")),
+            ("idle", "none", "none", ("idle", "none")),
+            ("working", "unknown", "none", ("working", "unattributed")),
+            ("idle", "unknown", "none", ("idle", "none")),
+            ("indeterminate", "unknown", "none", ("unknown", "unattributed")),
+            ("blocked", "unknown", "none", ("waiting", "unattributed")),
+            ("working", "human", "question", ("asking", "question")),
+        ] {
+            append("harness.observed", json!({"state":activity, "driver":"claude",
+                "incarnation_id":"one", "blocked_on":blocking, "ask":ask}));
+            let summary = summarize(&store, &[]).unwrap();
+            assert_eq!(summary.buckets.len(), 1, "{activity}/{blocking}");
+            let (bucket, (count, _, _)) = summary.buckets.first_key_value().unwrap();
+            assert_eq!((bucket.state, bucket.reason), expected, "{activity}/{blocking}");
+            assert_eq!(*count, 1);
+        }
     }
 }
