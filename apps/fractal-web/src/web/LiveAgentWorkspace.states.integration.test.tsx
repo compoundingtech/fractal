@@ -12,10 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { observed, unavailable, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 // Evaluate the real pane before mounting the workspace's lazy boundary.
 import './ConversationPane.tsx'
+import { FeedState } from '../data/FeedState.tsx'
+import { UsagePane } from '../monitor/UsagePane.tsx'
+import { projectNativeDetails } from '../data/nativeDetails.ts'
 
 // Only the build-time CSS runtime and absent jsdom layout APIs are substituted.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -112,6 +115,27 @@ describe('RM1 workspace source states', () => {
     expect(sidebar().querySelector('[data-system-state="loading"]')).toBeNull()
     expect(roster().querySelector('[data-wf-roster-skeleton]')).toBeNull()
     expect(retry(sidebar())).toBeUndefined()
+  })
+
+  it('keeps expired conversation, generic feed, usage and native-detail reads out of generic failure recovery', async () => {
+    const denied = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+    registry.set(conversation, denied)
+    await mount()
+    expect(transcript().textContent).toContain(credentialExpiredMessage)
+    expect(transcript().textContent).not.toMatch(/private diagnostic|Retry/)
+    const refresh = vi.fn()
+    source = { ...source, objectives: { list: Atom.make(denied), accounts: Atom.make(denied), history: () => Atom.make(denied), refresh } }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><FeedState feed={denied} label="Details" /><UsagePane /></DataSourceProvider>))
+    expect(host.querySelector('[aria-label="Details availability"]')?.textContent).toContain(credentialExpiredMessage)
+    const usage = host.querySelector('[data-testid="usage-pane"]')!
+    expect(usage.textContent).toContain(credentialExpiredMessage)
+    expect(usage.querySelector('[role="alert"], button')).toBeNull()
+    expect(host.textContent).not.toContain('private diagnostic')
+    const details = projectNativeDetails({ agentRef: agent.id, agent: denied, row: denied, session: denied, period: denied, declarations: denied, missions: denied, queue: denied, now: 118_000, onRetry: refresh, reads: { refreshUsage: refresh, retrySession: refresh, retryQueue: refresh } })
+    expect(details.overview.durations?.[0]?.detail).toBe(credentialExpiredMessage)
+    expect(JSON.stringify(details)).not.toContain('private diagnostic')
+    expect(details.spendRead ?? details.sessionFailure ?? details.queueFailure).toBeUndefined()
+    expect(refresh).not.toHaveBeenCalled()
   })
 
   it('replaces roster loading with an observed empty roster, not a filter no-match', async () => {

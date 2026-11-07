@@ -3,13 +3,13 @@ import * as stylex from '@stylexjs/stylex'
 import { EmptyState, Spinner } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 
-import type { Feed } from './source.ts'
+import { credentialExpiredMessage, type Feed } from './source.ts'
 
 /** Source states that have not supplied an observed value. */
 export type UnobservedFeed = Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
 
 const recovery = {
-  unauthorized: "This browser's access to the daemon has expired or was revoked. Pair the device again.",
+  unauthorized: credentialExpiredMessage,
   ungranted: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.',
   unsupported:
     'This gateway does not support this surface. Choose another surface; your saved work is unchanged.',

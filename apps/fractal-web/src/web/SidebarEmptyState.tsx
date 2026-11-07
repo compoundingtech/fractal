@@ -6,6 +6,7 @@ import { accentVars as accent, borderVars as border, geometryVars as g, radiusVa
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { ObservedAge } from './lastObserved.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+import { credentialExpiredMessage } from '../data/source.ts'
 
 /** Screen readers hear the wait; the skeleton beside it is decorative. */
 export const RosterLoading = () =>
@@ -24,7 +25,7 @@ export const SidebarEmptyState = (props: { readonly kind: 'empty' } | { readonly
     </div>
 
 const unavailableCopy = {
-  unauthorized: { title: 'Credential expired', body: "This browser's access to the daemon has expired or was revoked. Pair the device again." },
+  unauthorized: { title: 'Credential expired', body: credentialExpiredMessage },
   failed: { title: 'Couldn’t load agents', body: 'The agent list did not load. Open conversations keep working.' },
   ungranted: { title: 'No access to the agent roster', body: 'Read access has not been granted.' },
   unsupported: { title: 'Agent roster not supported', body: 'This connection does not offer it.' },

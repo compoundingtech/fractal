@@ -50,6 +50,10 @@ import type { SubjectReads } from './subjectReadPort.ts'
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { ObjectivesSource } from './objectivesSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
+
+/** Fixed recovery copy for a rejected browser credential; never expose the server's diagnostic. */
+export const credentialExpiredMessage = "This browser's access to the daemon has expired or was revoked. Pair the device again."
+
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
  * pins); live derives it from the SDK's `Observed<A>` (`value` + `freshness`) and follow errors.
