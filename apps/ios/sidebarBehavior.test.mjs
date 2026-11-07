@@ -274,6 +274,23 @@ test('same-revision resolution recovery never caches failures or scans members o
   invalid.complete.members[0].container = invalid.arrangement.id;
   assert.ok(!('error' in badCache.get(invalid)), 'non-readiness errors are not cached either');
 });
+test('cache invalidation preserves authoritative projection error precedence', () => {
+  const f = scaleFixture(2), input = projectionInput(f), cache = new SidebarProjectionCache();
+  cache.get(input);
+  const legacy = { ...input, arrangement: { ...f.v1, resolved: undefined } };
+  assert.deepEqual(cache.get(legacy), { error: { _tag: 'Unsupported', required: 2, advertised: 1 } });
+  for (const corrupt of [
+    members => { members.push(structuredClone(members[0])); },
+    members => { members[0].container = 'arrangement/other'; },
+  ]) {
+    cache.get(input);
+    const invalid = structuredClone(input);
+    delete invalid.arrangement.resolved.parents[f.intent.parent.id];
+    corrupt(invalid.complete.members);
+    assert.deepEqual(cache.get(invalid), { error: { _tag: 'InvalidResolution' } });
+    assert.deepEqual(cache.get(invalid), buildTree(invalid.arrangement, invalid.complete.members));
+  }
+});
 const pendingEdit = (f, edit) => {
   const state = createWriteState(scaleScope, f.intent);
   writeReducer.reduce(state, { type: 'Plan', base: { scope: scaleScope, snapshot, revision: f.arrangement.revision, ready: true }, plan: edit, folder: { actor: 'actor/test', action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: { actor: 'actor/test', action_id: 'action/member', idempotency_key: 'key/member' } });

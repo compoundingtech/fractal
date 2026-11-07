@@ -26,15 +26,16 @@ export class SidebarProjectionCache {
     if (arrangement.id !== scope.container || arrangement.owner !== scope.owner) {
       this.clear(); return { error: { _tag: 'InvalidResolution' } };
     }
-    if (arrangement.deleted) { this.clear(); return { error: { _tag: 'ArrangementUnavailable' } }; }
-    if (!arrangement.resolved) { this.clear(); return { error: { _tag: 'NotReady' } }; }
+    if (arrangement.deleted || !arrangement.resolved) {
+      this.clear(); return buildTree(arrangement, complete.members);
+    }
     let folderCount = 0, parentsChanged = false;
     // Admission bounds this scan to 1,024 live folders; never inspect members on a hit.
     for (const id in arrangement.body.folders) {
       if (arrangement.body.folders[id].tombstone != null) continue;
       folderCount++;
       if (!Object.hasOwn(arrangement.resolved.parents, id)) {
-        this.clear(); return { error: { _tag: 'NotReady' } };
+        this.clear(); return buildTree(arrangement, complete.members);
       }
       const parent = arrangement.resolved.parents[id], previous = this.tree?.nodes[`folder:${id}`]?.shownUnder;
       if (!previous || (parent === null ? previous._tag !== 'Root' : previous._tag !== 'Folder' || previous.id !== parent)) parentsChanged = true;
@@ -43,6 +44,7 @@ export class SidebarProjectionCache {
       arrangement.revision, arrangement.deleted ?? false, arrangement.body.version, modelRevision,
       frontier.epoch, frontier.changed_index, frontier.live_count, catalogRevision, presentationRevision]);
     if (key !== this.key || parentsChanged || folderCount !== this.folderCount) {
+      this.clear();
       const tree = buildTree(arrangement, complete.members);
       if ('error' in tree) { this.clear(); return tree; }
       this.tree = tree; this.key = key; this.folderCount = folderCount;
