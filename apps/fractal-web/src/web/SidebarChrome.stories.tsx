@@ -12,13 +12,14 @@ import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
-const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark' }: {
+const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark', initialQuery = '' }: {
   readonly width?: number
   readonly viewport?: number
   readonly initialScheme?: 'dark' | 'light'
+  readonly initialQuery?: string
 }) => {
-  const [filters, setFilters] = React.useState(defaultFilters)
-  const [scheme, setScheme] = React.useState(initialScheme)
+  const [filters, setFilters] = React.useState({ ...defaultFilters, query: initialQuery })
+  const [scheme, setScheme] = React.useState<'dark' | 'light'>(initialScheme)
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   return <main data-sidebar-chrome-story="" style={{ width: viewport }} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
@@ -102,12 +103,24 @@ export const scenarioExemptions: readonly string[] = [
   'At320:contract-fixture',
   'Light:contract-fixture',
   'NarrowDrawer:contract-fixture',
+  'WithSearchText:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 export const At256: Story = { args: { width: 256 }, play: chromePlay }
 export const At320: Story = { args: { width: 320 }, play: chromePlay }
 export const Light: Story = { args: { initialScheme: 'light' }, play: chromePlay }
 export const NarrowDrawer: Story = { args: { width: 240, viewport: 440 }, play: chromePlay }
+/** With text the `/` hint gives way to Clear search, which empties the field and leaves focus in it. */
+export const WithSearchText: Story = { args: { width: 256, initialQuery: 'builder machine:local' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const field = canvas.getByRole('textbox', { name: 'Search agents' })
+  await expect(canvasElement.querySelector('kbd')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: 'Clear search' }))
+  await expect(field).toHaveValue('')
+  await expect(field).toHaveFocus()
+  await expect(canvas.queryByRole('button', { name: 'Clear search' })).toBeNull()
+  await expect(canvasElement.querySelector('kbd')).toHaveTextContent('/')
+} }
 
 const styles = stylex.create({
   root: { display: 'flex', height: 480, maxWidth: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

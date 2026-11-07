@@ -1,9 +1,10 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
+import { Button as AriaButton } from 'react-aria-components'
 import { ChromeControl } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { lightTheme as compositionLightTheme } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, textVars as ink, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import {
   Input,
@@ -83,9 +84,12 @@ export const SidebarToolbar = ({
             if (event.key === 'Escape') update({ ...filters, query: '' })
             if (event.key === 'ArrowDown' && onEnterResults !== undefined) { event.preventDefault(); onEnterResults() }
           }}
-          stylexStyle={[styles.search, searchStyle, !narrow && styles.searchWithHint, narrow && styles.touchSearch]}
+          stylexStyle={[styles.search, searchStyle, !narrow && styles.searchWithHint, narrow && styles.touchSearch, narrow && filters.query !== '' && styles.touchSearchWithClear]}
         />
-        {!narrow && filters.query === '' && <kbd aria-hidden="true" {...stylex.props(styles.searchHint)}>/</kbd>}
+        {filters.query === ''
+          ? !narrow && <kbd aria-hidden="true" {...stylex.props(styles.searchHint)}>/</kbd>
+          // The same clear as Escape: the whole query, free text and tokens. Focus moves first, because this button then unmounts.
+          : <AriaButton aria-label="Clear search" onPress={() => { search.current?.querySelector('input')?.focus(); update({ ...filters, query: '' }) }} {...stylex.props(styles.searchClear, narrow && styles.searchClearTouch)}><Icon name="x" size={12} /></AriaButton>}
       </div>
       <SidebarShowMenu
         filters={filters}
@@ -155,8 +159,30 @@ const styles = stylex.create({
     fontSize: t.denseSize,
     pointerEvents: 'none',
   },
+  searchClear: {
+    position: 'absolute',
+    insetInlineEnd: s.xs2,
+    top: '50%',
+    transform: 'translateY(-50%)',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxSizing: 'border-box',
+    width: g.controlSm,
+    height: g.controlSm,
+    padding: 0,
+    borderWidth: 0,
+    borderRadius: r.sm,
+    backgroundColor: { default: 'transparent', ':hover': surface.rowHover },
+    color: { default: ink.fgMuted, ':hover': ink.fg },
+    cursor: 'pointer',
+    outlineStyle: 'none',
+    ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing },
+  },
+  searchClearTouch: { insetInlineEnd: 0, width: g.touchTarget, height: g.touchTarget },
   // Narrow (phone) hosts: every toolbar control is a 44px touch target; the search text is 16px so iOS does not zoom on focus.
   phoneInset: { paddingInline: s.md },
   touchRow: { minHeight: g.touchTarget },
   touchSearch: { minHeight: g.touchTarget, fontSize: t.touchInputSize },
+  touchSearchWithClear: { paddingInlineEnd: g.touchTarget },
 })
