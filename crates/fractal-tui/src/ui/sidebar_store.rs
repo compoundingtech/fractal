@@ -89,11 +89,11 @@ impl Store {
                         self.edits.reduce(if effect == Effect::PersistPending { Event::Persisted(id) } else { Event::CompletionPersisted(id) })
                     }).unwrap_or_default()
                 }
-                Effect::Send => {
+                Effect::Send(delivery) => {
                     let request = self.edits.request().expect("Send has a staged request");
                     if request.identity.actor != actor { return Err(Error::ActorMismatch); }
                     let wire = client::write_request(request).map_err(Error::Codec)?;
-                    let event = client::write_result(request, send(wire).await);
+                    let event = client::write_result(request, delivery, send(wire).await);
                     self.edits.reduce(event)
                 }
                 Effect::ReadBase | Effect::Replan => { external.push(effect); Vec::new() }
@@ -134,7 +134,7 @@ pub async fn send(client: &fractal_client::Client, request: ActionRequest) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_sidebar::{edits::{Base, Identity, Status}, model::{NodeRef, Parent}, paging::Snapshot, plan::{MoveIntent, V2Plan}};
+    use fractal_sidebar::{edits::{Base, Delivery, Identity, Status}, model::{NodeRef, Parent}, paging::Snapshot, plan::{MoveIntent, V2Plan}};
     fn scope() -> Scope { Scope { owner: "person/test".into(), container: "arrangement/person/test/01900000-0000-7000-8000-000000000001".into(), endpoint: "endpoint/test".into(), host: "host/test".into(), projection: "1".into() } }
     fn id(n: u8) -> Identity { Identity { actor: "person/test".into(), action_id: format!("action/{n}"), idempotency_key: format!("key/{n}") } }
     fn base(n: u8) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot/{n}"), host_id: scope().host, store_index: n.into(), projection_version: "1".into(), created_at: "created".into(), published_at: None }, revision: format!("revision/{n}"), ready: true } }
@@ -181,6 +181,35 @@ mod tests {
         assert!(Store::restore(path, &scope()).unwrap().is_none());
     }
     #[tokio::test]
+    async fn sidebar_store_restored_send_preserves_replay_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pending.json");
+        let (mut store, effects) = staged(path.clone(), false);
+        store.execute(effects, scope, "person/test", lost).await.unwrap();
+        assert_eq!(store.edits.status, Status::UnknownDelivery);
+        let (mut restored, effects) = Store::restore(path, &scope()).unwrap().unwrap();
+        let exact = restored.edits.request().cloned().unwrap();
+        let mut sends = 0;
+        restored.execute(effects, scope, "person/test", |wire| {
+            sends += 1;
+            assert_eq!(wire, client::write_request(&exact).unwrap());
+            async {
+                Err(ClientError::Api(fractal_client::ErrorCode::Forbidden, "refused replay".into(),
+                    Box::new(fractal_client::ErrorEnvelope {
+                        api_version: "0".into(), error_version: "1".into(), request_id: "request/test".into(),
+                        code: fractal_client::ErrorCode::Forbidden, message: "refused replay".into(),
+                        retryable: false, retry_after_ms: None,
+                        details: [("applied".into(), serde_json::json!("none"))].into(),
+                    })))
+            }
+        }).await.unwrap();
+        assert_eq!(sends, 1);
+        assert_eq!(restored.edits.status, Status::UnknownDelivery);
+        assert_eq!(restored.edits.request(), Some(&exact));
+        assert!(restored.edits.refusal.is_none());
+        assert!(restored.edits.reduce(Event::Retry).is_empty());
+    }
+    #[tokio::test]
     async fn sidebar_store_each_crash_stage_and_partial_completion() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("pending.json");
@@ -221,7 +250,7 @@ mod tests {
         let (mut store, effects) = staged(blocker.join("pending.json"), false);
         assert!(matches!(store.execute(effects, scope, "person/test", |_| async { panic!("unjournaled send") }).await, Err(Error::Storage(_))));
         assert_eq!(store.edits.refusal, Some(fractal_sidebar::edits::Refusal::Storage));
-        assert!(store.execute(vec![Effect::Send], scope, "person/test", |_| async { panic!("poisoned send") }).await.is_err());
+        assert!(store.execute(vec![Effect::Send(Delivery::First)], scope, "person/test", |_| async { panic!("poisoned send") }).await.is_err());
         let path = root.path().join("private.json");
         let (mut store, effects) = staged(path.clone(), false);
         // Authentication remains captured by the transport, never by Edits or its record.
@@ -239,7 +268,7 @@ mod tests {
         let (mut store, _) = staged(path.clone(), false);
         store.persist().unwrap();
         let original = fs::read(&path).unwrap();
-        for effect in [Effect::Send, Effect::ReadBase, Effect::Replan, Effect::PersistPending, Effect::PersistCompletion, Effect::PersistRemoval] {
+        for effect in [Effect::Send(Delivery::First), Effect::ReadBase, Effect::Replan, Effect::PersistPending, Effect::PersistCompletion, Effect::PersistRemoval] {
             for field in 0..5 {
                 let mut selected = scope();
                 match field { 0 => selected.owner.push('x'), 1 => selected.container.push('x'), 2 => selected.endpoint.push('x'), 3 => selected.host.push('x'), _ => selected.projection.push('x') }
