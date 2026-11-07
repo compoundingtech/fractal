@@ -34,13 +34,15 @@ to an existing thread when authorized on both sides. A reply in the thread and a
 are separate operations. An ask created from a thread can carry the thread reference explicitly.
 An ask created elsewhere must explicitly attach to that thread. Closing, answering or replacing
 one ask leaves the thread and the other asks intact. A fresh ask may link to a closed thread
-and show its full history without reopening it.
+and show its full history without reopening it. A related ask can record an explicit predecessor
+and the reason for revisiting a decision. The initial release presents this history. Any
+conditional activation continues to use existing mission step gates.
 
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
 threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
 from the agent joins closed history without reopening the thread, adding an alert or resurrecting
-the Inbox row. The owning person must explicitly reopen before sending a reply. A fresh linked
-ask can still show the closed thread. An authorized rename changes the shared title everywhere and
+the Inbox row. When admission sees a closed thread, the owning person must explicitly reopen it
+before sending a reply. A fresh linked ask can still show the closed thread. An authorized rename changes the shared title everywhere and
 preserves the thread, messages, links, unread state and current lifecycle.
 
 An embedded panel's disclosure state is local to its client and placement. A compact row carries
@@ -48,6 +50,10 @@ the title, message count, lifecycle status and any unread hint on one line where
 Expanding or opening a dedicated thread tab navigates to the same resource. Agent sessions and
 missions can each embed several threads, with separate disclosure state for each. A thread's
 display never requires the reader to join the unrelated portions of agent transcripts.
+
+Use the conversation composer with an explicit destination. When a thread is active, the
+composer sends into it without a separate reply mode. A quoted reply adds the message target.
+Agent conversation and thread drafts are separate and survive switching destinations.
 
 Track read progress per reader and thread against ordered messages. Moving a cursor forward can
 clear an unread reply on the existing Inbox row without creating an ask, changing the alert count
@@ -79,14 +85,36 @@ they leave the daemon.
 | Attach a follow-up | Send authority in the owning conversation and authority to create or update the linked source. A link cannot broaden either audience. |
 | Answer an ask | The existing ask action and exact ask authority. The thread identity cannot authorize or stand in for an answer. |
 
-Writes validate authority inside the writer transaction. Bind idempotency to the actor,
-operation and target so retries record one fact, and reauthorize receipt recovery after
-revocation. Rename, Close and Reopen are fenced by the current revision of the affected
-metadata in the owning daemon transaction. A stale client refreshes and may retry. An
+Writes validate authority in the admitting daemon transaction. Bind idempotency to the actor,
+operation and target, and reauthorize receipt recovery after revocation. Rename, Close and Reopen
+check the metadata revision visible at admission. A stale client refreshes and may retry. An
 accepted incoming reply remains append-only and does not change the title or lifecycle
-revision. Existing historical
-subject-based discussion remains readable through its existing path. There is no inferred
-migration from subjects to durable thread IDs.
+revision. Existing historical subject-based discussion remains readable through its existing
+path. There is no inferred migration from subjects to durable thread IDs.
+
+### Fleet behavior and receipts
+
+Reuse existing Fractal conversation routing, claim replication, authorization and request keys.
+Thread identity follows the stable conversation while agent placement determines where its
+runtime receives messages. Thread operations use the same routing and availability as
+conversation operations when an agent moves. They do not require the old runtime or introduce
+a separate writer service. If the conversation path cannot admit an operation, report its
+actual availability or refusal.
+
+Use the daemon's typed receipt to show an accepted action. Local acceptance confirms the
+local commit, not admission at another member or delivery to the agent. If the response is
+lost, retry the same request key. A member that has the receipt returns it. Partitioned
+members may accept separately before exchange. Matching operations reconcile on exchange and
+conflicting key reuse produces the existing typed conflict. Surface that outcome and refresh
+the affected view rather than presenting the earlier local receipt as fleet-wide proof.
+
+A revision check fences stale changes against the admitting member's known state. Concurrent
+changes accepted on different members reconcile by a deterministic claim projection. Close
+prevents outgoing replies on a member that knows the thread is closed. An independently
+admitted reply and close may both stand after exchange. Preserve accepted replies in history.
+The operation does not impose an atomic order across disconnected members. The
+[existing replication rules](replication.md) define the underlying
+convergence and retry behavior.
 
 ## Cross-surface contract
 
@@ -107,7 +135,11 @@ through each context and another authorized surface. Verify that B needs its own
 thread stays closed until reopened, and a same-title thread and an unrelated transcript
 message never appear in its history. Run with persisted state across daemon restart and verify
 incremental updates, bounded pagination, a revoked grant during a write, a forbidden
-cross-thread quote, and a duplicated request key.
+cross-thread quote, and a duplicated request key. Across two members, verify the same-key retry after exchange and
+show that local acceptance, peer observation and agent delivery are distinct. Verify that an
+agent moved using the existing placement mechanism can continue the thread when the prior
+host is offline, within ordinary conversation availability and without claiming unreplicated
+receipts were recovered.
 
 ## Decisions before wire freeze
 
