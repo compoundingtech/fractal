@@ -125,17 +125,29 @@ pub(super) fn validate_claim(
     kind: &str,
     body: &Value,
 ) -> Result<(), FractalError> {
-    let fields = body.get("fields").unwrap_or(body);
-    let payload = fields.get("body").unwrap_or(fields);
-    let declared = match kind {
+    // The writer persists the whole body, and desired/mission projection decodes that
+    // body even when schema_fields_for_body selects an explicit `fields` object.
+    // Mission capacity validation also reads `fields.body`. Inspect a conservative
+    // superset of these locations, retaining the existing `body` envelope checks;
+    // an empty decoy must never hide declarations in another persisted location.
+    let declared = [
+        Some(body),
+        body.get("fields"),
+        body.get("body"),
+        body.get("fields").and_then(|fields| fields.get("body")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|payload| match kind {
         "intent.desired" => {
-            payload.get("member").is_some_and(declares_fields)
-                || (payload.get("kind").and_then(Value::as_str) == Some("agent")
-                    && payload.get("desired").is_some_and(declares_children))
+            declares_fields(payload)
+                || declares_children(payload)
+                || payload.get("member").is_some_and(declares_fields)
+                || payload.get("desired").is_some_and(declares_children)
         }
         "mission.published" => declares_mission_json(payload),
         _ => false,
-    };
+    });
     if declared {
         validate_fleet(connection, origin)?;
     }
