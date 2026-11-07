@@ -595,11 +595,38 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
 }
 
+fn thread_fixture_message(
+    state: &AppState,
+    id: &str,
+    thread: &str,
+    from: &str,
+    to: &str,
+    quote: Option<&str>,
+    content: &str,
+) {
+    let mut fields = serde_json::from_value::<BTreeMap<String, Value>>(json!({
+        "from":from, "to":to, "content":content, "status":"sent", "thread_id":thread,
+    })).unwrap();
+    if let Some(quote) = quote {
+        fields.insert("thread_quote_id".into(), json!(quote));
+    }
+    crate::store::thread_delivery::append_reply(
+        &state.store,
+        &ClaimInput {
+            subject:id.into(), kind:"message.sent".into(), actor:Some(from.into()),
+            fields, evidence:vec![], expected_subject:None, idempotency_key:Some(id.into()),
+        },
+        crate::store::thread_metadata::PersonAuthority::TrustedLocal,
+        None,
+    ).unwrap();
+}
+
 #[tokio::test]
 async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revisions() {
     use crate::store::thread_metadata::{self, Edit};
 
     let mut fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
+    fixture.state.store.configure_thread_write_rollout([]);
     let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
     projection_read_mode(&mut fixture, "caller-bound-allow").await;
     for id in ["thread/first", "thread/second"] {
@@ -626,6 +653,12 @@ async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revision
             Edit::Create { agent, title: "Private foreign title" },
         ).unwrap();
     }
+    thread_fixture_message(&fixture.state, "message/thread-first", "thread/first",
+        OWNER, "agent/reads-codex", None, "First thread message");
+    thread_fixture_message(&fixture.state, "message/thread-quoted", "thread/first",
+        "agent/reads-codex", OWNER, Some("message/thread-first"), "Quoted thread reply");
+    thread_fixture_message(&fixture.state, "message/thread-private", "thread/foreign-owner",
+        "person/other", "agent/reads-codex", None, "Private foreign body");
     let list = format!(
         "/v1/client/assistant/threads?agent_id=agent%2Freads-codex&session_id={}&limit=1",
         urlencoding::encode(&session),
@@ -648,11 +681,22 @@ async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revision
     let (status, value, _) = fixture.request(&first, None).await;
     assert_eq!(status, StatusCode::OK, "{value}");
     assert_eq!(value["value"]["items"].as_array().unwrap().len(), 1);
+    let item = &value["value"]["items"][0];
+    assert_eq!(item["kind"], "message");
+    assert_eq!(item["content"], "Quoted thread reply");
+    assert_eq!(item["thread_quote_id"], "message/thread-first");
     let cursor = urlencoding::encode(value["value"]["next_cursor"].as_str().unwrap());
     let continuation = format!("{first}&cursor={cursor}");
     let (status, value, _) = fixture.request(&continuation, None).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    assert!(value["value"]["next_cursor"].is_null());
+    assert_eq!(value["value"]["items"][0]["id"], "message/thread-first");
+    assert!(value["value"]["next_cursor"].is_string());
+
+    for id in ["foreign-owner", "foreign-agent"] {
+        let (status, value, _) = fixture.request(&first.replace("thread%2Ffirst", &format!("thread%2F{id}")), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+        assert!(!value.to_string().contains("Private foreign"));
+    }
 
     for path in [
         continuation.replace("thread%2Ffirst", "thread%2Fsecond"),
@@ -665,7 +709,55 @@ async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revision
         assert!(!status.is_success(), "{value}");
         assert!(value.get("value").is_none());
     }
+    let escaped = format!("x{}", "\n".repeat(8191));
+    thread_fixture_message(&fixture.state, "message/thread-escaped", "thread/first",
+        "agent/reads-codex", OWNER, None, &escaped);
+    let long_page = first.replace("&limit=1", "&limit=50&max_response_bytes=16384");
+    let (status, value, bytes) = fixture.request(&long_page, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= MAX_RESPONSE_BYTES);
+    let item = &value["value"]["items"][0];
+    assert_eq!(item["id"], "message/thread-escaped");
+    assert_eq!(item["content_truncated"], true);
+    let mut decoded = item["content"].as_str().unwrap().to_owned();
+    let content_base = first.replace("&limit=1", "&max_response_bytes=16384");
+    let content_path = |handle: &str| {
+        format!("{content_base}&cursor={}", urlencoding::encode(handle))
+    };
+    let handle = item["next_content_cursor"].as_str().unwrap();
+    let content_request = content_path(handle);
+    for invalid in [
+        content_request.replace("thread%2Ffirst", "thread%2Fsecond"),
+        content_request.replace("agent%2Freads-codex", "agent%2Fother"),
+        format!("{content_request}tampered"),
+        format!("{content_request}&limit=1"),
+    ] {
+        let (status, value, _) = fixture.request(&invalid, None).await;
+        assert!(!status.is_success(), "{value}");
+        assert!(value.get("value").is_none());
+    }
+    let mut handle = Some(handle.to_owned());
+    while let Some(cursor) = handle {
+        let (status, value, bytes) = fixture.request(&content_path(&cursor), None).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert!(bytes <= MAX_RESPONSE_BYTES);
+        let chunk = &value["value"]["items"][0];
+        assert_eq!(chunk["kind"], "message-content");
+        assert!(value["value"]["next_cursor"].is_null());
+        decoded.push_str(chunk["content"].as_str().unwrap());
+        assert!(decoded.len() <= escaped.len());
+        handle = chunk["next_content_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(decoded, escaped);
+    let older = value["value"]["next_cursor"].as_str().unwrap();
+    let (status, value, _) = fixture.request(
+        &format!("{content_base}&cursor={}", urlencoding::encode(older)), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["items"][0]["id"], "message/thread-quoted");
+
     projection_read_mode(&mut fixture, "caller-bound-allow").await;
+    assert!(!fixture.request(&content_request, None).await.0.is_success());
     let (status, value, _) = fixture.request(&continuation, None).await;
     assert!(!status.is_success(), "{value}");
     let _ = super::super::revoke(
@@ -675,6 +767,7 @@ async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revision
     ).await.unwrap();
     assert_eq!(fixture.request(&continuation, None).await.0, StatusCode::FORBIDDEN);
     assert_eq!(fixture.request(&list_continuation, None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(fixture.request(&content_request, None).await.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

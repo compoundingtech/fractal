@@ -4,7 +4,7 @@ use super::*;
 
 #[path = "thread_message_window.rs"]
 mod message_window;
-pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mixed_timeline};
+pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mixed_message_content, mixed_timeline};
 
 pub enum Edit<'a> {
     Create {

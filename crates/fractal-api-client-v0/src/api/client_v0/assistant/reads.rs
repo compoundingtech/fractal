@@ -34,7 +34,7 @@ pub async fn project_with_context(
         "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
             conversation_reads::project_bound_with_context(state, snapshot, projection, parameters, max_bytes, binding, context).await,
         "threads" | "thread-detail" | "thread-timeline" =>
-            thread_read(state, projection, parameters, max_bytes, binding).await,
+            thread_read(state, projection, parameters, max_bytes, binding, context).await,
         "conversation-content" => {
             let mut parameters = parameters.clone();
             let reference = required(&parameters, "reference")?;
@@ -55,6 +55,7 @@ async fn thread_read(
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
     binding: &str,
+    context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     use crate::store::thread_metadata;
 
@@ -92,13 +93,23 @@ async fn thread_read(
         &serde_json::to_string(&(binding, &person, &agent, &session, &id))
             .map_err(ApiError::internal)?,
     ));
-    let cursor = parameters.get("cursor")
-        .map(|cursor| conversation_reads::timeline_cursor(cursor, &collection)).transpose()?;
+    let content_collection = format!("{collection}content:");
+    let (cursor, content_cursor) = match parameters.get("cursor") {
+        Some(cursor) if timeline && cursor.starts_with(&content_collection) => {
+            if parameters.contains_key("limit") {
+                return Err(validation("a thread content cursor cannot be combined with limit"));
+            }
+            (None, Some(conversation_reads::timeline_cursor(cursor, &content_collection)?))
+        }
+        Some(cursor) => (Some(conversation_reads::timeline_cursor(cursor, &collection)?), None),
+        None => (None, None),
+    };
     let limit = parameters.get("limit").map_or(Ok(10), |limit| {
         limit.parse::<usize>().ok().filter(|limit| (1..=50).contains(limit))
             .ok_or_else(|| validation("limit must be between 1 and 50"))
     })?;
     let state = state.clone();
+    let context = context.clone();
     blocking_store(move || {
         state.store.read_snapshot(|index| {
             let result = (|| {
@@ -118,13 +129,42 @@ async fn thread_read(
                 let bind = |cursor: Option<&str>| {
                     cursor.map(|cursor| conversation_reads::bind_cursor(cursor, &collection)).transpose()
                 };
+                let snapshot = client_snapshot_at(&state, index);
                 let value = if let Some(id) = id.as_deref() {
                     let summary = thread_metadata::summary_for_conversation(&state.store, &person, &agent, id)
                         .map_err(store_error)?;
                     if timeline {
-                        let page = thread_metadata::history(&state.store, &person, id, cursor.as_deref(), limit)
-                            .map_err(store_error)?;
-                        json!({"items":page.items,"next_cursor":bind(page.next_cursor.as_deref())?})
+                        let budget = ThreadResponseBudget {
+                            context: &context, snapshot: &snapshot, max_bytes, content_collection: &content_collection,
+                        };
+                        if let Some(handle) = content_cursor.as_deref() {
+                            let (offset, claim_id) = handle.split_once(':')
+                                .and_then(|(offset, claim_id)| Some((offset.parse::<usize>().ok()?, claim_id)))
+                                .ok_or_else(|| stale("invalid thread content cursor"))?;
+                            let content = thread_metadata::mixed_message_content(&state.store, &person, id, claim_id)
+                                .map_err(store_error)?;
+                            budget.chunk(&content, offset, claim_id, json!({"kind":"message-content"}), None)?
+                        } else {
+                            let mut page_limit = limit;
+                            loop {
+                                let mut page = thread_metadata::mixed_timeline(&state.store, &person, id, cursor.as_deref(), page_limit)
+                                    .map_err(store_error)?;
+                                let next = bind(page.next_cursor.as_deref())?;
+                                let value = json!({"items":page.items,"next_cursor":next});
+                                if budget.fits(&value)? {
+                                    break value;
+                                }
+                                if page_limit > 1 {
+                                    page_limit /= 2;
+                                    continue;
+                                }
+                                let Some(thread_metadata::TimelineItem::Message(message)) = page.items.pop() else {
+                                    return Err(budget_exceeded("the thread timeline item cannot fit the approved response byte budget"));
+                                };
+                                let item = json!(message);
+                                break budget.chunk(&message.content, 0, &message.claim_id, item, next)?;
+                            }
+                        }
                     } else {
                         json!(summary)
                     }
@@ -133,12 +173,58 @@ async fn thread_read(
                         .map_err(store_error)?;
                     json!({"items":page.items,"next_cursor":bind(page.next_cursor.as_deref())?})
                 };
-                Ok((client_snapshot_at(&state, index), value))
+                Ok((snapshot, value))
             })();
             Ok(result)
         })
     })
     .await?
+}
+
+struct ThreadResponseBudget<'a> {
+    context: &'a response_body::Context,
+    snapshot: &'a ClientSnapshot,
+    max_bytes: usize,
+    content_collection: &'a str,
+}
+
+impl ThreadResponseBudget<'_> {
+    fn fits(&self, value: &Value) -> Result<bool, ApiError> {
+        Ok(self.context.value_envelope_size(self.snapshot, value)? <= self.max_bytes)
+    }
+
+    fn chunk(
+        &self,
+        content: &str,
+        offset: usize,
+        claim_id: &str,
+        mut item: Value,
+        next: Option<String>,
+    ) -> Result<Value, ApiError> {
+        let tail = content.get(offset..).filter(|tail| !tail.is_empty())
+            .ok_or_else(|| stale("invalid thread content cursor"))?;
+        let mut bytes = tail.len();
+        loop {
+            while !tail.is_char_boundary(bytes) {
+                bytes -= 1;
+            }
+            if bytes == 0 {
+                return Err(budget_exceeded("the thread content chunk cannot fit the approved response byte budget"));
+            }
+            let end = offset + bytes;
+            let continuation = (end < content.len())
+                .then(|| conversation_reads::bind_cursor(&format!("{end}:{claim_id}"), self.content_collection))
+                .transpose()?;
+            item["content"] = json!(&tail[..bytes]);
+            item["content_truncated"] = json!(continuation.is_some());
+            item["next_content_cursor"] = json!(continuation);
+            let value = json!({"items":[item],"next_cursor":next});
+            if self.fits(&value)? {
+                return Ok(value);
+            }
+            bytes /= 2;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -164,7 +164,7 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
 | `fractal_threads_list` | `read.assistant.conversation` | Read | List threads for one selected conversation. |
 | `fractal_thread_get` | `read.assistant.conversation` | Read | Read one thread's title, lifecycle state and revisions. |
-| `fractal_thread_timeline` | `read.assistant.conversation` | Read | Page accepted rename, close and reopen events for a thread. |
+| `fractal_thread_timeline` | `read.assistant.conversation` | Read | Page messages and accepted rename, close and reopen events for a thread. Use a message’s `next_content_cursor` as `cursor` without `limit` to fetch remaining text. |
 
 These thread tools are available through the `fractal-mcp` stdio server. Use the agent
 and current session IDs returned by conversation discovery for all three.

@@ -311,7 +311,7 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | `conversation-timeline` | `agent_id`, optional `session_id`, `cursor`, `limit`, `max_response_bytes` | Allowlisted timeline items, bounded text snippets and exact content read ranges |
 | `threads` | `agent_id`, `session_id`, optional `cursor`, `limit`, `max_response_bytes` | List threads for one selected conversation. |
 | `thread-detail` | `agent_id`, `session_id`, `thread_id`, optional `max_response_bytes` | Read one thread's title, lifecycle state and revisions. |
-| `thread-timeline` | `agent_id`, `session_id`, `thread_id`, optional `cursor`, `limit`, `max_response_bytes` | Page accepted thread rename, close and reopen events. |
+| `thread-timeline` | `agent_id`, `session_id`, `thread_id`, optional `cursor`, `limit`, `max_response_bytes` | Page thread messages and accepted rename, close and reopen events, newest first. A quoted message references its exact parent through `thread_quote_id`. Follow `next_cursor` for older entries or pass a message’s `next_content_cursor` as `cursor` without `limit` to fetch remaining text. |
 | `conversation-search` | `text`, optional `agent_id`, `cursor`, `limit`, `max_response_bytes` | Safe-text search hits with bounded snippets and current conversation identities |
 | `terminal-content` | `agent_id`, `terminal_id`, `incarnation_id`, `screen_revision`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-terminal-content"` |
 

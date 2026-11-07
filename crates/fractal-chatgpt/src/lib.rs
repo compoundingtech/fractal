@@ -127,7 +127,7 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (CONVERSATION_READ, "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from fractal_conversations_list or fractal_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
     (MESSAGE_SEND, "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
     (THREADS_LIST, "List threads for one exact conversation. Use the agent and current session returned by conversation discovery, and next_cursor from the previous page.", true),
-    (THREAD_TIMELINE, "Page accepted rename, close and reopen events for one exact thread. Use the agent and session from the conversation and the next_cursor from the previous page.", true),
+    (THREAD_TIMELINE, "Page messages and accepted rename, close and reopen events for one exact thread, newest first. Messages can include thread_quote_id. Use next_cursor for older events. If a message has next_content_cursor, call this tool with that value as cursor, the same agent, session and thread, and no limit to fetch the remaining text.", true),
     (THREAD_GET, "Read the title and lifecycle state of one known thread under the existing conversation read grant. Use its exact thread ID. Content may be sensitive.", true),
 ];
 

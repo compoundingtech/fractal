@@ -10,6 +10,8 @@ pub struct ThreadMessage {
     pub accepted_at_unix_ms: u128,
     pub content: String,
     pub thread_quote_id: Option<String>,
+    #[serde(skip)]
+    pub claim_id: String,
 }
 
 #[derive(serde::Serialize)]
@@ -159,46 +161,117 @@ fn read(
             continue;
         }
         let actor = message_actor(connection, &claim, &person, &agent)?;
-        let fields = &claim.body["fields"];
-        let content = fields["content"]
-            .as_str()
-            .filter(|content| !content.starts_with("doc/") && content.len() <= 8 * 1024)
-            .ok_or_else(unavailable)?;
-        let quoted = fields["thread_quote_id"].as_str();
-        if let Some(quoted) = quoted {
-            let sql = canonical_sql(&format!(
-                "SELECT {CLAIM_COLUMNS} FROM claims WHERE subject=?1 AND kind='message.sent'
-                  AND {UNREPAIRED_CLAIM}
-                  AND EXISTS (SELECT 1 FROM operations
-                    WHERE operations.id=json_extract(claims.body, '$._operation.id')
-                      AND operations.canonical_claim_id=claims.id AND operations.state='active')
-                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"
-            ));
-            let parent = connection
-                .query_row(&sql, [quoted], claim_from_row)
-                .optional()
-                .map_err(internal)?
-                .filter(|parent| {
-                    parent.subject != claim.subject
-                        && member(parent, thread, first, &creation.batch_id, through)
-                })
-                .ok_or_else(unavailable)?;
-            message_actor(connection, &parent, &person, &agent)?;
-        }
-        last = Some(claim.id);
+        let content = message_content(&claim)?.to_owned();
+        let quoted = message_quote(
+            connection, &claim, &creation, thread, &person, &agent, through,
+        )?
+        .map(str::to_owned);
+        last = Some(claim.id.clone());
         items.push(TimelineItem::Message(ThreadMessage {
             kind: "message",
             id: claim.subject,
             actor_id: actor,
             accepted_at_unix_ms: claim.accepted_at_unix_ms,
-            content: content.into(),
-            thread_quote_id: quoted.map(str::to_owned),
+            content,
+            thread_quote_id: quoted,
+            claim_id: claim.id,
         }));
     }
     let next_cursor = last
         .filter(|_| has_more)
         .map(|last| format!("{scope}:{through}:{last}"));
     Ok(TimelinePage { items, next_cursor })
+}
+
+/// Resolve the same canonical admitted message from a previously issued content handle.
+pub fn mixed_message_content(
+    store: &Store,
+    person: &str,
+    thread: &str,
+    claim_id: &str,
+) -> Result<String, FractalError> {
+    store
+        .graph
+        .read_snapshot(|index| {
+            let connection = store.readers.get();
+            let read = || {
+                let creation =
+                    owned_creation(&connection, thread, person, false)?.ok_or_else(unavailable)?;
+                let agent = creation.body["fields"]["agent"]
+                    .as_str()
+                    .ok_or_else(unavailable)?;
+                let first = creation.body["fields"]["first_message"].as_str();
+                let sql = canonical_sql(&format!(
+                    "SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1
+                  AND {UNREPAIRED_CLAIM}
+                  AND EXISTS (SELECT 1 FROM operations
+                    WHERE operations.id=json_extract(claims.body, '$._operation.id')
+                      AND operations.canonical_claim_id=claims.id AND operations.state='active')"
+                ));
+                let claim = connection
+                    .query_row(&sql, [claim_id], claim_from_row)
+                    .optional()
+                    .map_err(internal)?
+                    .filter(|claim| member(claim, thread, first, &creation.batch_id, index))
+                    .ok_or_else(unavailable)?;
+                let person = identities::resolve_reference_conn(&connection, person)?;
+                let agent = identities::resolve_reference_conn(&connection, agent)?;
+                message_actor(&connection, &claim, &person, &agent)?;
+                message_quote(
+                    &connection,
+                    &claim,
+                    &creation,
+                    thread,
+                    &person,
+                    &agent,
+                    index,
+                )?;
+                message_content(&claim).map(str::to_owned)
+            };
+            Ok(read())
+        })
+        .map_err(internal)?
+}
+
+fn message_quote<'a>(
+    connection: &Connection,
+    claim: &'a ClaimRecord,
+    creation: &ClaimRecord,
+    thread: &str,
+    person: &str,
+    agent: &str,
+    through: u64,
+) -> Result<Option<&'a str>, FractalError> {
+    let Some(quoted) = claim.body["fields"]["thread_quote_id"].as_str() else {
+        return Ok(None);
+    };
+    let first = creation.body["fields"]["first_message"].as_str();
+    let sql = canonical_sql(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM claims WHERE subject=?1 AND kind='message.sent'
+          AND {UNREPAIRED_CLAIM}
+          AND EXISTS (SELECT 1 FROM operations
+            WHERE operations.id=json_extract(claims.body, '$._operation.id')
+              AND operations.canonical_claim_id=claims.id AND operations.state='active')
+          ORDER BY CANONICAL_DESC(claims) LIMIT 1"
+    ));
+    let parent = connection
+        .query_row(&sql, [quoted], claim_from_row)
+        .optional()
+        .map_err(internal)?
+        .filter(|parent| {
+            parent.subject != claim.subject
+                && member(parent, thread, first, &creation.batch_id, through)
+        })
+        .ok_or_else(unavailable)?;
+    message_actor(connection, &parent, person, agent)?;
+    Ok(Some(quoted))
+}
+
+fn message_content(claim: &ClaimRecord) -> Result<&str, FractalError> {
+    claim.body["fields"]["content"]
+        .as_str()
+        .filter(|content| !content.starts_with("doc/") && content.len() <= 8 * 1024)
+        .ok_or_else(unavailable)
 }
 
 fn lifecycle(claim: &ClaimRecord, thread: &str) -> bool {
