@@ -15,6 +15,8 @@ import { useNow } from '../data/react.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { alertsTabRows } from './alertsTab.ts'
 
+const isOpenableRef = (ref: string): boolean => /^(?:doc|agent|mission)\//.test(ref)
+
 /**
  * One alert as the main area's content: the same decision card at its full density. Answering advances to the next
  * alert at once, before the server replies, as the Fractal terminal UI does; a refused answer returns to the list
@@ -72,7 +74,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
             : row !== undefined
               ? row.item.attention_kind === 'harness-prompt'
                 ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} {...(onAnswer === undefined ? {} : { onAnswer })} />
-                : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} {...(onAct === undefined ? {} : { onAct })} />
+                : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} {...(onAct === undefined ? {} : { onAct })} />
               : <div {...stylex.props(styles.gone)}>
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined

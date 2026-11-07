@@ -12,6 +12,13 @@ export const sameWords = (one: string, other: string, within = false): boolean =
   return a === b || (within && a !== '' && b.includes(a))
 }
 
+/** A title saying nothing the heading does not: its words all appear there, give or take one. */
+export const repeatsHeading = (title: string, heading: string): boolean => {
+  const words = new Set(normalized(heading).split(' '))
+  const own = normalized(title).split(' ').filter(Boolean)
+  return own.filter((word) => !words.has(word)).length <= Math.min(1, Math.floor(own.length / 4))
+}
+
 const HEADING_MAX = 200
 
 /** A question short enough to be the card's heading; a long or structured one is the card's body under the title. */
