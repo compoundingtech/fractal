@@ -1,5 +1,5 @@
 === Now ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  ◆1 Inbox                                                                   +
  ▾ Everything else 7                    │   somebody is stopped on you  │ ╭─ UNPLACED · WAITING 1M ─────────────────╮
@@ -33,7 +33,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Roster ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  list:agents                                                                +
  ▾ Everything else 7                    │   stopped ─────────────────────────────────────────────────────────────── 4
@@ -67,7 +67,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Mission ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  ◆ example/atlas · Rename fe…                                               +
  ▾ Everything else 7                    │  ▲ stalled   example/atlas · Rename fetchUser to loadUser   1m              ┃
@@ -101,7 +101,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Fleet ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  list:fleet                                                                 +
  ▾ Everything else 7                    │ ▌ ● meadow  you are here                                           2 agents
@@ -135,7 +135,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Worktrees unavailable ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  list:worktrees                                                             +
  ▾ Everything else 7                    │
@@ -169,7 +169,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Machine and devices ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  meadow                                                                     +
  ▾ Everything else 7                    │  ● meadow  this machine
@@ -203,7 +203,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Conversation ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  ~ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ? Atlas Builder  running · older Fractal                    codex · meadow
@@ -237,7 +237,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Agent details ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                                                                 ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                                                       ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                              +New│  ~ Atlas Builder                                                                                                +
  ▾ Everything else 7                        │  ? Atlas Builder  running · older Fractal                 codex · meadow   │ details                    × close
@@ -271,7 +271,7 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Terminal ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  ~ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
