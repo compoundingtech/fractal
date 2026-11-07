@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reserve immutable notice delivery receipts outside disposable runtime snapshots, with fail-closed owner authorization.",
+  "replay": { "status": "changed", "detail": "Receipt claims and signed dependency quarantine retain durable source-linked evidence independently of snapshots. Receipt admission never uses runtime designation or a payload timestamp as authority. Without a receipt owner authorizer, local receipt writes are unavailable, signed remote receipts remain pending dependencies, and delivery projects as unknown." },
+  "schema": { "status": "changed", "detail": "Reserve custom/attention/receipt/ and custom.attention.receipt-created from the first writable commit, including roots, ancestors, descendants and alternate-prefix claim-kind squats. Only the compiled reviewed creation-only manifest is accepted. A receipt identifies its immutable source creation, producer, person recipient, opaque owner binding, surface and adapter outcome." },
+  "rules": { "status": "changed", "detail": "Delivered requires independently authorized durable adapter evidence. Snapshot delivery arrays cannot invent an outcome or authorize redelivery. The owner authorizer seam defaults to unknown, not an implicit runtime grant. The approved owner-incarnation causal-position rule is implemented separately; this contract does not invent historical authorization or fleet order." },
+  "compatibility": { "status": "changed", "detail": "Reserved generic custom reads hide receipt rows and deny details. Full-state backup, rename-proof export and internal replication retain complete evidence because filtering would corrupt restore or proof. This internal store contract adds no native operation or capability." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "No supported notice delivery history exists to migrate." },
+  "recovery": { "status": "changed", "detail": "Handover does not erase durable receipts. Missing authorization, invalid lineage or conflicting evidence means delivery unknown, never inferred success or an automatic resend. A trusted member asserting the designated runtime or recipient actor is not detected. It is the same fleet-member trust as the existing relay, and end-to-end actor authentication is out of scope." }
+}

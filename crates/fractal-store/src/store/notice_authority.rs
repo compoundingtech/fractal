@@ -80,7 +80,8 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
 /// Retain links from all facts, including unpinned, pending and invalid facts, so a later
 /// source arrival, repair or competing creation revalidates every linked row.
 pub(super) fn record_dependencies(tx: &Transaction<'_>, subject: &str, history: &[ClaimRecord]) -> Result<()> {
-    if !subject.starts_with(notice::SNAPSHOT_PREFIX) && !subject.starts_with(notice::CONTROL_PREFIX) {
+    if ![notice::SNAPSHOT_PREFIX, notice::CONTROL_PREFIX, notice::RECEIPT_PREFIX].iter()
+        .any(|prefix| subject.starts_with(prefix)) {
         return Ok(());
     }
     let mut insert = tx.prepare_cached(
@@ -126,7 +127,6 @@ fn runtime(connection: &Connection) -> Result<String, FractalError> {
     }
 }
 
-/// Compare the resolver's actual outcome, not a duplicated identity/lifecycle watch list.
 /// The exact selected declaration is the disposable materialization incarnation.
 pub(super) fn binding(connection: &Connection) -> Result<(String, String), FractalError> {
     let actor = runtime(connection)?;
@@ -135,6 +135,7 @@ pub(super) fn binding(connection: &Connection) -> Result<(String, String), Fract
     Ok((actor, declaration))
 }
 
+/// Compare the resolver's actual outcome, not a duplicated identity/lifecycle watch list.
 /// Identity heads and pending records can fence a holder without changing desired at all.
 pub(super) fn refresh_binding(tx: &Transaction<'_>) -> Result<()> {
     let outcome = match binding(tx) {
@@ -257,8 +258,15 @@ pub(super) fn classify_replicated(
         };
         Some(creation)
     };
-    custom::validate_fact(connection, &claim.subject, manifest, &claim.kind,
-        claim.actor.as_deref(), &fields, creation).map_err(invalid_admission)?;
+    match custom::validate_fact(connection, &claim.subject, manifest, &claim.kind,
+        claim.actor.as_deref(), &fields, creation) {
+        Ok(()) => {}
+        Err(error) if error.downcast_ref::<FractalError>()
+            .is_some_and(|error| error.code == "notice-receipt-authority-unavailable") => {
+            return pending_admission("durable receipt owner authority is not configured");
+        }
+        Err(error) => return Err(invalid_admission(error)),
+    }
     Ok(ReplicatedClaimAdmission::Valid)
 }
 
@@ -322,6 +330,8 @@ pub(super) fn validate(
         let (runtime, declaration) = binding(connection)?;
         anyhow::ensure!(fields.get("runtime").and_then(Value::as_str) == Some(runtime.as_str()),
             "notices unavailable: forged runtime");
+        anyhow::ensure!(fields.get("runtime_binding").and_then(Value::as_str) == Some(declaration.as_str()),
+            "notices unavailable: snapshot belongs to another designation");
         if let Some(prior) = creation {
             let prior_fields = custom::fields(prior);
             for field in ["runtime", "runtime_binding"] {
@@ -330,11 +340,18 @@ pub(super) fn validate(
             }
         }
         anyhow::ensure!(actor == runtime, "notices unavailable: only the designated runtime may write snapshots");
+    } else if subject.starts_with(notice::RECEIPT_PREFIX) {
+        let mut receipt_fields = fields.clone();
+        receipt_fields.remove("_registration");
+        receipt_fields.remove("_basis");
+        let receipt: fractal_schema::notice_receipt::Receipt =
+            serde_json::from_value(json!(receipt_fields))?;
+        receipt.validate()?;
+        return Err(FractalError::new("notice-receipt-authority-unavailable",
+            "notices unavailable: durable receipt owner authority is not configured").into());
     } else {
         anyhow::ensure!(subject.starts_with("custom/attention/control/") && actor.starts_with("person/") && actor == recipient,
             "notices unavailable: only the source recipient may write person controls");
-        anyhow::ensure!(fields.get("runtime_binding").and_then(Value::as_str) == Some(declaration.as_str()),
-            "notices unavailable: snapshot belongs to another designation");
     }
     Ok(())
 }
