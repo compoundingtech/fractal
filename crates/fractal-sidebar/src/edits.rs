@@ -79,6 +79,7 @@ impl Edits {
     pub fn new(scope: Scope, intent: MoveIntent) -> Self {
         Self { scope, intent, status: Status::Intent, refusal: None, request: None, dependent: None, folder_completed: false, used: Vec::new(), next_delivery: Delivery::First }
     }
+    pub fn scope(&self) -> &Scope { &self.scope }
     pub fn intent(&self) -> Option<&MoveIntent> { (self.status != Status::Observed).then_some(&self.intent) }
     /// Send/replay effects always borrow this immutable request; never regenerate its identity/fence.
     pub fn request(&self) -> Option<&Request> { self.request.as_ref() }
