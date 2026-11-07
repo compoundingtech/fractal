@@ -33,7 +33,7 @@ pub(super) fn cards(
     if names.is_empty() { return Ok(BTreeMap::new()); }
     let desired = store.desired_subjects_named(&names.iter().cloned().collect::<Vec<_>>())?
         .into_iter().map(|child| (child.subject.clone(), child)).collect::<BTreeMap<_, _>>();
-    let statuses = store.agent_card_status_at(Some(&names), index, true)?.subjects
+    let statuses = store.agent_card_status_for_generic_reads_at(Some(&names), index, true)?.subjects
         .into_iter().map(|child| (child.subject.clone(), child)).collect::<BTreeMap<_, _>>();
     let connection = store.readers.get();
     static FRESH_RECEIPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
