@@ -44,10 +44,10 @@ vi.mock('../folders/client.ts', async (importOriginal) => ({
 }))
 
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { openAgent } from '@fractal/sdk/read'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { fleetFromAgents } from '../data/projections.ts'
 import { DataSourceProvider, useSubjectList } from '../data/react.tsx'
-import type { DataSource } from '../data/source.ts'
+import { observed, type DataSource, type Feed } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import type { ArrangementRefusal, SidebarOperation } from '../folders/edit.ts'
 import type * as FolderClient from '../folders/client.ts'
@@ -168,6 +168,7 @@ const mountTree = ({
   return {
     container,
     filters: () => registry.get(state.filters),
+    registry,
     unmount: () => {
       flushSync(() => root.unmount())
       container.remove()
@@ -252,6 +253,27 @@ describe('AgentFolders Filter menu counts', () => {
     try {
       await openMenu(tree.container)
       await vi.waitFor(() => expect(counts()).toMatchObject({ 'Show ended': 1, 'Show retired': 1 }))
+    } finally { tree.unmount() }
+  })
+
+  it('follows an agent changing status and lifecycle after mount, with the menu open and rows retained', async () => {
+    const source = fixtureSource({ world })
+    const tree = mountTree({ source })
+    try {
+      await openMenu(tree.container)
+      await vi.waitFor(() => expect(counts()).toMatchObject({ 'Show ended': 1, 'Show retired': 1 }))
+      const before = counts()
+      const [changed, activity] = world.agents.slice(2)
+      const row = tree.container.querySelector('[data-sidebar-tree-key^="agent/"]')
+      expect(row).not.toBeNull()
+      await act(async () => tree.registry.set(source.agents as Atom.Writable<Feed<readonly DecodedAgent[]>>, observed({
+        value: world.agents.map((agent) => agent === changed ? { ...agent, state: 'stopped' } : agent === activity ? { ...agent, state: 'retired' } : agent).map((agent) => openAgent(agent as Parameters<typeof openAgent>[0])) as readonly DecodedAgent[],
+      })))
+      await vi.waitFor(() => expect(counts()).toMatchObject({ 'Show ended': before['Show ended']! + 1, 'Show retired': before['Show retired']! + 1 }))
+      // Two running agents left: the statuses they held lost them, with no filter change or remount.
+      const held = (now: Record<string, number>) => (now['Working'] ?? 0) + (now['Needs you'] ?? 0) + (now['Idle'] ?? 0) + (now['Failed'] ?? 0)
+      expect(held(counts())).toBe(held(before) - 2)
+      expect(tree.container.querySelector(`[data-sidebar-tree-key="${row!.getAttribute('data-sidebar-tree-key')}"]`)).toBe(row)
     } finally { tree.unmount() }
   })
 
