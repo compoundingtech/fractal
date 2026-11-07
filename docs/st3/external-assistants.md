@@ -1,12 +1,12 @@
 # External assistants
 
-Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter and local stdio `st-mcp` adapter use separate caller-bound assistant principals; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
+Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter and local stdio `fractal-mcp` adapter use separate caller-bound assistant principals; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
 
 The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p fractal-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
 
 ## Connect an MCP client to Fractal
 
-`st-mcp` is a local stdio-only MCP server named `st`, suitable for Claude Code,
+`fractal-mcp` is a local stdio-only MCP server named `fractal-mcp`, suitable for Claude Code,
 Codex, and other stdio clients. It has no HTTP listener, transport selector, or
 automatic pairing/renewal. Provision it with an `assistant/mcp` bearer, never a
 person or `assistant/chatgpt` credential. The existing `st-chatgpt` entrypoint and its
@@ -80,7 +80,7 @@ or credential permissions.
 
 ### Nix package and client configuration
 
-`nix build .#st-mcp` and `nix run .#st-mcp -- --socket SOCKET --credential-file TOKEN_FILE`
+`nix build .#fractal-mcp` and `nix run .#fractal-mcp -- --socket SOCKET --credential-file TOKEN_FILE`
 select the local adapter. Both binaries build from the `fractal-chatgpt` crate
 in one derivation; `.#fractal-chatgpt` defaults to `fractal-chatgpt`, and the existing
 `.#st-chatgpt` package alias selects that same canonical ChatGPT program.
@@ -90,7 +90,7 @@ The neutral paths below must be replaced with local paths; they contain no secre
 Claude Code:
 
 ```sh
-claude mcp add st -- st-mcp --socket /absolute/path/to/fractal-client.sock --credential-file /absolute/path/to/mcp-token
+claude mcp add fractal-mcp -- fractal-mcp --socket /absolute/path/to/fractal-client.sock --credential-file /absolute/path/to/mcp-token
 ```
 
 The equivalent Claude Code `.mcp.json` entry is:
@@ -98,9 +98,9 @@ The equivalent Claude Code `.mcp.json` entry is:
 ```json
 {
   "mcpServers": {
-    "st": {
+    "fractal-mcp": {
       "type": "stdio",
-      "command": "/absolute/path/to/st-mcp",
+      "command": "/absolute/path/to/fractal-mcp",
       "args": ["--socket", "/absolute/path/to/fractal-client.sock", "--credential-file", "/absolute/path/to/mcp-token"]
     }
   }
@@ -110,8 +110,8 @@ The equivalent Claude Code `.mcp.json` entry is:
 Codex `config.toml`:
 
 ```toml
-[mcp_servers.st]
-command = "/absolute/path/to/st-mcp"
+[mcp_servers.fractal-mcp]
+command = "/absolute/path/to/fractal-mcp"
 args = ["--socket", "/absolute/path/to/fractal-client.sock", "--credential-file", "/absolute/path/to/mcp-token"]
 ```
 

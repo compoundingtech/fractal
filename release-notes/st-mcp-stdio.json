@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Add the local stdio st-mcp adapter with an isolated assistant/mcp principal and eleven scoped tools",
+  "summary": "Add the local stdio fractal-mcp adapter with an isolated assistant/mcp principal and eleven scoped tools",
   "replay": {
     "status": "none",
     "detail": "No full or partial store replay is introduced by this change. Historical assistant grants without a stored principal continue to resolve to assistant/chatgpt; MCP grants must be explicitly issued and preserve their principal through pairing, policy, revocation, messages and answers."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Existing ChatGPT entrypoint, person pairing and legacy ChatGPT grants remain supported. st-mcp is stdio-only, uses a separate assistant/mcp profile and exposes eleven typed fractal_* tools with outputSchema and structuredContent plus text mirrors. Both profiles hide deprecated st_* aliases from discovery while accepting cached alias calls until fractal-chatgpt 0.2.0. Older daemons reject MCP subjects with invalid-claim-subject and replicated MCP messages with assistant-send-refused; a custom grant record may persist but an older assistant session still rejects any principal other than assistant/chatgpt. Do not fall back to person credentials or relabel MCP as ChatGPT. Mixed-version deployment and Claude Code/Codex interoperability have not been exercised in this change."
+    "detail": "Existing ChatGPT entrypoint, person pairing and legacy ChatGPT grants remain supported. fractal-mcp is stdio-only, uses a separate assistant/mcp profile and exposes eleven typed fractal_* tools with outputSchema and structuredContent plus text mirrors. Both profiles hide deprecated st_* aliases from discovery while accepting cached alias calls until fractal-chatgpt 0.2.0. Older daemons reject MCP subjects with invalid-claim-subject and replicated MCP messages with assistant-send-refused; a custom grant record may persist but an older assistant session still rejects any principal other than assistant/chatgpt. Do not fall back to person credentials or relabel MCP as ChatGPT. Mixed-version deployment and Claude Code/Codex interoperability have not been exercised in this change."
   },
   "downtime": {
     "status": "unknown",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Upgrade participating members before MCP issuance. Until R1 (#3324, verified keyed issuer admission) is verified, production assistant grants must have read scopes only (Q32 freeze). The configured owning person explicitly pairs assistant/mcp with named scopes and recorded disclosure consent, completes into a separate owner-only JSON profile, extracts the selected member's session.credential into a protected token file, and configures st-mcp with the paired gateway socket and token path. Existing ChatGPT profiles are not migrated or reinterpreted. See docs/st3/external-assistants.md for exact CLI, protected file permissions, Claude Code/Codex configuration, recipient policy and grant revocation. Live issuance remains subject to the documented activation gates."
+    "detail": "Upgrade participating members before MCP issuance. Until R1 (#3324, verified keyed issuer admission) is verified, production assistant grants must have read scopes only (Q32 freeze). The configured owning person explicitly pairs assistant/mcp with named scopes and recorded disclosure consent, completes into a separate owner-only JSON profile, extracts the selected member's session.credential into a protected token file, and configures fractal-mcp with the paired gateway socket and token path. Existing ChatGPT profiles are not migrated or reinterpreted. See docs/st3/external-assistants.md for exact CLI, protected file permissions, Claude Code/Codex configuration, recipient policy and grant revocation. Live issuance remains subject to the documented activation gates."
   },
   "recovery": {
     "status": "changed",

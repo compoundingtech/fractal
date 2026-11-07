@@ -17,6 +17,13 @@ fn server_identity_uses_fractal_chatgpt() {
 }
 
 #[test]
+fn server_identity_uses_fractal_mcp() {
+    let mut adapter = disconnected_adapter();
+    adapter.profile = Profile::Mcp;
+    assert_eq!(adapter.get_info().server_info.name, "fractal-mcp");
+}
+
+#[test]
 fn adapter_accepts_only_paired_gateway_socket_names() {
     let dir = tempfile::tempdir().unwrap();
     let credential = dir.path().join("credential");
@@ -639,7 +646,7 @@ fn chatgpt_discovery_matches_main_golden() {
 fn profiles_pin_server_identity_and_cross_profile_annotations() {
     assert_eq!(Profile::ChatGpt.server_name(), "fractal-chatgpt");
     assert_eq!(Profile::ChatGpt.assistant_principal(), "assistant/chatgpt");
-    assert_eq!(Profile::Mcp.server_name(), "st");
+    assert_eq!(Profile::Mcp.server_name(), "fractal-mcp");
     assert_eq!(Profile::Mcp.assistant_principal(), "assistant/mcp");
     let actual = serde_json::to_value(tool_definitions(Profile::ChatGpt)).unwrap();
     let mcp = serde_json::to_value(tool_definitions(Profile::Mcp)).unwrap();
@@ -858,7 +865,7 @@ async fn mcp_telemetry_has_no_chatgpt_wording() {
     let _capture = tracing::subscriber::set_default(subscriber);
     let mut adapter = disconnected_adapter();
     adapter.profile = Profile::Mcp;
-    assert_eq!(adapter.get_info().server_info.name, "st");
+    assert_eq!(adapter.get_info().server_info.name, "fractal-mcp");
     assert_eq!(call(&adapter, "unknown", &json!({})).await.unwrap_err()["code"], "unknown-tool");
     let text = logs.text();
     assert!(text.contains("MCP tool call finished"), "{text}");

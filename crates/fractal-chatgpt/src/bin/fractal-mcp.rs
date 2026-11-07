@@ -3,7 +3,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "st-mcp")]
+#[command(name = "fractal-mcp")]
 struct Args {
     #[arg(long)]
     socket: PathBuf,
@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn flags_are_stdio_only_and_paths_are_required() {
         let base = [
-            "st-mcp",
+            "fractal-mcp",
             "--socket",
             "/tmp/fractal-client.sock",
             "--credential-file",
@@ -40,8 +40,8 @@ mod tests {
         for flag in ["--listen", "--transport", "--profile", "--principal"] {
             assert!(Args::try_parse_from(base.into_iter().chain([flag, "stdio"])).is_err());
         }
-        assert!(Args::try_parse_from(["st-mcp"]).is_err());
-        assert!(Args::try_parse_from(["st-mcp", "--socket", "/tmp/fractal-client.sock"]).is_err());
-        assert!(Args::try_parse_from(["st-mcp", "--credential-file", "/tmp/credential"]).is_err());
+        assert!(Args::try_parse_from(["fractal-mcp"]).is_err());
+        assert!(Args::try_parse_from(["fractal-mcp", "--socket", "/tmp/fractal-client.sock"]).is_err());
+        assert!(Args::try_parse_from(["fractal-mcp", "--credential-file", "/tmp/credential"]).is_err());
     }
 }

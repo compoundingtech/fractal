@@ -28,7 +28,7 @@ impl Profile {
     };
     #[allow(non_upper_case_globals)]
     pub const Mcp: Self = Self {
-        server_name: "st",
+        server_name: "fractal-mcp",
         assistant_principal: "assistant/mcp",
         tool_descriptions: &[
             (MESSAGE_SEND, "Send one exact message to an existing agent under write.assistant.messages and the paired assistant/mcp grant. Obtain human confirmation before calling. Person recipients are refused."),
