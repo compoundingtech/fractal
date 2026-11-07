@@ -4,6 +4,7 @@
 pub mod edits;
 pub mod keys;
 pub mod model;
+mod overlay;
 pub mod paging;
 pub mod plan;
 pub mod projection;
