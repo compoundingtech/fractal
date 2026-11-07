@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep claims with missing runtime prerequisites quarantined separately from unknown vocabulary and invalid authority.",
+  "replay": { "status": "changed", "detail": "A writer-bound runtime may report PendingDependencies. Admission retains the signed record outside admitted claims with missing-claim-dependencies, and the existing indexed unknown-record backlog retries it after prerequisites arrive. Pending dependencies do not degrade the envelope; invalid claims still do." },
+  "schema": { "status": "none", "detail": "No persisted schema or wire format changes; the existing unknown quarantine state carries a distinct error code and explicit runtime reason." },
+  "rules": { "status": "changed", "detail": "This is a runtime admission result, not a historical authorization certificate or revocation guarantee. Unknown kind and field handling is unchanged." },
+  "compatibility": { "status": "changed", "detail": "Custom runtimes matching ReplicatedClaimAdmission exhaustively must handle PendingDependencies. Older runtimes cannot establish notice authority through this result alone." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "No manual migration is required." },
+  "recovery": { "status": "changed", "detail": "Supply the missing prerequisites and run normal replication admission; no new receipt or schema upgrade is necessary. Invalid authorization remains invalid and requires explicit repair." }
+}

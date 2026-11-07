@@ -126,9 +126,9 @@ fn admitted_rows(store: &Store) -> Vec<String> {
     rows
 }
 
-/// The oracle: `validate_and_admit_envelope_tx` exactly as it was on main at 7be50273c, before
-/// admission prepared envelopes, copied verbatim apart from its name. It decodes, verifies and
-/// writes in one pass and shares no code with `prepared_envelope`.
+/// The oracle: `validate_and_admit_envelope_tx` from main at 7be50273c, before admission
+/// prepared envelopes, extended only for the pending-dependency admission result. It decodes,
+/// verifies and writes in one pass and shares no code with `prepared_envelope`.
 #[allow(clippy::too_many_lines)]
 fn legacy_validate_and_admit_envelope_tx(
     transaction: &Connection,
@@ -354,9 +354,10 @@ fn legacy_validate_and_admit_envelope_tx(
             }
             Ok(
                 classification @ (ReplicatedClaimAdmission::UnknownKind
-                | ReplicatedClaimAdmission::UnknownField),
+                | ReplicatedClaimAdmission::UnknownField
+                | ReplicatedClaimAdmission::PendingDependencies { .. }),
             ) => {
-                let (error_code, error_message) = match classification {
+                let (error_code, error_message) = match &classification {
                     ReplicatedClaimAdmission::UnknownKind => (
                         "unknown-claim-kind",
                         "this st build does not know the claim kind",
@@ -365,6 +366,9 @@ fn legacy_validate_and_admit_envelope_tx(
                         "unknown-claim-field",
                         "this st build does not know every field on the claim kind",
                     ),
+                    ReplicatedClaimAdmission::PendingDependencies { message } => {
+                        ("missing-claim-dependencies", message.as_str())
+                    }
                     ReplicatedClaimAdmission::Valid => unreachable!(),
                 };
                 transaction
@@ -740,6 +744,7 @@ fn admission_retry_preserves_rows_and_skips_sqlite_changes() {
         ("example.bad", 0, false),
         ("example.note", 1, false),
         ("example.unknown", 0, true),
+        ("example.gated", 0, false),
     ] {
         let source = node("person/robin");
         let target = node_with("person/recipient", ByKind::new(true));
@@ -791,6 +796,77 @@ fn admission_retry_preserves_rows_and_skips_sqlite_changes() {
             .query_row("SELECT count(*) FROM admission_writes", [], |row| row.get(0))
             .unwrap();
         assert_eq!(writes, 0, "{kind}");
+    }
+}
+
+#[test]
+fn pending_dependencies_retry_without_changing_unknown_or_invalid_admission() {
+    for unbound in [true, false] {
+        for (kind, code, state) in [
+            ("example.gated", "missing-claim-dependencies", "unknown"),
+            ("example.unknown", "unknown-claim-kind", "unknown"),
+            ("example.extra", "unknown-claim-field", "unknown"),
+            ("example.bad", "invalid-replicated-claim", "invalid"),
+        ] {
+            let source = node("birch");
+            let target = node_with("cedar", ByKind::new(unbound));
+            let oracle = node_with("rowan", ByKind::new(unbound));
+            let subject = "note/prerequisite";
+            claim_of(&source, subject, kind, BTreeMap::new());
+            let exchange = source
+                .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
+                .unwrap();
+            for store in [&target, &oracle] {
+                store.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+            }
+            let initial = target.validate_replication_backlog().unwrap();
+            admit_with_the_old_function(&oracle);
+            assert_eq!(admitted_rows(&target), admitted_rows(&oracle));
+            assert_eq!(initial.valid, 0);
+            assert!(target.claims_for(subject, None).unwrap().is_empty());
+            let record = target.replica_records(true).unwrap().pop().unwrap();
+            assert_eq!(record.state, state);
+            assert_eq!(record.error_code.as_deref(), Some(code));
+            if kind == "example.gated" {
+                assert_eq!((initial.unknown, initial.invalid), (1, 0));
+                assert_eq!(
+                    record.error_message.as_deref(),
+                    Some("the gate prerequisite has not arrived")
+                );
+            }
+            let receipt: (String, Option<String>, Option<String>) = target.readers.get().query_row(
+                "SELECT receipt_state,validation_error,batch_id FROM replica_envelopes",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(receipt.0, if state == "invalid" { "degraded" } else { "validated" });
+            assert!(receipt.1.is_none());
+            for store in [&target, &oracle] {
+                store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-h475b9c435b3b owner=smallclaims::store::prepared_envelope_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('gate', 'open')", [],
+                ).unwrap();
+            }
+            // No new receipt or schema change: the indexed unknown-record retry finds it.
+            let retried = target.validate_replication_backlog().unwrap();
+            legacy_validate_and_admit_envelope_tx(
+                &oracle.connection.write(),
+                &exchange.envelopes[0],
+                &*oracle.runtime,
+                &mut ReplicationAdmission::default(),
+            ).unwrap();
+            assert_eq!(admitted_rows(&target), admitted_rows(&oracle));
+            let record = target.replica_records(false).unwrap().pop().unwrap();
+            if kind == "example.gated" {
+                assert_eq!((retried.valid, retried.invalid), (1, 0));
+                assert_eq!(record.state, "valid");
+                assert!(record.error_code.is_none());
+                assert!(record.error_message.is_none());
+                assert_eq!(target.claims_for(subject, None).unwrap().len(), 1);
+            } else {
+                assert_eq!(record.state, state);
+                assert_eq!(record.error_code.as_deref(), Some(code));
+                assert!(target.claims_for(subject, None).unwrap().is_empty());
+            }
+        }
     }
 }
 
@@ -901,8 +977,8 @@ fn a_blob_stored_after_preparation_admits_the_claim_that_names_it() {
 }
 
 /// A runtime that classifies by kind: `example.unknown` is unknown, `example.extra` carries an
-/// unknown field, `example.bad` is invalid, and `example.gated` is valid only once the store's
-/// `gate` meta row exists, a classification that reads the store. Everything else is Plain's.
+/// unknown field, `example.bad` is invalid, and `example.gated` awaits dependencies until the
+/// store's `gate` meta row exists, a classification that reads the store. Everything else is Plain's.
 /// With `unbound`, it classifies every kind but `example.gated` without the store.
 struct ByKind {
     unbound: bool,
@@ -965,7 +1041,9 @@ impl Runtime for ByKind {
             return Ok(if open {
                 ReplicatedClaimAdmission::Valid
             } else {
-                ReplicatedClaimAdmission::UnknownKind
+                ReplicatedClaimAdmission::PendingDependencies {
+                    message: "the gate prerequisite has not arrived".into(),
+                }
             });
         }
         Self::by_kind(claim)
@@ -1158,7 +1236,7 @@ fn a_classification_that_reads_the_store_sees_the_store_under_the_writer() {
                     let mut writer = target.connection.write();
                     let transaction = writer.transaction().unwrap();
                     transaction
-                        .execute(/* sqlite-large-value: allow-for-now lv-h475b9c435b3b owner=smallclaims::store::prepared_envelope_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('gate', 'open')", [])
+                        .execute(/* sqlite-large-value: allow-for-now lv-hace536ac041b owner=smallclaims::store::prepared_envelope_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('gate', 'open')", [])
                         .unwrap();
                     transaction.commit().unwrap();
                 }

@@ -2094,6 +2094,8 @@ pub enum ReplicatedClaimAdmission {
     Valid,
     UnknownKind,
     UnknownField,
+    /// Known claim whose prerequisites have not arrived; quarantine and retry without degradation.
+    PendingDependencies { message: String },
 }
 
 pub fn reject_old_schema(connection: &Connection) -> Result<()> {

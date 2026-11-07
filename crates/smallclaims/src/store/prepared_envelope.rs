@@ -477,9 +477,10 @@ pub fn admit_prepared_envelope_tx(
             }
             Ok(
                 classification @ (ReplicatedClaimAdmission::UnknownKind
-                | ReplicatedClaimAdmission::UnknownField),
+                | ReplicatedClaimAdmission::UnknownField
+                | ReplicatedClaimAdmission::PendingDependencies { .. }),
             ) => {
-                let (error_code, error_message) = match classification {
+                let (error_code, error_message) = match &classification {
                     ReplicatedClaimAdmission::UnknownKind => (
                         "unknown-claim-kind",
                         "this st build does not know the claim kind",
@@ -488,6 +489,9 @@ pub fn admit_prepared_envelope_tx(
                         "unknown-claim-field",
                         "this st build does not know every field on the claim kind",
                     ),
+                    ReplicatedClaimAdmission::PendingDependencies { message } => {
+                        ("missing-claim-dependencies", message.as_str())
+                    }
                     ReplicatedClaimAdmission::Valid => unreachable!(),
                 };
                 transaction
