@@ -40,6 +40,12 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
+The live loop polls input independently of painting. Input, feed results, voice transitions,
+open requests and native-terminal output, geometry or lifecycle changes invalidate the frame;
+otherwise relative-time displays and non-terminal progress
+indicators refresh at most once per second. Input paints before draining queued background
+updates, and each background drain is bounded to 16 ms.
+
 Install the repo's `.#fractal` Nix package and run `FRACTAL_PERSON=person/<your-id> fractal` in a terminal
 with a running Fractal daemon. For source development, use
 `FRACTAL_PERSON=person/<your-id> cargo run -p fractal-cli --locked -- ui`. `FRACTAL_ENDPOINT` can override the discovered Unix socket. When neither person environment variable is set,

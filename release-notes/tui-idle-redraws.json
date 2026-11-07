@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Avoid repainting unchanged terminal UI frames on every input poll. Input remains immediate; background drains are bounded and time-based displays refresh once per second when terminal output is not flowing.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No stored format changes." },
+  "rules": { "status": "none", "detail": "No authority or validation changes." },
+  "compatibility": { "status": "none", "detail": "Only local terminal UI scheduling changes." },
+  "downtime": { "status": "none", "detail": "Restart the terminal UI to use the new scheduling." },
+  "manual": { "status": "none", "detail": "No manual migration." },
+  "recovery": { "status": "none", "detail": "No recovery changes." }
+}
