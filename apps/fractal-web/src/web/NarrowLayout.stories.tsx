@@ -263,7 +263,7 @@ export const DrawersLight: Story = { ...Drawers, parameters: { scenario: { _tag:
 
 /** Decode evidence stays between the retained roster and footer in either real sidebar host. */
 export const DecodeStaleSidebarHosts: Story = {
-  tags: ['critical'],
+  tags: ['critical', 'both-widths'],
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic stale roster decoding proves the notice remains visible in both responsive sidebar hosts.' } },
   args: { decodeStale: true },
   play: async ({ canvasElement }) => {
