@@ -39,6 +39,11 @@ pub fn legacy_reason(store: &Store, input: &ClaimInput) -> Result<Option<&'stati
     let Some(to) = input.fields.get("to").and_then(Value::as_str) else {
         return Ok(Some("no-recipient"));
     };
+    // Mail to a retired seat goes to the graph append, whose producer guard refuses it as before.
+    let seat = identities::resolve_reference_conn(&store.readers.get(), &normalize_message_party(to))?;
+    if retirements::record(&store.readers.get(), &seat, None)?.is_some() {
+        return Ok(Some("retired"));
+    }
     let Some(host) = recipient_host(store, to)? else {
         return Ok(Some("no-host"));
     };
