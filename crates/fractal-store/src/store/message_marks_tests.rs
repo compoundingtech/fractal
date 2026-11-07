@@ -503,16 +503,17 @@ fn a_closed_mark_leaves_a_header_its_fold_has_saved_work_on_to_the_fold() {
 
 
 /// A later version that folds past the published cut while another subject is still pending leaves
-/// readers pinned before it, and the in-place close cannot promote that cut's next winner. The
-/// group shows no winner there until the cut publishes, but never shows the closed one open.
+/// readers pinned before it, where the closed winner's currency stays on a header the fold retired.
+/// The group's next version at that cut stands in for it until the cut publishes.
 #[test]
-fn a_closed_mark_at_a_cut_a_later_version_folded_past_never_shows_the_closed_winner_open() {
+fn a_closed_mark_at_a_cut_a_later_version_folded_past_hands_the_cuts_winner_on() {
     let (_root, _claims, marks) = twins();
     marks.append_claim(&sent("message/r1", RECIPIENT, &["reminder:standup", "version:1"])).unwrap();
     marks.append_claim(&sent("message/r2", RECIPIENT, &["reminder:standup", "version:2"])).unwrap();
-    let page = || -> Vec<(String, String, bool)> {
+    // (subject, status, current) of the group's rows at the page's own cut, for everyone and for the recipient.
+    let page = |person: Option<&str>| -> Vec<(String, String, bool)> {
         let cut = marks.client_messages_page_cut(marks.index().unwrap()).unwrap();
-        marks.client_messages_page(Some(RECIPIENT), None, false, cut, None, 100).unwrap().into_iter()
+        marks.client_messages_page(person, None, false, cut, None, 100).unwrap().into_iter()
             .filter(|(message, ..)| message.subject.starts_with("message/r"))
             .map(|(message, _, current)| (message.subject, message.status, current)).collect()
     };
@@ -523,9 +524,56 @@ fn a_closed_mark_at_a_cut_a_later_version_folded_past_never_shows_the_closed_win
     marks.append_claim(&sent("message/zz", RECIPIENT, &[])).unwrap();
     while unfolded("message/r3") { assert!(marks.maintain_client_message_selectors().unwrap()); }
     assert!(unfolded("message/zz"), "the cut stays pinned before r3");
-    assert_eq!(page(), [row("message/r2", "sent", true)]);
+    for person in [None, Some(RECIPIENT)] {
+        assert_eq!(page(person), [row("message/r2", "sent", true)], "{person:?}");
+    }
     message_marks::record(&marks, "message/r2", "message.closed", RECIPIENT).unwrap();
-    assert!(!page().iter().any(|(subject, ..)| subject == "message/r2"), "{:?}", page());
+    for person in [None, Some(RECIPIENT)] {
+        assert_eq!(page(person), [row("message/r1", "sent", true)], "the cut's next version stands in, {person:?}");
+    }
     while marks.maintain_client_message_selectors().unwrap() {}
-    assert_eq!(page(), [row("message/r3", "sent", true)]);
+    for person in [None, Some(RECIPIENT)] {
+        assert_eq!(page(person), [row("message/r3", "sent", true)], "{person:?}");
+    }
+}
+
+/// What the open page costs a reader pinned to a cut that `ST_PAGE_GROUPS` (default 2000)
+/// reminder groups have each had a later version fold past: with no closed marks, and with every
+/// one of the cut's winners closed by a mark, so each group's version 0 stands in for it.
+#[test]
+#[ignore = "pinned open page cost against the retirements since its cut: run alone"]
+fn a_pinned_open_page_costs_little_beside_the_retirements_since_its_cut() {
+    let groups: usize = std::env::var("ST_PAGE_GROUPS").ok().and_then(|value| value.parse().ok()).unwrap_or(2000);
+    let (_root, _claims, marks) = twins();
+    for group in 0..groups {
+        for version in [0, 1] {
+            marks.append_claim(&sent(&format!("message/g{group:05}-{version}"), RECIPIENT, &[&format!("reminder:g{group:05}"), &format!("version:{version}")])).unwrap();
+        }
+    }
+    hold_the_fold_behind_a_backlog(&marks);
+    for group in 0..groups {
+        marks.append_claim(&sent(&format!("message/g{group:05}-2"), RECIPIENT, &[&format!("reminder:g{group:05}"), "version:2"])).unwrap();
+    }
+    marks.append_claim(&sent("message/zz", RECIPIENT, &[])).unwrap();
+    let unfolded = || projections(&marks)["local_client_message_selectors_v1 unfolded"].clone();
+    let last = format!("{:?}", rusqlite::types::ValueRef::from("message/zz"));
+    while unfolded() != [last.clone()] { assert!(marks.maintain_client_message_selectors().unwrap()); }
+    let cut = marks.client_messages_page_cut(marks.index().unwrap()).unwrap();
+    let time = |person: Option<&str>| {
+        let mut rows = 0;
+        let mut samples = (0..200).map(|_| {
+            let start = std::time::Instant::now();
+            rows = marks.client_messages_page(person, None, false, cut, None, 50).unwrap().len();
+            start.elapsed().as_secs_f64() * 1000.0
+        }).collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        json!({"p50_ms": samples[samples.len() / 2], "p99_ms": samples[samples.len() * 99 / 100], "rows": rows})
+    };
+    let unmarked = json!({"global": time(None), "recipient": time(Some(RECIPIENT))});
+    for group in 0..groups {
+        message_marks::record(&marks, &format!("message/g{group:05}-1"), "message.closed", RECIPIENT).unwrap();
+    }
+    assert_eq!(unfolded(), [last], "the cut stays pinned");
+    let marked = json!({"global": time(None), "recipient": time(Some(RECIPIENT))});
+    println!("{}", json!({"groups": groups, "unmarked": unmarked, "every_winner_marked": marked}));
 }
