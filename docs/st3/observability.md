@@ -712,15 +712,17 @@ Gate/verifier kinds are reserved, not inferred from a seat's current verifying
 work or from human-gate attention. Existing gate work is not proof of a distinct
 gate/verifier agent.
 
-Repository is normalized against R at the agent resource boundary. The resource
-already has declared `checkout.repository`, but does not project the optional
-repository from `workspace.observed`; these are different facts. Project the
-current observed repository onto the agent resource so the exporter needs no
-workspace-claim join. Prefer that positively observed repository; a declared
-checkout is usable only when not contradicted by a current observation. Missing
-or conflicting evidence maps to `unattributed`. A child inherits its observed
-parent's repository unless it has its own positively observed checkout; do not
-infer one from a native session path.
+Repository is normalized against R at the population-only agent resource boundary.
+Ordinary roster/card presentation does not read workspace observations for metrics.
+The population fold overlays the current `workspace.observed` repository when its
+workspace and host match the card. A canonical `owner/repo`, or an absolute
+megarepo path containing `github.com/owner/repo[/refs/...]`, normalizes to lowercase
+`owner/repo`; unknown paths map to `unattributed`. This normalization performs no
+git or filesystem I/O. Prefer positively observed repository evidence; a declared
+`checkout.repository` is usable only when not contradicted by a current observation.
+An empty registry skips the population workspace read entirely. A child inherits
+its observed parent's repository unless it has its own positively observed checkout;
+do not infer one from a native session path.
 
 ### Membership and exclusive classification
 
@@ -789,6 +791,24 @@ to its completion time in seconds since the Unix epoch. Failed refreshes and
 SDK collection callbacks never advance that value; before the first success
 the instrument is absent. The dotted name follows the instrument convention
 above, without a Prometheus `_seconds` suffix.
+The card's nonauthoritative `host-lost` end-reason is not terminal evidence:
+retain its last-live incarnation as `unreachable/stale`, even when the
+presentation also carries a launch/fault annotation. An authoritative runtime
+or harness end, retirement, or removal still excludes the incarnation.
+
+
+Refresh subscribes to the store commit notification before the initial fold,
+then coalesces commits with a minimum 30-second rest (or the preceding fold's
+duration, whichever is longer). It also wakes for the earliest relevant shared
+classification boundary: idle freshness at heard-at + 90,001 ms, launch/down at
+launch + 120,001 ms or heard-at + 661,001 ms, an owned live child's lease expiry,
+and the canonical attention snapshot's next visibility boundary. These strict-age
+offsets match the existing card overlay; working turns have no age-only expiry.
+With no commits or deadlines, the refresher performs zero folds per minute.
+Retention expiry removes cached zero buckets at their ten-minute deadline,
+independently of refresh admission or success, without a store read or a new
+last-success timestamp. Failed folds retry after the same minimum rest.
+
 
 Consumers alert on `st_agents_refresh_last_success`: compute snapshot age with
 `time() - st_agents_refresh_last_success` and compare it with the deployment's
@@ -857,6 +877,12 @@ with the attribute `otel.metric.overflow=true`, rendered in Mimir as
 `st_agents{otel_metric_overflow="true"}`). Alert on the presence of that label
 for any of the three metrics: overflow is a contract violation, never a valid
 fallback bucket or silently accepted population total.
+The 256-bucket operational allocation must not reject a complete snapshot or
+freeze last-success, counts, or retained-zero aging. Publish the complete cut;
+the SDK's explicit 512-series safety limit surfaces excess combinations through
+its overflow series. Such overflow remains an alertable contract violation,
+not an approved loss of labels or a valid substitute for capacity review.
+
 
 This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
 another 2,000. The HTTP request-duration instrument already reserves up to 1,500

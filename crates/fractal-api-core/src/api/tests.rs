@@ -14818,7 +14818,7 @@ async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked
 }
 
 #[test]
-fn agent_list_workspace_observations_require_current_host_and_workspace() {
+fn population_repository_observations_require_current_host_and_workspace() {
     let store = Store::open_memory("node").unwrap();
     let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
     store.apply_internal(&parse_intent(source, "node").unwrap(), "workspace-overlay").unwrap();
@@ -14840,14 +14840,16 @@ fn agent_list_workspace_observations_require_current_host_and_workspace() {
             subject: subject.into(), kind: "workspace.observed".into(), actor: None,
             fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
-        let rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        assert!(rows.iter().all(|card| card.get("observed_repository").is_none()));
+        overlay_population_repositories(&store, &mut rows).unwrap();
         let card = rows.iter().find(|card| card["id"] == subject).unwrap();
         assert_eq!(card.get("observed_repository"), expected.as_ref(), "{host} {workspace}");
     }
     // Reusing a presented card must erase evidence that no longer matches its location.
     let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
     rows[0]["workspace"] = json!("/moved");
-    overlay_agent_resources(&store, &mut rows, "now").unwrap();
+    overlay_population_repositories(&store, &mut rows).unwrap();
     assert!(rows[0].get("observed_repository").is_none());
 }
 
@@ -14881,7 +14883,46 @@ fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
         let rows = client_agent_resources(&store, false, "again", index).unwrap();
         let work = scope.finish();
         assert_eq!(rows.len(), count);
+        // The identical fixture at pinned base b0bbc6dc uses six statements
+        // for both cardinalities: population evidence must add no request reads.
+        assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
         statements.push(work.statements);
     }
     assert_eq!(statements[0], statements[1], "{statements:?}");
+}
+
+#[test]
+fn population_repository_normalizes_production_shaped_checkout_paths() {
+    let store = Store::open_memory("node").unwrap();
+    let mut rows = vec![json!({
+        "id":"agent/example.workspace", "workspace":"/work/tree", "host_id":"host/node",
+        "checkout":{"repository":"/srv/checkouts/github.com/Example/Repo/refs/heads/main"}
+    })];
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert_eq!(rows[0]["checkout"]["repository"], "example/repo");
+    for (raw, expected) in [
+        ("/srv/checkouts/github.com/example/repo", Some("example/repo")),
+        ("/srv/checkouts/github.com/example/repo/refs/heads/feature/topic", Some("example/repo")),
+        ("example/repo", Some("example/repo")),
+        ("/srv/work/repo", None),
+        ("/srv/github.com/example/repo/../other", None),
+        ("/srv/github.com/example/repo/arbitrary", None),
+        ("example/repo/extra", None),
+        ("https://github.com/example/repo", None),
+    ] {
+        assert_eq!(canonical_population_repository(raw).as_deref(), expected, "{raw}");
+    }
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "population-repository-path").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"agent/example/workspace".into(), kind:"workspace.observed".into(), actor:None,
+        fields:BTreeMap::from([
+            ("host".into(), json!("node")), ("workspace".into(), json!("/tmp")),
+            ("repository".into(), json!("/srv/checkouts/github.com/example/repo/refs/heads/main")),
+        ]),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    overlay_population_repositories(&store, &mut cards).unwrap();
+    assert_eq!(cards[0]["observed_repository"], "example/repo");
 }

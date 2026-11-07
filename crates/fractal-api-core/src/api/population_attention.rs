@@ -14,8 +14,11 @@ pub type Counts = [(&'static str, u64); 10];
 /// fold. No independent cut, timeout, mailbox read or fault collection is introduced here.
 /// Every source's ownership must resolve, including remote sources: an error invalidates the
 /// complete refresh rather than silently treating an unowned item as zero.
-pub fn summarize(store: &Store, now: u128) -> anyhow::Result<Counts> {
-    let items = store.attention_snapshot(None, now)?;
+pub fn summarize_with_deadline(store: &Store, now: u128) -> anyhow::Result<(Counts, Option<u128>)> {
+    // Use the canonical collection's admission clock, not a periodic refresh. Runtime grace,
+    // leases and ask escalation affect other projections or require a graph write; none can
+    // change these source counts on their own.
+    let (items, deadline) = store.attention_collection_snapshot(None, now)?;
     let mut seen = HashSet::with_capacity(items.len());
     let sources: Vec<_> = items.iter().filter(|item| {
         item.kind != "unread-message"
@@ -25,9 +28,10 @@ pub fn summarize(store: &Store, now: u128) -> anyhow::Result<Counts> {
     let origins: std::collections::HashMap<_, _> = sources.into_iter().zip(origins)
         .map(|(item, origin)| ((item.subject.as_str(), item.kind.as_str(), item.mission_run.as_deref()), origin))
         .collect();
-    count_items(&items, store.origin(), |item| {
+    let counts = count_items(&items, store.origin(), |item| {
         Ok(origins[&(item.subject.as_str(), item.kind.as_str(), item.mission_run.as_deref())].clone())
-    })
+    })?;
+    Ok((counts, deadline))
 }
 
 fn count_items(
@@ -59,6 +63,67 @@ fn count_items(
 mod tests {
     use super::*;
     use serde_json::json;
+    use crate::{PersonWorkStore as _, SeatsStoreCore as _};
+
+    fn store_with_asks(times: &[(u128, u128)]) -> Store {
+        let store = Store::open_memory("example").unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"example.worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n",
+            "example",
+        ).unwrap();
+        store.apply_internal(&intent, "attention-deadline-fixture").unwrap();
+        for (index, (accepted, waiting)) in times.iter().enumerate() {
+            let ask = store.ask_person(&serde_json::from_value(json!({
+                "person":"person/reviewer", "actor":"agent/example.worker",
+                "title":"Choose a seed", "reason":"Review the garden plan",
+                "idempotency_key":format!("attention-{index}")
+            })).unwrap()).unwrap();
+            // Model a replicated future-dated ask and a migrated waiting timestamp separately.
+            store.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?2,
+                 body=json_set(body,'$.fields.waiting_since',?3)
+                 WHERE subject=?1 AND kind='work.person-asked'",
+                rusqlite::params![ask.subject, accepted.to_string(), waiting.to_string()],
+            ).unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn admission_deadline_opens_both_acceptance_and_waiting_gates_without_a_commit() {
+        let store = store_with_asks(&[(2_000, 1_000), (1_000, 3_000)]);
+        let cut = store.index().unwrap();
+        for (now, expected_count, expected_deadline) in [
+            (999, 0, Some(2_000)),
+            (1_000, 0, Some(2_000)),
+            (1_999, 0, Some(2_000)),
+            (2_000, 1, Some(3_000)),
+            (2_999, 1, Some(3_000)),
+            (3_000, 2, None),
+            (u128::MAX, 2, None),
+        ] {
+            let (counts, deadline) = summarize_with_deadline(&store, now).unwrap();
+            assert_eq!(counts.iter().map(|(_, count)| count).sum::<u64>(), expected_count, "{now}");
+            assert_eq!(deadline, expected_deadline, "{now}");
+            assert_eq!(store.index().unwrap(), cut, "a clock-only fold must not write");
+        }
+    }
+
+    #[test]
+    fn future_admission_does_not_transfer_source_ownership_to_the_reading_host() {
+        let store = store_with_asks(&[(2_000, 1_000)]);
+        store.connection.write().execute(
+            "UPDATE desired SET member=json_set(member,'$.host','remote')
+             WHERE subject='agent/example.worker'",
+            [],
+        ).unwrap();
+        let (before, deadline) = summarize_with_deadline(&store, 1_999).unwrap();
+        assert_eq!(before, KINDS.map(|kind| (kind, 0)));
+        assert_eq!(deadline, Some(2_000));
+        let (after, deadline) = summarize_with_deadline(&store, 2_000).unwrap();
+        assert_eq!(after, before, "the source's selected member remains its only publisher");
+        assert_eq!(deadline, None);
+    }
 
     fn item(kind: &str, source: &str, person: &str, episode: &str) -> AttentionItemView {
         serde_json::from_value(json!({
