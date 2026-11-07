@@ -2,6 +2,8 @@ export type { DebugBag } from './meters.tsx'
 
 declare module './meters.tsx' {
   interface DebugBag {
+    'Wf.httpInstrumented': number
+    'Wf.httpSamples': number
     'Wf.httpInFlight': number
     'Wf.httpErrors': number
     'Wf.httpP50Ms': number
