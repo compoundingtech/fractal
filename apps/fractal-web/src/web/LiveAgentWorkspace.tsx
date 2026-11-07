@@ -26,7 +26,7 @@ import { RegisteredPortal, usePortalContainerRegistration } from '../../../../pa
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
-import { useAtom, useAtomValue } from '@effect/atom-react'
+import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
@@ -48,6 +48,7 @@ import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { leftSidebar } from '../state/cells/panels.ts'
+import { persistedFolds } from '../state/cells/view.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
@@ -865,7 +866,9 @@ const GatewayConnectionStatus = () => {
 export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focusShownView, agentName, onOpenTool, onOpenDocument, onOpenAgent, onFocusMission, alertControls, ux }: { readonly onFocusMission?: (ref: string | undefined) => void; readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly focusShownView?: React.RefObject<boolean>; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly alertControls?: Omit<React.ComponentProps<typeof AlertDetailsPane>, 'id' | 'ux'>; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
-  const [viewportStore] = React.useState(() => new ViewportStore())
+  // Work-log folds outlive the surface and reload; reading positions stay with this surface.
+  const registry = React.useContext(RegistryContext)
+  const [viewportStore] = React.useState(() => new ViewportStore({ folds: persistedFolds(registry) }))
   React.useEffect(() => {
     viewportStore.open()
     return () => viewportStore.dispose()
