@@ -5589,11 +5589,11 @@ version 2
 
   mission "terminal-owner" state="ready" {
     goal "Make terminal ownership authoritative."
-    step "active" { assigned-to "agent/worker" }
-    step "expired" { assigned-to "agent/worker" }
-    step "ready" { assigned-to "agent/worker" }
-    step "blocked" { assigned-to "agent/worker" }
-    step "pending" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/source.worker" }
+    step "expired" { assigned-to "agent/source.worker" }
+    step "ready" { assigned-to "agent/source.worker" }
+    step "blocked" { assigned-to "agent/source.worker" }
+    step "pending" { assigned-to "agent/source.worker" }
   }
 
 "#;
@@ -8465,7 +8465,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "summaries" state="ready" {
   goal "Show what the worker reported."
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     retry { attempts 2 }
     gate "the result is ready" { exists "resource/result" }
   }

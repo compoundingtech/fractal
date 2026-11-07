@@ -517,7 +517,7 @@ fn work_claim_canonicalizes_legacy_actor_and_stored_assignee() {
         let step = ready_step_with_mail(0);
         // Model both current rows and persisted rows predating actor canonicalization.
         step.store.connection.write().execute(
-            "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h755979e290e9 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
             params![step.subject, assignee],
         ).unwrap();
         assert_eq!(
