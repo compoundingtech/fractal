@@ -80,6 +80,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const { changedFiles, branchFiles, proseResources, reviewerCard, now: milestoneNow } = props
   const { folders: rosterFolders, inboxCount } = props.roster.value
   const { primaryRef: mainAgentRef, reviewerRef, lastSeen } = props.conversation.value
+  const firstOpenRef = props.defaultOpenRefs[0]
   const [recovery, setRecovery] = React.useState<Partial<Record<'roster' | 'conversation', { readonly input: RedesignMilestoneProps['roster'] | RedesignMilestoneProps['conversation']; readonly state: 'loading' | 'ready' }>>>({})
   const rosterRecovery = recovery.roster?.input === props.roster ? recovery.roster.state : undefined
   const conversationRecovery = recovery.conversation?.input === props.conversation ? recovery.conversation.state : undefined
@@ -97,7 +98,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
       : rosterLoad === 'stale' ? 'stale'
       : rosterFolders.length === 0 ? 'empty-roster'
       : props.roster.value.query !== '' ? 'no-match'
-      : props.defaultOpenRefs.length === 1 && props.conversation.value.threads[props.defaultOpenRefs[0]!]?.turns.length === 0 ? 'empty-thread'
+      : props.defaultOpenRefs.length === 1 && firstOpenRef !== undefined && props.conversation.value.threads[firstOpenRef]?.turns.length === 0 ? 'empty-thread'
       : props.defaultPaletteOpen ? 'navigation' : 'slice')
   const allRows = rosterFolders.flatMap(folder => folder.rows.flatMap(row => [row, ...row.children]))
   const rowFor = (ref: string) => allRows.find(row => row.ref === ref)
@@ -182,7 +183,8 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
     const reviewer = rowFor(reviewerRef)
     if (path === reviewerCard.path && reviewer !== undefined) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} onOpen={() => openAgent(reviewer)} />
     const resource = proseResources[path]
-    return resource === undefined ? undefined : <ResourceChipV1 resource={resource} file={resource.files[0]!} />
+    const file = resource?.files[0]
+    return resource === undefined || file === undefined ? undefined : <ResourceChipV1 resource={resource} file={file} />
   }
 
   // Narrow: one pane, so Changes folds in as a tab derived from changesOpen alone. Docked: a resizable panel beside the thread.
@@ -193,7 +195,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const showSidebar = <PaneHeaderButton label="Show sidebar" icon="chevron-right" shortcut="Meta+B Control+B" onPress={() => setCollapsed(false)} />
 
   // The panel header names the change set; the "Changes" surface tab beside it says what kind of view it is.
-  const changes = (inPane: boolean) => <DiffPanel open title="feat/metric-track" width="100%" diff={changedFiles[0]!.diff} path={changedFiles[0]!.path} added={2} removed={1}
+  const changes = (inPane: boolean) => <DiffPanel open title="feat/metric-track" width="100%"
     currentTurnFiles={changedFiles} branchFiles={branchFiles} revealRequest={revealRequest} onClose={inPane ? undefined : () => setChangesOpen(false)} />
   const thread = (key: string) => {
     const turns = [...(props.conversation.value.threads[key]?.turns ?? []), ...(sent[key] ?? [])]
