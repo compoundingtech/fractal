@@ -131,6 +131,10 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
     let cookie = request.headers().get(header::COOKIE).and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("fractal_local=")))
         .map(str::to_owned);
+    if cookie.is_some() && request.headers().contains_key(header::AUTHORIZATION) {
+        // Refuse before token redemption too: mixed authority must not mint a browser session.
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let mut expires_at = None;
     let result = {
         let mut credentials = web.credentials.lock().expect("web credentials poisoned");
@@ -162,10 +166,7 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
             Some(StatusCode::UNAUTHORIZED.into_response())
         }
     };
-    if let Some(response) = result { response } else if request.headers().contains_key(header::AUTHORIZATION) {
-        // Browser authority and bearer authority must never be silently combined or downgraded.
-        StatusCode::FORBIDDEN.into_response()
-    } else {
+    if let Some(response) = result { response } else {
         request.headers_mut().remove("x-fractal-person");
         request.headers_mut().remove("x-st3-person");
         request.extensions_mut().insert(crate::api::client_v0::LocalWebSession {
@@ -286,7 +287,7 @@ mod tests {
                 observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
                 StatusCode::OK
             }
-        }).layer(middleware::from_fn_with_state(web,admission));
+        }).layer(middleware::from_fn_with_state(web.clone(),admission));
         for method in ["GET","POST","PUT","PATCH","DELETE"] {
             let response = app.clone().oneshot(Request::builder()
                 .method(method).uri("/v1/client/actions")
@@ -297,6 +298,14 @@ mod tests {
                 .body(Body::from("{}")).unwrap()).await.unwrap();
             assert_eq!(response.status(),StatusCode::FORBIDDEN,"{method}");
         }
+        let login = app.oneshot(Request::builder().uri("/?token=once")
+            .header(header::HOST,"127.0.0.1:7410")
+            .header(header::COOKIE,"fractal_local=admitted")
+            .header(header::AUTHORIZATION,"Bearer service-credential")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(login.status(),StatusCode::FORBIDDEN);
+        assert_eq!(web.credentials.lock().unwrap().token,"once");
+        assert!(!web.credential_path.exists());
         assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst),0);
     }
 }
