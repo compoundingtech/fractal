@@ -41,6 +41,21 @@ struct Reading {
     good: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum Checkpoint {
+    Cut { reading: Reading, pending: bool },
+    Legacy(Reading),
+}
+
+impl Checkpoint {
+    fn reading(&self) -> &Reading {
+        match self {
+            Self::Cut { reading, .. } | Self::Legacy(reading) => reading,
+        }
+    }
+}
+
 /// Install the single operator-selected policy when the daemon starts.
 pub fn configure(
     config: Option<&ReadinessSloConfig>,
@@ -174,17 +189,33 @@ impl Policy {
     }
 
     fn admit(&self, reading: &Reading, now: u64) -> Result<bool> {
+        self.validate_after(reading, now, self.read_checkpoint()?.as_ref())
+    }
+
+    fn validate_after(
+        &self,
+        reading: &Reading,
+        now: u64,
+        checkpoint: Option<&Checkpoint>,
+    ) -> Result<bool> {
         reading.check(&self.config.member, now)?;
+        if let Some(checkpoint) = checkpoint {
+            let prior = checkpoint.reading();
+            ensure!(
+                reading.follows(prior),
+                "replayed or conflicting readiness evidence"
+            );
+            return Ok(reading != prior);
+        }
+        Ok(true)
+    }
+
+    fn read_checkpoint(&self) -> Result<Option<Checkpoint>> {
         match File::open(&self.checkpoint) {
-            Ok(file) => {
-                let prior = read_json(file).context("readiness evidence checkpoint is invalid")?;
-                ensure!(
-                    reading.follows(&prior),
-                    "replayed or conflicting readiness evidence"
-                );
-                Ok(reading != &prior)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Ok(file) => read_json(file)
+                .map(Some)
+                .context("readiness evidence checkpoint is invalid"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
@@ -227,13 +258,19 @@ impl Policy {
         (row, Some(issue))
     }
 
-    fn checkpoint(&self, reading: &Reading) -> Result<()> {
+    fn checkpoint(&self, reading: &Reading, pending: bool) -> Result<()> {
         let parent = self
             .checkpoint
             .parent()
             .context("readiness checkpoint has no parent")?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(&mut temporary, reading)?;
+        serde_json::to_writer(
+            &mut temporary,
+            &Checkpoint::Cut {
+                reading: reading.clone(),
+                pending,
+            },
+        )?;
         temporary.flush()?;
         temporary.as_file().sync_all()?;
         temporary.persist(&self.checkpoint)?;
@@ -241,12 +278,41 @@ impl Policy {
         Ok(())
     }
 
+    fn reconcile(
+        &self,
+        store: &Store,
+        now: u64,
+        next: impl FnOnce() -> Result<Reading>,
+    ) -> Result<Value> {
+        let checkpoint = self.read_checkpoint()?;
+        if let Some(Checkpoint::Cut {
+            reading,
+            pending: true,
+        }) = checkpoint.as_ref()
+        {
+            // Replay the single previously admitted cut even if the publisher advanced or
+            // its evidence is now stale. Native fault transitions deduplicate this retry.
+            reading.check(&self.config.member, reading.observed_at_ms)?;
+            self.route(store, reading)?;
+            self.checkpoint(reading, false)?;
+        }
+        let reading = next()?;
+        let changed = self.validate_after(&reading, now, checkpoint.as_ref())?;
+        self.apply(store, &reading, changed)
+    }
+
     fn apply(&self, store: &Store, reading: &Reading, changed: bool) -> Result<Value> {
         if changed {
-            // Persist before routing. An identical cut may retry after a crash, and the
-            // native fault lifecycle deduplicates the transition.
-            self.checkpoint(reading)?;
+            self.checkpoint(reading, true)?;
         }
+        let row = self.route(store, reading)?;
+        if changed {
+            self.checkpoint(reading, false)?;
+        }
+        Ok(row)
+    }
+
+    fn route(&self, store: &Store, reading: &Reading) -> Result<Value> {
         let row = self.row(Some(reading));
         let objectives = BTreeSet::from([format!("{OBJECTIVE}/{}", self.config.member)]);
         crate::objective_faults::check_with_response(
@@ -280,10 +346,9 @@ pub fn sample(store: &Store) -> Option<Value> {
     static FAILING: AtomicBool = AtomicBool::new(false);
     static INVALID_BINDING: AtomicBool = AtomicBool::new(false);
     let policy = POLICY.get()?;
-    let row = match policy
-        .checked_reading(now_ms())
-        .and_then(|(reading, changed)| policy.apply(store, &reading, changed))
-    {
+    let row = match policy.reconcile(store, now_ms(), || {
+        trusted_evidence(&policy.config.evidence_file)
+    }) {
         Ok(row) => {
             FAILING.store(false, Ordering::Relaxed);
             row
@@ -349,6 +414,96 @@ mod tests {
         assert!(reading(1, 0, 1).check("dev5", evidence.end_ms).is_err());
         let payload = vec![b' '; MAX_BYTES as usize + 1];
         assert!(read_json::<Reading>(payload.as_slice()).is_err());
+    }
+
+    #[test]
+    fn pending_miss_and_recovery_replay_before_a_newer_cut_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("graph.db");
+        let policy = Policy {
+            config: ReadinessSloConfig {
+                executor: "node".into(),
+                member: "dev5".into(),
+                reviewer: "agent/node.ops".into(),
+                evidence_file: dir.path().join("unused.json"),
+            },
+            checkpoint: dir.path().join("readiness-slo-cut.json"),
+        };
+        let store = Store::open(&db, "node").unwrap();
+        let source = "version 2\nagent \"node.ops\" { command \"true\" }\n";
+        let intent = crate::graph::parse_intent(source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply(
+                &intent,
+                &preview.subject_tokens,
+                "readiness-pending-reviewer",
+            )
+            .unwrap();
+        let id = "slo-objective/node/fractal-api-readiness/dev5";
+
+        // Crash after writing a pending miss but before appending the fault.
+        let missed = reading(1, MINUTES, MINUTES - 11);
+        policy.checkpoint(&missed, true).unwrap();
+        assert!(store.operational_failure(id).unwrap().is_none());
+        drop(store);
+
+        // The pending cut is already stale, and the next fresh cut is inconclusive.
+        let store = Store::open(&db, "node").unwrap();
+        let successor = reading(5, 0, 0);
+        assert_eq!(
+            policy
+                .reconcile(&store, successor.end_ms, || Ok(successor.clone()))
+                .unwrap()["status"],
+            "no-data"
+        );
+        let first = store.operational_failure(id).unwrap().unwrap();
+        assert_eq!(first.status, "pending");
+        assert_eq!(first.reviewer, "agent/node.ops");
+
+        // Crash before recording recovery. A later miss must open a new episode,
+        // rather than being absorbed into the still-open old failure.
+        let met = reading(6, MINUTES, MINUTES);
+        policy.checkpoint(&met, true).unwrap();
+        drop(store);
+
+        let store = Store::open(&db, "node").unwrap();
+        let next_miss = reading(7, MINUTES, MINUTES - 11);
+        assert_eq!(
+            policy
+                .reconcile(&store, next_miss.end_ms, || Ok(next_miss.clone()))
+                .unwrap()["status"],
+            "missed"
+        );
+        let reopened = store.operational_failure(id).unwrap().unwrap();
+        assert_eq!(reopened.status, "pending");
+        assert_ne!(reopened.request, first.request);
+        assert!(matches!(
+            policy.read_checkpoint().unwrap(),
+            Some(Checkpoint::Cut { pending: false, .. })
+        ));
+
+        // Also tolerate a crash after native routing but before marking committed.
+        policy.checkpoint(&next_miss, true).unwrap();
+        let index = store.index().unwrap();
+        drop(store);
+        let store = Store::open(&db, "node").unwrap();
+        policy
+            .reconcile(&store, next_miss.end_ms, || Ok(next_miss.clone()))
+            .unwrap();
+        assert_eq!(store.index().unwrap(), index);
+        assert_eq!(
+            store.operational_failure(id).unwrap().unwrap().request,
+            reopened.request
+        );
     }
 
     #[test]

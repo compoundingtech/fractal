@@ -414,8 +414,10 @@ falling back to the fleet fault handler. A measured breach remains visible
 and the invalid binding appears in Usage and daemon logs. An unreachable but
 still-declared reviewer remains the owner. Missing, stale, invalid or
 indeterminate readings neither open nor resolve a fault. The local
-readiness-slo-cut.json checkpoint is advanced before routing. Replaying the
-same cut is safe. Keep this checkpoint across restart and rollback while using
+readiness-slo-cut.json checkpoint records a pending cut before routing and
+marks it committed after the idempotent transition. A restart replays an
+admitted pending cut before reading the next publication. Keep this checkpoint
+across restart and rollback while using
 the same source identity. The fault reports weekly objective compliance.
 Short outage detection and the publisher's transport remain separate.
 Before enabling both for the same member, the deployment must correlate the

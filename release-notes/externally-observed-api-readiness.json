@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Opt-in daemon-local admission for a trusted API readiness reading and one native fault per missed objective episode",
-  "replay": {"status": "none", "detail": "Existing claims and projections are unchanged. An enabled member persists its latest admitted observation in a local evidence checkpoint."},
+  "replay": {"status": "none", "detail": "Existing claims and projections are unchanged. An enabled member persists one admitted pending cut and replays it before accepting a successor after restart."},
   "schema": {"status": "none", "detail": "No SQL, client wire or claim schema change."},
   "rules": {"status": "none", "detail": "Uses existing system-only claims. The new readiness fault condition prevents fallback assignment when the explicit reviewer stops or retires. Other faults retain their routing rules."},
   "compatibility": {"status": "changed", "detail": "An enabled member adds a native API readiness objective. Builds that predate readiness_slo reject that optional config key; absent the key behavior is unchanged."},
