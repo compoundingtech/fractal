@@ -59,6 +59,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "limits", run: limits::open_limits },
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
+    Hook { name: "wake-lookup", run: wake_lookup::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
@@ -171,6 +172,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "arrangements", run: arrangements::rebuild },
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
+    Hook { name: "wake-lookup", run: wake_lookup::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
@@ -185,6 +187,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
+    ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
