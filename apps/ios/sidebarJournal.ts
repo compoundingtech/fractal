@@ -28,45 +28,78 @@ const recover = (state: JournalState): JournalEffect[] => {
   }
 };
 /** Unwired AsyncStorage host, following LocalDrafts' injected storage precedent.
- * One instance owns one public connection/scope. All mutation must go through dispatch;
- * effect callbacks must not await a nested dispatch on this serialized queue. */
+ * One instance owns one public connection/scope; close it before replacing that connection.
+ * Callbacks must honor signal and must not await a nested dispatch on this serialized queue. */
 export class SidebarJournal<TState extends JournalState, TEvent> {
   private pending: Promise<unknown> = Promise.resolve();
   private readonly key: string;
-  constructor(private readonly storage: JournalStorage, private readonly scope: MembershipScope, private readonly reducer: JournalReducer<TState, TEvent>, private readonly run: (effect: 'Send' | 'ReadBase' | 'Replan', state: TState) => Promise<void>) {
+  private readonly lifetime = new AbortController();
+  private queued = 0;
+  private restored?: TState;
+  constructor(private readonly storage: JournalStorage, private readonly scope: MembershipScope, private readonly reducer: JournalReducer<TState, TEvent>, private readonly run: (effect: 'Send' | 'ReadBase' | 'Replan', state: TState, signal: AbortSignal) => Promise<void>, private readonly limits = { maxQueued: 64, timeoutMs: 30000 }) {
+    if (!Number.isSafeInteger(limits.maxQueued) || limits.maxQueued < 1 || !Number.isSafeInteger(limits.timeoutMs) || limits.timeoutMs < 1) throw new Error('Invalid sidebar journal limits');
     this.key = `st3.sidebar.journal.v1:${JSON.stringify([scope.owner, scope.container, scope.endpoint, scope.host, scope.projection])}`;
   }
+  close(): void { this.lifetime.abort(); }
+  private assertOpen(): void { if (this.lifetime.signal.aborted) throw new Error('Sidebar journal closed'); }
   private serial<TResult>(work: () => Promise<TResult>): Promise<TResult> {
-    const next = this.pending.then(work); this.pending = next.catch(() => {}); return next;
+    if (this.lifetime.signal.aborted) return Promise.reject(new Error('Sidebar journal closed'));
+    if (this.queued >= this.limits.maxQueued) return Promise.reject(new Error('Sidebar journal queue full'));
+    this.queued++;
+    const next = this.pending.then(async () => {
+      this.assertOpen();
+      const timer = setTimeout(() => this.close(), this.limits.timeoutMs);
+      let onAbort = () => {};
+      try {
+        const stopped = new Promise<never>((_, reject) => {
+          onAbort = () => reject(new Error('Sidebar journal closed'));
+          this.lifetime.signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return await Promise.race([work(), stopped]);
+      } finally { clearTimeout(timer); this.lifetime.signal.removeEventListener('abort', onAbort); }
+    });
+    this.pending = next.catch(() => {});
+    return next.finally(() => { this.queued--; });
   }
   restore(): Promise<JournalRestore<TState>> {
     return this.serial(async () => {
       const raw = await this.storage.getItem(this.key);
+      this.assertOpen();
       if (raw === null) return { empty: true };
       try {
         const record: unknown = JSON.parse(raw);
         if (!record || typeof record !== 'object' || !('version' in record)) return { error: { type: 'InvalidRecord' } };
+        if (typeof record.version !== 'number' || !Number.isInteger(record.version) || record.version < 0 || record.version > 0xffffffff) return { error: { type: 'InvalidRecord' } };
         // Refuse unknown versions without invoking the current state decoder.
         if (record.version !== SIDEBAR_JOURNAL_VERSION) return { error: { type: 'Version', version: record.version } };
         if (!('state' in record) || Object.keys(record).length !== 2) return { error: { type: 'InvalidRecord' } };
         const state = this.reducer.decode(record.state);
         if (!state) return { error: { type: 'InvalidRecord' } };
         if (!sameScope(state.scope, this.scope) || state.request && !sameScope(state.request.fence.scope, this.scope)) return { error: { type: 'ScopeMismatch' } };
+        this.restored = state;
         return { state, effects: recover(state) };
       } catch { return { error: { type: 'InvalidRecord' } }; }
     });
   }
   dispatch(state: TState, event: TEvent): Promise<void> {
-    return this.serial(() => this.execute(state, this.reducer.reduce(state, event)));
+    return this.serial(() => {
+      if (this.restored) throw new Error('Resume restored sidebar journal first');
+      return this.execute(state, this.reducer.reduce(state, event));
+    });
   }
   /** Execute restored effects before accepting new edit events. Restore itself never sends. */
   resume(restored: { state: TState; effects: JournalEffect[] }): Promise<void> {
-    return this.serial(() => this.execute(restored.state, restored.effects));
+    return this.serial(async () => {
+      if (this.restored && this.restored !== restored.state) throw new Error('Sidebar journal restore identity mismatch');
+      await this.execute(restored.state, restored.effects);
+      this.restored = undefined;
+    });
   }
   private async execute(state: TState, effects: JournalEffect[]): Promise<void> {
     for (const effect of effects) {
+      this.assertOpen();
       if (!sameScope(state.scope, this.scope) || state.request && !sameScope(state.request.fence.scope, this.scope)) throw new Error('Sidebar journal scope mismatch');
-      if (effect === 'Send' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state); continue; }
+      if (effect === 'Send' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state, this.lifetime.signal); this.assertOpen(); continue; }
       let ack: TEvent;
       try {
         if (effect === 'PersistRemoval') { await this.storage.removeItem(this.key); continue; }
@@ -74,6 +107,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
         const raw = JSON.stringify({ version: SIDEBAR_JOURNAL_VERSION, state: this.reducer.encode(state) });
         ack = this.reducer.persisted(state, effect === 'PersistCompletion');
         await this.storage.setItem(this.key, raw);
+        this.assertOpen();
       } catch (error) {
         // Do not recursively retry persistence effects from StorageFailed or send past this barrier.
         this.reducer.reduce(state, this.reducer.storageFailed());
