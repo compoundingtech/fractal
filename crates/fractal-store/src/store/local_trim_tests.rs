@@ -629,6 +629,88 @@ fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agre
     assert_eq!(peer.replication_snapshot().unwrap().inventory.digest, from_nothing.inventory.digest, "the peer lists the same identities");
 }
 
+/// Each patch of the replication snapshot logs one line: what it marked, whether an exchange
+/// still held the snapshot so the patch copied all of it first, how long it held the build lock,
+/// and the generation every peer's next exchange then builds on from.
+#[test]
+fn a_trim_logs_each_snapshot_patch_and_whether_an_exchange_s_hold_made_it_copy() {
+    for hold in [false, true] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Arc::new(local_member("alder"));
+        store.set_trim_pause(std::time::Duration::ZERO);
+        store.set_trim_chunk_envelopes(1);
+        // No catch-up within the run: its stop is the one patch.
+        store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
+        for n in 0..30 {
+            apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&lines);
+        *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+        // An exchange that answered during the run keeps its snapshot until the run stops.
+        let exchange = Arc::new(Mutex::new(None));
+        let (hook_store, hook_exchange) = (Arc::clone(&store), Arc::clone(&exchange));
+        *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+            if chunk == 1 {
+                let snapshot = hook_store.replication_snapshot().unwrap();
+                if hold {
+                    *hook_exchange.lock().unwrap() = Some(snapshot);
+                }
+            }
+        }));
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+        store.trim_chunk_hook.lock().unwrap().take();
+        let patches = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|line| line.strip_prefix("st3: a trim patched the replication snapshot "))
+            .map(|fields| serde_json::from_str::<serde_json::Value>(fields).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(patches.len(), 1, "hold {hold}: {patches:?}");
+        let patch = &patches[0];
+        assert_eq!((patch["cached"].as_bool(), patch["cloned"].as_bool()), (Some(true), Some(hold)), "{patch}");
+        let marked = patch["marked"].as_u64().unwrap();
+        assert!(marked > 0 && marked <= patch["envelopes"].as_u64().unwrap(), "{patch}");
+        for field in ["lock_wait_ms", "held_ms", "generation"] {
+            assert!(patch[field].is_u64(), "{field}: {patch}");
+        }
+    }
+}
+
+/// A trim step's delete is timed statement by statement, each under its own name, so a slow
+/// chunk's line names the statement behind it; a delete's triggers count under the statement
+/// that fires them.
+#[test]
+fn a_trim_step_s_delete_times_each_of_its_statements() {
+    let store = local_member("alder");
+    for n in 0..6 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let ids = store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims WHERE kind='observer.observed' ORDER BY store_index LIMIT 3")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(ids.len(), 3);
+    let ((), stages) = super::checkpoint::stage_times::timing_deletes(|| delete_as_a_trim_step(&store, &ids));
+    let stages = stages.largest(usize::MAX);
+    for stage in ["claims", "events", "principals", "retire_claim"] {
+        assert_eq!(stages[stage]["count"].as_u64(), Some(3), "{stage}: {stages}");
+    }
+    // Outside a chunk nothing collects, and the delete works as before.
+    let rest = store
+        .readers
+        .get()
+        .query_row("SELECT id FROM claims WHERE kind='observer.observed' ORDER BY store_index LIMIT 1", [], |row| row.get::<_, String>(0))
+        .unwrap();
+    delete_as_a_trim_step(&store, &[rest]);
+}
+
 fn max_envelope_rowid(store: &Store) -> i64 {
     store.readers.get().query_row("SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes", [], |row| row.get(0)).unwrap()
 }

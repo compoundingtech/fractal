@@ -206,6 +206,25 @@ pub fn checkpointed_operations(connection: &Connection) -> Result<Vec<(String, S
         .map_err(Into::into)
 }
 
+/// What one `Store::mark_payloads_trimmed` did, for the line a trim logs at each patch.
+#[derive(Debug, Default)]
+pub struct SnapshotPatch {
+    /// Deleted envelopes the patch was given.
+    pub envelopes: usize,
+    /// Of those, the ones the snapshot listed with their payload, now marked payloadless.
+    pub marked: usize,
+    /// A snapshot was cached to patch.
+    pub cached: bool,
+    /// An exchange still held the cached snapshot, so the patch copied all of it first.
+    pub cloned: bool,
+    /// How long the patch waited for the snapshot build lock.
+    pub lock_wait: std::time::Duration,
+    /// How long it held that lock: the copy, if any, and the marks.
+    pub held: std::time::Duration,
+    /// The replica generation after the patch moved it.
+    pub generation: u64,
+}
+
 impl Store {
     /// One page of the manifest of a checkpoint: the tombstones this node holds for it and for
     /// every earlier checkpoint, envelopes first, each in sorted order. Checkpoints are named
@@ -409,22 +428,33 @@ impl Store {
     /// this one. Under the build lock, so a build that read the store before the deletes cannot
     /// publish its snapshot after this patch. A trim that deleted the newest envelope row has
     /// already moved the inventory generation, and the next snapshot is built from nothing.
-    pub fn mark_payloads_trimmed(&self, trimmed: &[ReplicaEnvelopeId]) -> Result<()> {
+    pub fn mark_payloads_trimmed(&self, trimmed: &[ReplicaEnvelopeId]) -> Result<SnapshotPatch> {
+        let mut patch = SnapshotPatch { envelopes: trimmed.len(), ..SnapshotPatch::default() };
         {
+            let waiting = std::time::Instant::now();
             let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
+            patch.lock_wait = waiting.elapsed();
+            let held = std::time::Instant::now();
             let mut cached = crate::read_budget::lock_sync(&self.replication_snapshot)?;
             if let Some(previous) = cached.take() {
-                let mut snapshot = Arc::try_unwrap(previous).unwrap_or_else(|shared| (*shared).clone());
+                patch.cached = true;
+                let mut snapshot = Arc::try_unwrap(previous).unwrap_or_else(|shared| {
+                    patch.cloned = true;
+                    (*shared).clone()
+                });
                 for identity in trimmed {
                     if snapshot.inventory.mark_payloadless(identity) {
                         snapshot.envelope_rows = snapshot.envelope_rows.saturating_sub(1);
+                        patch.marked += 1;
                     }
                 }
                 *cached = Some(Arc::new(snapshot));
             }
+            patch.held = held.elapsed();
         }
         self.replica_inventory_changed();
-        Ok(())
+        patch.generation = self.replica_generation.load(Ordering::Acquire);
+        Ok(patch)
     }
 
     /// Whether evidence may cite this claim: it is stored, or a checkpoint dropped it.

@@ -9,11 +9,14 @@
 
 use super::*;
 
+pub mod stage_times;
 pub mod tombstones;
+
+use stage_times::delete_statement;
 
 pub use tombstones::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
-    CheckpointManifestPage, CheckpointManifestRequest, verify_checkpoint_manifest,
+    CheckpointManifestPage, CheckpointManifestRequest, SnapshotPatch, verify_checkpoint_manifest,
 };
 pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
@@ -392,64 +395,86 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
     let authoritative = super::retired::authoritative(transaction)?;
     for claim in claims {
         if authoritative {
-            super::retired::retire_claim_tx(transaction, &claim.id)?;
+            delete_statement("retire_claim", || super::retired::retire_claim_tx(transaction, &claim.id))?;
         }
         if let Some(operation) = &claim.operation_id {
-            transaction
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
-                .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
+            delete_statement("operations", || -> Result<()> {
+                transaction
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
+                Ok(())
+            })?;
         }
-        super::events::remove_claim_tx(transaction, &claim.id)?;
+        delete_statement("events", || super::events::remove_claim_tx(transaction, &claim.id))?;
         if authoritative {
             // What a deleted claim cites, or what cites it, a local cut never needs again.
-            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h60426679c653 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE citer=?1")?.execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
-            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b4af7f83e06 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE cited=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h22fa37082c14 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            delete_statement("local_trim_citations", || -> Result<()> {
+                transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h60426679c653 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE citer=?1")?.execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+                transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b4af7f83e06 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE cited=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h22fa37082c14 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+                Ok(())
+            })?;
         }
-        super::principals::forget_claim_tx(transaction, &claim.id)?;
+        delete_statement("principals", || super::principals::forget_claim_tx(transaction, &claim.id))?;
         // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
         // compiles every trigger program again. Per row that cost several times the delete.
         // A local cut may drop a claim whose envelope stays: its raw record goes with it, and
         // the payload keeps the envelope whole for peers. Shared checkpoints drop whole envelopes.
         if authoritative {
-            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2943e551c4ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h2eb3b0d71dfa owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            delete_statement("claim_records", || -> Result<()> {
+                transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2943e551c4ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h2eb3b0d71dfa owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+                Ok(())
+            })?;
         }
-        transaction
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
-            .execute(/* sqlite-large-value: allow-for-now lv-h2851fd201348 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+        delete_statement("claims", || -> Result<()> {
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
+                .execute(/* sqlite-large-value: allow-for-now lv-h2851fd201348 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            Ok(())
+        })?;
     }
     for envelope in envelopes {
         if authoritative {
-            super::retired::retire_envelope_tx(transaction, &envelope.writer, envelope.sequence, &envelope.envelope_hash)?;
+            delete_statement("retire_envelope", || {
+                super::retired::retire_envelope_tx(transaction, &envelope.writer, envelope.sequence, &envelope.envelope_hash)
+            })?;
         }
-        let batch: Option<String> = transaction
-            .prepare_cached(
-                "SELECT batch_id FROM replica_envelopes
-                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-            )?
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h5c9af66a6a3a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
+        let batch: Option<String> = delete_statement("envelope_batch", || -> Result<Option<String>> {
+            Ok(transaction
+                .prepare_cached(
+                    "SELECT batch_id FROM replica_envelopes
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                )?
+                .query_row(
+                    /* sqlite-large-value: allow-for-now lv-h5c9af66a6a3a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten())
+        })?;
         for table in [
             "replica_records",
             "replica_envelope_signatures",
             "replica_envelope_holds",
             "replica_envelopes",
         ] {
-            transaction
-                .prepare_cached(&format!(
-                    /* sqlite-large-value: allow-for-now lv-h5f5425870484 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
-                ))?
-                .execute(/* sqlite-large-value: allow-for-now lv-h9bdfd18f2c1e owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash])?;
+            delete_statement(table, || -> Result<()> {
+                transaction
+                    .prepare_cached(&format!(
+                        /* sqlite-large-value: allow-for-now lv-h5f5425870484 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+                    ))?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h9bdfd18f2c1e owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash])?;
+                Ok(())
+            })?;
         }
         if let Some(batch) = batch {
-            transaction
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
+            delete_statement("batches", || -> Result<()> {
+                transaction
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
                  AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
-                .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
+                    .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
+                Ok(())
+            })?;
         }
     }
     Ok(())
