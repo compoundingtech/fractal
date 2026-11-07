@@ -146,6 +146,13 @@ fn fold_with_deadline(store: &Store, repositories: &[String]) -> anyhow::Result<
         let now = client_now_ms();
         let mut cards = super::client_agent_resources_selected(store, false, index, Some((&members, &[])))?;
         let mut deadline = classification_deadline(store, &cards, now)?;
+        // Consume the internal runtime input on this metrics-only copy before ordinary
+        // presentation strips it. Neither runtime_state nor its transport enters client-v0.
+        for card in &mut cards {
+            if let Some(runtime) = card.as_object_mut().expect("agent resource").remove("_runtime_state") {
+                card["runtime_state"] = runtime;
+            }
+        }
         super::overlay_agent_resources_at(store, &mut cards, &super::client_timestamp(now), now, None)?;
         if !repositories.is_empty() {
             super::overlay_population_repositories(store, &mut cards)?;
@@ -240,8 +247,23 @@ pub fn register_metrics(meter: &Meter, summary: Arc<RwLock<Summary>>) {
         }).build();
 }
 
+/// An uninitialized deployment extension is deliberately off, including in embedded callers.
+pub(super) fn enabled(store: &Store) -> bool {
+    store.extension::<crate::config::AgentPopulationEnabled>().0.get().copied().unwrap_or(false)
+}
+
 pub fn start(store: &Arc<Store>, repositories: Vec<String>) {
-    if !crate::otel::metrics_enabled() { return; }
+    if !enabled(store) || !crate::otel::metrics_enabled() { return; }
+    let _worker = start_with_meter(store, repositories, || opentelemetry::global::meter("st3"));
+}
+
+fn start_with_meter(
+    store: &Arc<Store>,
+    repositories: Vec<String>,
+    meter: impl FnOnce() -> Meter,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !enabled(store) { return None; }
+    let meter = meter();
     let wake = Arc::new(tokio::sync::Notify::new());
     let commits = Arc::clone(&wake);
     // The same writer notification used by published-list refreshers: never read
@@ -249,7 +271,7 @@ pub fn start(store: &Arc<Store>, repositories: Vec<String>) {
     let observer = store.observe_commits(move |_| commits.notify_one());
     let store = Arc::downgrade(store);
     let repositories: Arc<[String]> = repositories.into();
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let _observer = observer;
         let summary = Arc::new(RwLock::new(Summary::default()));
         let mut registered = false;
@@ -269,7 +291,7 @@ pub fn start(store: &Arc<Store>, repositories: Vec<String>) {
                     if let Err(error) = result {
                         eprintln!("st3: WARN population metrics refresh failed: {error:#}");
                     } else if !registered {
-                        register_metrics(&opentelemetry::global::meter("st3"), Arc::clone(&summary));
+                        register_metrics(&meter, Arc::clone(&summary));
                         registered = true;
                     }
                 }
@@ -284,7 +306,7 @@ pub fn start(store: &Arc<Store>, repositories: Vec<String>) {
             }
             wait_for_refresh(&wake, &summary, next, REFRESH_PAUSE.max(started.elapsed())).await;
         }
-    });
+    }))
 }
 
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {
@@ -328,6 +350,62 @@ async fn wait_for_refresh(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn population_metrics_deployment_switch_controls_real_worker_and_registration() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        let store = Arc::new(Store::open_memory("example").unwrap());
+        let before = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+        assert!(!enabled(&store));
+        assert!(start_with_meter(&store, Vec::new(), || panic!("disabled startup must not obtain a meter")).is_none());
+        assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), before);
+        provider.force_flush().unwrap();
+        assert!(exporter.get_finished_metrics().unwrap().iter()
+            .flat_map(|resource| resource.scope_metrics()).flat_map(|scope| scope.metrics()).next().is_none());
+
+        let disabled = Arc::new(Store::open_memory("example").unwrap());
+        disabled.extension::<crate::config::AgentPopulationEnabled>().0.set(false).unwrap();
+        let before = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+        assert!(start_with_meter(&disabled, Vec::new(), || panic!("explicit false must not obtain a meter")).is_none());
+        assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), before);
+
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"example.worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n",
+            "example",
+        ).unwrap();
+        store.apply_internal(&intent, "population-activation").unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "incarnation_id":"one", "runtime_id":"wrapper"})),
+            ("harness.observed", json!({"state":"working", "driver":"claude", "incarnation_id":"one"})),
+        ] {
+            store.append_claim(&crate::model::ClaimInput {
+                subject: "agent/example.worker".into(), kind: kind.into(), actor: None,
+                fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(true).unwrap();
+        let worker = start_with_meter(&store, Vec::new(), || provider.meter("st3")).unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                provider.force_flush().unwrap();
+                let finished = exporter.get_finished_metrics().unwrap();
+                let names: BTreeSet<_> = finished.iter().flat_map(|resource| resource.scope_metrics())
+                    .flat_map(|scope| scope.metrics()).map(|metric| metric.name()).collect();
+                if ["st.agents", "st.attention.open", "st.agents.refresh.last_success"]
+                    .into_iter().all(|name| names.contains(name)) { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("enabled startup must fold and register all population instruments");
+        worker.abort();
+        let _ = worker.await;
+        provider.shutdown().unwrap();
+    }
 
     fn bucket(state: &'static str, reason: &'static str) -> Bucket {
         Bucket { driver: "unattributed".into(), kind: "unattributed", repo: "unattributed".into(),

@@ -98,6 +98,9 @@ pub struct Config {
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
+    /// Deployment opt-in for population and attention metrics; off until rollout prerequisites pass.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_population_enabled: bool,
     /// Closed repository registry R for population metrics; empty maps every repo to unattributed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agent_population_repositories: Vec<String>,
@@ -141,6 +144,10 @@ pub struct Config {
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
 }
+
+/// Deployment opt-in, pinned for the lifetime of this daemon; absent means disabled.
+#[derive(Default)]
+pub struct AgentPopulationEnabled(pub std::sync::OnceLock<bool>);
 
 /// Validated population repository registry, pinned for the lifetime of this daemon.
 #[derive(Default)]
@@ -694,6 +701,7 @@ impl Default for Config {
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             github: GithubConfig::default(),
+            agent_population_enabled: false,
             agent_population_repositories: Vec::new(),
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
@@ -1270,6 +1278,21 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn population_export_requires_explicit_configuration_opt_in() {
+        let default = super::Config::default();
+        assert!(!default.agent_population_enabled);
+        assert!(!toml::to_string(&default).unwrap().contains("agent_population_enabled"));
+        let legacy: super::Config = toml::from_str("").unwrap();
+        assert!(!legacy.agent_population_enabled);
+        for enabled in [false, true] {
+            let config: super::Config = toml::from_str(&format!("agent_population_enabled = {enabled}")).unwrap();
+            assert_eq!(config.agent_population_enabled, enabled);
+            let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.agent_population_enabled, enabled);
+        }
+    }
+
     #[test]
     fn population_repository_registry_is_explicit_bounded_and_canonical() {
         let mut config = super::Config::default();

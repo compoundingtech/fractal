@@ -209,8 +209,10 @@ pub fn start_published_lists(state: &AppState) {
     super::mailbox_metrics::start(&state.store);
     client_v0::published_runtimes::register_metrics(&state.store);
     delivery_metrics::start(&state.store);
-    population_metrics::start(&state.store, state.store
-        .extension::<crate::config::AgentPopulationRepositories>().0.get().cloned().unwrap_or_default());
+    if population_metrics::enabled(&state.store) {
+        population_metrics::start(&state.store, state.store
+            .extension::<crate::config::AgentPopulationRepositories>().0.get().cloned().unwrap_or_default());
+    }
     spawn(
         state.store.clone(),
         |store| store.published_runtime_list(),

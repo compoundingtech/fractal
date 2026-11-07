@@ -14855,9 +14855,9 @@ fn population_repository_observations_require_current_host_and_workspace() {
 
 #[test]
 fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
-    let mut statements = Vec::new();
-    for count in [1, 32] {
+    for (count, enabled) in [(1, false), (32, false), (1, true), (32, true)] {
         let store = Store::open_memory("node").unwrap();
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(enabled).unwrap();
         let mut source = String::from("version 2\n");
         for i in 0..count {
             source.push_str(&format!(
@@ -14883,12 +14883,13 @@ fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
         let rows = client_agent_resources(&store, false, "again", index).unwrap();
         let work = scope.finish();
         assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|card| ["runtime_state", "_runtime_state", "observed_repository"]
+            .iter().all(|field| card.get(*field).is_none())),
+            "population-only evidence leaked into ordinary agent resources");
         // The identical fixture at pinned base b0bbc6dc uses six statements
         // for both cardinalities: population evidence must add no request reads.
         assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
-        statements.push(work.statements);
     }
-    assert_eq!(statements[0], statements[1], "{statements:?}");
 }
 
 #[test]

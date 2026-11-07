@@ -924,6 +924,26 @@ only after independent GO on this revision, in separate exporter/store and drive
 PRs; this documentation changes no runtime behavior.
 Consumer dashboards and alerts require telemetry-registry entries before rollout.
 
+### Rollout prerequisites and deployment switch
+
+Population export is explicitly opt-in per daemon: the root TOML key
+`agent_population_enabled = false` is the default, including when omitted.
+While off, the daemon starts no population refresher, subscribes no population
+commit observer, registers none of the three population/attention instruments,
+and performs no population queries on the ordinary roster/card path.
+Enabling the ordinary OTLP metrics pipeline alone does not enable population.
+
+Set `agent_population_enabled = true` only after the independent review GO,
+enabled-driver child lifecycle coverage, authoritative attention ownership,
+host inventory, repository registry R, cardinality allocation, and applicable
+telemetry-registry requirements above have been satisfied. Configure
+`agent_population_repositories` alongside the switch; an empty registry remains
+valid and maps all repositories to `unattributed`, not permission to discover
+new label values. Restart the daemon after changing either key. Population
+instruments register only after the first successful complete snapshot and
+also require the existing metrics pipeline to be enabled. To disable population
+without disabling other telemetry, set the switch to false and restart.
+
 ## Per-agent delivery health
 
 The daemon's existing `st3` meter exports observable f64 gauge

@@ -7267,6 +7267,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         })
     })?);
     store
+        .extension::<fractal_daemon::config::AgentPopulationEnabled>()
+        .0
+        .set(config.agent_population_enabled)
+        .map_err(|_| anyhow::anyhow!("population activation already initialized"))?;
+    store
         .extension::<fractal_daemon::config::AgentPopulationRepositories>()
         .0
         .set(config.agent_population_repositories.clone())
