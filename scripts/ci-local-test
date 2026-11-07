@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -21,23 +22,53 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 
 
 def kill_tree(process):
-    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then reap it: killed alone, a run frozen
-    mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the worker test, 2026-11-03)."""
-    tree, grew = {process.pid}, True
-    while grew:
-        grew = False
-        for status in Path('/proc').glob('[0-9]*/status'):
-            try:
-                parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
-            except (OSError, StopIteration, ValueError):
-                continue
-            if parent in tree and int(status.parent.name) not in tree:
-                tree.add(int(status.parent.name))
-                grew = True
-    for pid in tree:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-    process.wait()
+    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then wait until every one of them has exited and reap
+    the run: killed alone, a run frozen mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the
+    worker test, 2026-11-03). Each process is held by a pidfd from the moment it is found, so a PID that is reused is never signalled, and
+    the return waits on each exit itself: a killed process can take seconds to exit on a loaded runner (two merge-group failures of the
+    frozen-lane test, 2026-11-07, which polled for 2 s)."""
+    held = {process.pid: os.pidfd_open(process.pid)}
+    try:
+        grew = True
+        while grew:
+            grew = False
+            for status in Path('/proc').glob('[0-9]*/status'):
+                pid = int(status.parent.name)
+                if pid in held or parent_of(status) not in held:
+                    continue
+                with contextlib.suppress(ProcessLookupError):
+                    pidfd = os.pidfd_open(pid)
+                    # Held, and still the child found above: it is the same process, not a reuse of its PID.
+                    if parent_of(status) in held:
+                        held[pid] = pidfd
+                        grew = True
+                    else:
+                        os.close(pidfd)
+        for pidfd in held.values():
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        poller, deadline = select.poll(), time.monotonic() + 60
+        for pidfd in held.values():
+            poller.register(pidfd, select.POLLIN)
+        alive = set(held.values())
+        while alive and time.monotonic() < deadline:
+            # An exited process's pidfd stays readable: each is dropped from the poll once it is.
+            for pidfd, _ in poller.poll(1000):
+                poller.unregister(pidfd)
+                alive.discard(pidfd)
+        if alive:
+            raise AssertionError(f'killed but still alive after 60 s: {sorted(pid for pid, pidfd in held.items() if pidfd in alive)}')
+    finally:
+        for pidfd in held.values():
+            os.close(pidfd)
+        process.wait()
+
+
+def parent_of(status):
+    try:
+        return int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
+    except (OSError, StopIteration, ValueError):
+        return None
 
 
 class CiLocal(unittest.TestCase):
@@ -651,16 +682,15 @@ exit 0
             os.kill(pid, signal.SIGSTOP)
 
         def gone(pid):
+            # Exited: a zombie (Z), or dead and being reaped by its parent this moment (X), or already reaped. A pidfd turns readable at
+            # the first of these, so right after kill_tree a lane can still show X for an instant.
             try:
-                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] in ('Z', 'X')
             except OSError:
                 return True
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in (lane, stage) if not gone(pid)])
+        self.addCleanup(run.stdout.close)
         kill_tree(run)
-        for _ in range(200):
-            if gone(lane) and gone(stage):
-                break
-            time.sleep(0.01)
         self.assertTrue(gone(lane) and gone(stage), 'the frozen lane outlived the cleanup of its run')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
