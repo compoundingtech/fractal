@@ -82,7 +82,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
             let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
             let refused = sensitive && ancestry == HarnessAncestry::Unavailable;
-            assert_eq!(response.status(), if refused { StatusCode::BAD_REQUEST } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
+            assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
             response.into_body().collect().await.unwrap();
         }
         server.abort();
