@@ -480,6 +480,43 @@ describe('session inventory independence', () => {
   )
 })
 
+describe('mission decode evidence', () => {
+  it.live('publishes rejected missions, retains last-good rows on all-bad frames and recovers', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.missions)
+      yield* settle
+      const mission = {
+        id: 'mission/example', kind: 'mission', title: 'Example', state: 'ready',
+        revision: '1', mission_revision: '1', updated_at: snapshot.created_at,
+        runs: [], run_generations: {},
+      }
+      const broken = { ...mission, id: 'mission/broken', runs: 'not-a-list' }
+      const frame = (items: readonly Record<string, unknown>[]) => gateway.sendUnchecked({
+        kind: 'snapshot', id: gateway.subscription('missions').id, collection: 'missions',
+        has_more: false, items, order: items.map((row) => row.id), snapshot,
+      })
+      frame([mission, broken])
+      yield* settle
+      expect(live.registry.get(live.source.missions)).toMatchObject({
+        _tag: 'Observed', freshness: 'live', value: [{ id: mission.id }],
+      })
+      expect(live.registry.get(live.source.missionsDecode!)).toMatchObject({
+        decodeStale: false, undecodable: [{ _tag: 'Rejected', id: broken.id, path: expect.stringContaining('runs') }],
+      })
+      frame([broken])
+      yield* settle
+      expect(live.registry.get(live.source.missions)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: mission.id }],
+      })
+      expect(live.registry.get(live.source.missionsDecode!).decodeStale).toBe(true)
+      frame([mission])
+      yield* settle
+      expect(live.registry.get(live.source.missionsDecode!)).toEqual({ undecodable: [], decodeStale: false })
+      expect(live.registry.get(live.source.missions)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+    })),
+  )
+})
+
 
 describe('connection loss detection', () => {
   const withBrowser = (test: (live: LiveSource, gateway: Gateway, browser: EventTarget, documentEvents: EventTarget) => Effect.Effect<void>) =>

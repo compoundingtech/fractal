@@ -175,8 +175,8 @@ export interface Fleet {
 }
 
 /**
- * SDK decode evidence for the latest roster observation. `decodeStale`: every row in the latest
- * frame failed to decode, so the observed rows are the retained last-good roster.
+ * SDK decode evidence for the latest collection observation. `decodeStale`: every row in the latest
+ * frame failed to decode, so the observed rows are the retained last-good collection.
  */
 export interface RosterDecode {
   readonly undecodable: readonly Undecodable[]
@@ -337,6 +337,8 @@ export interface DataSource {
   /** Explicit recovery for a failed or ended roster follow; a healthy follow is untouched. */
   readonly retryAgents?: () => void
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
+  /** Rows the SDK could not decode for the missions feed; absent sources decode every row. */
+  readonly missionsDecode?: Atom.Atom<RosterDecode>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
   readonly events: Atom.Atom<Feed<readonly GatewayEvent[]>>
