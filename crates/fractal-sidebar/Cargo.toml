@@ -20,4 +20,5 @@ ratatui = { workspace = true, optional = true }
 [dev-dependencies]
 # Exercise optional adapters and painter in ordinary workspace tests, not consumer builds.
 fractal_sidebar_self = { package = "fractal-sidebar", path = ".", features = ["ratatui", "client"] }
+
 jsonschema = { version = "0.33", default-features = false }
