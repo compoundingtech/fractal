@@ -102,7 +102,7 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
       }}
       {...stylex.props(styles.scroll)}
     >
-      <DecodeNotice noun="alert" decode={decode} shown={shownIds} />
+      {feed._tag === 'Observed' ? <DecodeNotice noun="alert" decode={decode} shown={shownIds} /> : null}
       {feed._tag === 'Waiting' ? <p ref={message} role="status" tabIndex={-1} {...stylex.props(styles.empty)}>Loading alerts…</p>
         : feed._tag === 'Unavailable' ? (
           <p ref={message} role="alert" tabIndex={-1} {...stylex.props(styles.empty)}>

@@ -8,7 +8,7 @@ vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn(), useNow: vi.fn() }))
 
 import type { AlertAction } from '../conversation/alerts/alert-action-port.ts'
-import { observed } from '../data/source.ts'
+import { observed, unavailable } from '../data/source.ts'
 import { AlertsList } from './AlertsTab.tsx'
 
 const now = Date.parse('2026-11-01T12:00:00Z')
@@ -169,5 +169,21 @@ describe('AlertsList decode notice', () => {
     />))
     expect(row(first)).not.toBeNull()
     expect(host.querySelector('[data-wf-attention-decode] [role="status"]')?.textContent).toContain('1 alert could not be shown')
+  })
+
+  it('hides retained decode evidence when alert read access is refused', async () => {
+    const decode = {
+      decodeStale: false,
+      undecodable: [{ _tag: 'Rejected' as const, id: 'attention/broken', path: 'actions', reason: 'Expected an array' }],
+    }
+    await act(async () => root.render(<AlertsList feed={observed({ value: [] })} decode={decode} now={now} onOpen={() => {}} />))
+    expect(host.querySelector('[data-wf-attention-decode]')).not.toBeNull()
+    await act(async () => root.render(<AlertsList
+      feed={unavailable({ reason: 'ungranted', detail: 'Read access refused.' })}
+      decode={decode} now={now} onOpen={() => {}}
+    />))
+    expect(host.querySelector('[data-wf-attention-decode]')).toBeNull()
+    expect(host.textContent).not.toContain('attention/broken')
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('Read access to alerts has not been granted.')
   })
 })
