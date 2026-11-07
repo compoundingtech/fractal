@@ -808,7 +808,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
 function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean }) {
   const row = agent === undefined ? undefined : sidebarRow({ agent, stale })
-  return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
+  // Beside the title only what asks for attention: amber when it needs the person, red when it failed. Calm states show nothing.
+  const marked = row?.status === 'waiting' || row?.status === 'failed' ? row : undefined
+  return <ThreadHeader {...props} status={marked?.status} statusLabel={marked?.statusLabel} statusSince={marked?.statusSince} />
 }
 
 
