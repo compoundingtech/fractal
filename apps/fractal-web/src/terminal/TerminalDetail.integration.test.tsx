@@ -253,6 +253,7 @@ const live = async (session: FakeSession, text: string) => {
 describe('terminal detail', () => {
   it.each([
     ['loading', waiting, 'Loading terminal…'],
+    ['unauthorized', unavailable({ reason: 'unauthorized', detail: 'private diagnostic', retryable: true }), "This browser's access to the daemon has expired or was revoked. Pair the device again."],
     ['ungranted', unavailable({ reason: 'ungranted', detail: 'Terminal viewing is not permitted.' }), 'Terminal viewing is not permitted.'],
     ['unsupported', unavailable({ reason: 'unsupported', detail: 'This gateway does not provide terminals.' }), 'This gateway does not provide terminals.'],
     ['failed', unavailable({ reason: 'failed', detail: 'This agent has no terminal.', code: 'no-terminal' }), 'This agent has no terminal.'],

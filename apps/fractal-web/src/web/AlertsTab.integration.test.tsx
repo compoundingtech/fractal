@@ -7,7 +7,7 @@ import { Attention, decodeUnknownSync } from '@fractal/client/schema'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('../data/react.tsx', () => ({ useAttention: vi.fn(), useAttentionDecode: vi.fn(), useDataSource: vi.fn(), useNow: vi.fn() }))
 
-import { observed, unavailable } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable } from '../data/source.ts'
 import { AlertsList } from './AlertsTab.tsx'
 
 const now = Date.parse('2026-11-01T12:00:00Z')
@@ -69,6 +69,13 @@ describe('AlertsList rows', () => {
 })
 
 describe('AlertsList, after a row leaves the feed', () => {
+  it('explains rejected credentials quietly without reconnect advice or Retry', async () => {
+    await act(async () => root.render(<AlertsList feed={unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} now={now} onOpen={() => {}} onSelect={() => {}} />))
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredMessage)
+    expect(host.querySelector('[role="alert"], button')).toBeNull()
+    expect(host.textContent).not.toMatch(/private diagnostic|reconnect/)
+  })
+
   it('moves focus to the row that took its place', async () => {
     await show([first, second, third])
     rowButton(second).focus()

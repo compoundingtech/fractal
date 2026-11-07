@@ -26,7 +26,7 @@ import {
   useFleetSelection,
   useSubjectSelection,
 } from '../data/react.tsx'
-import type { Feed, Fleet } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed, type Fleet } from '../data/source.ts'
 import { folders } from '../folders/client.ts'
 import { liveAncestor, project, type ProjectedFolder } from '../folders/core.mts'
 import { refusalText } from '../folders/edit.ts'
@@ -539,7 +539,7 @@ const LegacyAgentFolders = React.memo(
           <p {...stylex.props(styles.notice)}>No agents match these filters.</p>
         ) : null}
         <div role="status" {...stylex.props(styles.notice)}>
-          {snapshot.phase === 'fixture' ? (
+          {snapshot.reason === 'unauthorized' ? credentialExpiredMessage : snapshot.phase === 'fixture' ? (
             'Fixture folders · local preview'
           ) : snapshot.phase === 'synced' ? (
             snapshot.detail

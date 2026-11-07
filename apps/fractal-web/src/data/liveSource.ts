@@ -43,6 +43,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { readAuthorization } from './source.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
@@ -152,13 +153,30 @@ export const liveSource = ({
 }): LiveSource => {
   const { baseUrl } = options
   const origin = typeof location === 'undefined' ? new URL(baseUrl).origin : location.origin
+  const transportFetch = options.fetch ?? globalThis.fetch.bind(globalThis)
   const fetch = instrumentFetch({
-    fetchImpl: nativeAgentFetch({ origin, fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis) }),
+    fetchImpl: nativeAgentFetch({ origin, fetchImpl: async (input, init) => {
+      const response = await transportFetch(input, init)
+      const url = new URL(input instanceof Request ? input.url : String(input), baseUrl)
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+      if (method.toUpperCase() === 'GET' && url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/v1/client/') &&
+        response.status === 403) {
+        const body: unknown = await response.clone().json().catch(() => undefined)
+        if (readAuthorization({ status: response.status, response: body }) === 'unauthorized') {
+          credentialExpired = true
+          readRejection = 'Browser credential expired or revoked'
+          registry.set(readRefusal, readRejection)
+          for (const deny of deniedReaders) deny(readRejection)
+        }
+      }
+      return response
+    } }),
     origin,
     traceContext: options.traceContext,
   })
   const deniedReaders = new Set<(message: string) => void>()
   let readRejection: string | undefined
+  let credentialExpired = false
   let connectionAttempt = 1
   const noGrants: Grants = {
     actions: 'ungranted',
@@ -653,7 +671,7 @@ export const liveSource = ({
       // Snapshot-only readers have no follow controller, but still lose read authority on rejection.
       const loss = get(networkLoss)
       const refusal = get(readRefusal)
-      if (refusal !== undefined) return unavailable({ reason: 'ungranted', detail: refusal, ...(telemetryKind === 'terminal' ? { retryable: false } : {}) })
+      if (refusal !== undefined) return unavailable({ reason: credentialExpired ? 'unauthorized' : 'ungranted', detail: refusal, ...(telemetryKind === 'terminal' ? { retryable: false } : {}) })
       return loss !== undefined && latest._tag === 'Observed' ? { ...latest, freshness: 'stale' as const } : latest
     })
     retained = {

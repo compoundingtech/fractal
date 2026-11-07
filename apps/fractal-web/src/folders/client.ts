@@ -3,6 +3,7 @@ import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, Arrange
 import { Effect, Schema } from 'effect'
 import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema/read'
 import { formatDuration } from '@fractal/ui/human-time/format'
+import { clientReadAuthorization, credentialExpiredMessage } from '../data/source.ts'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 const isCapabilities = Schema.is(Schema.toEncoded(CapabilitiesSchema))
@@ -79,6 +80,7 @@ export interface FolderState {
   readonly detail?: string
   /** Why `unavailable`: `ungranted` is this connection's standing capability, which no retry changes. */
   readonly unavailableReason?: 'ungranted' | 'failed' | 'interrupted' | 'refused'
+  readonly reason?: 'unauthorized'
   readonly readOnly?: boolean
   readonly refusal?: ArrangementRefusal
   readonly sidebarCandidates?: readonly { readonly id: string; readonly label: string }[]
@@ -132,6 +134,7 @@ export const sidebarFolders = ({ gateway, socket }: {
     })
   const retry = () => { if (follow !== undefined) follow.refresh(); else if (!starting) void start() }
   const publish = (next: FolderState) => {
+    if (current.reason === 'unauthorized') return
     if (!active) return
     if (next.doc === current.doc && next.phase === current.phase && next.detail === current.detail && next.unavailableReason === current.unavailableReason &&
       next.refusal === current.refusal && next.retryEdit === current.retryEdit && next.retryReady === current.retryReady && next.readOnly === current.readOnly &&
@@ -141,6 +144,11 @@ export const sidebarFolders = ({ gateway, socket }: {
         next.sidebarCandidates?.every((candidate, index) => candidate.id === current.sidebarCandidates?.[index]?.id && candidate.label === current.sidebarCandidates?.[index]?.label)))) return
     current = next
     get.setSelf(next)
+  }
+  const rejectCredential = (error: unknown): boolean => {
+    if (clientReadAuthorization(error) !== 'unauthorized') return false
+    publish({ doc, phase: 'unavailable', reason: 'unauthorized', detail: credentialExpiredMessage, readOnly: true, edit })
+    return true
   }
   const start = async () => {
     starting = true
@@ -194,16 +202,19 @@ export const sidebarFolders = ({ gateway, socket }: {
             return
           }
           case 'ReadFailed':
+            if (rejectCredential(event.error)) return
             publish({ ...current, phase: 'unavailable', unavailableReason: 'failed', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
             return
           case 'Interrupted':
             publish({ ...current, phase: 'unavailable', unavailableReason: 'interrupted', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
             return
           case 'Refused':
+            if (rejectCredential(event.error)) return
             publish({ ...current, phase: 'unavailable', unavailableReason: 'refused', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })
         }
       } })
     } catch (error) {
+      if (rejectCredential(error)) return
       publish({ ...current, phase: 'unavailable', unavailableReason: 'failed', detail: error instanceof Error ? error.message : String(error), readOnly: true })
     } finally { starting = false }
   }

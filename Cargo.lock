@@ -1960,6 +1960,7 @@ dependencies = [
  "fractal-resource-protocol",
  "fractal-resource-providers",
  "fractal-resource-wasip2",
+ "fractal-runtime",
  "fractal-schema",
  "fractal-wire",
  "kdl",
