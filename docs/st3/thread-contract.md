@@ -45,6 +45,10 @@ the Inbox row. When admission sees a closed thread, the owning person must expli
 before sending a reply. A fresh linked ask can still show the closed thread. An authorized rename changes the shared title everywhere and
 preserves the thread, messages, links, unread state and current lifecycle.
 
+Show rename, close and reopen as events in the thread timeline with their actor and time.
+Project each event from its accepted lifecycle claim and reuse the operation identity to
+deduplicate retries. These events do not add messages, notifications or unread replies.
+
 An embedded panel's disclosure state is local to its client and placement. A compact row carries
 the title, message count, lifecycle status and any unread hint on one line where space permits.
 Expanding or opening a dedicated thread tab navigates to the same resource. Agent sessions and
@@ -135,7 +139,9 @@ through each context and another authorized surface. Verify that B needs its own
 thread stays closed until reopened, and a same-title thread and an unrelated transcript
 message never appear in its history. Run with persisted state across daemon restart and verify
 incremental updates, bounded pagination, a revoked grant during a write, a forbidden
-cross-thread quote, and a duplicated request key. Across two members, verify the same-key retry after exchange and
+cross-thread quote, and a duplicated request key. Verify that rename, close and reopen appear
+once with the correct actor and time, without affecting message or unread counts. Across two
+members, verify the same-key retry after exchange and
 show that local acceptance, peer observation and agent delivery are distinct. Verify that an
 agent moved using the existing placement mechanism can continue the thread when the prior
 host is offline, within ordinary conversation availability and without claiming unreplicated
