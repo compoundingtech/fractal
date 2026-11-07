@@ -79,8 +79,9 @@ fn decision_inputs_body_byte_limit_refuses_instead_of_truncating() {
 #[test]
 fn decision_inputs_limits_exclude_repaired_history() {
     let (store, opened, bytes) = decision_inputs_limit_fixture();
-    let repaired = tree_claim(&store, TREE, "answered", DECIDER, json!({
-        "question":"ship", "answer":"yes"
+    let raw = tree_document(&store, "doc/example/limit-repair", b"unreadable source");
+    let repaired = tree_claim(&store, TREE, "damaged", SEAT, json!({
+        "raw":raw, "records":1, "imported":0, "malformed":1
     })).unwrap();
     store.seal_local_batches().unwrap();
     store.connection.batched(|tx| -> Result<()> {
@@ -99,8 +100,9 @@ fn decision_inputs_limits_exclude_repaired_history() {
 #[test]
 fn decision_inputs_limits_count_all_claims_and_sum_utf8_body_bytes() {
     let (store, _, opened_bytes) = decision_inputs_limit_fixture();
-    let answered = tree_claim(&store, TREE, "answered", DECIDER, json!({
-        "question":"ship", "answer":"✓"
+    let raw = tree_document(&store, "doc/example/limit-bytes", b"unreadable source");
+    let answered = tree_claim(&store, TREE, "damaged", SEAT, json!({
+        "raw":raw, "records":1, "imported":0, "malformed":1, "detail":"✓"
     })).unwrap();
     let (answer_bytes, answer_chars): (u64, u64) = store.readers.get().query_row(
         "SELECT length(CAST(body AS BLOB)),length(body) FROM claims WHERE id=?1",
