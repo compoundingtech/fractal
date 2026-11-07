@@ -1,48 +1,106 @@
-//! Observe completed local GET-agents requests on the same boundary as HTTP telemetry.
-//! This shadow meter is process-local. A restart or missing boundary leaves unknown minutes.
+//! Local GET-agents counts from the HTTP telemetry boundary, retained by a single minute writer.
+mod ledger;
+
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use parking_lot::Mutex;
 use serde::Serialize;
 
 use crate::otel::RequestOutcome;
+use ledger::Ledger;
 
 const MINUTE_MS: u64 = 60_000;
 const WINDOW: u64 = 7 * 24 * 60;
-const CAPACITY: usize = WINDOW as usize + 1;
 const FAST_LIMIT: Duration = Duration::from_millis(100);
 const GOAL_PERCENT: u128 = 95;
+const LEDGER_NAME: &str = "agents-request-slo-v1.sqlite3";
 
-#[derive(Clone, Default)]
-struct Minute {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Receipt {
     slot: u64,
-    complete: bool,
     eligible: u64,
     fast: u64,
 }
 
+#[derive(Clone, Copy)]
 struct Boundary {
     slot: u64,
     at: Instant,
     aligned: bool,
 }
 
-struct Meter {
-    minutes: Box<[Minute]>,
-    boundary: Option<Boundary>,
+#[derive(Default)]
+struct Pending {
+    minutes: [Option<Receipt>; 2],
+    latest_slot: Option<u64>,
+    rewind_from: Option<u64>,
 }
 
-impl Default for Meter {
-    fn default() -> Self {
-        Self {
-            minutes: vec![Minute::default(); CAPACITY].into_boxed_slice(),
-            boundary: None,
+impl Pending {
+    fn observe_slot(&mut self, slot: u64) {
+        if self.latest_slot.is_some_and(|latest| slot < latest) {
+            self.minutes = [None; 2];
+            self.rewind_from = Some(self.rewind_from.map_or(slot, |prior| prior.min(slot)));
         }
+        self.latest_slot = Some(slot);
+    }
+
+    fn record(&mut self, slot: u64, fast: bool) {
+        self.observe_slot(slot);
+        let index = (slot % 2) as usize;
+        let receipt = match &mut self.minutes[index] {
+            Some(receipt) if receipt.slot == slot => receipt,
+            entry => entry.insert(Receipt {
+                slot,
+                ..Receipt::default()
+            }),
+        };
+        receipt.eligible += 1;
+        receipt.fast += u64::from(fast);
+    }
+
+    fn boundary(
+        &mut self,
+        previous: Option<Boundary>,
+        now_ms: u64,
+        at: Instant,
+    ) -> (Boundary, Option<Receipt>, Option<u64>) {
+        let slot = now_ms / MINUTE_MS;
+        self.observe_slot(slot);
+        let rewind = self.rewind_from.take();
+        let boundary = Boundary {
+            slot,
+            at,
+            // Even an aligned startup tick starts a partial minute.
+            aligned: previous.is_some() && now_ms % MINUTE_MS <= 1_000,
+        };
+        let receipt = previous
+            .filter(|previous| {
+                rewind.is_none()
+                    && slot == previous.slot + 1
+                    && previous.aligned
+                    && boundary.aligned
+                    && (Duration::from_secs(59)..=Duration::from_secs(61))
+                        .contains(&at.duration_since(previous.at))
+            })
+            .map(|previous| {
+                let index = (previous.slot % 2) as usize;
+                self.minutes[index]
+                    .take()
+                    .filter(|receipt| receipt.slot == previous.slot)
+                    .unwrap_or(Receipt {
+                        slot: previous.slot,
+                        ..Receipt::default()
+                    })
+            });
+        (boundary, receipt, rewind)
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Verdict {
     Met,
@@ -50,7 +108,7 @@ enum Verdict {
     Unknown,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 pub(super) struct Reading {
     through_unix_ms: u64,
     window_minutes: u64,
@@ -58,6 +116,38 @@ pub(super) struct Reading {
     eligible: u128,
     fast: u128,
     verdict: Verdict,
+    storage_ready: bool,
+}
+
+impl Reading {
+    fn new(end: u64, storage_ready: bool) -> Self {
+        Self {
+            through_unix_ms: end * MINUTE_MS,
+            window_minutes: WINDOW,
+            covered_minutes: 0,
+            eligible: 0,
+            fast: 0,
+            verdict: Verdict::Unknown,
+            storage_ready,
+        }
+    }
+
+    fn add(&mut self, eligible: u64, fast: u64) {
+        self.covered_minutes += 1;
+        self.eligible += u128::from(eligible);
+        self.fast += u128::from(fast);
+    }
+
+    fn finish(mut self) -> Self {
+        if self.covered_minutes == WINDOW && self.eligible > 0 {
+            self.verdict = if self.fast * 100 >= self.eligible * GOAL_PERCENT {
+                Verdict::Met
+            } else {
+                Verdict::Missed
+            };
+        }
+        self
+    }
 }
 
 fn count(method: &str, route: &str, outcome: RequestOutcome, elapsed: Duration) -> Option<bool> {
@@ -71,88 +161,81 @@ fn count(method: &str, route: &str, outcome: RequestOutcome, elapsed: Duration) 
     }
 }
 
-impl Meter {
-    fn minute(&mut self, slot: u64) -> &mut Minute {
-        let minute = &mut self.minutes[(slot % CAPACITY as u64) as usize];
-        if minute.slot != slot {
-            *minute = Minute {
-                slot,
-                ..Minute::default()
-            };
-        }
-        minute
-    }
+static PENDING: LazyLock<Mutex<Pending>> = LazyLock::new(|| Mutex::new(Pending::default()));
+static PUBLISHED: Mutex<Option<Reading>> = Mutex::new(None);
 
-    fn record(&mut self, slot: u64, fast: bool) {
-        let minute = self.minute(slot);
-        if !minute.complete {
-            minute.eligible += 1;
-            minute.fast += u64::from(fast);
-        }
-    }
-
-    fn boundary(&mut self, now_ms: u64, at: Instant) {
-        let slot = now_ms / MINUTE_MS;
-        // The startup call is a partial boundary even if startup coincides with the UTC edge.
-        let aligned = self.boundary.is_some() && now_ms % MINUTE_MS <= 1_000;
-        if let Some(previous) = self.boundary.replace(Boundary { slot, at, aligned }) {
-            if slot < previous.slot {
-                // A backwards wall-clock step would give new requests old slot identities.
-                self.minutes.fill(Minute::default());
-            } else if slot == previous.slot + 1
-                && previous.aligned
-                && aligned
-                && (Duration::from_secs(59)..=Duration::from_secs(61))
-                    .contains(&at.duration_since(previous.at))
-            {
-                self.minute(previous.slot).complete = true;
-            }
-        }
-    }
-
-    fn read(&self, end: u64) -> Reading {
-        let mut reading = Reading {
-            through_unix_ms: end * MINUTE_MS,
-            window_minutes: WINDOW,
-            covered_minutes: 0,
-            eligible: 0,
-            fast: 0,
-            verdict: Verdict::Unknown,
-        };
-        for minute in &self.minutes {
-            if minute.complete && (end.saturating_sub(WINDOW)..end).contains(&minute.slot) {
-                reading.covered_minutes += 1;
-                reading.eligible += u128::from(minute.eligible);
-                reading.fast += u128::from(minute.fast);
-            }
-        }
-        if reading.covered_minutes == WINDOW && reading.eligible > 0 {
-            reading.verdict = if reading.fast * 100 >= reading.eligible * GOAL_PERCENT {
-                Verdict::Met
-            } else {
-                Verdict::Missed
-            };
-        }
-        reading
-    }
+fn now_ms() -> u64 {
+    super::client_now_ms() as u64
 }
-
-static METER: LazyLock<Mutex<Meter>> = LazyLock::new(|| Mutex::new(Meter::default()));
 
 pub(super) fn record(method: &str, route: &str, outcome: RequestOutcome, elapsed: Duration) {
     if let Some(fast) = count(method, route, outcome, elapsed) {
-        METER
-            .lock()
-            .record(super::client_now_ms() as u64 / MINUTE_MS, fast);
+        let mut pending = PENDING.lock();
+        // Read UTC inside the lock so a request cannot arrive after its minute has closed.
+        pending.record(now_ms() / MINUTE_MS, fast);
     }
 }
 
-pub(super) fn boundary(now_ms: u64, at: Instant) {
-    METER.lock().boundary(now_ms, at);
+pub(super) fn read() -> Reading {
+    let pending = PENDING.lock();
+    let end = now_ms() / MINUTE_MS;
+    let published = *PUBLISHED.lock();
+    published
+        .filter(|reading| {
+            pending.rewind_from.is_none() && reading.through_unix_ms == end * MINUTE_MS
+        })
+        .unwrap_or_else(|| Reading::new(end, published.is_some()))
 }
 
-pub(super) fn read(now_ms: u64) -> Reading {
-    METER.lock().read(now_ms / MINUTE_MS)
+/// The daemon starts this only after it reserves the socket for its state directory.
+/// Awaiting each blocking update bounds the writer to one receipt in flight.
+pub(super) async fn run(state_dir: PathBuf, node: String) {
+    let path = std::sync::Arc::new(state_dir.join(LEDGER_NAME));
+    let node = std::sync::Arc::new(node);
+    let mut previous = None;
+    let mut invalidate_from = None;
+    let mut ledger = None;
+    loop {
+        let (boundary, receipt) = {
+            let mut pending = PENDING.lock();
+            let (boundary, receipt, rewind) = pending.boundary(previous, now_ms(), Instant::now());
+            if let Some(slot) = rewind.or_else(|| previous.is_none().then_some(boundary.slot)) {
+                invalidate_from = Some(invalidate_from.map_or(slot, |prior: u64| prior.min(slot)));
+                *PUBLISHED.lock() = None;
+            }
+            (boundary, receipt)
+        };
+        previous = Some(boundary);
+        let db_path = path.clone();
+        let db_node = node.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            smallclaims::task_cpu::blocking("slo.agents_request_minutes", || {
+                let mut ledger = match ledger {
+                    Some(ledger) => ledger,
+                    None => Ledger::open(&db_path, &db_node)?,
+                };
+                let reading = ledger.update(boundary.slot, receipt, invalidate_from)?;
+                Ok::<_, anyhow::Error>((ledger, reading))
+            })
+        })
+        .await
+        .context("join agents request SLO writer")
+        .and_then(|result| result);
+        match result {
+            Ok((stored, reading)) => {
+                ledger = Some(stored);
+                invalidate_from = None;
+                *PUBLISHED.lock() = Some(reading);
+            }
+            Err(error) => {
+                ledger = None;
+                *PUBLISHED.lock() = None;
+                tracing::warn!(%error, "agents request SLO ledger unavailable");
+            }
+        }
+        let now = now_ms();
+        tokio::time::sleep(Duration::from_millis(MINUTE_MS - now % MINUTE_MS + 5)).await;
+    }
 }
 
 #[cfg(test)]
@@ -173,74 +256,75 @@ mod tests {
         for outcome in [RequestOutcome::Cancelled, RequestOutcome::ClientError] {
             assert_eq!(classify(outcome, Duration::ZERO), None);
         }
-        assert_eq!(
-            count(
-                "POST",
-                "/v1/client/agents",
-                RequestOutcome::Ok,
-                Duration::ZERO
-            ),
-            None
-        );
-        assert_eq!(
-            count(
-                "GET",
-                "/v1/client/agents/{id}",
-                RequestOutcome::Ok,
-                Duration::ZERO
-            ),
-            None
-        );
+        for (method, route) in [
+            ("POST", "/v1/client/agents"),
+            ("GET", "/v1/client/agents/{id}"),
+        ] {
+            assert_eq!(
+                count(method, route, RequestOutcome::Ok, Duration::ZERO),
+                None
+            );
+        }
     }
 
     #[test]
-    fn complete_idle_minutes_count_as_coverage_but_partial_and_skipped_do_not() {
-        let mut meter = Meter::default();
-        let at = Instant::now();
-        meter.boundary(20_000, at);
-        meter.record(0, false);
-        meter.boundary(60_005, at + Duration::from_secs(40));
-        meter.record(1, true);
-        meter.boundary(120_005, at + Duration::from_secs(100));
-        meter.boundary(240_005, at + Duration::from_secs(220));
-        meter.boundary(300_005, at + Duration::from_secs(280));
-        let reading = meter.read(5);
+    fn only_complete_minutes_emit_receipts_and_covered_idle_is_zero() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let mut previous = None;
+        let mut tick = |pending: &mut Pending, millis| {
+            let (boundary, receipt, rewind) =
+                pending.boundary(previous, millis, start + Duration::from_millis(millis));
+            previous = Some(boundary);
+            (receipt, rewind)
+        };
+
+        assert_eq!(tick(&mut pending, 20_000), (None, None));
+        pending.record(0, false);
+        assert_eq!(tick(&mut pending, 60_005), (None, None));
+        pending.record(1, true);
+        pending.record(2, false);
         assert_eq!(
-            (reading.covered_minutes, reading.eligible, reading.fast),
-            (2, 1, 1)
+            tick(&mut pending, 120_005),
+            (
+                Some(Receipt {
+                    slot: 1,
+                    eligible: 1,
+                    fast: 1
+                }),
+                None
+            )
         );
-        assert_eq!(reading.verdict, Verdict::Unknown);
+        assert_eq!(tick(&mut pending, 240_005), (None, None));
+        assert_eq!(
+            tick(&mut pending, 300_005),
+            (
+                Some(Receipt {
+                    slot: 4,
+                    eligible: 0,
+                    fast: 0
+                }),
+                None
+            )
+        );
+        pending.record(2, false);
+        assert_eq!(tick(&mut pending, 360_005), (None, Some(2)));
     }
 
     #[test]
-    fn requires_full_window_and_nonzero_eligible_traffic() {
-        let mut meter = Meter::default();
-        let at = Instant::now();
-        for slot in 0..=WINDOW + 1 {
-            meter.boundary(slot * MINUTE_MS, at + Duration::from_secs(slot * 60));
-        }
-        assert_eq!(meter.read(WINDOW + 1).verdict, Verdict::Unknown);
-
-        let mut meter = Meter::default();
-        for slot in 0..=WINDOW + 2 {
-            meter.boundary(slot * MINUTE_MS, at + Duration::from_secs(slot * 60));
-            if slot == 1 {
-                meter.record(slot, false);
+    fn requires_full_coverage_and_eligible_traffic() {
+        let reading = |covered, eligible, fast| {
+            Reading {
+                covered_minutes: covered,
+                eligible,
+                fast,
+                ..Reading::new(WINDOW, true)
             }
-            if slot == 2 {
-                for _ in 0..19 {
-                    meter.record(slot, true);
-                }
-            }
-            if slot == WINDOW + 1 {
-                meter.record(slot, false);
-                meter.record(slot, false);
-            }
-        }
-        assert_eq!(meter.read(WINDOW).verdict, Verdict::Unknown);
-        assert_eq!(meter.read(WINDOW + 1).verdict, Verdict::Met);
-        assert_eq!(meter.read(WINDOW + 2).eligible, 21);
-        assert_eq!(meter.read(WINDOW + 2).verdict, Verdict::Missed);
-        assert_eq!(Meter::default().read(WINDOW + 2).verdict, Verdict::Unknown);
+            .finish()
+        };
+        assert_eq!(reading(WINDOW - 1, 20, 19).verdict, Verdict::Unknown);
+        assert_eq!(reading(WINDOW, 0, 0).verdict, Verdict::Unknown);
+        assert_eq!(reading(WINDOW, 20, 19).verdict, Verdict::Met);
+        assert_eq!(reading(WINDOW, 21, 19).verdict, Verdict::Missed);
     }
 }

@@ -7560,6 +7560,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.clone(),
         usize::from(config.fleet_id.is_some()),
     )));
+    tokio::spawn(fractal_daemon::task_cpu::account("slo.agents_request_minutes", fractal_daemon::api::run_agents_request_slo(
+        config.state_dir.clone(),
+        config.node.clone(),
+    )));
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
         store.clone(),
         fractal_daemon::recorder::receipt_path(&config.state_dir),

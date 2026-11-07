@@ -1620,10 +1620,8 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     let mut seats_until = 0;
     let mut unsettled = None;
     loop {
-        let now_ms = client_now_ms() as u64;
-        let minute = now_ms / 60_000;
+        let minute = client_now_ms() as u64 / 60_000;
         let (at, daemon_ns) = (Instant::now(), smallclaims::windows::process_cpu_ns());
-        agents_request_slo::boundary(now_ms, at);
         let catching_up = store.replication_catching_up();
         let closed = {
             let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1665,6 +1663,11 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
         let now = client_now_ms() as u64;
         tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
     }
+}
+
+/// Retain completed local agent-list request minutes in the daemon state directory.
+pub async fn run_agents_request_slo(state_dir: std::path::PathBuf, node: String) {
+    agents_request_slo::run(state_dir, node).await;
 }
 
 pub use crate::peer::track_remote_reads;
@@ -9859,7 +9862,7 @@ fn doctor_report_within(
     let report_status = doctor_status(&checks);
     let mut performance = crate::performance::snapshot();
     performance["seatAdmission"] = admission;
-    performance["agentsRequestSloShadow"] = json!(agents_request_slo::read(client_now_ms() as u64));
+    performance["agentsRequestSloShadow"] = json!(agents_request_slo::read());
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
