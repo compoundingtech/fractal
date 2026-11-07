@@ -79,6 +79,35 @@ fn a_summary_takes_each_field_from_the_newest_observation_that_has_it() {
     }
 }
 
+#[test]
+fn notice_summary_does_not_advance_a_populated_shared_cache_over_a_claim_backlog() {
+    let store = seat_with(2);
+    let warm_cut = store.index().unwrap();
+    store.status_at(Some(SEAT), None, Some(warm_cut)).unwrap();
+    let before = {
+        let cache = store.fractal.subject_cache.lock().unwrap();
+        assert!(!cache.statuses.is_empty(), "exercise an already populated cache");
+        (cache.through, cache.statuses.len())
+    };
+    for index in 0..32 {
+        notice_raw_observation(
+            &store, "agent/example/backlog", "runtime.observed",
+            &format!("summary-backlog-{index}"), "backlog-origin", 100 + index,
+            json!({"status":"running", "incarnation_id":"unrelated"}),
+        );
+    }
+    let through = store.index().unwrap();
+    assert!(through > before.0, "the cache has a claim backlog to process");
+    for cut in [None, Some(through)] {
+        let summary = store.status_summary_at(SEAT, cut).unwrap();
+        assert_eq!(summary.store_index, through);
+        let cache = store.fractal.subject_cache.lock().unwrap();
+        assert_eq!((cache.through, cache.statuses.len()), before,
+            "an incarnation-only reduction must neither advance nor maintain the shared cache");
+    }
+}
+
+
 /// Model retained or replicated rows without the public append boundary rejecting reserved kinds.
 fn notice_raw_observation(
     store: &Store,

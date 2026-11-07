@@ -5626,9 +5626,10 @@ impl Store {
                 )?;
             }
         }
-        // A snapshot reduction is kept per subject until a claim it depends on arrives.
+        // Incarnation reads are uncached: pinning their logical cut must not
+        // scan an unrelated backlog to maintain shared caches they never use.
         let newest = match at_index {
-            Some(_) if selected_owner_run.is_none() => {
+            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation) => {
                 Some(self.advance_subject_cache(&connection, store_index)?)
             }
             _ => None,
