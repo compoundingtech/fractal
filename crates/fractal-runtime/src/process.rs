@@ -344,7 +344,9 @@ impl ExecRuntime {
                 // A failed spawn leaves nothing that could still die with this process. Unjoined,
                 // the leader is still `systemd-run`, alone in the session it started.
                 unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-                join?;
+                join.with_context(|| {
+                    format!("the exec's join of its scope {unit} could not be read, so it was ended")
+                })?;
                 anyhow::bail!(
                     "the exec did not join its scope {unit} within {}ms, so it was ended",
                     self.scope_join_limit.as_millis()
