@@ -4,9 +4,9 @@ import * as Atom from 'effect/reactivity/Atom'
 import { defaultEnvironment } from './defaultEnvironment.ts'
 import { CellEnvironment, layerMemory } from './environment.ts'
 import * as Store from './store.ts'
-import type { BootFields, CellBinding, CellStoreShape, Tier } from './store.ts'
+import type { BootFields, CellBinding, CellStoreShape, Retired, Tier } from './store.ts'
 
-export type { BootFields, CellIssue, Tier } from './store.ts'
+export type { BootFields, CellIssue, Retired, Tier } from './store.ts'
 export { bootKey } from './store.ts'
 
 /**
@@ -33,14 +33,14 @@ interface SpecBase<A, I> {
 export interface GlobalSpec<A, I> extends SpecBase<A, I> {
   readonly scope: 'global'
   /** Reads a retired storage format once when nothing is stored yet. */
-  readonly seed?: () => A | undefined
+  readonly seed?: (retired: Retired) => A | undefined
 }
 export interface ScopedSpec<A, I> extends SpecBase<A, I> {
   readonly scope: Exclude<Scope, 'global'>
   /** Bound the members of this cell per owner: least recently written go first, also under quota. */
   readonly retain?: number
   /** Reads a retired storage format once when nothing is stored yet for this owner and member. */
-  readonly seed?: (owner: string, member?: string) => A | undefined
+  readonly seed?: (retired: Retired, owner: string, member?: string) => A | undefined
 }
 
 /** A scoped cell is a family: one owner id, plus an optional member (e.g. conversation) within it. */
@@ -99,7 +99,7 @@ export function make<A, I>(spec: GlobalSpec<A, I> | ScopedSpec<A, I>): Atom.Writ
   const tier = spec.tier ?? 'shared'
   if (tier === 'boot' && spec.boot === undefined) throw new Error(`Boot cell ${spec.key} needs a boot projection`)
   if (tier === 'sensitive' && spec.scope !== 'person') throw new Error(`Sensitive cell ${spec.key} must be person-scoped`)
-  const bindingSpec = (key: string, seed: (() => A | undefined) | undefined, retain?: { readonly prefix: string; readonly max: number }): Store.CellBindingSpec<A, I> => ({
+  const bindingSpec = (key: string, seed: ((retired: Retired) => A | undefined) | undefined, retain?: { readonly prefix: string; readonly max: number }): Store.CellBindingSpec<A, I> => ({
     key, tier, retain, seed,
     schema: spec.schema, version: spec.version, migrate: spec.migrate, default: spec.default, boot: spec.boot,
   })
@@ -114,11 +114,24 @@ export function make<A, I>(spec: GlobalSpec<A, I> | ScopedSpec<A, I>): Atom.Writ
     const key = member === undefined ? familyPrefix : `${familyPrefix}/${segment(member)}`
     const existing = family.get(key)
     if (existing !== undefined) return existing
-    const ownerSeed = seed === undefined ? undefined : () => seed(owner, member)
+    const ownerSeed = seed === undefined ? undefined : (retired: Retired) => seed(retired, owner, member)
     const atom = atomOf(() => store().bind(bindingSpec(key, ownerSeed, retain === undefined ? undefined : { prefix: `${familyPrefix}/`, max: retain })))
     family.set(key, atom)
     return atom
   }
+}
+
+/** A retired `wf.ui@1` entry decoded with `schema`, or undefined when absent or invalid. */
+export const retiredEntry = <A, I>(retired: Retired, schema: Schema.Codec<A, I>, key: string, version = 1): A | undefined => {
+  const value = retired.entry(key, version)
+  if (value === undefined) return undefined
+  const decoded = Schema.decodeUnknownOption(schema)(value)
+  return decoded._tag === 'Some' ? decoded.value : undefined
+}
+/** A retired raw key read as a finite number. */
+export const retiredNumber = (retired: Retired, key: string): number | undefined => {
+  const value = Number(retired.raw(key) ?? Number.NaN)
+  return Number.isFinite(value) ? value : undefined
 }
 
 /** Revoke and sign-out: removes everything the owner has stored, in this and every other window. */

@@ -26,8 +26,18 @@ export interface CellBindingSpec<A, I> {
   /** Keep only the `max` most recently written keys under `prefix`; also the eviction pool under quota. */
   readonly retain?: { readonly prefix: string; readonly max: number } | undefined
   /** Supplies a first value when nothing is stored, e.g. from a retired storage format. Written once. */
-  readonly seed?: (() => A | undefined) | undefined
+  readonly seed?: ((retired: Retired) => A | undefined) | undefined
 }
+
+/** Read-only access to storage formats cells replaced. Seeds validate what they read. */
+export interface Retired {
+  /** A raw key outside the cell roots. */
+  readonly raw: (key: string) => string | undefined
+  /** One entry of the retired `wf.ui@1` document, if it was written at `version`. */
+  readonly entry: (key: string, version?: number) => unknown
+}
+/** The document every persisted atom shared before cells (retired 2026-11-07). Nothing writes it now. */
+export const retiredDocumentKey = 'wf.ui@1'
 
 export interface CellBinding<A> {
   readonly read: () => A
@@ -118,6 +128,24 @@ export const make = ({ debounceMs = 150, writer = globalThis.crypto.randomUUID()
   }
 
   // A queue, not a ref: writes made before the flushing fiber first runs must still schedule a flush.
+  let retiredEntries: Readonly<Record<string, { readonly version?: unknown; readonly value?: unknown }>> | undefined
+  const retired: Retired = {
+    raw: environment.retired,
+    entry: (key, version = 1) => {
+      if (retiredEntries === undefined) {
+        retiredEntries = {}
+        try {
+          const document: unknown = JSON.parse(environment.retired(retiredDocumentKey) ?? 'null')
+          if (typeof document === 'object' && document !== null && 'entries' in document && typeof document.entries === 'object' && document.entries !== null) {
+            retiredEntries = document.entries as typeof retiredEntries
+          }
+        } catch { /* An unreadable document seeds nothing. */ }
+      }
+      const found = retiredEntries![key]
+      return found !== undefined && found.version === version ? found.value : undefined
+    },
+  }
+
   const pending = yield* Queue.unbounded<void>()
   const schedule = () => { Queue.offerUnsafe(pending, undefined) }
 
@@ -271,7 +299,7 @@ export const make = ({ debounceMs = 150, writer = globalThis.crypto.randomUUID()
       if (envelope === undefined) {
         envelope = load()
         if (envelope === undefined) {
-          const seeded = spec.seed?.()
+          const seeded = spec.seed?.(retired)
           if (seeded !== undefined) { write(seeded); return seeded }
           if (spec.boot !== undefined) project(spec.boot(spec.default))
           return spec.default

@@ -16,6 +16,8 @@ export class CellEnvironment extends Context.Service<CellEnvironment, {
   readonly session: KeyValueStore.KeyValueStore
   readonly changes: Stream.Stream<StorageChange>
   readonly pageHide: Stream.Stream<unknown>
+  /** Reads a key some retired storage format wrote outside the cell roots, for one-time seeding. */
+  readonly retired: (key: string) => string | undefined
 }>()('fractal-web/state/CellEnvironment') {}
 
 const storageStore = (storage: () => Storage) =>
@@ -33,6 +35,9 @@ export const layerBrowser: Layer.Layer<CellEnvironment> = Layer.effect(CellEnvir
       Stream.map((event) => ({ key: event.key, newValue: event.newValue })),
     ),
     pageHide: Stream.fromEventListener(window, 'pagehide'),
+    retired: (key) => {
+      try { return window.localStorage.getItem(key) ?? undefined } catch { return undefined }
+    },
   }
 }))
 
@@ -40,7 +45,7 @@ export const layerBrowser: Layer.Layer<CellEnvironment> = Layer.effect(CellEnvir
 export const layerMemory: Layer.Layer<CellEnvironment> = Layer.effect(CellEnvironment, Effect.gen(function* () {
   const local = yield* Effect.service(KeyValueStore.KeyValueStore).pipe(Effect.provide(KeyValueStore.layerMemory))
   const session = yield* Effect.service(KeyValueStore.KeyValueStore).pipe(Effect.provide(KeyValueStore.layerMemory))
-  return { local, session, changes: Stream.never, pageHide: Stream.never }
+  return { local, session, changes: Stream.never, pageHide: Stream.never, retired: () => undefined }
 }))
 
 /** True when this document can use localStorage; privacy modes and sandboxed frames can refuse it. */

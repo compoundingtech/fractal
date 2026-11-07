@@ -52,6 +52,7 @@ export const memoryOrigin = ({ quota = Number.POSITIVE_INFINITY }: { readonly qu
         queue = events
         for (const change of received.splice(0)) Queue.offerUnsafe(events, change)
       })),
+      retired: (key: string) => local.get(key),
       pageHide: Stream.callback<void>((events) => Effect.sync(() => {
         const listener = () => { Queue.offerUnsafe(events, undefined) }
         hide.listeners.add(listener)

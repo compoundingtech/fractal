@@ -1,21 +1,6 @@
 import { Schema } from 'effect'
 
 import * as StateCell from '../cell/StateCell.ts'
-import { legacyEntry } from '../legacy.ts'
-
-const legacy = <A, I>(schema: Schema.Codec<A, I>, key: string): A | undefined => {
-  const value = legacyEntry(key)
-  if (value === undefined) return undefined
-  const decoded = Schema.decodeUnknownOption(schema)(value)
-  return decoded._tag === 'Some' ? decoded.value : undefined
-}
-const storedNumber = (key: string): number | undefined => {
-  if (typeof window === 'undefined') return undefined
-  try {
-    const value = Number(window.localStorage.getItem(key) ?? Number.NaN)
-    return Number.isFinite(value) ? value : undefined
-  } catch { return undefined }
-}
 
 export const RightDockTab = Schema.Literals(['details', 'changes', 'resources'])
 export type RightDockTab = typeof RightDockTab.Type
@@ -35,9 +20,9 @@ export const rightDock = StateCell.make({
   default: defaultRightDock,
   tier: 'boot',
   boot: ({ open, width }) => ({ 'dock.open': open, 'dock.width': Math.round(width) }),
-  seed: () => {
-    const tab = legacy(RightDockTab, 'inspector.view')
-    const width = storedNumber('composition.live.rightPanel')
+  seed: (retired) => {
+    const tab = StateCell.retiredEntry(retired, RightDockTab, 'inspector.view')
+    const width = StateCell.retiredNumber(retired, 'composition.live.rightPanel')
     return tab === undefined && width === undefined ? undefined : { ...defaultRightDock, ...(tab === undefined ? {} : { tab }), ...(width === undefined ? {} : { width }) }
   },
 })
@@ -55,9 +40,9 @@ export const leftSidebar = StateCell.make({
   default: defaultLeftSidebar,
   tier: 'boot',
   boot: ({ open, ratio }) => ({ 'sidebar.open': open, 'sidebar.ratio': ratio }),
-  seed: () => {
-    const closed = legacy(Schema.Boolean, 'round2.sidebarClosed')
-    const ratio = legacy(Schema.Finite, 'round2.sidebarRatio')
+  seed: (retired) => {
+    const closed = StateCell.retiredEntry(retired, Schema.Boolean, 'round2.sidebarClosed')
+    const ratio = StateCell.retiredEntry(retired, Schema.Finite, 'round2.sidebarRatio')
     return closed === undefined && ratio === undefined ? undefined : { open: closed !== true, ratio: ratio ?? defaultLeftSidebar.ratio }
   },
 })

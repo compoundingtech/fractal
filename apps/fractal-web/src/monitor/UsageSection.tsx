@@ -119,8 +119,9 @@ export interface UsageSectionMemory {
 }
 
 /** Uncontrolled memory under one localStorage key, for stories and isolated hosts. */
-const useStoredMemory = (storageKey: string): UsageSectionMemory => {
-  const [state, setState] = React.useState(() => ({ open: stored(`${storageKey}.open`) === 'true', height: storedHeight(`${storageKey}.height`) }))
+const useStoredMemory = (storageKey: string, controlled: boolean): UsageSectionMemory => {
+  // A controlled section never touches storage, so embeds stay off the host page's storage.
+  const [state, setState] = React.useState(() => controlled ? { open: false, height: DEFAULT_HEIGHT } : { open: stored(`${storageKey}.open`) === 'true', height: storedHeight(`${storageKey}.height`) })
   return { ...state, onChange: (next) => {
     setState(next)
     remember(`${storageKey}.open`, String(next.open))
@@ -136,7 +137,7 @@ export const UsageSection = ({ view, onOpenUsage, storageKey = 'wf.sidebar.usage
   readonly memory?: UsageSectionMemory
 }): React.ReactNode => {
   const narrow = React.useContext(NarrowLayoutContext)
-  const fallback = useStoredMemory(storageKey)
+  const fallback = useStoredMemory(storageKey, memory !== undefined)
   const remembered = memory ?? fallback
   const open = remembered.open
   // Dragging previews locally every frame; only a commit reaches the memory.

@@ -132,6 +132,19 @@ describe('StateCell', () => {
     expect(calls).toBe(1)
   })
 
+  it('seeds a gateway cell from its retired wf.ui@1 entry', () => {
+    const origin = memoryOrigin()
+    origin.local.set('wf.ui@1', JSON.stringify({ version: 1, entries: { 'gw-a:sidebar.tab': { version: 1, value: 'missions', clock: 1, writer: 'old' }, 'gw-b:sidebar.tab': { version: 1, value: 'nonsense', clock: 1, writer: 'old' } } }))
+    install(origin.window().environment)
+    const tab = StateCell.make({ scope: 'gateway', key: 'test.tab', version: 1, schema: Schema.Literals(['agents', 'missions']), default: 'agents' as 'agents' | 'missions',
+      seed: (retired, gateway) => StateCell.retiredEntry(retired, Schema.Literals(['agents', 'missions']), `${gateway}:sidebar.tab`) })
+    const registry = AtomRegistry.make()
+    expect(registry.get(tab('gw-a'))).toBe('missions')
+    expect(registry.get(tab('gw-b'))).toBe('agents')
+    StateCell.flush()
+    expect(origin.local.get('wf.c/gw:gw-a/test.tab')).toContain('"d":"missions"')
+  })
+
   it('keeps the newest drafts per person and evicts the oldest under quota', () => {
     const origin = memoryOrigin({ quota: 600 })
     install(origin.window().environment)
