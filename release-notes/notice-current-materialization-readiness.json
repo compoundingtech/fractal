@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose internal typed notice readiness for the exact current runtime binding without exposing reserved raw custom rows.",
+  "replay": { "status": "changed", "detail": "Readiness resolves the immutable source creation and recipient independently of cached payloads, then selects the newest canonical admitted snapshot for that creation and exact current runtime declaration. Rebuild and incremental projection use the same authority state. A superseded runtime's snapshots never satisfy the current binding." },
+  "schema": { "status": "changed", "detail": "The internal store result distinguishes ready, rebuilding and unavailable at both collection and per-notice levels. Stable source-derived notice IDs survive handover. This is not a new native API operation, resource or capability." },
+  "rules": { "status": "changed", "detail": "Missing or conflicting reviewed registrations, missing runtime designation and reserved quarantined prerequisites report unavailable explicitly. A valid source without a ready current-binding snapshot reports rebuilding rather than an empty successful collection. Source and control payloads do not cross this readiness boundary." },
+  "compatibility": { "status": "changed", "detail": "Generic filtered and unfiltered custom reads continue to hide reserved raw history. Full-state backup, rename-proof export and internal replication remain unfiltered because filtering would corrupt restore or proof. The later authenticated native API must authorize the recipient before calling this internal store reader." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "No manual cache reset is required." },
+  "recovery": { "status": "changed", "detail": "Rebuilding never invents delivery outcomes. Durable delivery receipts, persisted owner acknowledgement and action routing are separate work. A stale partition may continue observing the previous designation until synchronization; this reader does not establish historical authorization or cross-partition revocation." }
+}

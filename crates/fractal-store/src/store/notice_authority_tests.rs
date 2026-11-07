@@ -597,3 +597,6 @@ fn notice_source_and_person_controls_survive_handover_and_absent_runtime() {
     assert!(store.custom_subject(SOURCE).is_err());
     assert!(store.custom_subject(CONTROL).is_err());
 }
+
+#[path = "notice_materialization_tests.rs"]
+mod materialization;

@@ -56,6 +56,17 @@ data accepted by released v0.3.x generic writers, is not notice history and stay
 hidden. Facts from untagged interim builds before the runtime-independent contract
 are not migrated; reviewed registration hashes identify the current contract.
 
+Each snapshot pins `runtime_binding`, the exact selected runtime declaration claim
+ID. Removing the role and later assigning it to the same actor produces a different
+binding; old snapshots cannot become current again. The internal readiness reader
+selects the newest canonical admitted snapshot for the immutable source creation
+and current binding, never the most recently received row. Missing current snapshots
+are `rebuilding`; missing or conflicting authority, registration or quarantined
+prerequisites are `unavailable`, at both collection and per-notice levels. Existing
+source identities remain visible in those typed states. This store boundary does
+not register a native API or authorize its caller; recipient authorization belongs
+to the eventual native operation.
+
 Handover follows the discard-and-rebuild model, not a portable historical admission
 certificate. A partition that has not observed revocation can keep accepting the
 old runtime's snapshots until it observes the change. Action revocation linearizes
