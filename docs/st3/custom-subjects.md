@@ -204,3 +204,111 @@ source's `damage*` fields even when a tree has no readable requests, so a failed
 not read as an empty tree. Writes need a running daemon; nothing is spooled offline. Custom
 claims do not block native work or confer native approval; a tool that needs native blocking
 separately uses authorized work asks.
+
+### Version 2: captured history and deterministic reads
+
+[decision-tree-v2.json](../../examples/fractal/decision-tree-v2.json) is a separate, immutable
+`decision.tree` version 2 registration. Version 1 and its registered bytes remain unchanged.
+Register v2 through the same schema mechanism:
+
+```sh
+fractal schema register examples/fractal/decision-tree-v2.json --as agent/example/decisions
+```
+
+V2 subjects use `custom/decision/tree/v2/<seat>` and claim kinds
+`custom.decision.tree.v2.*`. They retain the seven v1 kinds and their authority and fields,
+with one addition: `assumed.selection` is an optional array of up to 64 option strings.
+An assumption with no explicit selection uses its text as a singleton selection when evaluating
+guards. The v1 namespace is not an alias for v2; no v1 claim is rewritten or silently migrated.
+
+| Added kind | Authority | Required fields | Optional fields |
+| --- | --- | --- | --- |
+| `provenance` | owner | `target` (claim reference), `raw` (hash-pinned document), `source_host`, `source_layout`, `source_paths` (array), `legacy_id`, `source_scope`, `written_ms` (integer), `actors` (array) | none |
+| `withdrawn` | owner/requester | `request` (claim reference), `reason` | `duplicate_of` (claim reference) |
+| `recorded` | owner | `request` (claim reference), `recorder` (agent or person reference), `responder` (original string), `quote` (verbatim string) | `selection` (array), `supersedes` (claim reference) |
+| `ask_linked` | owner | `request` (claim reference), `ask` (native ask's `step-run` subject reference), `activation` (string) | none |
+
+The authority DSL has only `creator`, `owner`, and `recipient`; it has no general actor-union
+or field-equality policy. Because `requested` is owner-only, its requester is necessarily the
+owner, so owner authority implements requester-or-owner withdrawal without broadening admission.
+The fold still validates that a withdrawal refers to a request on this tree. `reason` is required;
+`duplicate_of` is optional and must name another request, not a human response.
+
+`recorded` is an accountable capture, not an impersonated `answered` claim. `recorder` must
+equal the actual writing actor; the DSL only admits the field's reference family, so a mismatch
+is a fold defect rather than an admission-time equality check. `responder` preserves the
+original spelling instead of resolving or inventing a person identity, and `quote` preserves
+the actual response verbatim. Capture does not require that responder to be the addressed
+person. Owner-written captures and assumptions never acquire person authority: only a genuine
+recipient-authorized `answered` is a person answer. `selection` gives an explicitly captured
+option selection; free-form quoted text is retained independently.
+
+`provenance.target` names the typed fact whose original bytes are preserved by `raw`, an
+immutable `doc/...@<64-hex-SHA-256>` reference. `source_host` and `source_layout` identify where and
+how the source was found; `source_paths` preserves its path spellings. `legacy_id` identifies
+the source record, `source_scope` scopes its numeric question handles, `written_ms` preserves
+the source timestamp, and `actors` preserves the original actor spellings as strings. These
+are evidence, not authority, native claim order, or permission to rewrite a source. The generic
+schema bounds arrays but does not validate their members; the decision fold validates their
+domain shape. As with v1 claim references, existence checks alone do not establish the target
+kind or same-tree membership.
+
+`ask_linked` records a relationship to an existing native work ask and its activation. It does
+not open, complete, cancel, approve, or delegate that ask. A decision answer, capture,
+assumption, promotion, or withdrawal never bypasses native work authorization.
+
+### Decision fold contract
+
+```sh
+fractal subject decisions custom/decision/tree/v2/<seat>
+```
+
+This is a read-only domain fold of the subject's raw claims, not the latest-slot source row
+and not an instruction to append `status`. It does not write claims, documents, schema
+registrations, or native asks. The generic source row retains its last-fact summaries and
+status-driven attention contract; it is not a substitute for folding all requests.
+
+The fold checks the opened tree's owner/seat/subject identity, same-tree request references,
+response and supersession references, and malformed domain fields. Invalid facts are defects,
+not silently accepted empty history. Provenance supplies a request's `source_scope`; requests
+without provenance use the native tree subject as their scope. Source timestamps and numeric
+`q` handles do not replace canonical claim ordering.
+
+`requested.applies_when` is a conjunction of guards with this shape:
+
+```json
+[
+  {"q": 1, "selection": ["ship"]},
+  {"q": 2, "selection": ["small"], "source_scope": "legacy/seat-a"}
+]
+```
+
+The original v1 guard shape `{ "decision": "<request-claim-id>", "option": "<option-key>" }`
+is also supported, resolving the request directly rather than through a scoped `q`.
+
+Each guard resolves `q` only within its `source_scope`, defaulting to the requesting question's
+own scope. A guard is active when its option strings intersect the referenced question's
+effective selection; it does not search every imported tree for a matching number. A missing
+effective answer or a withdrawn dependency leaves the guard inactive. Malformed guards are defects rather than guessed
+cross-tree links. Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
+parent only while the child's guards are active; an inactive branch cannot erase a pending
+parent. An active child still suppresses its parent when the child itself has been withdrawn.
+
+The fold reports `pending`, `answered`, `withdrawn`, `superseded`, or `moot` for each request.
+An assumption sets an independent `assumed` flag but leaves the question pending: an owner
+assumption is not a response. Only an unimported `answered` written by a `person/` actor
+counts as a person-authority approval gate, and only while the effective status is `answered`;
+provenance-marked imported answers and recorded captures remain historical responses, not native approval.
+
+Imported response heads are selected by `(written_ms, legacy_id, source_scope)`. The imported
+head is then merged with the newest native response using native claim order, which gives a
+total order for mixed imported and native history. Native-only history uses native claim
+order. Source order is never inferred from array order, local storage indexes, or `q`.
+
+Supersession must resolve without choosing an arbitrary winner for conflicting forks.
+A withdrawal removes that request from the active pending set without fabricating an answer;
+its reason and duplicate relationship remain historical facts. `needs_ask` means the request
+is open and has no `ask_linked` facts; `ask_links` preserves the link fields without assuming
+that a linked ask is still active or authorized. The fold does not distinguish blockers from
+refinements for this open-request accounting. Decision state is derived from effective
+requests and guards, never trusted from a last-written `status` or an unrelated native ask.

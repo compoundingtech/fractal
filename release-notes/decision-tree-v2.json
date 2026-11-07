@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an immutable decision.tree v2 manifest and a read-only decision fold for v1 and v2 histories.",
+  "replay": {"status": "none", "detail": "Existing v1 claims and manifests remain unchanged."},
+  "schema": {"status": "none", "detail": "No database schema change; v2 is an explicitly registered custom manifest."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Version 2 adds provenance, withdrawn, recorded, and ask_linked claims. Captured responses never satisfy the native person approval predicate."},
+  "downtime": {"status": "none", "detail": "Manifest registration and decision reads require no daemon restart."},
+  "manual": {"status": "changed", "detail": "Register examples/fractal/decision-tree-v2.json and read with fractal subject decisions SUBJECT. The fold does not import documents or create asks."},
+  "recovery": {"status": "none", "detail": "Version 1 remains available without migration."}
+}
