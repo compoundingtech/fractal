@@ -2356,6 +2356,14 @@
       "verification": "real CLI over private Unix socket; registered reads and fenced person replies across restart"
     },
     {
+      "command": "st subject decisions",
+      "description": "Fold complete basis-fenced decision.tree history without writes.",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::decision_tree_manifest_cards_fences_retries_damage_and_restarts"
+      ],
+      "verification": "real CLI over private Unix socket; pending request needs an ask, native person answer closes it and satisfies the approval predicate"
+    },
+    {
       "command": "st subject history",
       "description": "Show bounded immutable history for one subject",
       "tests": [

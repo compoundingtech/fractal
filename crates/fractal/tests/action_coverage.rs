@@ -6290,6 +6290,12 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     .unwrap_err();
     assert!(matches!(denied, ClientError::Api(ErrorCode::Forbidden, ..)));
     let pending_view = daemon.store().custom_subject(TREE).unwrap().unwrap();
+    let folded = cli_value(daemon.cli(PERSON, &["subject", "decisions", TREE]).await);
+    assert_eq!(folded["requests"][0]["request"], request);
+    assert_eq!(folded["requests"][0]["status"], "pending");
+    assert_eq!(folded["requests"][0]["open"], true);
+    assert_eq!(folded["requests"][0]["needs_ask"], true);
+    assert!(folded["defects"].as_array().unwrap().is_empty());
     // A stale card fence writes nothing; the accepted answer's exact replay across restarts
     // returns the same claim without a second write.
     daemon
@@ -6303,6 +6309,11 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     assert_eq!(answers[0].actor.as_deref(), Some(DECIDER));
     assert_eq!(answers[0].body["fields"]["request"], json!(request));
     assert_eq!(answers[0].body["fields"]["selection"], json!(["keep"]));
+    let folded = cli_value(daemon.cli(PERSON, &["subject", "decisions", TREE]).await);
+    assert_eq!(folded["requests"][0]["status"], "answered");
+    assert_eq!(folded["requests"][0]["answer"], answers[0].id);
+    assert_eq!(folded["requests"][0]["approval_gate"], true);
+    assert_eq!(folded["requests"][0]["needs_ask"], false);
     assert!(
         daemon
             .client(DECIDER)

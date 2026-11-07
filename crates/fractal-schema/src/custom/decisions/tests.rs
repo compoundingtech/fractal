@@ -100,7 +100,7 @@ fn v1_legacy_guard_shape() {
 
 #[test]
 fn provenance_ties_use_legacy_id_then_scope() {
-    for (legacy, scope, expected) in [("b", "one", "a2"), ("a", "two", "a2"), ("a", "zero", "a1")] {
+    for (legacy, scope, expected) in [("b", "one", "a2"), ("a", "two", "a2"), ("a", "aaa", "a1")] {
         let claims = vec![request("r", 1),
             claim("a1", "answered", 3, json!({"request":"r","selection":[]})),
             claim("a2", "answered", 2, json!({"request":"r","selection":[]})),
