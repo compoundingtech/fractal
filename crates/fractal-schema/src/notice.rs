@@ -11,10 +11,20 @@ pub const SNAPSHOT_PREFIX: &str = "custom/attention/snapshot/";
 pub const CONTROL_PREFIX: &str = "custom/attention/control/";
 pub const PREFIXES: [&str; 3] = [SOURCE_PREFIX, SNAPSHOT_PREFIX, CONTROL_PREFIX];
 pub const HASHES: [&str; 3] = [
-    "7a9c67075779112dd117ea13a7cc6bb9535e9501beb2e1d683d1516c62d07b24",
+    "1282a67945367e1557ab423f0ad6e4547c48629d9cbc0479ad70b15ef7c6a530",
     "1f91f51979ce1b303c43453fa14fa8f0b2ec03fbb2304ff3b4a21ea99c30ff69",
-    "01e8f20112982c35e6f316a4c750e11cfc3f84129f1a266ea1d15f568e0a648e",
+    "ea890a46d937566b480ea782047f3e6d923810414e5b0e52e0c8a883561efbb0",
 ];
+
+/// Stable domain identity: the immutable source UUID, never a runtime snapshot subject.
+pub fn id_for_source(source: &str) -> Result<String, ValidationError> {
+    static UUID: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    ).expect("compiled notice source UUID"));
+    let suffix = source.strip_prefix(SOURCE_PREFIX).filter(|suffix| UUID.is_match(suffix))
+        .ok_or_else(|| error("invalid-notice-source", "notice identity requires a canonical source UUID"))?;
+    Ok(format!("notice/{suffix}"))
+}
 
 /// Includes exact roots and ancestors, so a broader registration cannot squat.
 pub fn is_reserved_subject(subject: &str) -> bool {
@@ -114,6 +124,7 @@ fn build(family: &str) -> custom::Manifest {
         ("producer", &["agent", "person"][..]), ("recipient", &["person"][..]),
         ("runtime", &["agent"][..]),
     ] {
+        if name == "runtime" && family != "snapshot" { continue; }
         fields.insert(name.into(), field("subject-reference", family != "source" || name == "recipient", families));
     }
     let creation_kind = format!("custom.attention.{}-created", if family == "source" { "notice" } else { family });
@@ -144,6 +155,15 @@ mod tests {
     fn notice_reviewed_manifests_match_compiled_pins() {
         for (manifest, pin) in manifests().iter().zip(HASHES) {
             validate_registration(manifest, pin).unwrap();
+        }
+    }
+
+    #[test]
+    fn notice_identity_is_derived_from_source_not_runtime() {
+        let source = "custom/attention/source/01900000-0000-7000-8000-000000000002";
+        assert_eq!(id_for_source(source).unwrap(), "notice/01900000-0000-7000-8000-000000000002");
+        for invalid in [SNAPSHOT_PREFIX, "custom/attention/source/not-a-uuid", "custom/attention/source/../source"] {
+            assert!(id_for_source(invalid).is_err());
         }
     }
 

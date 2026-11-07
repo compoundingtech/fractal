@@ -220,10 +220,12 @@ pub(super) fn classify_replicated(
     if registered_hash != hash || state != "ready" {
         return Err(invalid_admission("registration is conflicting or mismatched"));
     }
-    match runtime(connection) {
-        Ok(_) => {}
-        Err(error) if error.code == "notices-unavailable" => return pending_admission(&error.message),
-        Err(error) => return Err(error),
+    if claim.subject.starts_with(notice::SNAPSHOT_PREFIX) {
+        match runtime(connection) {
+            Ok(_) => {}
+            Err(error) if error.code == "notices-unavailable" => return pending_admission(&error.message),
+            Err(error) => return Err(error),
+        }
     }
     if !claim.subject.starts_with(notice::SOURCE_PREFIX) {
         let source_id = fields.get("source_id").and_then(Value::as_str)
@@ -261,17 +263,14 @@ pub(super) fn validate(
         .ok_or_else(|| unavailable("missing registration pin"))?;
     notice::validate_registration(manifest, hash)?;
     anyhow::ensure!(subject.starts_with(&manifest.subject_prefix), "notices unavailable: claim/prefix mismatch");
-    let runtime = runtime(connection)?;
     if subject.starts_with("custom/attention/source/") {
         anyhow::ensure!(kind == manifest.creation_kind, "notices unavailable: producer input is immutable");
         if let Some(prior) = creation {
             anyhow::ensure!(prior.actor.as_deref() == Some(actor) && custom::fields(prior) == *fields,
                 "notices unavailable: source creation conflict");
         }
-        for (field, expected) in [("producer", actor), ("runtime", runtime.as_str())] {
-            anyhow::ensure!(fields.get(field).is_none_or(|value| value.as_str() == Some(expected)),
-                "notices unavailable: forged {field}");
-        }
+        anyhow::ensure!(fields.get("producer").is_none_or(|value| value.as_str() == Some(actor)),
+            "notices unavailable: forged producer");
         anyhow::ensure!(fields.get("recipient").and_then(Value::as_str).is_some_and(|p| p.starts_with("person/")),
             "notices unavailable: source recipient must be a person");
         return Ok(());
@@ -301,17 +300,24 @@ pub(super) fn validate(
     let producer = source.actor.as_deref().ok_or_else(|| unavailable("missing source author"))?;
     fractal_schema::custom::validate_fields(&source_manifest.claims[&source.kind], &source_fields)?;
     validate(connection, source_id, &source_manifest, &source.kind, producer, &source_fields, None)?;
-    for (field, expected) in [("recipient", recipient), ("producer", producer), ("runtime", runtime.as_str())] {
+    for (field, expected) in [("recipient", recipient), ("producer", producer)] {
         anyhow::ensure!(fields.get(field).and_then(Value::as_str) == Some(expected),
             "notices unavailable: forged {field}");
     }
     if let Some(prior) = creation {
         let prior_fields = custom::fields(prior);
-        for field in ["source_id", "creation_claim", "recipient", "producer", "runtime"] {
+        for field in ["source_id", "creation_claim", "recipient", "producer"] {
             anyhow::ensure!(prior_fields.get(field) == fields.get(field), "notices unavailable: immutable {field} changed");
         }
     }
     if subject.starts_with("custom/attention/snapshot/") {
+        let runtime = runtime(connection)?;
+        anyhow::ensure!(fields.get("runtime").and_then(Value::as_str) == Some(runtime.as_str()),
+            "notices unavailable: forged runtime");
+        if let Some(prior) = creation {
+            anyhow::ensure!(custom::fields(prior).get("runtime") == fields.get("runtime"),
+                "notices unavailable: immutable runtime changed");
+        }
         anyhow::ensure!(actor == runtime, "notices unavailable: only the designated runtime may write snapshots");
     } else {
         anyhow::ensure!(subject.starts_with("custom/attention/control/") && actor.starts_with("person/") && actor == recipient,

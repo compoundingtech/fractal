@@ -46,6 +46,23 @@ kind and ID references come from the same notice closure; decoding goes directly
 from bytes to the native model, never through `Resource::Unknown` serialization.
 This metadata does not register a collection, Resource arm, capability or action.
 
+Notice lineage is runtime-independent: authenticated producer sources and their
+recipient's person controls survive a runtime designation change. Runtime authority
+applies only to disposable derived snapshots. `NoticeId` is `notice/` followed by the
+source UUID; snapshot subject IDs do not identify the domain notice. Person-control
+fences retain source/control revisions and do not depend on delivery or runtime.
+Generic custom data under the reserved prefixes before notice reservation, including
+data accepted by released v0.3.x generic writers, is not notice history and stays
+hidden. Facts from untagged interim builds before the runtime-independent contract
+are not migrated; reviewed registration hashes identify the current contract.
+
+Handover follows the discard-and-rebuild model, not a portable historical admission
+certificate. A partition that has not observed revocation can keep accepting the
+old runtime's snapshots until it observes the change. Action revocation linearizes
+at the persisted owner's acknowledgement fence, not remote graph publication; a
+stale owner retains the residual exposure. Owner binding, acknowledgement and
+action routing are not provided by the internal models or lineage validation.
+
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
 WebSocket senders now offer only the corresponding `fractal.client.*` protocol

@@ -76,7 +76,7 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
     },
     "NoticeClaimId": {"type": "string", "x-st-brand": "NoticeClaimId", "pattern": "^[0-9a-f]{64}$"},
-    "NoticeId": {"type": "string", "x-st-brand": "NoticeId", "pattern": "^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "NoticeId": {"description": "Stable notice identity: notice/ followed by the immutable source UUID, independent of snapshot materialization and runtime.", "type": "string", "x-st-brand": "NoticeId", "pattern": "^notice/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
     "NoticeSourceId": {"type": "string", "x-st-brand": "NoticeSourceId", "pattern": "^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
     "NoticeActor": {"type": "string", "x-st-ref": ["agent", "person"], "pattern": "^(?:agent|person)/[^\\s]+$"},
     "NoticeRuntime": {"type": "string", "x-st-ref": "agent", "pattern": "^(?:agent)/[^\\s]+$"},

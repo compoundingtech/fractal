@@ -33,12 +33,12 @@ fn notice_upgrade_revalidates_quiet_legacy_registration_like_replay() {
         tx, store.origin(), &substitute.subject(), schema::REGISTERED, Some("person/example"),
         &json!({"fields":{"document":format!("{name}@{hash}")}}), &[], None,
     )).unwrap().unwrap();
-    // Emulate a quiet pre-reservation projection, including its old version marker.
+    // Emulate a quiet pre-handover projection, including its old version marker.
     store.connection.batched(|tx| -> Result<()> {
         tx.execute(/* sqlite-large-value: allow-for-now lv-hb426ee0c141e owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO custom_registrations VALUES(?1,?2,?3,?4,?5,?6,?7,'ready',NULL)",
             params![substitute.subject(),substitute.kind,substitute.version,substitute.subject_prefix,
                 hash,canonical_serialized_json_text(&substitute)?,claim.id])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h105a7bf3df39 owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='1' WHERE key='custom_projections_version'", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h42c8273290ff owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='2' WHERE key='custom_projections_version'", [])?;
         tx.execute(/* sqlite-large-value: allow-for-now lv-h946810538d0c owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_custom_dirty", [])?;
         Ok(())
     }).unwrap().unwrap();

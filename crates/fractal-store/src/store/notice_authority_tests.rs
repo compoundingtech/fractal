@@ -31,6 +31,7 @@ fn input(subject: &str, kind: &str, actor: &str, fields: Value) -> ClaimInput {
 fn linked(source: &ClaimRecord, control: bool) -> Value {
     let mut fields = json!({"source_id":SOURCE,"creation_claim":source.id,"producer":"agent/example/producer","recipient":"person/example","runtime":RUNTIME});
     if control {
+        fields.as_object_mut().unwrap().remove("runtime");
         for field in ["seen_at", "dismissed_at", "snoozed_until"] { fields[field] = Value::Null; }
     } else { fields["policy"] = json!({"disposition":"deliver"}); fields["delivery"] = json!([]); }
     fields
@@ -52,6 +53,19 @@ fn assert_links_fail_closed_like_rebuild(tx: &Transaction<'_>) -> Result<()> {
     custom::rebuild(tx)?;
     for (subject, before) in [SNAPSHOT, CONTROL].iter().zip(incremental) {
         assert_eq!(custom::source(tx, subject)?.unwrap(), before);
+    }
+    Ok(())
+}
+
+fn assert_runtime_fenced_like_rebuild(tx: &Transaction<'_>) -> Result<()> {
+    let before = [SOURCE, SNAPSHOT, CONTROL].map(|subject| custom::source(tx, subject).unwrap().unwrap());
+    assert_eq!(before[0]["state"], "ready");
+    assert_eq!(before[2]["state"], "ready");
+    assert_ne!(before[1]["state"], "ready");
+    assert!(before[1]["error"].is_string());
+    custom::rebuild(tx)?;
+    for (subject, row) in [SOURCE, SNAPSHOT, CONTROL].iter().zip(before) {
+        assert_eq!(custom::source(tx, subject)?.unwrap(), row);
     }
     Ok(())
 }
@@ -91,7 +105,7 @@ fn notice_altered_links_recipient_producer_and_manifest_are_refused() {
 
 #[test]
 fn notice_second_designated_holder_is_refused_and_missing_binding_fails_closed() {
-    let (store, _) = setup();
+    let (store, source) = setup();
     assert_eq!(designate(&store, "example/other").unwrap_err().code, "notices-unavailable");
     let empty = Store::open_memory("example").unwrap();
     assert!(runtime(&empty.readers.get()).is_err());
@@ -99,10 +113,10 @@ fn notice_second_designated_holder_is_refused_and_missing_binding_fails_closed()
         tx.execute(/* sqlite-large-value: allow-for-now lv-h4e5df88ef9e3 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [RUNTIME])?;
         custom::rebuild(tx)?;
         let row = custom::source(tx, SOURCE)?.unwrap();
-        assert_ne!(row["state"], "ready");
-        assert!(row["error"].as_str().unwrap().contains("missing notice-runtime"));
+        assert_eq!(row["state"], "ready");
         Ok(())
     }).unwrap().unwrap();
+    store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&source, true))).unwrap();
 }
 
 #[test]
@@ -211,7 +225,7 @@ fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
             store.apply_as(&intent, &BTreeMap::from([(RUNTIME.into(), vec![token])]),
                 mutation, Some("person/example")).unwrap();
         }
-        store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
+        store.connection.batched(assert_runtime_fenced_like_rebuild).unwrap().unwrap();
     }
 }
 
@@ -236,7 +250,7 @@ fn notice_owned_runtime_liveness_mutations_match_rebuild() {
                 _ => { tx.execute(/* sqlite-large-value: allow-for-now lv-h3394ef4bbe97 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE id='notice-generation'", [])?; }
             }
             custom::flush(tx)?;
-            assert_links_fail_closed_like_rebuild(tx)
+            assert_runtime_fenced_like_rebuild(tx)
         }).unwrap().unwrap();
     }
 }
@@ -294,7 +308,7 @@ fn notice_only_runtime_dependency_chain_queues_revalidation() {
             }, [])?;
             assert!(queued(tx)? > 0);
             custom::flush(tx)?;
-            assert_links_fail_closed_like_rebuild(tx)?;
+            assert_runtime_fenced_like_rebuild(tx)?;
             if mutation == "ancestor-generation" {
                 tx.execute(/* sqlite-large-value: allow-for-now lv-h5f87cb47cc14 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations VALUES('ancestor','ancestor','revision',NULL,
                     'running','person/example','Fixture','0','0')", [])?;
@@ -323,7 +337,7 @@ fn notice_runtime_identity_fences_match_rebuild_without_declaration_changes() {
             Ok(())
         }).unwrap().unwrap();
         // The commit finalizer must discover the fence even with no desired/liveness mutation.
-        store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
+        store.connection.batched(assert_runtime_fenced_like_rebuild).unwrap().unwrap();
         store.connection.batched(|tx| -> Result<()> {
             tx.execute(/* sqlite-large-value: allow-for-now lv-h206fb305ff5c owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE identity_heads SET unavailable=NULL WHERE identity=?1", [RUNTIME])?;
             tx.execute(/* sqlite-large-value: allow-for-now lv-h3a0326f24f3d owner=fractal_store::store::notice_authority_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE record_ref='record/notice-fence'", [])?;
@@ -552,4 +566,28 @@ fn notice_unknown_kind_and_field_remain_schema_quarantine_not_dependency_or_inva
         assert_eq!(notice_replication_parity(&reader), before);
         assert_eq!(reader.replica_record(&record.record_ref).unwrap().unwrap().error_code.as_deref(), Some(code));
     }
+}
+
+#[test]
+fn notice_source_and_person_controls_survive_handover_and_absent_runtime() {
+    let store = linked_store();
+    let source = custom::claims(&store.readers.get(), SOURCE).unwrap().remove(0);
+    let source_bytes = source.body.clone();
+    let token = store.selected_desired_token(RUNTIME).unwrap().unwrap();
+    let intent = crate::parse_intent("version 2\nstop \"agent/example/runtime\"", "example").unwrap();
+    store.apply_as(&intent, &BTreeMap::from([(RUNTIME.into(), vec![token])]),
+        "stop-notice-runtime", Some("person/example")).unwrap();
+    let control = store.append_claim(&input(CONTROL, "custom.attention.control-updated",
+        "person/example", linked(&source, true))).unwrap();
+    assert!(control.body["fields"].get("runtime").is_none());
+    let fields = custom::fields(&source);
+    store.append_claim(&ClaimInput {
+        subject: "custom/attention/source/01900000-0000-7000-8000-000000000004".into(),
+        fields, ..input(SOURCE, &source.kind, "agent/example/producer", json!({}))
+    }).unwrap();
+    designate(&store, "example/next-runtime").unwrap();
+    assert_eq!(store.claim_by_id(&source.id).unwrap().unwrap().body, source_bytes);
+    store.connection.batched(assert_runtime_fenced_like_rebuild).unwrap().unwrap();
+    assert!(store.custom_subject(SOURCE).is_err());
+    assert!(store.custom_subject(CONTROL).is_err());
 }

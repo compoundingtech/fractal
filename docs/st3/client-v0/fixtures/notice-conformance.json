@@ -1,6 +1,6 @@
 {
   "snapshot": {
-    "id": "custom/attention/snapshot/01900000-0000-7000-8000-000000000001",
+    "id": "notice/01900000-0000-7000-8000-000000000002",
     "kind": "attention-notice",
     "schema_version": 1,
     "revision": "snapshot-v1",
@@ -68,7 +68,7 @@
     {"pointer": "/input/dedupe_key", "value": ""},
     {"pointer": "/kind", "value": "notice"},
     {"pointer": "/schema_version", "value": 2},
-    {"pointer": "/id", "value": "custom/attention/snapshot/not-a-uuid"},
+    {"pointer": "/id", "value": "notice/not-a-uuid"},
     {"pointer": "/basis_claim", "value": "not-a-claim"},
     {"pointer": "/runtime", "value": "person/example"},
     {"pointer": "/updated_at", "value": "2026-02-30T10:00:00Z"},
