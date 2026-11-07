@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document the proposed Fractal topic thread contract",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "Documentation only. No deployed protocol, client or daemon behavior changes." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}

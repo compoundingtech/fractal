@@ -1,0 +1,109 @@
+# Fractal topic threads
+
+Status: proposed contract for review. The examples describe the intended behavior. The existing
+client protocol and daemon do not yet provide this thread resource.
+
+Fractal already stores addressed messages and their `in_reply_to` edges. Inbox's **Chat about
+this** currently finds a discussion by the message subject. That works while returning to the
+same Inbox item. A fresh request with a different title can refer to the same discussion even
+though it needs its own answer and decision history.
+
+## Identity and history
+
+A thread has an opaque durable identity in the `thread/` family. Its editable title, current
+state, participant set, message history and related items are read through that identity. A
+new thread started from an Inbox item can commit its creation, origin link and first message
+together. A client may hold an unsent draft without publishing an empty thread.
+
+The thread ID is independent of the first message ID. Anchoring it to the first message could
+reuse reply-chain lookup, but would couple the discussion's identity and availability to that
+message's delivery, visibility and retention. A separate identity makes rename, reopening and
+reference from other resources explicit. The cost is a durable thread projection and admission
+rules for mutations and links.
+
+Every message still has its own message ID and ordinary sender attribution. Thread membership
+is explicit. A reply to a specific message retains an `in_reply_to` edge whose parent is in the
+same thread. The reply can be shown in an agent conversation and in the thread while remaining
+one message. Clients use authoritative order, current participant visibility and stable cursors.
+Subjects, titles, text similarity, and agent incarnation are presentation or context data.
+
+## Links and lifecycle
+
+A person can start an inline thread from a readable Inbox item. An agent can attach a fresh ask
+to an existing thread when authorized on both sides. A reply in the thread and a follow-up ask
+are separate operations. An ask created from a thread can carry the thread reference explicitly.
+An ask created elsewhere must explicitly attach to that thread. Closing, answering or replacing
+one ask leaves the thread and the other asks intact. A fresh ask may link to a closed thread
+and show its full history without reopening it.
+
+The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
+threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
+to a closed thread joins its history without reopening it, adding an alert or resurrecting the
+Inbox row. Reopen is explicit. An authorized rename changes the shared title everywhere and
+preserves the thread, messages, links, unread state and current lifecycle.
+
+An embedded panel's disclosure state is local to its client and placement. A compact row carries
+the title, message count, lifecycle status and any unread hint on one line where space permits.
+Expanding or opening a dedicated thread tab navigates to the same resource. Agent sessions and
+missions can each embed several threads, with separate disclosure state for each. A thread's
+display never requires the reader to join the unrelated portions of agent transcripts.
+
+Track read progress per reader and thread against ordered messages. Moving a cursor forward can
+clear an unread reply on the existing Inbox row without creating an ask, changing the alert count
+or resolving an approval. Which visible interaction advances the read cursor should be tested
+with real UI visibility and reviewed before client implementations treat it as read.
+
+## Daemon boundary
+
+Use durable claims as authority and bounded, rebuildable projections for summaries by context
+and ordered message windows. Subscriptions advance by the same data and policy cut as their
+reads, with explicit reauthorization on scope, membership or source changes. A link is a
+reference only. It cannot confer participant membership, grant content access or reveal an
+otherwise inaccessible context's title. Direct reads and collection reads apply the same
+visibility rules. Filter unauthorized summaries, message edges, counts and source links before
+they leave the daemon.
+
+| Operation | Admission boundary |
+| --- | --- |
+| List, read or subscribe | A scoped client grant and reader access to the thread. Apply context authorization to context listings and source links. Bind cursors to the reader, scope, thread or context, and revision semantics. |
+| Start or reply | An attributed authenticated principal and the permitted creation or participant role. Validate an optional quoted parent against the same thread and its visibility. |
+| Rename, close or reopen | Thread lifecycle authority, separate from message delivery and access to an ask. |
+| Attach a follow-up | Authority to link the thread and authority to create or update the linked source. A link cannot broaden either audience. |
+| Answer an ask | The existing ask action and exact ask authority. The thread identity cannot authorize or stand in for an answer. |
+
+Writes validate authority inside the writer transaction. Bind idempotency to the actor,
+operation and target so retries record one fact, and reauthorize receipt recovery after
+revocation. The implementation must specify how rename and Close/Reopen races converge
+without resolving a linked ask or losing an accepted incoming reply. Existing historical
+subject-based discussion remains readable through its existing path. There is no inferred
+migration from subjects to durable thread IDs.
+
+## Cross-surface contract
+
+| Surface | Conformance at release |
+| --- | --- |
+| TUI, web and iOS | Start inline in Inbox, type and reply to a message, show a fresh linked ask with full discussion, and answer that ask independently. Use the same thread in Inbox, agent session, mission and a dedicated tab or screen. Compact embeds start collapsed. Web and terminal can reveal Reply on hover with accessible keyboard equivalents. Mobile supplies an equivalent touch action. |
+| TUI, web and iOS | Rename, close, list under Recently closed threads, read replies while closed, reopen, and retain selection and draft destination across navigation. State and unread progress agree when another authorized client changes them. |
+| MCP | Bounded list by readable context, get summary and read a message window through the daemon. A thread-content grant and participant visibility are both required. No transcript scraping or adapter-owned reconstruction. |
+| MCP writes | Use the same typed daemon actions and idempotency, with separate least-privilege grants for reply and lifecycle/link operations. Preserve assistant attribution. Production write issuance follows the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Expose only capabilities the current grant and daemon support. |
+
+Implement and review behind capability negotiation. TUI, web, iOS and MCP are part of one
+release acceptance rather than independently inventing thread protocols. The MCP authorization
+gate remains separate from client parity and must pass before granting production writes.
+
+The minimum integrated fixture starts on ask A, creates a thread, quotes a message, renames
+and closes it, receives an ordinary reply, and links a fresh ask B. Inspect the same history
+through each context and another authorized surface. Verify that B needs its own answer, the
+thread stays closed until reopened, and a same-title thread and an unrelated transcript
+message never appear in its history. Run with persisted state across daemon restart and verify
+incremental updates, bounded pagination, a revoked grant during a write, a forbidden
+cross-thread quote, and a duplicated request key.
+
+## Decisions before wire freeze
+
+Settle initial participant and lifecycle authority, whether a direct reply from a closed
+thread requires explicit reopening, how visibility changes affect retained history, and the
+revision/conflict rules for concurrent edits. Select the exact operation names, claim schemas,
+subscription shapes, and cursor format only when the fixture runs through the existing
+client boundary. The [original topic projection discussion](https://github.com/compoundingtech/fractal/issues/49)
+and [normalized conversation contract](conversation-normalization-design.md) provide context.
