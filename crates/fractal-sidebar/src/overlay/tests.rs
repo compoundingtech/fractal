@@ -218,12 +218,12 @@ fn cut_cycle_withholds_folder_move_and_delete_but_not_membership_overlay() {
     assert_eq!(observed.nodes["folder:folder-b"].parent, parent("folder-a"));
     assert_eq!(observed.nodes["folder:folder-b"].shown_under, Parent::Root {});
     let intent = MoveIntent { node: folder("folder-a"), parent: Parent::Root {}, before: None };
-    let mut edits = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
+    let mut edits = staged(intent.clone(), plan_v2(&observed, &intent).unwrap());
     assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
     let deletion = staged(intent, V2Plan { folders: vec![Folder::FolderDelete { id: "folder-b".into() }], memberships: vec![] });
     assert!(matches!(deletion.project(&observed).unwrap(), Cow::Borrowed(_)));
     let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-b"), before: None };
-    let membership = staged(intent.clone(), plan_v2(&arrangement, &members, &intent).unwrap());
+    let membership = staged(intent.clone(), plan_v2(&observed, &intent).unwrap());
     let visible = membership.project(&observed).unwrap();
     assert!(matches!(visible, Cow::Owned(_)));
     assert_eq!(visible.nodes["subject:member-a"].shown_under, parent("folder-b"));
