@@ -7560,10 +7560,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.clone(),
         usize::from(config.fleet_id.is_some()),
     )));
-    tokio::spawn(fractal_daemon::task_cpu::account("slo.agents_request_minutes", fractal_daemon::api::run_agents_request_slo(
-        config.state_dir.clone(),
-        config.node.clone(),
-    )));
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
         store.clone(),
         fractal_daemon::recorder::receipt_path(&config.state_dir),
@@ -7680,8 +7676,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     let bound = std::sync::atomic::AtomicUsize::new(0);
+    let agents_request_slo = std::sync::OnceLock::new();
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            agents_request_slo.get_or_init(|| fractal_daemon::api::start_agents_request_slo(
+                config.state_dir.clone(),
+                config.node.clone(),
+            ));
             let activation_store = store.clone();
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
@@ -7774,6 +7775,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => Ok(libc::SIGTERM),
         _ = interrupt.recv() => Ok(libc::SIGINT),
     };
+    drop(agents_request_slo);
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.

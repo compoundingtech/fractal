@@ -1665,10 +1665,7 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     }
 }
 
-/// Retain completed local agent-list request minutes in the daemon state directory.
-pub async fn run_agents_request_slo(state_dir: std::path::PathBuf, node: String) {
-    agents_request_slo::run(state_dir, node).await;
-}
+pub use agents_request_slo::{AgentsRequestSloServing, start_agents_request_slo};
 
 pub use crate::peer::track_remote_reads;
 

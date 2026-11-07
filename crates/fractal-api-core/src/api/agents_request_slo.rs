@@ -35,12 +35,24 @@ struct Boundary {
 
 #[derive(Default)]
 struct Pending {
+    serving: bool,
     minutes: [Option<Receipt>; 2],
     latest_slot: Option<u64>,
     rewind_from: Option<u64>,
 }
 
 impl Pending {
+    fn start_serving(&mut self) {
+        *self = Self {
+            serving: true,
+            ..Self::default()
+        };
+    }
+
+    fn stop_serving(&mut self) {
+        *self = Self::default();
+    }
+
     fn observe_slot(&mut self, slot: u64) {
         if self.latest_slot.is_some_and(|latest| slot < latest) {
             self.minutes = [None; 2];
@@ -50,6 +62,9 @@ impl Pending {
     }
 
     fn record(&mut self, slot: u64, observed_slot: u64, fast: bool) {
+        if !self.serving {
+            return;
+        }
         self.observe_slot(observed_slot);
         if !(observed_slot.saturating_sub(1)..=observed_slot).contains(&slot) {
             return;
@@ -80,7 +95,7 @@ impl Pending {
             slot,
             at,
             // Even an aligned startup tick starts a partial minute.
-            aligned: previous.is_some() && now_ms % MINUTE_MS <= 1_000,
+            aligned: self.serving && previous.is_some() && now_ms % MINUTE_MS <= 1_000,
         };
         let receipt = previous
             .filter(|previous| {
@@ -209,14 +224,35 @@ pub(super) fn read() -> Reading {
     let published = *PUBLISHED.lock();
     published
         .filter(|reading| {
-            pending.rewind_from.is_none() && reading.through_unix_ms == end * MINUTE_MS
+            pending.serving
+                && pending.rewind_from.is_none()
+                && reading.through_unix_ms == end * MINUTE_MS
         })
         .unwrap_or_else(|| Reading::new(end, published.is_some()))
 }
 
-/// The daemon starts this only after it reserves the socket for its state directory.
-/// Awaiting each blocking update bounds the writer to one receipt in flight.
-pub(super) async fn run(state_dir: PathBuf, node: String) {
+/// Owns agent-list measurement for the native listeners' serving lifetime.
+#[must_use = "dropping the guard stops measuring listener coverage"]
+pub struct AgentsRequestSloServing(tokio::task::JoinHandle<()>);
+
+impl Drop for AgentsRequestSloServing {
+    fn drop(&mut self) {
+        PENDING.lock().stop_serving();
+        self.0.abort();
+    }
+}
+
+/// Start once, when the native listeners enter service.
+pub fn start_agents_request_slo(state_dir: PathBuf, node: String) -> AgentsRequestSloServing {
+    PENDING.lock().start_serving();
+    AgentsRequestSloServing(tokio::spawn(smallclaims::task_cpu::account(
+        "slo.agents_request_minutes",
+        run(state_dir, node),
+    )))
+}
+
+// Awaiting each blocking update bounds the writer to one receipt in flight.
+async fn run(state_dir: PathBuf, node: String) {
     let path = std::sync::Arc::new(state_dir.join(LEDGER_NAME));
     let node = std::sync::Arc::new(node);
     let mut previous = None;
@@ -225,6 +261,9 @@ pub(super) async fn run(state_dir: PathBuf, node: String) {
     loop {
         let (boundary, receipt) = {
             let mut pending = PENDING.lock();
+            if !pending.serving {
+                return;
+            }
             let (boundary, receipt, rewind) = pending.boundary(
                 previous,
                 now_ms(),
@@ -302,6 +341,7 @@ mod tests {
     #[test]
     fn only_complete_minutes_emit_receipts_and_covered_idle_is_zero() {
         let mut pending = Pending::default();
+        pending.start_serving();
         let start = Instant::now();
         let mut previous = None;
         let mut tick = |pending: &mut Pending, millis| {
@@ -352,6 +392,7 @@ mod tests {
         let start = Instant::now();
         let run = |in_flight_at_cut: bool| {
             let mut pending = Pending::default();
+            pending.start_serving();
             let (startup, _, _) = pending.boundary(None, 5, start, false);
             let (previous, _, _) = pending.boundary(
                 Some(startup),
@@ -397,6 +438,46 @@ mod tests {
             })
         );
         assert_eq!(run(true), None);
+    }
+
+    #[test]
+    fn startup_and_shutdown_drain_do_not_emit_idle_receipts() {
+        let mut pending = Pending::default();
+        let start = Instant::now();
+        let mut previous = None;
+        let tick = |pending: &mut Pending, previous: &mut Option<Boundary>, minute| {
+            let (boundary, receipt, _) = pending.boundary(
+                *previous,
+                minute * MINUTE_MS + 5,
+                start + Duration::from_secs(minute * 60),
+                false,
+            );
+            *previous = Some(boundary);
+            receipt
+        };
+        pending.record(0, 0, false);
+        assert_eq!(tick(&mut pending, &mut previous, 0), None);
+        assert_eq!(tick(&mut pending, &mut previous, 1), None);
+        assert_eq!(tick(&mut pending, &mut previous, 2), None);
+
+        pending.start_serving();
+        previous = None;
+        assert_eq!(tick(&mut pending, &mut previous, 3), None);
+        assert_eq!(tick(&mut pending, &mut previous, 4), None);
+        assert_eq!(
+            tick(&mut pending, &mut previous, 5),
+            Some(Receipt {
+                slot: 4,
+                eligible: 0,
+                fast: 0
+            })
+        );
+
+        pending.stop_serving();
+        pending.record(5, 5, false);
+        assert_eq!(tick(&mut pending, &mut previous, 6), None);
+        assert_eq!(tick(&mut pending, &mut previous, 7), None);
+        assert_eq!(pending.minutes, [None; 2]);
     }
 
     #[test]
