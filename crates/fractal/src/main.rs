@@ -2114,7 +2114,12 @@ struct ActivityArgs {
 }
 
 /// Observation-only device grant requested by `st devices pair --read-only`.
-const READ_ONLY_PAIRING_SCOPES: &[&str] = &["read.projections", "read.glasses", "terminal.read"];
+const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "read.glasses",
+    "read.arrangements",
+    "terminal.read",
+];
 
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
@@ -2133,7 +2138,7 @@ enum DevicesCommand {
         /// Delegate every current client scope to this trusted device.
         #[arg(long, conflicts_with = "assistant")]
         full_control: bool,
-        /// Delegate only observation: projections, glasses frames, and terminal output.
+        /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
