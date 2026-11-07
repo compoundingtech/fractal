@@ -80,8 +80,17 @@ impl ObservationBatches {
 }
 
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
-    let actor = normalize_actor(actor, "agent");
-    resolve_reference_conn(connection, &actor)
+    let actor = canonical_work_actor(actor)?;
+    let resolved = resolve_reference_conn(connection, &actor)?;
+    canonical_work_actor(&resolved)
+}
+
+fn canonical_work_actor(actor: &str) -> Result<String, FractalError> {
+    fractal_schema::canonical_agent_actor(actor)
+        .map(std::borrow::Cow::into_owned)
+        .ok_or_else(|| {
+            FractalError::new("invalid-work-actor", format!("invalid agent actor `{actor}`"))
+        })
 }
 
 // One query preserves the native collection's indexed latest/live probes and shallow
@@ -5889,12 +5898,11 @@ impl MissionsStore for Store {
             ));
         }
         let subject = normalize_step_run(subject);
-        let actor = normalize_actor(
+        let actor = canonical_work_actor(
             request.actor.as_deref().ok_or_else(|| {
                 FractalError::new("missing-work-actor", "a work action needs an actor")
             })?,
-            "agent",
-        );
+        )?;
         let requested_incarnation = request
             .incarnation
             .as_deref()
@@ -5955,6 +5963,12 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject, current),
                 };
+                let legacy_claimant = current.claimant.as_deref().is_some_and(|claimant| {
+                    fractal_schema::canonical_agent_actor(claimant).as_deref() != Some(claimant)
+                });
+                current.claimant = current.claimant.as_deref()
+                    .and_then(fractal_schema::canonical_agent_actor)
+                    .map(std::borrow::Cow::into_owned);
                 if handoff.is_some() {
                     enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
                 }
@@ -6033,11 +6047,11 @@ impl MissionsStore for Store {
                 if action == "claim" && adhoc_work::pending_handoff(transaction, &current)? {
                     return Err(FractalError::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
                 }
-                let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
-                    || current
-                        .available_to
-                        .iter()
-                        .any(|candidate| candidate == &actor);
+                let eligible = current.assigned_to.as_deref().is_some_and(|assignee| {
+                    fractal_schema::canonical_agent_actor(assignee).as_deref() == Some(actor.as_str())
+                }) || current.available_to.iter().any(|candidate| {
+                    fractal_schema::canonical_agent_actor(candidate).as_deref() == Some(actor.as_str())
+                });
                 if current.agentless || !eligible {
                     return Err(FractalError::new(
                         "work-not-available",
@@ -6252,7 +6266,7 @@ impl MissionsStore for Store {
                 } else {
                     None
                 };
-                let publish = !quiet_renewal
+                let publish = !quiet_renewal || legacy_claimant
                     || last_replicated_expiry.is_none_or(|expiry| expiry <= now.saturating_add(300_000));
                 let readiness_epoch = current
                     .readiness_epoch

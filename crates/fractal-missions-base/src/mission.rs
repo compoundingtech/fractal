@@ -2685,6 +2685,11 @@ fn normalize_subject(value: &str, kind: &str) -> String {
 }
 
 fn normalize_assignee(value: &str, default_host: &str) -> String {
+    if let Some(canonical) = fractal_schema::canonical_agent_actor(value) {
+        return canonical.into_owned();
+    }
+    // Stored declarations are parsed again during reconciliation. Preserve their historical
+    // normalization when an actor cannot be canonicalized; writers validate new work actors.
     if value.starts_with("person/") {
         return value.to_owned();
     }
@@ -3129,6 +3134,35 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn assignees_canonicalize_legacy_slash_ids() {
+        for (input, expected) in [
+            ("example/worker", "agent/example/worker"),
+            ("agent/example/worker", "agent/example/worker"),
+            ("person/reviewer", "person/reviewer"),
+            ("daemon/scheduler", "daemon/scheduler"),
+            ("worker", "agent/host.worker"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
+    #[test]
+    fn stored_assignees_preserve_historical_malformed_normalization() {
+        for (input, expected) in [
+            ("agent/", "agent/host."),
+            ("", "agent/host."),
+            ("worker name", "agent/host.worker name"),
+            ("example/worker name", "example/worker name"),
+            ("agent/example/worker name", "agent/example/worker name"),
+            ("example/worker.name ", "agent/example/worker.name "),
+            ("person/reviewer name", "person/reviewer name"),
+            ("person/", "person/"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
     #[test]
     fn nested_loop_paths_follow_their_distinct_owning_steps() {
         let source = r#"mission "collision" state="ready" { goal "Keep nested histories separate.";
