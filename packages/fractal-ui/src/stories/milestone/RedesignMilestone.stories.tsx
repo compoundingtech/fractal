@@ -16,7 +16,24 @@ import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme } from '../../assistant-ui/composition-theme'
 import { borderVars as border, spaceVars as sp, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 
-type Args = Omit<RedesignMilestoneProps, 'persistKey' | 'reload'>
+import { branchFiles, changedFiles, idleAgentRef, inboxCount, lastSeen, mainAgentRef, mainTurns, milestoneNow, proseResources, reviewerCard, reviewerRef, reviewerTurns, rosterFolders, staleMainTurns } from './milestone-fixtures'
+
+type Args = Pick<RedesignMilestoneProps, 'scheme'> & { readonly state: 'slice' | 'loading' | 'empty-roster' | 'empty-thread' | 'no-match' | 'roster-error' | 'thread-unavailable' | 'stale' | 'navigation' }
+const fixtureProps = ({ state, scheme }: Args): Omit<RedesignMilestoneProps, 'persistKey'> => {
+  const rosterValue = { folders: state === 'empty-roster' ? [] : rosterFolders, inboxCount: state === 'empty-roster' ? 0 : inboxCount, query: state === 'no-match' ? 'zz-nothing' : '' }
+  const conversationValue = { primaryRef: mainAgentRef, reviewerRef, lastSeen, threads: {
+    [mainAgentRef]: { turns: state === 'stale' ? staleMainTurns : mainTurns, running: true },
+    [reviewerRef]: { turns: reviewerTurns, running: false },
+    [idleAgentRef]: { turns: [], running: false },
+  } }
+  return {
+    scheme, now: milestoneNow, changedFiles, branchFiles, proseResources, reviewerCard,
+    roster: state === 'loading' ? { _tag: 'loading', value: rosterValue } : state === 'roster-error' ? { _tag: 'failed', value: rosterValue, reason: 'Roster unavailable', detail: 'The gateway could not load the roster.' } : state === 'stale' ? { _tag: 'stale', value: rosterValue, observedAt: lastSeen.at } : { _tag: 'ready', value: rosterValue },
+    conversation: state === 'loading' ? { _tag: 'loading', value: conversationValue } : state === 'thread-unavailable' ? { _tag: 'failed', value: conversationValue, reason: 'Conversation unavailable', detail: 'The gateway could not load it (HTTP 503). Your draft is unchanged.' } : state === 'stale' ? { _tag: 'stale', value: conversationValue, observedAt: lastSeen.at } : { _tag: 'ready', value: conversationValue },
+    defaultOpenRefs: state === 'empty-roster' ? [] : state === 'empty-thread' ? [idleAgentRef] : state === 'slice' || state === 'navigation' ? [mainAgentRef, reviewerRef] : [mainAgentRef],
+    defaultChangesOpen: state === 'slice' || state === 'navigation', defaultPaletteOpen: state === 'navigation',
+  }
+}
 
 const meta: Meta<Args> = {
   excludeStories: ['scenarioExemptions'],
@@ -25,7 +42,7 @@ const meta: Meta<Args> = {
     layout: 'fullscreen',
     scenario: {
       _tag: 'contract-fixture',
-      reason: 'Accepted RM1 composition imports milestone-fixtures at module level. Loading, empty roster, empty thread and no-match switch on its state prop, not slice data; those stories convert to slices once the composition takes roster and conversation slice data. The remaining contracts require fixture titles, Known usage and duration, unread and prose chips, a fixed last-seen instant and command, branch-named Changes, or host-settled reload promises that worlds do not express.',
+      reason: 'Accepted RM1 contract uses story-local authored roster and conversation projections to preserve fixture titles, Known usage and duration, unread and prose chips, a fixed last-seen instant and command, branch-named Changes, and host-settled reload promises. Scenario conversion is separate.',
     },
     docs: { description: { component: `Accepted RM1 reference; live app ports slices separately. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. The sidebar uses the shared kit row.` } },
   },
@@ -35,7 +52,7 @@ const meta: Meta<Args> = {
     state: { control: 'select', options: ['slice', 'loading', 'empty-roster', 'empty-thread', 'no-match', 'roster-error', 'thread-unavailable', 'stale', 'navigation'] },
   },
   // Initial state derives from args, so any arg change remounts with a fresh frame.
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} />,
+  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...fixtureProps(args)} persistKey={`rm1-${context.id}`} />,
 }
 export default meta
 
@@ -209,10 +226,22 @@ export const NavigationKeyboard: Story = {
   },
 }
 
+const recoveryUpdates = React.createRef<{ failRoster: () => void; removeAgent: () => void; emptyRoster: () => void }>()
+/** Keep the same mounted composition while its parent replaces data projections. */
+function RecoveryUpdates({ args, persistKey }: { readonly args: Args; readonly persistKey: string }) {
+  const [props, setProps] = React.useState(() => fixtureProps(args))
+  React.useImperativeHandle(recoveryUpdates, () => ({
+    failRoster: () => setProps(current => ({ ...current, roster: { _tag: 'failed', value: current.roster.value, reason: 'Roster unavailable again', detail: 'A later request failed.' } })),
+    removeAgent: () => setProps(current => ({ ...current, roster: { _tag: 'ready', value: { ...current.roster.value, folders: rosterFolders.map(folder => ({ ...folder, rows: folder.rows.filter(row => row.ref !== mainAgentRef).map(row => ({ ...row, children: row.children.filter(child => child.ref !== mainAgentRef) })) })) } } })),
+    emptyRoster: () => setProps(current => ({ ...current, roster: { _tag: 'ready', value: { ...current.roster.value, folders: [], inboxCount: 0 } } })),
+  }), [])
+  return <RedesignMilestone {...props} persistKey={persistKey} reload={rosterReload.reload} />
+}
+
 /** A roster fault stays in the sidebar while the open thread keeps working; Retry walks loading back to a loaded roster. */
 export const ErrorRecovery: Story = {
   tags: ['critical'], args: { state: 'roster-error' },
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} reload={rosterReload.reload} />,
+  render: (args, context) => <RecoveryUpdates key={JSON.stringify(args)} args={args} persistKey={`rm1-${context.id}`} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const alert = await canvas.findByRole('alert')
@@ -227,13 +256,25 @@ export const ErrorRecovery: Story = {
     rosterReload.settle()
     await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'ready'))
     await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3))
+    // Replacing the retried input must expose a later fault, not retain the local ready override.
+    recoveryUpdates.current?.failRoster()
+    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'error'))
+    await expect(await canvas.findByRole('alert')).toHaveTextContent('Couldn’t load agents')
+    // Preserve the selected conversation with a neutral ref title if its roster row disappears.
+    recoveryUpdates.current?.removeAgent()
+    await waitFor(() => expect(canvasElement.querySelector(`[data-pane="${mainAgentRef}"]`)).toHaveAttribute('aria-label', mainAgentRef))
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
+    recoveryUpdates.current?.emptyRoster()
+    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'empty'))
+    await expect(canvasElement.querySelector(`[data-pane="${mainAgentRef}"]`)).toHaveAttribute('aria-label', mainAgentRef)
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
   },
 }
 
 /** A thread fault stays in its pane while the roster stays live; Retry loads that conversation only. */
 export const ThreadRecovery: Story = {
   tags: ['critical'], args: { state: 'thread-unavailable' },
-  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} reload={threadReload.reload} />,
+  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...fixtureProps(args)} persistKey={`rm1-${context.id}`} reload={threadReload.reload} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: 'Retry: Conversation unavailable' }))
@@ -255,7 +296,7 @@ export const Decisions: Story = {
   parameters: {
     scenario: {
       _tag: 'contract-fixture',
-      reason: 'Static decision sheet shares this CSF module with RedesignMilestone, whose runtime import graph reaches milestone-fixtures; it is not a fixture-free primitive.',
+      reason: 'Static decision sheet shares this CSF module with story-local milestone-fixtures; it is not a fixture-free primitive.',
     },
   },
   render: args => <article {...stylex.props(styles.sheet, ...baselineTheme, args.scheme === 'light' && lightTheme)}>
