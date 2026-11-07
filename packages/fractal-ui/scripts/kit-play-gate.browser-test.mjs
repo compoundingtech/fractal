@@ -65,7 +65,7 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
 
-const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false, criticalTags = ['dev', 'critical'], policyTags = ['dev'], criticalImportPath = './Kit.stories.tsx' } = {}) => {
+const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false, criticalTags = ['dev', 'critical'], policyTags = ['dev'], criticalImportPath = './Kit.stories.tsx', syntheticCost = false } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -85,6 +85,7 @@ const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fi
       ? [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output]
       : ['--input-type=module', '--eval', `
           import { runKitPlayGate } from ${JSON.stringify(new URL('./kit-play-gate-runner.mjs', import.meta.url).href)}
+          import { assessKitPlayCost } from ${JSON.stringify(new URL('./kit-play-budget.mjs', import.meta.url).href)}
           if (${retainWebStorage}) {
             const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
             const launch = chromium.launch.bind(chromium)
@@ -109,20 +110,22 @@ const runGate = async ({ env = {}, report, probes, prependProbes, navigation, fi
           const receipt = await runKitPlayGate({
             buildDirectory: ${JSON.stringify(build)}, outputDirectory: ${JSON.stringify(output)},
             ${fixtureOverrides === undefined ? '' : `overrides: new Map(${JSON.stringify(fixtureOverrides)}),`}
+            ${syntheticCost ? 'assessCost: (budget, usage) => assessKitPlayCost(budget, { ...usage, costRequired: false }),' : ''}
           })
           if (!receipt.pass) process.exitCode = 1
         `]
     const child = spawn(process.execPath, args, {
       env: { ...inherited, ...env },
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
-    let stdout = ''
+    let stdout = '', stderr = ''
     child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
     const code = await new Promise((resolve, reject) => {
       child.once('error', reject)
       child.once('close', resolve)
     })
-    return { code, stdout, receipt: JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8')) }
+    return { code, stdout, stderr, receipt: JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8')) }
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -292,8 +295,10 @@ test('the per-commit set refuses policy-tagged stories that are not critical bef
 })
 
 test('a new-folder critical story tagged both-widths runs both browser widths without lane edits', { timeout: 60000 }, async () => {
-  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' }, criticalTags: ['critical', 'both-widths'], criticalImportPath: './new-folder/Kit.stories.tsx' })
-  assert.equal(code, 0)
+  // This synthetic selection fixture is not a production CPU-budget sample; that policy has unit tests.
+  const { code, receipt, stderr } = await runGate({ env: { KIT_PLAY_SET: 'commit', KIT_PLAY_A11Y: 'off' }, criticalTags: ['critical', 'both-widths'], criticalImportPath: './new-folder/Kit.stories.tsx', syntheticCost: true })
+  assert.equal(code, 0, JSON.stringify({ stderr, receipt }, null, 2))
+  assert.ok(receipt.rows.every(row => row.pass))
   assert.deepEqual(receipt.rows.map(({ scheme, width }) => [scheme, width]), [['dark', 440], ['dark', 1440]])
 })
 

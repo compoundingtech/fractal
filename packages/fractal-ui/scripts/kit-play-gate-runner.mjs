@@ -25,7 +25,7 @@ export function assertStrictEvidence(records, id, a11y) {
 
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
-export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
+export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES, assessCost = assessKitPlayCost }) {
   const shardIndex = Number(process.env.KIT_PLAY_SHARD_INDEX ?? 0)
   const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
   // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
@@ -78,7 +78,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
-    const cost = assessKitPlayCost(budget, {
+    const cost = assessCost(budget, {
       elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit', plays: rows.length,
     })
     const receipt = {
