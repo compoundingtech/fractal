@@ -3992,6 +3992,15 @@ export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelinePage = typeof TimelinePage.Type
 export type TimelinePageEncoded = typeof TimelinePage.Encoded
 
+/** The operator's usage hub quota. snapshot is the hub's own schema version 3 document, relayed unchanged. */
+export const UsageHubQuota = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "state": Schema.Literal("disabled") }),
+  Schema.Struct({ "reason": Schema.Literals(["transport","invalid_snapshot"]), "refresh_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(3600)), "state": Schema.Literal("unavailable") }),
+  Schema.Struct({ "refresh_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(3600)), "snapshot": Schema.Struct({ "accounts": Schema.Array(Schema.Unknown), "generatedAt": Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })), "schemaVersion": Schema.Literal(3) }), "state": Schema.Literal("available") })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "UsageHubQuota", description: "The operator's usage hub quota. snapshot is the hub's own schema version 3 document, relayed unchanged." }))()
+export type UsageHubQuota = typeof UsageHubQuota.Type
+export type UsageHubQuotaEncoded = typeof UsageHubQuota.Encoded
+
 export const HarnessInventoryItem = /*#__PURE__*/ (() => Schema.Struct({
   "kind": Schema.Literals(["file","directory","skill-command","slash-command"]),
   "name": Schema.String,
