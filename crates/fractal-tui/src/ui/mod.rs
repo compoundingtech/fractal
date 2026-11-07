@@ -6901,13 +6901,19 @@ pub fn run_demo(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| arg == "--dump") {
         return dump(args);
     }
-    let generated = demo::load().context("Cannot open scenario demo")?;
+    let mut generated = demo::load().context("Cannot open scenario demo")?;
+    let sidebar_preview = args.iter().any(|arg| arg == "--sidebar-v2-preview")
+        .then(|| demo::sidebar_v2(&mut generated.world)).transpose()?;
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
     let mut ui = Ui::new(demo::loading_from(generated.world.clone()));
     ui.keyboard_enhanced = _guard.enhanced;
     ui.resource_sidebar.arrangements = generated.arrangements;
+    if let Some((arrangement, memberships)) = sidebar_preview {
+        ui.resource_sidebar.set_v2_preview(arrangement, memberships);
+        ui.resource_sidebar.preview_v2 = true;
+    }
     ui.load_prefs();
     // The demo keeps its spaces in memory only, and shows the sidebar as a new device does.
     ui.glasses = glass::Glasses::open(space_request(args), None);
@@ -6957,14 +6963,23 @@ fn dump(args: &[String]) -> Result<()> {
     let height = arg(args, "--height")
         .and_then(|v| v.parse().ok())
         .unwrap_or(44);
-    let generated = demo::load().context("Cannot open scenario demo")?;
+    let mut generated = demo::load().context("Cannot open scenario demo")?;
+    let sidebar_preview = args.iter().any(|arg| arg == "--sidebar-v2-preview")
+        .then(|| demo::sidebar_v2(&mut generated.world)).transpose()?;
     let mut ui = Ui::new(if args.iter().any(|arg| arg == "--loading") {
         demo::loading_from(generated.world)
     } else {
         generated.world
     });
     ui.resource_sidebar.arrangements = generated.arrangements;
+    if let Some((arrangement, memberships)) = sidebar_preview {
+        ui.resource_sidebar.set_v2_preview(arrangement, memberships);
+        ui.resource_sidebar.preview_v2 = true;
+    }
     ui.glasses = glass::Glasses::open(space_request(args), None);
+    if args.iter().any(|arg| arg == "--sidebar-v2-preview") {
+        ui.glasses.sidebar.shown = true;
+    }
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     // Keys: each character is a key; "\n" is Enter, "<esc>", "<end>", "<pgdn>", "<pgup>", "<down>";
     // "<c-k>" is Ctrl+K and "<a-1>" Alt+1.

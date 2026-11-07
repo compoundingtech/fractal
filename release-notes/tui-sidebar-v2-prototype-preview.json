@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preview-only PR17 prototype: render an isolated synthetic version 2 sidebar through fractal-sidebar projection and the ratatui widget, preserving the existing live version 1 path",
+  "replay": { "status": "none", "detail": "No replay, migration, or backfill; the fixture exists only in demo memory." },
+  "schema": { "status": "none", "detail": "No graph, daemon, storage, or preference schema changes." },
+  "rules": { "status": "none", "detail": "No admission or checkpoint changes. This is not production PR17 activation." },
+  "compatibility": { "status": "none", "detail": "Normal --demo and live connections retain version 1 behavior. The opt-in preview uses five folders, including two nested folders, with 30 invented agent/mission catalog entries and 29 live ordered memberships; the retired catalog entry is hidden." },
+  "downtime": { "status": "none", "detail": "No daemon or live data access is required." },
+  "manual": { "status": "none", "detail": "Launch fractal tui --demo --sidebar-v2-preview. Add --dump for a text frame. The preview supports folding, filtering, scrolling, and resource navigation but is read-only. Live v2 paging, edit journaling, and write protocols are not wired." },
+  "recovery": { "status": "none", "detail": "Exit the demo and omit --sidebar-v2-preview to return to the unchanged version 1 presentation. No live resource writes or confirmed-base persistence occur." }
+}

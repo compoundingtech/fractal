@@ -104,6 +104,80 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
     Ok(DemoWorld { world, terminals, arrangements })
 }
 
+/// Preview-only PR 17 fixture. Memberships are a complete invented server result,
+/// not a substitute for the still-unwired live collection-v1 reader.
+pub(super) fn sidebar_v2(world: &mut World) -> Result<(fractal_client::Arrangement, Vec<fractal_sidebar::model::MembershipInput>)> {
+    use fractal_sidebar::model::MembershipInput;
+    use serde_json::json;
+    let subject = format!("arrangement/person/robin/{}", fractal_client::SIDEBAR_ARRANGEMENT_UUID);
+    let folder_ids: Vec<String> = (0..5).map(|i| format!("00000000-0000-7000-8000-{i:012}")).collect();
+    let names = ["Product", "Sidebar v2", "Delivery", "Operations", "Research"];
+    let mut folders = serde_json::Map::new();
+    let mut parents = BTreeMap::new();
+    for (i, id) in folder_ids.iter().enumerate() {
+        let parent = match i { 1 | 2 => Some(folder_ids[0].clone()), _ => None };
+        folders.insert(id.clone(), json!({
+            "name": {"value": names[i], "revision": "preview-1"},
+            "position": {"value": {"parent": parent, "key": format!("a{i}")}, "revision": "preview-1"},
+            "tombstone": null
+        }));
+        parents.insert(id.clone(), parent);
+    }
+    let arrangement = serde_json::from_value(json!({
+        "id": subject, "revision": "preview-1", "updated_at": "2026-11-07T12:00:00Z",
+        "owner": "person/robin", "deleted": false,
+        "body": {"version": 2, "name": {"value": "Sidebar", "revision": "preview-1"}, "folders": folders},
+        "resolved": {"parents": parents, "folders": {}}
+    })).context("Invalid v2 preview arrangement")?;
+    let agent_template = world.agents.items().first().context("Demo has no agent template")?.clone();
+    let mission_template = world.missions.items().first().context("Demo has no mission template")?.clone();
+    let mut agents = world.agents.items().to_vec();
+    let mut missions = world.missions.items().to_vec();
+    let mut members = Vec::new();
+    let tasks = [
+        "Projection", "Ordered placements", "Folder nesting", "Keyboard navigation",
+        "Retirement", "Membership paging", "Sidebar review", "Write journal",
+        "Terminal handoff", "Delivery audit", "Release plan", "Device pairing",
+        "Fleet inventory", "Observability", "Research notes",
+    ];
+    for i in 0..30 {
+        let member = if i % 3 == 0 {
+            let mut row = mission_template.clone();
+            row.id = format!("mission/preview/sidebar-{i:02}");
+            row.title = format!("{} mission", tasks[i / 2]);
+            let id = row.id.clone();
+            missions.push(row);
+            id
+        } else {
+            let mut row = agent_template.clone();
+            row.id = format!("agent/preview/sidebar-{i:02}");
+            row.name = format!("{} agent", tasks[i / 2]);
+            row.mission = None;
+            row.parent = None;
+            row.terminal = false;
+            row.subagents.clear();
+            row.activity = "Invented sidebar preview".into();
+            row.state = if i == 29 { AgentState::Retired } else if i % 2 == 0 { AgentState::Working } else { AgentState::Idle };
+            let id = row.id.clone();
+            agents.push(row);
+            id
+        };
+        // Retired members are absent from the complete membership set while the
+        // catalog still contains them. The production projection must hide this row.
+        if i == 29 { continue; }
+        members.push(MembershipInput {
+            container: subject.clone(), member, revision: "preview-1".into(),
+            position: fractal_schema::ordered_membership::Position {
+                bucket: Some(folder_ids[match i { 0..=8 => 1, 9..=14 => 2, 15..=23 => 3, _ => 4 }].clone()),
+                key: format!("a{}", char::from(b'A' + i as u8)),
+            },
+        });
+    }
+    world.agents = Load::Ready(agents);
+    world.missions = Load::Ready(missions);
+    Ok((arrangement, members))
+}
+
 /// Product callers use `load` to report errors before entering terminal raw mode.
 #[cfg(test)]
 pub fn world() -> World {
@@ -163,6 +237,19 @@ pub(super) fn contract_inputs() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_v2_preview_has_nested_ordered_members_and_hides_retired() {
+        let mut world = load().unwrap().world;
+        let (arrangement, members) = sidebar_v2(&mut world).unwrap();
+        assert!(matches!(arrangement.body, fractal_client::ArrangementBody::V2(_)));
+        assert_eq!(members.len(), 29);
+        assert!(members.windows(2).all(|pair| pair[0].position.key < pair[1].position.key));
+        assert_eq!(arrangement.resolved.as_ref().unwrap().parents.values().filter(|parent| parent.is_some()).count(), 2);
+        let retired = world.agents.items().iter().find(|agent| agent.id == "agent/preview/sidebar-29").unwrap();
+        assert_eq!(retired.state, AgentState::Retired);
+        assert!(!members.iter().any(|member| member.member == retired.id));
+    }
 
     #[test]
     fn demo_rebases_inventory_instants_but_keeps_relative_ages() {
