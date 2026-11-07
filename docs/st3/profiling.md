@@ -323,6 +323,29 @@ the part not yet used and a reset time. `fractal slo explain ID` says one row in
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
+Quota windows merge `harness.limits` and `usage.limits.observed` by provider account digest and
+window, selecting the newest provider observation time across hosts (canonical claim order
+breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
+`reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
+explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
+The omp-usage observations do not change the harness-only inputs to the seat-stopping policy.
+Producer batches contain `readings` and `credit_readings`; only the explicitly allowlisted agent
+identity may write them, as itself. Older members retain this non-authority unknown kind for
+replay after upgrade without changing terminal/runtime routing.
+
+Credit objectives read the durable `usage.limits.observed` evidence from the explicitly admitted
+omp-usage producer. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
+seven days, counted by expiry; each durable credit represents one window-equivalent.
+`CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
+`redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;
+otherwise it is at-risk. Credits fold by provider, account digest and durable `credit_id`,
+not host or friendly account reference. The newest provider `measured_at` wins; claim ID breaks
+equal-time ties consistently across members. Rows retain the selected claim and disposition
+evidence. Missing expiry, unknown state, unreported/unsupported coverage or a future measurement
+is `no-data`; stale readings are `stale`, never success. The same freshness policy as account
+readings applies. These rows describe only observed credits and are observational: they do not
+stop seats, enforce quotas or redeem credits.
+
 The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
 percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
 `NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run

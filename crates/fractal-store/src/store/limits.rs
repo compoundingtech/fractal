@@ -76,6 +76,18 @@ fn select_account_reading(readings: Vec<(AccountLimit, Vec<u8>)>) -> AccountLimi
         .expect("the latest reset has a recent reading")
 }
 
+/// A provider window, retaining its own observation clock and provenance.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LimitWindow {
+    pub window: String,
+    pub used_percent: Option<f64>,
+    pub resets_at_unix_ms: Option<u64>,
+    pub measured_at_unix_ms: u64,
+    pub coverage: String,
+    pub source: String,
+    pub host: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AccountLimit {
     /// The account label, or `DRIVER/unknown` when the harness named none.
@@ -105,6 +117,9 @@ pub struct AccountLimit {
     pub host: String,
     /// Every seat whose newest reading names this account.
     pub seats: Vec<String>,
+    /// Observational windows. These never drive the seat-stopping policy.
+    #[serde(default)]
+    pub windows: Vec<LimitWindow>,
 }
 
 pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
@@ -119,10 +134,14 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
         .map(str::to_owned);
     // Older bound producers can carry a generic label or none at all. Match the publishers'
     // stable declared label so one declared account cannot split as its provider label changes.
-    let account = account_ref.as_ref().map_or_else(
-        || identity.map_or_else(|| format!("{driver}/unknown"), str::to_owned),
-        |name| fractal_drivers::account::account_label(&driver, &format!("declared:{name}")),
-    );
+    let account = if fields["observed_windows"].is_array() {
+        identity?.to_owned()
+    } else {
+        account_ref.as_ref().map_or_else(
+            || identity.map_or_else(|| format!("{driver}/unknown"), str::to_owned),
+            |name| fractal_drivers::account::account_label(&driver, &format!("declared:{name}")),
+        )
+    };
     let identified = account_ref.is_some() || identity.is_some();
     let percent = |name: &str| fields[name].as_f64().filter(|value| value.is_finite());
     Some((
@@ -141,9 +160,51 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
             measured_by: String::new(),
             host: origin.to_owned(),
             seats: Vec::new(),
+            windows: fields["observed_windows"]
+                .as_array()
+                .map(|windows| windows.iter().filter_map(|window| serde_json::from_value(window.clone()).ok()).collect())
+                .unwrap_or_else(|| {
+                    [
+                        ("weekly", "weekly_percent", "weekly_resets_at_unix_ms"),
+                        ("5h", "five_hour_percent", "five_hour_resets_at_unix_ms"),
+                    ].into_iter().map(|(window, used, resets)| LimitWindow {
+                        window: window.into(),
+                        used_percent: percent(used),
+                        resets_at_unix_ms: fields[resets].as_u64(),
+                        measured_at_unix_ms: fields["measured_at_unix_ms"].as_u64().unwrap_or_default(),
+                        coverage: if percent(used).is_some() { "reported" } else { "unreported" }.into(),
+                        source: "harness".into(),
+                        host: origin.into(),
+                    }).collect()
+                }),
         },
         account,
     ))
+}
+
+/// Normalize a producer batch into independently timestamped projection rows.
+fn observation_readings(body: Value) -> Vec<Value> {
+    let Some(readings) = body.pointer("/fields/readings").and_then(Value::as_array) else {
+        return vec![body];
+    };
+    readings.iter().filter_map(|fields| {
+        let provider = fields["provider"].as_str()?;
+        let driver = match provider { "anthropic" => "claude", "openai-codex" => "codex", other => other };
+        let timestamp = |name: &str| fields[name].as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
+        let measured = timestamp("measured_at")?;
+        let window = fields["window"].as_str()?;
+        Some(serde_json::json!({"fields": {
+            "driver": driver, "account": fields["account"], "account_ref": fields["account_ref"],
+            "measured_at_unix_ms": measured, "observation_window": window,
+            "observed_windows": [{
+                "window": window, "used_percent": fields["used_percent"],
+                "resets_at_unix_ms": timestamp("resets_at"), "measured_at_unix_ms": measured,
+                "coverage": fields["coverage"], "source": "omp-usage", "host": fields["host"]
+            }]
+        }}))
+    }).collect()
 }
 
 // Account limits are a projection of the `harness.limits` claims, kept as two small tables that
@@ -160,7 +221,7 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
 // `meta` says which claims are folded; it decides only what is folded next, never a winner.
 // The tables keep version 1's columns, which this version fills but never decides by, so a
 // version 1 build that opens this store can still fold into them after it empties them.
-const LIMITS_PROJECTION_VERSION: &str = "2";
+const LIMITS_PROJECTION_VERSION: &str = "3";
 const LIMITS_CURSOR: &str = "account_limits_through_index";
 const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h36d2fcc0cc4f owner=fractal_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS account_limit_readings (
@@ -168,13 +229,14 @@ CREATE TABLE IF NOT EXISTS account_limit_readings (
     account TEXT NOT NULL,
     account_ref TEXT NOT NULL,
     weekly INTEGER NOT NULL CHECK(weekly IN (0,1)),
+    window TEXT NOT NULL DEFAULT '',
     measured_at_unix_ms INTEGER NOT NULL,
     subject TEXT NOT NULL,
     store_index INTEGER NOT NULL,
     origin TEXT NOT NULL,
     body TEXT NOT NULL,
     head_key BLOB NOT NULL DEFAULT x'',
-    PRIMARY KEY (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index)
+    PRIMARY KEY (driver, account, account_ref, weekly, window, measured_at_unix_ms, subject, store_index)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS account_limit_seats (
     subject TEXT PRIMARY KEY,
@@ -235,7 +297,7 @@ pub fn open_limits(transaction: &Transaction<'_>) -> Result<()> {
         |row| row.get(0),
     )?;
     let has_history: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='harness.limits')",
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE kind IN ('harness.limits','usage.limits.observed'))",
         [],
         |row| row.get(0),
     )?;
@@ -270,7 +332,7 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
     let claims = transaction
         .prepare_cached(
             "SELECT id, subject, origin, body, accepted_at_unix_ms, store_index FROM claims
-             WHERE kind='harness.limits' AND store_index>?1 ORDER BY store_index LIMIT ?2",
+             WHERE kind IN ('harness.limits','usage.limits.observed') AND store_index>?1 ORDER BY store_index LIMIT ?2",
         )?
         .query_map(params![through, limit as i64], |row| {
             Ok((
@@ -284,21 +346,30 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut newest_index = through;
-    let mut touched = BTreeSet::<(String, String, String, bool)>::new();
+    let mut touched = BTreeSet::<(String, String, String, bool, String)>::new();
     for (id, subject, origin, body, accepted_at, store_index) in &claims {
         newest_index = newest_index.max(*store_index);
         let value: Value = serde_json::from_str(body)?;
+        let head_key = canonical::sortable_key(&canonical::claim_key(transaction, id)?);
+        for value in observation_readings(value) {
+        let window = value.pointer("/fields/observation_window").and_then(Value::as_str).unwrap_or_default();
+        let normalized_body;
+        let projected_body = if window.is_empty() {
+            body
+        } else {
+            normalized_body = serde_json::to_string(&value)?;
+            &normalized_body
+        };
         let Some((limit, _)) = reading(origin, &value) else {
             continue;
         };
-        let head_key = canonical::sortable_key(&canonical::claim_key(transaction, id)?);
         let account_ref = limit.account_ref.clone().unwrap_or_default();
         let weekly = limit.weekly_percent.is_some();
         transaction
             .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-hf1ac321eba1a owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
-                 (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body, head_key)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                 (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body, head_key, window)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?
             .execute(/* sqlite-large-value: allow-for-now lv-hc848209c8c7f owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 limit.driver,
@@ -309,10 +380,12 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
                 subject,
                 *store_index as i64,
                 origin,
-                body,
-                head_key
+                projected_body,
+                head_key,
+                window
             ])?;
         // The seat's newest reading in canonical claim order.
+        if window.is_empty() {
         transaction
             .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-hab71d076506e owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
@@ -333,24 +406,27 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
                 *store_index as i64,
                 head_key
             ])?;
-        touched.insert((limit.driver, limit.account, account_ref, weekly));
+        }
+        touched.insert((limit.driver, limit.account, account_ref, weekly, window.to_owned()));
+        }
     }
     // Readings more than an hour older than their group's newest can no longer decide anything.
-    for (driver, account, account_ref, weekly) in touched {
+    for (driver, account, account_ref, weekly, window) in touched {
         transaction
             .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-heddd3ac44bac owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
-                 WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4
+                 WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6
                    AND measured_at_unix_ms < (
                        SELECT MAX(measured_at_unix_ms) FROM account_limit_readings
-                       WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4) - ?5",
+                       WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6) - ?5",
             )?
             .execute(/* sqlite-large-value: allow-for-now lv-heeda99e2cde0 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 driver,
                 account,
                 account_ref,
                 weekly,
-                ACCOUNT_READING_WINDOW_MS as i64
+                ACCOUNT_READING_WINDOW_MS as i64,
+                window
             ])?;
     }
     if newest_index > through {
@@ -472,18 +548,31 @@ fn account_limits_with(
             }
         }
     }
-    let resolve = |driver: String, account: String, account_ref: String| -> Key {
+    // Producer account_ref labels are display names, not part of the provider account identity.
+    let mut references = BTreeMap::<(String, String), String>::new();
+    for (driver, account, account_ref, ..) in &rows {
+        if !account_ref.is_empty() {
+            references.entry((driver.clone(), account.clone()))
+                .and_modify(|current| { if account_ref < current { *current = account_ref.clone(); } })
+                .or_insert_with(|| account_ref.clone());
+        }
+    }
+    let resolve = |driver: String, account: String, account_ref: String, observer: bool| -> Key {
         match alias.get(&(driver.clone(), account.clone())) {
-            Some(declared) if account_ref.is_empty() => (
+            Some(declared) if observer || account_ref.is_empty() => (
                 driver.clone(),
                 fractal_drivers::account::account_label(&driver, &format!("declared:{declared}")),
                 Some(declared.clone()),
             ),
-            _ => (driver, account, (!account_ref.is_empty()).then_some(account_ref)),
+            _ => {
+                let reference = references.get(&(driver.clone(), account.clone())).cloned();
+                (driver, account, reference)
+            },
         }
     };
     let mut weekly = BTreeMap::<Key, Vec<(AccountLimit, Vec<u8>)>>::new();
     let mut partial = BTreeMap::<Key, Vec<(AccountLimit, Vec<u8>)>>::new();
+    let mut windows = BTreeMap::<(String, String), BTreeMap<String, (LimitWindow, Vec<u8>)>>::new();
     for (driver, account, account_ref, is_weekly, origin, subject, body, head_key) in rows {
         let body: Value = serde_json::from_str(&body)?;
         let Some((mut limit, _)) = reading(&origin, &body) else {
@@ -491,12 +580,23 @@ fn account_limits_with(
         };
         limit.measured_by = subject;
         let aliased = account_ref.is_empty().then(|| account.clone());
-        let key = resolve(driver, account, account_ref);
+        let key = resolve(driver, account, account_ref, body["fields"]["observed_windows"].is_array());
         if let Some(declared) = &key.2 {
             limit.identity = aliased.filter(|raw| *raw != key.1);
             limit.account = key.1.clone();
-            limit.account_ref = Some(declared.clone());
+            if limit.account_ref.is_some() || limit.identity.is_some() || body["fields"]["observed_windows"].is_array() {
+                limit.account_ref = Some(declared.clone());
+            }
             limit.identified = true;
+        }
+        for window in &limit.windows {
+            let entries = windows.entry((key.0.clone(), key.1.clone())).or_default();
+            let replace = entries.get(&window.window).is_none_or(|(current, current_key)| {
+                (window.measured_at_unix_ms, &head_key) > (current.measured_at_unix_ms, current_key)
+            });
+            if replace {
+                entries.insert(window.window.clone(), (window.clone(), head_key.clone()));
+            }
         }
         if is_weekly {
             weekly.entry(key).or_default().push((limit, head_key));
@@ -514,6 +614,11 @@ fn account_limits_with(
     }
     for (key, readings) in weekly {
         accounts.insert(key, select_account_reading(readings));
+    }
+    for (key, limit) in &mut accounts {
+        limit.windows = windows.get(&(key.0.clone(), key.1.clone()))
+            .map(|entries| entries.values().map(|(window, _)| window.clone()).collect())
+            .unwrap_or_default();
     }
     let mut seats = connection.prepare_cached(
         "SELECT subject, driver, account, account_ref FROM account_limit_seats ORDER BY subject",
@@ -534,7 +639,7 @@ fn account_limits_with(
         members.sort();
     }
     for (seat, driver, account, account_ref) in members {
-        let key = resolve(driver, account, account_ref);
+        let key = resolve(driver, account, account_ref, false);
         accounts
             .get_mut(&key)
             .expect("the seat reported an account")
@@ -627,6 +732,69 @@ pub use crate::store::limits_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::limits_tests_shared_seats::{HOUR, read, read_account, read_unnamed};
 use super::*;
+
+    fn observe(store: &Store, used: f64, measured: &str) {
+        let writer = "agent/dotfiles/omp-usage-fleet-dev3";
+        store.append_claim(&ClaimInput {
+            subject: writer.into(), actor: Some(writer.into()), kind: "usage.limits.observed".into(),
+            fields: serde_json::from_value(json!({
+                "readings": [
+                    {"provider":"anthropic","account":"claude/example","account_ref":"claude/example-ref",
+                     "window":"weekly","used_percent":used,"resets_at":null,"measured_at":measured,
+                     "coverage":"reported","source":"omp-usage","host":"cedar"},
+                    {"provider":"anthropic","account":"claude/example","account_ref":"claude/example-ref",
+                     "window":"5h","used_percent":null,"resets_at":null,"measured_at":measured,
+                     "coverage":"unsupported","source":"omp-usage","host":"cedar"}
+                ], "credit_readings": []
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some(format!("observed-{measured}")),
+        }).unwrap();
+    }
+
+    #[test]
+    fn newest_provider_time_merges_windows_across_kinds_and_hosts_without_enforcement() {
+        let store = Store::open_memory("alder").unwrap();
+        read(&store, "agent/a", Some("claude/example"), 95.0, 1_000);
+        observe(&store, 20.0, "1970-01-01T00:00:03Z");
+        observe(&store, 90.0, "1970-01-01T00:00:02Z");
+        let limits = account_limits_at(&store.readers.get()).unwrap();
+        assert_eq!(limits.len(), 1);
+        let weekly = limits[0].windows.iter().find(|window| window.window == "weekly").unwrap();
+        assert_eq!(weekly.used_percent, Some(20.0));
+        assert_eq!(weekly.source, "omp-usage");
+        assert_eq!(weekly.host, "cedar");
+        // The old enforcement input remains harness-only.
+        assert_eq!(limits[0].weekly_percent, Some(95.0));
+        read(&store, "agent/b", Some("claude/example"), 10.0, 4_000);
+        let limits = account_limits_at(&store.readers.get()).unwrap();
+        let weekly = limits[0].windows.iter().find(|window| window.window == "weekly").unwrap();
+        assert_eq!(weekly.used_percent, Some(10.0));
+        assert_eq!(weekly.source, "harness");
+        assert_eq!(weekly.host, "alder");
+    }
+
+    #[test]
+    fn observed_provider_identity_follows_a_harness_declared_account_alias() {
+        let store = Store::open_memory("alder").unwrap();
+        read(&store, "agent/a", Some("claude/example"), 95.0, 1_000);
+        store.append_claim(&ClaimInput {
+            subject: "agent/a".into(), actor: Some("agent/a".into()), kind: "harness.limits".into(),
+            fields: serde_json::from_value(json!({
+                "driver":"claude", "account":"claude/example", "account_ref":"ada/claude",
+                "weekly_percent":95.0, "measured_at_unix_ms":2000
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("bound".into()),
+        }).unwrap();
+        observe(&store, 20.0, "1970-01-01T00:00:03Z");
+        let limits = account_limits_at(&store.readers.get()).unwrap();
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].account_ref.as_deref(), Some("ada/claude"));
+        assert_eq!(limits[0].account, fractal_drivers::account::account_label("claude", "declared:ada/claude"));
+        let weekly = limits[0].windows.iter().find(|window| window.window == "weekly").unwrap();
+        assert_eq!(weekly.used_percent, Some(20.0));
+        assert_eq!(weekly.source, "omp-usage");
+        assert_eq!(limits[0].weekly_percent, Some(95.0));
+    }
 
     #[test]
     fn the_catch_up_page_seeks_the_kind_index_past_the_cursor() {

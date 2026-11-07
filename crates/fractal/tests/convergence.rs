@@ -990,6 +990,32 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == fractal_schema::usage_limits::KIND {
+            return Some(ClaimInput {
+                subject: fractal_schema::usage_limits::PRODUCER.into(),
+                kind: spec.kind.clone(),
+                actor: Some(fractal_schema::usage_limits::PRODUCER.into()),
+                fields: BTreeMap::from([
+                    ("readings".into(), json!([])),
+                    ("credit_readings".into(), json!([{
+                        "account": "digest",
+                        "account_ref": "account/example-0",
+                        "provider": "anthropic",
+                        "credit_id": "durable-convergence-credit",
+                        "expires_at": "2100-01-08T12:30:00Z",
+                        "measured_at": "2100-01-01T12:30:00Z",
+                        "state": "available",
+                        "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                        "coverage": "reported",
+                        "source": "omp-usage",
+                        "host": self.nodes[index].name
+                    }])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("usage")),
+            });
+        }
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
         let deployment = deployment_fields(&spec.kind);
