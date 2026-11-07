@@ -117,7 +117,9 @@ fn observation_drops_overlay_before_completion_persistence_without_double_apply(
 }
 #[test]
 fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
-    let (_, _, observed) = observed_inputs();
+    let (arrangement, mut members) = inputs();
+    for member in &mut members { member.position.bucket = Some("folder-a".into()); }
+    let observed = build_v2(&arrangement, &members).unwrap();
     let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-a"), before: None };
     let mut edits = staged(intent, V2Plan { folders: vec![
         Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("folder-a".into()), key: "a0".into() },
@@ -126,7 +128,7 @@ fn folder_create_delete_lifts_children_and_remove_changes_visible_rows() {
         Folder::FolderDelete { id: "folder-c".into() },
     ], memberships: vec![] });
     let visible = edits.project(&observed).unwrap();
-    assert_eq!((&visible.nodes["folder:folder-a"].children, visible.nodes.contains_key("folder:folder-c")), (&vec![folder("folder-b")], false));
+    assert_eq!((&visible.nodes["folder:folder-a"].children, visible.nodes.contains_key("folder:folder-c")), (&vec![folder("folder-b"), subject("member-a"), subject("member-b")], false));
     edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Refused(identity(1), Refusal::Conflict));
     assert_eq!(edits.project(&observed).unwrap().as_ref(), &observed);
     let intent = MoveIntent { node: subject("member-a"), parent: Parent::Root {}, before: None };
@@ -170,7 +172,9 @@ fn atomic_delete_move_lifts_from_final_positions_in_every_operation_order() {
 }
 #[test]
 fn create_delete_preserves_tombstone_and_missing_ancestor_rules_in_both_orders() {
-    let (arrangement, members, observed) = observed_inputs();
+    let (arrangement, mut members) = inputs();
+    for member in &mut members { member.position.bucket = Some("folder-a".into()); }
+    let observed = build_v2(&arrangement, &members).unwrap();
     let create = Folder::FolderCreate { id: "folder-c".into(), name: "C".into(), parent: Some("missing".into()), key: "a0".into() }; let delete = Folder::FolderDelete { id: "folder-c".into() };
     for folders in [vec![delete.clone(), create.clone()], vec![create, delete]] {
         let intent = MoveIntent { node: folder("folder-b"), parent: parent("folder-c"), before: None }; let mut folders = folders;
@@ -242,6 +246,29 @@ fn creating_an_orphans_missing_parent_waits_for_authoritative_resolution() {
     let confirmed = build_v2(&arrangement, &members).unwrap();
     assert_eq!(confirmed.nodes["folder:folder-b"].children, vec![folder("folder-x")]);
     assert_eq!(confirmed.nodes["folder:folder-x"].children, vec![folder("folder-a")]);
+    edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Observed(identity(1)));
+    assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
+}
+
+#[test]
+fn folder_create_withholds_when_a_root_members_retained_bucket_is_unavailable() {
+    let (mut arrangement, mut members) = inputs();
+    // The retained server Place bucket is X; live membership reads expose only root.
+    let retained_bucket = Some("folder-x".to_owned());
+    assert_eq!(members[0].position.bucket, None);
+    let observed = build_v2(&arrangement, &members).unwrap();
+    assert!(observed.nodes.values().all(|row| row.parent == row.shown_under));
+    let intent = MoveIntent { node: subject("member-a"), parent: parent("folder-x"), before: None };
+    let mut edits = staged(intent, V2Plan { folders: vec![Folder::FolderCreate { id: "folder-x".into(), name: "X".into(), parent: Some("folder-b".into()), key: "a0".into() }], memberships: vec![] });
+    assert!(matches!(edits.project(&observed).unwrap(), Cow::Borrowed(_)));
+    let arrangements::VersionedBody::V2(body) = &mut arrangement.body else { unreachable!() };
+    let mut created = body.folders["folder-b"].clone();
+    created.position.value = arrangements::Position { parent: Some("folder-b".into()), key: "a0".into() };
+    body.folders.insert("folder-x".into(), created);
+    arrangement.resolved.as_mut().unwrap().parents.insert("folder-x".into(), Some("folder-b".into()));
+    members[0].position.bucket = retained_bucket;
+    let confirmed = build_v2(&arrangement, &members).unwrap();
+    assert_eq!(confirmed.nodes["folder:folder-x"].children, vec![subject("member-a")]);
     edits.reduce(Event::Persisted(identity(1))); edits.reduce(Event::Observed(identity(1)));
     assert_eq!(edits.project(&confirmed).unwrap().as_ref(), &confirmed);
 }
