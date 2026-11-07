@@ -129,8 +129,9 @@ impl LocalCommits {
         Self::scanning_gated(store, from, scan, None)
     }
 
-    /// A scanner of its own whose first look waits, before it reads the store's index, until
-    /// `gate` sends, for tests that register a check while a look runs.
+    /// A scanner of its own whose first look, once it has taken its list of checks and before it
+    /// reads the store's index, says so on the first receiver and then waits until the sender
+    /// sends: for tests that register a check while a look runs.
     #[cfg(any(test, feature = "test-support"))]
     pub fn from_index_gated(
         store: &Arc<Store>,
@@ -138,16 +139,18 @@ impl LocalCommits {
         scan: u64,
         name: &'static str,
         check: LocalCheck,
-    ) -> (Self, std::sync::mpsc::SyncSender<()>) {
+    ) -> (Self, std::sync::mpsc::Receiver<()>, std::sync::mpsc::SyncSender<()>) {
+        let (snapshotted, taken) = std::sync::mpsc::sync_channel(1);
         let (gate, held) = std::sync::mpsc::sync_channel(0);
-        (Self::holding(Self::scanning_gated(store, from, scan, Some(held)), name, check), gate)
+        let scanner = Self::scanning_gated(store, from, scan, Some((snapshotted, held)));
+        (Self::holding(scanner, name, check), taken, gate)
     }
 
     fn scanning_gated(
         store: &Arc<Store>,
         from: u64,
         scan: u64,
-        gate: Option<std::sync::mpsc::Receiver<()>>,
+        gate: Option<Gate>,
     ) -> Arc<Scanner> {
         let (sender, cut) = tokio::sync::watch::channel(LocalCut { scanned: from, newest_local: BTreeMap::new() });
         let checks = Checks::default();
@@ -224,8 +227,11 @@ struct Scanned {
     checked: Arc<AtomicU64>,
     looking: Arc<AtomicBool>,
     /// For tests: the first look waits here before it reads the index.
-    gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+    gate: Arc<Mutex<Option<Gate>>>,
 }
+
+/// For tests: where the first look says it has taken its checks, and what it then waits for.
+type Gate = (std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>);
 
 /// Read each run of commits once, one look at a time on the blocking pool, and publish what it
 /// found. Each check is asked once a look about the claims after where it was last asked, through
@@ -263,7 +269,9 @@ async fn scan_commits(
         let checked = Arc::clone(&shared.checked);
         let gate = shared.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         let read = tokio::task::spawn_blocking(move || {
-            if let Some(gate) = gate {
+            // The checks above are this look's: one registered from here on is the next look's.
+            if let Some((snapshotted, gate)) = gate {
+                let _ = snapshotted.send(());
                 let _ = gate.recv();
             }
             let index = reader.index()?;

@@ -2191,12 +2191,17 @@ async fn a_check_registered_during_a_look_is_asked_about_the_claims_that_look_re
     let root = tempfile::tempdir().unwrap();
     let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
     let from = store.index().unwrap();
-    let (first, gate) =
+    let (first, snapshotted, gate) =
         local_commits::LocalCommits::from_index_gated(&store, from, 10_000, "first", local_commits::every_local_claim(&store));
-    // A commit starts a look, which waits at the gate before it reads the index.
+    // A commit starts a look, which takes its checks and then waits at the gate before it reads
+    // the index.
     crate::test_support::note_local_claim(&store, "message/during-a-look-first");
-    until_within(Duration::from_secs(2), "the look", || first.looking()).await;
-    // A second holder registers while the look runs, and writes: the look reads that write.
+    tokio::task::spawn_blocking(move || snapshotted.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the look took its checks");
+    // A second holder registers after that, while the look runs, and writes: the look reads that
+    // write without asking its check.
     let mut second = first.also("second", local_commits::every_local_claim(&store));
     let before = store.index().unwrap();
     crate::test_support::note_local_claim(&store, "message/during-a-look-second");
