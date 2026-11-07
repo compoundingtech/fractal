@@ -134,7 +134,7 @@ impl Ui {
     }
 
     /// Take in what the helper said since the last pass, and give up on one that says nothing.
-    pub(crate) fn step_voice(&mut self) {
+    pub(crate) fn step_voice(&mut self) -> bool {
         if let Some(state) = &self.voice {
             let waiting_since = match (state.chosen_at, state.device.is_empty()) {
                 (Some(chosen), _) => Some(chosen),
@@ -144,14 +144,14 @@ impl Ui {
             if waiting_since.is_some_and(|since| since.elapsed() >= VOICE_PATIENCE) {
                 self.cancel_voice();
                 self.flash("Voice did not answer, so it was stopped; your keys work again");
-                return;
+                return true;
             }
             // Voice belongs to the input it started in: leaving that conversation ends it, so
             // it cannot keep holding the keys from a tab where it is not shown.
             if self.draft_key().as_deref() != Some(state.input.as_str()) {
                 self.cancel_voice();
                 self.flash("Voice stopped: you left that conversation");
-                return;
+                return true;
             }
         }
         let mut events = Vec::new();
@@ -162,9 +162,11 @@ impl Ui {
         {
             events.extend(listening.events.try_iter());
         }
+        let changed = !events.is_empty();
         for event in events {
             self.voice_event(event);
         }
+        changed
     }
 
     pub(crate) fn voice_event(&mut self, event: Event) {
