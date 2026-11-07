@@ -180,6 +180,76 @@ pub mod tests {
     }
 
     #[test]
+    fn starting_thread_from_real_ask_commits_one_first_message_and_leaves_ask_pending() {
+        use crate::store::thread_metadata::{StartFromAsk, start_from_ask};
+
+        let (store, _, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let message = ClaimInput {
+            subject: "message/thread-first".into(),
+            kind: "message.sent".into(),
+            actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!(original.actor.as_deref().unwrap())),
+                ("content".into(), json!("Could we check worker tests first?")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let start = |thread, key, person| StartFromAsk {
+            thread, title: "Worker test", person, ask: &ask.subject,
+            episode: &original.id, key, first_message: &message,
+        };
+        let (created, appended) = start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap();
+        assert!(appended);
+        assert_eq!(created.body["fields"]["origin_ask_episode"], original.id);
+        assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let (retry, appended) = start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap();
+        assert!(!appended);
+        assert_eq!(retry.id, created.id);
+        let messages = store.claims_for(&message.subject, Some("message.sent")).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].batch_id, created.batch_id);
+        assert_eq!(
+            start_from_ask(&store, start("thread/rollback", "another-start", person)).unwrap_err().code,
+            "stale-subject",
+        );
+        assert!(store.claims_for("thread/rollback", None).unwrap().is_empty());
+        assert!(store.claims_for(&ask.subject, Some("work.person-done")).unwrap().is_empty());
+        assert_eq!(request(&store.readers.get(), &ask.subject).unwrap().unwrap().id, original.id);
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+
+        let mut foreign_message = message.clone();
+        foreign_message.subject = "message/foreign-thread-first".into();
+        foreign_message.actor = Some("person/robin".into());
+        foreign_message.fields.insert("from".into(), json!("person/robin"));
+        assert_eq!(
+            start_from_ask(&store, StartFromAsk {
+                first_message: &foreign_message,
+                ..start("thread/foreign", "foreign-start", "person/robin")
+            }).unwrap_err().code,
+            "thread-unavailable",
+        );
+        assert!(store.claims_for(&foreign_message.subject, None).unwrap().is_empty());
+
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: person.into(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "answer-after-thread".into(), answer: None,
+        }, false).unwrap();
+        assert_eq!(
+            start_from_ask(&store, start("thread/after-answer", "start-after-answer", person)).unwrap_err().code,
+            "thread-unavailable",
+        );
+        assert!(!start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap().1);
+    }
+
+    #[test]
     fn rename_before_ask_replication_converges_and_receipt_survives_reopen() {
         let (source, origin, input) = fixture();
         known_rename_person(&source);

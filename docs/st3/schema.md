@@ -236,7 +236,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `terminal.input.requested` | `agent`, `pty` | `authorized-requester` | `append` | `durable` | `byte_count:integer`, `incarnation_id:string`, `intent:string`, `mode:string`, `runtime_id:string`, `sequence:integer`, `sha256:string` |  |
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |
-| `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `person!:subject-reference(person)`, `title!:string` | `thread` |
+| `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `first_message:subject-reference(message)`, `origin_ask:subject-reference(step-run)`, `origin_ask_episode:string`, `person!:subject-reference(person)`, `title!:string` | `thread` |
 | `thread.state-set` | `thread` | `system-only` | `append` | `durable` | `state!:string` |  |
 | `thread.title-set` | `thread` | `system-only` | `append` | `durable` | `previous_title!:string`, `title!:string`, `title_revision!:string` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |

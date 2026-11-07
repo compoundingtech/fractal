@@ -92,6 +92,7 @@ mod stream_timeline_tests;
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
     app
         .route("/v1/client/arrangements", get(arrangements::list))
+        .route("/v1/client/threads", get(threads::list))
         .route("/v1/client/threads/{id}", get(threads::detail))
         .route("/v1/client/threads/{id}/timeline", get(threads::timeline))
         .route(

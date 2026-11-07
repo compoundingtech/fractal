@@ -789,6 +789,9 @@ WHERE kind='custom.client.terminal-attached';
 CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
 ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
 WHERE kind='harness-question.resolved' AND actor IS NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
+WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';

@@ -13363,3 +13363,31 @@ fn thread_pairing_revocation_precedes_receipt_recovery() {
     );
     assert_eq!(store.claims_for(thread, Some("thread.state-set")).unwrap().len(), 1);
 }
+
+#[test]
+fn thread_list_paginates_only_the_exact_owner_and_agent_conversation() {
+    use thread_metadata::{Edit, apply, list_conversation};
+
+    let store = Store::open_memory("thread-list").unwrap();
+    for (person, agent, thread) in [
+        ("person/avery", "agent/reviewer", "thread/first"),
+        ("person/avery", "agent/reviewer", "thread/second"),
+        ("person/avery", "agent/other", "thread/other-agent"),
+        ("person/robin", "agent/reviewer", "thread/other-owner"),
+    ] {
+        apply(&store, person, thread, thread, Edit::Create { agent, title: thread }).unwrap();
+    }
+    let first = list_conversation(&store, "person/avery", "agent/reviewer", None, 1).unwrap();
+    assert_eq!(first.items[0].id, "thread/first");
+    let cursor = first.next_cursor.as_deref();
+    assert!(cursor.is_some());
+    let second = list_conversation(&store, "person/avery", "agent/reviewer", cursor, 1).unwrap();
+    assert_eq!(second.items[0].id, "thread/second");
+    assert!(second.next_cursor.is_none());
+    for (person, agent) in [("person/avery", "agent/other"), ("person/robin", "agent/reviewer")] {
+        assert_eq!(
+            list_conversation(&store, person, agent, cursor, 1).err().unwrap().code,
+            "invalid-thread-cursor",
+        );
+    }
+}

@@ -396,50 +396,104 @@ pub struct Summary {
 pub fn summary(store: &Store, person: &str, subject: &str) -> Result<Summary, FractalError> {
     store
         .graph
-        .read_snapshot_unindexed(|| {
-            Ok((|| {
-                let connection = store.readers.get();
-                let creation =
-                    owned_creation(&connection, subject, person, false)?.ok_or_else(unavailable)?;
-                let state = match latest_applied_claim(&connection, subject, "thread.state-set")?
-                    .as_ref()
-                    .and_then(|claim| claim.body["fields"]["state"].as_str())
-                {
-                    Some("closed") => "closed",
-                    Some("open") | None => "open",
-                    _ => {
-                        return Err(FractalError::new(
-                            "invalid-thread-event",
-                            "the thread state is invalid",
-                        ));
-                    }
-                };
-                let title = latest_applied_claim(&connection, subject, "thread.title-set")?
-                    .unwrap_or_else(|| creation.clone());
-                let revision = connection
-                    .query_row(
-                        &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
-                        [subject],
-                        |row| row.get(0),
-                    )
-                    .map_err(internal)?;
-                Ok(Summary {
-                    id: subject.into(),
-                    agent_id: creation.body["fields"]["agent"]
-                        .as_str()
-                        .ok_or_else(unavailable)?
-                        .into(),
-                    title: title.body["fields"]["title"]
-                        .as_str()
-                        .ok_or_else(unavailable)?
-                        .into(),
-                    title_revision: title.id,
-                    revision,
-                    state,
-                })
-            })())
-        })
+        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject)))
         .map_err(internal)?
+}
+
+fn summary_conn(
+    connection: &Connection,
+    person: &str,
+    subject: &str,
+) -> Result<Summary, FractalError> {
+    let creation = owned_creation(connection, subject, person, false)?.ok_or_else(unavailable)?;
+    let state = match latest_applied_claim(connection, subject, "thread.state-set")?
+        .as_ref()
+        .and_then(|claim| claim.body["fields"]["state"].as_str())
+    {
+        Some("closed") => "closed",
+        Some("open") | None => "open",
+        _ => {
+            return Err(FractalError::new(
+                "invalid-thread-event",
+                "the thread state is invalid",
+            ));
+        }
+    };
+    let title = latest_applied_claim(connection, subject, "thread.title-set")?
+        .unwrap_or_else(|| creation.clone());
+    let revision = connection
+        .query_row(
+            &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
+            [subject],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    Ok(Summary {
+        id: subject.into(),
+        agent_id: creation.body["fields"]["agent"]
+            .as_str()
+            .ok_or_else(unavailable)?
+            .into(),
+        title: title.body["fields"]["title"]
+            .as_str()
+            .ok_or_else(unavailable)?
+            .into(),
+        title_revision: title.id,
+        revision,
+        state,
+    })
+}
+
+#[derive(serde::Serialize)]
+pub struct SummaryPage {
+    pub items: Vec<Summary>,
+    pub next_cursor: Option<String>,
+}
+
+/// Read one exact conversation, with cursor scope independent of agent incarnation.
+pub fn list_conversation(
+    store: &Store,
+    person: &str,
+    agent: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<SummaryPage, FractalError> {
+    store.graph.read_snapshot_unindexed(|| Ok((|| {
+        let connection = store.readers.get();
+        let person = identities::resolve_reference_conn(&connection, person)?;
+        let agent = identities::resolve_reference_conn(&connection, agent)?;
+        let scope = canonical_hash(&("thread.conversation.v1", &person, &agent)).map_err(internal)?;
+        let after = cursor.map(|cursor| {
+            cursor.split_once(':').filter(|(id, subject)| *id == scope && subject.starts_with("thread/") && subject.len() <= 512)
+                .map(|(_, subject)| subject)
+                .ok_or_else(|| FractalError::new("invalid-thread-cursor", "the cursor belongs to another conversation"))
+        }).transpose()?.unwrap_or_default();
+        let limit = limit.clamp(1, 100);
+        let mut query = connection.prepare_cached(
+            "SELECT DISTINCT claims.subject
+             FROM claims INDEXED BY claims_thread_conversation_index
+             JOIN operations ON operations.canonical_claim_id=claims.id AND operations.state='active'
+             WHERE claims.kind='thread.created'
+               AND json_extract(claims.body, '$.fields.person')=?1
+               AND json_extract(claims.body, '$.fields.agent')=?2
+               AND claims.subject>?3
+               AND NOT EXISTS (SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
+             ORDER BY claims.subject LIMIT ?4"
+        ).map_err(internal)?;
+        let mut subjects = query.query_map(params![person, agent, after, limit + 1], |row| row.get::<_, String>(0))
+            .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        let has_more = subjects.len() > limit;
+        subjects.truncate(limit);
+        let next_cursor = subjects.last().filter(|_| has_more).map(|subject| format!("{scope}:{subject}"));
+        let items = subjects.into_iter().map(|subject| {
+            let summary = summary_conn(&connection, &person, &subject)?;
+            if summary.agent_id != agent {
+                return Err(unavailable());
+            }
+            Ok(summary)
+        }).collect::<Result<Vec<_>, FractalError>>()?;
+        Ok(SummaryPage { items, next_cursor })
+    })())).map_err(internal)?
 }
 
 #[derive(serde::Serialize)]
@@ -520,4 +574,165 @@ pub fn history(
         }
         Ok(HistoryPage { items, next_cursor })
     })())).map_err(internal)?
+}
+
+pub struct StartFromAsk<'a> {
+    pub thread: &'a str,
+    pub title: &'a str,
+    pub person: &'a str,
+    pub ask: &'a str,
+    pub episode: &'a str,
+    pub key: &'a str,
+    /// Canonical message prepared by the caller. This store entry point is not a client action.
+    pub first_message: &'a ClaimInput,
+}
+
+/// Atomically admit a thread and its first ordinary graph message from a current agent ask.
+/// This store path deliberately does not handle paired-device signing or message attachments.
+pub fn start_from_ask(
+    store: &Store,
+    start: StartFromAsk<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    let StartFromAsk {
+        thread,
+        title,
+        person,
+        ask,
+        episode,
+        key,
+        first_message,
+    } = start;
+    let agent = first_message
+        .fields
+        .get("to")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content = first_message
+        .fields
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !person.starts_with("person/")
+        || !agent.starts_with("agent/")
+        || !thread.starts_with("thread/")
+        || first_message.kind != "message.sent"
+        || first_message.actor.as_deref() != Some(person)
+        || first_message.fields.get("from").and_then(Value::as_str) != Some(person)
+        || content.trim().is_empty()
+        || content.len() > 8 * 1024
+        || content.starts_with("doc/")
+        || first_message.fields.contains_key("attachments")
+        || first_message.fields.contains_key("in_reply_to")
+        || title.trim().is_empty()
+        || title.len() > 512
+        || key.is_empty()
+        || key.len() > 512
+    {
+        return Err(FractalError::new(
+            "invalid-thread-start",
+            "thread start requires a plain inline first message to the asking agent",
+        ));
+    }
+    let operation_id = operation_id_for_key(key);
+    let digest = canonical_hash(&(
+        "thread.start.v1",
+        thread,
+        title,
+        person,
+        ask,
+        episode,
+        &first_message.subject,
+        &first_message.fields,
+    ))
+    .map_err(internal)?;
+    let creation_body = json!({
+        "fields": {
+            "person": person, "agent": agent, "title": title,
+            "origin_ask": ask, "origin_ask_episode": episode, "first_message": first_message.subject,
+        },
+        "evidence": [episode],
+        "_operation": {"id": operation_id, "request_digest": digest},
+    });
+    let message_body = json!({"fields": first_message.fields, "evidence": []});
+    store.graph.ensure_principal_key(person)?;
+    store
+        .connection
+        .batched(|tx| {
+            if let Some((saved_digest, canonical, state)) =
+                operation_tx(tx, &operation_id).map_err(internal)?
+            {
+                owned_creation(tx, thread, person, false)?;
+                if state == "conflict" || saved_digest != digest {
+                    return Err(FractalError::new(
+                        "idempotency-conflict",
+                        "the thread start key identifies a different request",
+                    ));
+                }
+                let claim = claim_by_id_tx(tx, &canonical)
+                    .map_err(internal)?
+                    .ok_or_else(unavailable)?;
+                return Ok((claim, false));
+            }
+            if latest_claim_id_tx(tx, thread).map_err(internal)?.is_some() {
+                return Err(FractalError::new(
+                    "stale-subject",
+                    "the thread already exists",
+                ));
+            }
+            let ask_claim = person_work::request(tx, ask)
+                .map_err(internal)?
+                .ok_or_else(unavailable)?;
+            let assigned = person_work::step(tx, ask)
+                .map_err(internal)?
+                .and_then(|step| step.assigned_to)
+                .ok_or_else(unavailable)?;
+            if ask_claim.id != episode
+                || ask_claim.actor.as_deref() != Some(agent)
+                || identities::resolve_reference_conn(tx, &assigned)?
+                    != identities::resolve_reference_conn(tx, person)?
+                || !person_work::current(tx, &ask_claim, now_ms()).map_err(internal)?
+            {
+                return Err(unavailable());
+            }
+            let mut creation_body = creation_body.clone();
+            creation_body["fields"]["person"] =
+                json!(identities::resolve_reference_conn(tx, person)?);
+            creation_body["fields"]["agent"] =
+                json!(identities::resolve_reference_conn(tx, agent)?);
+            let created = append_claim_tx(
+                tx,
+                &store.origin,
+                thread,
+                "thread.created",
+                Some(person),
+                &creation_body,
+                &[],
+                None,
+            )
+            .map_err(claim_append_error)?;
+            if latest_claim_id_tx(tx, &first_message.subject)
+                .map_err(internal)?
+                .is_some()
+            {
+                return Err(FractalError::new(
+                    "stale-subject",
+                    "the first message already exists",
+                ));
+            }
+            append_receipt_claim_tx(
+                tx,
+                &store.origin,
+                &first_message.subject,
+                "message.sent",
+                Some(person),
+                &message_body,
+                &[],
+                Some(&created.batch_id),
+                &format!("thread-start-message:{key}"),
+            )
+            .map_err(claim_append_error)?;
+            register_operation_tx(tx, &created).map_err(internal)?;
+            Ok((created, true))
+        })
+        .map_err(internal)?
 }

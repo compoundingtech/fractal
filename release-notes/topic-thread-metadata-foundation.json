@@ -2,9 +2,9 @@
   "version": 1,
   "summary": "Add owner-scoped thread metadata reads and lifecycle actions",
   "replay": { "status": "none", "detail": "Existing claims and projections replay unchanged. The new exact reads use retained thread claims and typed operation receipts." },
-  "schema": { "status": "none", "detail": "No SQLite layout change. The replicated claim registry adds a thread subject and three system-only kinds." },
+  "schema": { "status": "none", "detail": "Add an index over existing claims for one owner and agent conversation. The replicated claim registry adds a thread subject and three system-only kinds." },
   "rules": { "status": "none", "detail": "No checkpoint rule change. Thread creation and lifecycle history are retained under existing checkpoint policy." },
-  "compatibility": { "status": "changed", "detail": "Adds exact owner-scoped thread summary and metadata timeline reads, plus rename, close, and reopen actions for existing threads. Thread creation, message sending, and discovery remain unavailable. Daemons must be upgraded before a complete thread capability can be advertised." },
+  "compatibility": { "status": "changed", "detail": "Adds exact owner-scoped conversation listing, thread summary, and metadata timeline reads, plus rename, close, and reopen actions for existing threads. Public thread creation, message sending, and discovery outside one selected conversation remain unavailable. The store can start a thread atomically with an inline first message, and that entry point has no public action. Daemons must be upgraded before a complete thread capability can be advertised." },
   "downtime": { "status": "none", "detail": "No migration or startup work." },
   "manual": { "status": "none", "detail": "No configuration change." },
   "recovery": { "status": "none", "detail": "Existing data needs no conversion. After thread claims exist, use a build with the thread vocabulary to read them." }

@@ -4208,6 +4208,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("person", required_reference_to(&["person"])),
             ("agent", required_reference_to(&["agent"])),
             ("title", required_string()),
+            ("origin_ask", reference_to(&["step-run"])),
+            ("origin_ask_episode", string()),
+            ("first_message", reference_to(&["message"])),
         ],
         "thread.title-set" => &[
             ("title", required_string()),

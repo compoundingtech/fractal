@@ -1,7 +1,39 @@
 use super::*;
-use crate::store::thread_metadata::{self, HistoryPage, Summary};
+use crate::store::thread_metadata::{self, HistoryPage, Summary, SummaryPage};
 
 type ReadResult<T> = Result<(Extension<ClientSnapshot>, Json<T>), ApiError>;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListQuery {
+    agent_id: String,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+pub(super) async fn list(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<ListQuery>,
+) -> ReadResult<SummaryPage> {
+    with_person(state, session, move |store, person, _| {
+        let valid = fractal_schema::registry()
+            .validate_subject(&query.agent_id)
+            .is_ok_and(|spec| spec.family == "agent");
+        if !valid {
+            return Err(validation("thread discovery requires one concrete agent"));
+        }
+        thread_metadata::list_conversation(
+            store,
+            person,
+            &query.agent_id,
+            query.cursor.as_deref(),
+            query.limit.unwrap_or(40),
+        )
+        .map_err(store_error)
+    })
+    .await
+}
 
 pub(super) async fn detail(
     State(state): State<AppState>,
@@ -63,6 +95,17 @@ async fn with_owner<T: Send + 'static>(
         return Err(ApiError::not_found("the thread is unavailable"));
     }
     let subject = format!("thread/{id}");
+    with_person(state, session, move |store, person, index| {
+        read(store, person, &subject, index)
+    })
+    .await
+}
+
+async fn with_person<T: Send + 'static>(
+    state: AppState,
+    session: ClientSession,
+    read: impl FnOnce(&Store, &str, u64) -> Result<T, ApiError> + Send + 'static,
+) -> ReadResult<T> {
     blocking_store(move || {
         state.store.read_snapshot(|index| {
             let value = (|| {
@@ -76,7 +119,7 @@ async fn with_owner<T: Send + 'static>(
                 {
                     return Err(forbidden("thread reads require a concrete person"));
                 }
-                let value = read(&state.store, person, &subject, index)?;
+                let value = read(&state.store, person, index)?;
                 Ok((Extension(client_snapshot_at(&state, index)), Json(value)))
             })();
             Ok(value)
@@ -397,5 +440,45 @@ mod tests {
                 .len(),
             1
         );
+    }
+    #[tokio::test]
+    async fn list_returns_only_the_selected_owner_and_agent_conversation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-list");
+        for (person, agent, thread) in [
+            ("person/operator", "agent/example", "thread/fixture"),
+            ("person/operator", "agent/other", "thread/other-agent"),
+            ("person/other", "agent/example", "thread/other-owner"),
+        ] {
+            thread_metadata::apply(
+                &state.store,
+                person,
+                thread,
+                thread,
+                thread_metadata::Edit::Create {
+                    agent,
+                    title: "Review",
+                },
+            )
+            .unwrap();
+        }
+        let response = crate::api::router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/client/threads?agent_id=agent%2Fexample&limit=2")
+                    .header(LOCAL_PERSON_HEADER, "person/operator")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["value"]["items"][0]["id"], "thread/fixture");
+        assert!(body["value"]["next_cursor"].is_null());
     }
 }
