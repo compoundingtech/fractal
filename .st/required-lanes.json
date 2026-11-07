@@ -148,6 +148,8 @@
       ],
       "definition_paths": [
         ".st",
+        "apps/ios/scripts/release_delivery.py",
+        "apps/ios/scripts/test_release_delivery.py",
         "flake.lock",
         "flake.nix",
         "package.json",
@@ -164,6 +166,8 @@
         ".fractal",
         "apps/fractal-web/.gitignore",
         "apps/fractal-web/src/changelog/seen.ts",
+        "apps/ios/scripts/release_delivery.py",
+        "apps/ios/scripts/test_release_delivery.py",
         "crates/fractal/tests/daemon_load.rs",
         "crates/fractal/tests/messaging_faults.rs",
         "docs/st3/gate-evidence.md",

@@ -112,7 +112,7 @@ class Gateway {
             message: 'Device credential revoked',
             retryable: false,
             request_id: 'request/revoked',
-            details: {},
+            details: { reason: 'credential-rejected' },
           }),
           { status: 403, headers: { 'content-type': 'application/json' } },
         )
@@ -520,6 +520,47 @@ describe('mission decode evidence', () => {
   )
 })
 
+describe('attention decode evidence', () => {
+  it.live('publishes rejected alerts, retains last-good rows on all-bad frames and recovers', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.attention)
+      yield* settle
+      const alert = {
+        id: 'attention/example', kind: 'attention', title: 'Example', detail: '',
+        revision: '1', updated_at: snapshot.created_at, requested_at: snapshot.created_at,
+        person_id: 'person/operator', source_id: 'agent/example', attention_kind: 'agent-request',
+        priority: 'normal', state: 'open', actions: ['work.done'],
+      }
+      const broken = { ...alert, id: 'attention/broken', actions: 'not-a-list' }
+      const frame = (items: readonly Record<string, unknown>[]) => gateway.sendUnchecked({
+        kind: 'snapshot', id: gateway.subscription('attention').id, collection: 'attention',
+        has_more: false, items, order: items.map((row) => row.id), snapshot,
+      })
+      frame([alert, broken])
+      yield* settle
+      expect(live.registry.get(live.source.attention)).toMatchObject({
+        _tag: 'Observed', freshness: 'live', value: [{ id: alert.id }],
+      })
+      expect(live.registry.get(live.source.attentionDecode!)).toMatchObject({
+        decodeStale: false,
+        undecodable: expect.arrayContaining([
+          expect.objectContaining({ _tag: 'Rejected', id: broken.id, path: 'actions' }),
+        ]),
+      })
+      frame([broken])
+      yield* settle
+      expect(live.registry.get(live.source.attention)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: alert.id }],
+      })
+      expect(live.registry.get(live.source.attentionDecode!).decodeStale).toBe(true)
+      frame([alert])
+      yield* settle
+      expect(live.registry.get(live.source.attentionDecode!)).toEqual({ undecodable: [], decodeStale: false })
+      expect(live.registry.get(live.source.attention)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+    })),
+  )
+})
+
 
 describe('connection loss detection', () => {
   const withBrowser = (test: (live: LiveSource, gateway: Gateway, browser: EventTarget, documentEvents: EventTarget) => Effect.Effect<void>) =>
@@ -867,11 +908,11 @@ describe('live feed sync sidecars', () => {
         live.registry.mount(live.source.agents)
         live.registry.mount(sync.agents)
         yield* settle
-        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.agents).sync.status).toEqual(failed)
         expect(Option.isNone(live.registry.get(sync.agents).last)).toBe(true)
         const later = 'agent/opened-after-rejection'
-        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.conversation(later)).sync.status).toEqual(failed)
       }),
     ),

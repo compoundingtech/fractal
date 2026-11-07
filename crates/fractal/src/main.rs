@@ -2149,8 +2149,8 @@ enum DevicesCommand {
         /// Explicit phone-reachable gateway URL; show a pairing QR in an interactive terminal.
         #[arg(long, value_parser = pairing_qr::parse_gateway, conflicts_with = "assistant")]
         gateway: Option<reqwest::Url>,
-        /// Begin a revocable external-assistant grant instead of a person device.
-        #[arg(long, value_parser = parse_assistant_principal)]
+        /// Begin a revocable external-assistant grant (defaults to assistant/chatgpt).
+        #[arg(long, num_args = 0..=1, default_missing_value = "assistant/chatgpt", value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
         #[command(flatten)]
         grant: AssistantGrantTerms,
@@ -7527,6 +7527,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.gate_runner_history", copy_gate_runner_history(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.work_wake_index", copy_work_wake_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
         std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
@@ -7772,6 +7773,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
+    let receipts_started = Instant::now();
     tokio::select! {
         flushed = receipts.shutdown() => if let Err(error) = flushed {
             stderr_message("fractal", format_args!("assistant read receipts failed to commit at shutdown: {}", error.message));
@@ -7779,9 +7781,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    stderr_message("fractal", format_args!("shutdown: receipt drain stage finished in {} ms", receipts_started.elapsed().as_millis()));
     // Leave the replication inventory for the next start, which extends it instead of reading
     // every envelope while its peers reconnect. A second stop signal skips it.
     let saving = store.clone();
+    let inventories_started = Instant::now();
     tokio::select! {
         saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
             stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
@@ -7789,7 +7793,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
     }
+    stderr_message("fractal", format_args!("shutdown: replication inventory save stage finished in {} ms", inventories_started.elapsed().as_millis()));
+    let telemetry_started = Instant::now();
     telemetry.shutdown();
+    stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
@@ -9462,7 +9469,10 @@ async fn run_devices(
             let response = client
                 .pairing_begin(&PairingBegin::Assistant(AssistantPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name: device_name.unwrap_or_else(|| "ChatGPT".into()),
+                    device_name: device_name.unwrap_or_else(|| match assistant {
+                        AssistantPrincipal::Chatgpt => "ChatGPT".into(),
+                        AssistantPrincipal::Mcp => "MCP".into(),
+                    }),
                     assistant_id: assistant,
                     scopes: terms.scopes,
                     expires_in_seconds: Some(terms.expires_in_seconds),
@@ -20902,6 +20912,27 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
             error => {
                 stderr_message("fractal", format_args!("agent message usage backfill failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Each turn copies at most one fixed page, releases the background writer loan, then yields.
+/// The writer's background admission gives foreground work priority; there is no sleep polling.
+async fn copy_work_wake_history(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.work_wake_index", || {
+                fractal_daemon::store::wake_lookup::advance(&page_store)
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::task::yield_now().await,
+            error => {
+                stderr_message("fractal", format_args!("work wake index copy stopped: {error:?}; doctor reports the retained cursor"));
+                return;
             }
         }
     }
