@@ -1,3 +1,4 @@
+import { gatewayThreads } from '../threads/threadSource.ts'
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
@@ -1223,6 +1224,7 @@ export const liveSource = ({
       pins: sidebarPins(client),
       subjectReads,
       nativeDetails,
+      threads: gatewayThreads(client, registry),
       objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,

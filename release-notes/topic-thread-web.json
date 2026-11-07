@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Show Fractal threads in web agent and tab views",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The web UI shows thread controls only when its connected daemon advertises threads-v1 and grants the corresponding scopes. This change does not activate the capability."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual upgrade step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  }
+}
