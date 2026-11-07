@@ -130,14 +130,7 @@ pub(super) fn validate_claim(
     // Mission capacity validation also reads `fields.body`. Inspect a conservative
     // superset of these locations, retaining the existing `body` envelope checks;
     // an empty decoy must never hide declarations in another persisted location.
-    let declared = [
-        Some(body),
-        body.get("fields"),
-        body.get("body"),
-        body.get("fields").and_then(|fields| fields.get("body")),
-    ]
-    .into_iter()
-    .flatten()
+    let declared = fractal_missions_base::declared_admission::claim_payload_candidates(body)
     .any(|payload| match kind {
         "intent.desired" => {
             declares_fields(payload)
