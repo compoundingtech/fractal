@@ -77,6 +77,8 @@ export interface FolderState {
   readonly doc: FolderDoc
   readonly phase: 'fixture' | 'connecting' | 'synced' | 'pending' | 'unavailable'
   readonly detail?: string
+  /** Why `unavailable`: `ungranted` is this connection's standing capability, which no retry changes. */
+  readonly unavailableReason?: 'ungranted' | 'failed' | 'interrupted' | 'refused'
   readonly readOnly?: boolean
   readonly refusal?: ArrangementRefusal
   readonly sidebarCandidates?: readonly { readonly id: string; readonly label: string }[]
@@ -131,7 +133,7 @@ export const sidebarFolders = ({ gateway, socket }: {
   const retry = () => { if (follow !== undefined) follow.refresh(); else if (!starting) void start() }
   const publish = (next: FolderState) => {
     if (!active) return
-    if (next.doc === current.doc && next.phase === current.phase && next.detail === current.detail &&
+    if (next.doc === current.doc && next.phase === current.phase && next.detail === current.detail && next.unavailableReason === current.unavailableReason &&
       next.refusal === current.refusal && next.retryEdit === current.retryEdit && next.retryReady === current.retryReady && next.readOnly === current.readOnly &&
       (next.pendingTargets === current.pendingTargets || (next.pendingTargets?.length === current.pendingTargets?.length && next.pendingTargets?.every((target, index) => target === current.pendingTargets?.[index]))) &&
       next.sidebarSubject === current.sidebarSubject && next.restoreUnavailable === current.restoreUnavailable &&
@@ -142,10 +144,14 @@ export const sidebarFolders = ({ gateway, socket }: {
   }
   const start = async () => {
     starting = true
-    publish({ ...current, phase: 'connecting', detail: 'Loading arrangements…', readOnly: true })
+    const { unavailableReason: _settled, ...settled } = current
+    publish({ ...settled, phase: 'connecting', detail: 'Loading arrangements…', readOnly: true })
     try {
       const discovery = await client.discover()
-      requireArrangements(discovery.value)
+      try { requireArrangements(discovery.value) } catch (error) {
+        publish({ ...settled, phase: 'unavailable', unavailableReason: 'ungranted', detail: error instanceof Error ? error.message : String(error), readOnly: true })
+        return
+      }
       const owner = /^(person\/[^/\s]+)(?:\/session\/[^/\s]+)?$/.exec(discovery.value.session_actor)?.[1]
       if (owner === undefined) throw new Error('Select an explicit person owner before loading arrangements.')
       if (!active) return
@@ -188,17 +194,17 @@ export const sidebarFolders = ({ gateway, socket }: {
             return
           }
           case 'ReadFailed':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', unavailableReason: 'failed', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
             return
           case 'Interrupted':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', unavailableReason: 'interrupted', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
             return
           case 'Refused':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', unavailableReason: 'refused', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })
         }
       } })
     } catch (error) {
-      publish({ ...current, phase: 'unavailable', detail: error instanceof Error ? error.message : String(error), readOnly: true })
+      publish({ ...current, phase: 'unavailable', unavailableReason: 'failed', detail: error instanceof Error ? error.message : String(error), readOnly: true })
     } finally { starting = false }
   }
   get.addFinalizer(() => { active = false; follow?.close(); editor?.close() })

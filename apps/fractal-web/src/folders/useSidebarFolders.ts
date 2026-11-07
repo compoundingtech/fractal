@@ -6,6 +6,11 @@ import { emptyDoc, type FolderDoc } from './core.mts'
 import { arrangementUuid, refusalText, type RestageVerdict } from './edit.ts'
 import { boundRows, canDrop, filterSidebarTree, restageBoundMove, restageCreate, restageDelete, restageRename, rowStatus, sidebarProjection, sidebarTree, type SidebarDocument, type SidebarSeat } from './sidebarAdapter.ts'
 import type { AgentFoldersProps } from './sidebarContract.ts'
+import type { SystemStateKind } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+
+const editingUnavailable = 'Folder editing is unavailable'
+/** A refused attempt on a connection that cannot edit is news once; the roster itself is unaffected. */
+const editingUnavailableMs = 6000
 
 export interface SidebarFoldersOptions {
   /** The host supplies actual seat row keys and their shared subject; never infer a subject from a label. */
@@ -14,7 +19,7 @@ export interface SidebarFoldersOptions {
   readonly query?: string
   readonly collapsedSource?: Atom.Writable<readonly string[], readonly string[]>
 }
-export type SidebarFoldersBinding = Pick<AgentFoldersProps, 'tree' | 'canDrop' | 'onMove' | 'onCreateFolder' | 'onRenameFolder' | 'onDeleteFolder' | 'onToggleCollapsed' | 'unavailable' | 'treeStatus'> & {
+export type SidebarFoldersBinding = Pick<AgentFoldersProps, 'tree' | 'canDrop' | 'onMove' | 'onCreateFolder' | 'onRenameFolder' | 'onDeleteFolder' | 'onToggleCollapsed' | 'unavailable' | 'unavailableKind' | 'onRetryUnavailable' | 'onEditRefused' | 'treeStatus'> & {
   readonly orderingTree: AgentFoldersProps['tree']
   readonly status: NonNullable<AgentFoldersProps['rowStatus']>
   readonly rowStatus: NonNullable<AgentFoldersProps['rowStatus']>
@@ -35,6 +40,11 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   const collapseAtom = collapsedSource ?? local.collapse
   const [collapsedIds, setCollapsedIds] = useAtom(collapseAtom)
   const refused = useAtomValue(local.refused)
+  React.useEffect(() => {
+    if (refused !== editingUnavailable) return
+    const timer = setTimeout(() => registry.set(local.refused, undefined), editingUnavailableMs)
+    return () => clearTimeout(timer)
+  }, [refused, registry, local])
   const currentRoster = React.useRef(roster)
   currentRoster.current = roster
   // Arrangement identity is independent of query and clock presentation.
@@ -50,7 +60,7 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   }
   /** Plans against fresh state at gesture time and again on every restage; the old fence is never resent. */
   const submit = (plan: (fresh: SidebarDocument) => RestageVerdict, onApplied?: () => void): void => {
-    if (!ready()) return
+    if (!ready()) { registry.set(local.refused, editingUnavailable); return }
     registry.set(local.refused, undefined)
     const fresh = (doc: FolderDoc): SidebarDocument => ({ ...doc, roster: currentRoster.current })
     const verdict = plan(fresh(currentDoc()))
@@ -77,16 +87,23 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   }, targets)
   const treeStatus = snapshot.refusal !== undefined
     ? React.createElement('div', { role: 'status' }, refusalText(snapshot.refusal), retry === undefined ? null : React.createElement('button', { type: 'button', onClick: retry }, snapshot.retryReady ? 'Try again' : 'Refresh for retry'))
-    : refused !== undefined ? React.createElement('div', { role: 'status' }, refused)
+    : refused !== undefined ? refused
     : snapshot.phase === 'pending' ? 'Saving folder layout…' : undefined
+  const unreachable = snapshot.phase === 'unavailable' && snapshot.refusal === undefined
   const unavailable = snapshot.restoreUnavailable ? 'Restore unavailable.'
     : snapshot.phase === 'connecting' ? 'Loading folder layout…'
-    : snapshot.phase === 'unavailable' && snapshot.refusal === undefined ? 'Folder layout is unavailable. Reconnect to try again.'
-    : snapshot.readOnly ? 'Folder editing is unavailable for this connection.'
+    : unreachable && snapshot.unavailableReason === 'ungranted' ? 'Folders unavailable on this connection'
+    : unreachable && snapshot.unavailableReason === 'interrupted' ? 'Reconnecting to folder layout…'
+    : unreachable ? 'Folder layout is unavailable'
     : (snapshot.sidebarCandidates?.length ?? 0) > 1 ? 'Several sidebar layouts are available. Using the earliest layout; the others are unchanged.' : undefined
+  const unavailableKind: SystemStateKind = snapshot.phase === 'connecting' ? 'loading' : 'offline'
+  // The client reconnects by itself after an interruption, and a missing grant does not change by trying again.
+  const onRetryUnavailable = unreachable && snapshot.unavailableReason !== 'ungranted' && snapshot.unavailableReason !== 'interrupted' ? snapshot.retry : undefined
   return {
-    tree: filterSidebarTree(orderingTree, query), orderingTree, status, rowStatus: status, treeStatus, unavailable,
-    canDrop: (items, target) => ready() ? canDrop({ ...currentDoc(), roster: currentRoster.current }, { items, target }) : { refused: 'Folder editing is unavailable for this connection.' },
+    tree: filterSidebarTree(orderingTree, query), orderingTree, status, rowStatus: status, treeStatus, unavailable, unavailableKind,
+    ...(onRetryUnavailable === undefined ? {} : { onRetryUnavailable }),
+    onEditRefused: (sentence) => { registry.set(local.refused, sentence) },
+    canDrop: (items, target) => ready() ? canDrop({ ...currentDoc(), roster: currentRoster.current }, { items, target }) : { refused: editingUnavailable },
     onMove: (intent) => {
       // Agent rows are bound to the subject they showed now; a rebound row key refuses instead of moving another agent.
       const bound = boundRows(currentRoster.current, intent)

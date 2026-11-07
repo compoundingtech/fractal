@@ -419,7 +419,8 @@ describe('conversation import boundary', () => {
     rosterFeed = { _tag: 'Observed', freshness: 'live', value: { agents: [], hosts: [] } }
     await renderShell()
     expect(container.querySelector('[data-wf-roster-skeleton]')).toBeNull()
-    expect(container.querySelector('[data-system-state]')).toBeNull()
+    // The folder layout connects on its own and says so; nothing speaks for the roster, which is known empty.
+    expect(container.querySelector('[data-system-state]:not([data-wf-folder-status])')).toBeNull()
     rosterFeed = { _tag: 'Unavailable', reason: 'ungranted', detail: 'not-for-display' }
     await renderShell()
     expect(container.querySelector('[data-wf-roster-skeleton]')).toBeNull()
