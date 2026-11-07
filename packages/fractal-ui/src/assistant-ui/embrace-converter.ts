@@ -150,7 +150,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
         content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}${item.retryable === true ? '\nCan be retried' : ''}` }],
       } : {
         ...common, role: 'system',
-        content: [{ type: 'text', text: `${item.kind} · ${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
+        content: [{ type: 'text', text: `${item.kind === 'event' ? '' : `${item.kind} · `}${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
       }
     case 'Event': {
       diagnostics.push('semantic-row-as-text')

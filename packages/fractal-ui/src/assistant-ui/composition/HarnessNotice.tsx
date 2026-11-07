@@ -15,6 +15,7 @@ const presentation: { readonly [Tag in HarnessNoticeData['_tag']]: { readonly ic
   Interjection: { icon: 'pencil', kind: 'Interjection', noun: 'message' },
   SkillInvocation: { icon: 'gear', kind: 'Skill', noun: 'details' },
   Delivery: { icon: 'send', kind: 'Delivery', noun: 'message' },
+  SystemRecord: { icon: 'gear', kind: 'System', noun: 'details' },
 }
 
 /** Outcome overrides the kind icon: alert only for failure, check only for completion; every other outcome keeps the neutral kind icon. */

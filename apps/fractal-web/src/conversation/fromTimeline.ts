@@ -12,6 +12,7 @@ import { blockFacts, recordValue } from './blocks.ts'
 import { blockRole, isKnownView, viewMeaning } from './vocabulary.ts'
 import { inspectPreview } from './inspect.ts'
 import { recordTranscriptTelemetry } from './telemetry.ts'
+import { bodyRepeatsRecord, systemRecordItem } from './systemRecords.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the Fractal wire contract.
@@ -168,6 +169,11 @@ const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): Conve
 
 const isHiddenBlock = (block: { readonly visibility?: string | undefined }) =>
   block.visibility === 'internal' || block.visibility === 'hidden-by-harness'
+
+/** Harness text with nothing beside it that a delivery copy could take with it: images, views, hidden or dropped blocks. */
+const isPlainText = (entry: Extract<Entry, { type: 'content' }>) =>
+  (entry.degraded?.length ?? 0) === 0 && (entry.body.blocks ?? []).every(block =>
+    block.kind === 'source_record' || (block.kind === 'text' && block.view === undefined && !isHiddenBlock(block)))
 
 /**
  * Native bodies with internal or hidden-by-harness blocks stay out of prose but keep their inspectable data as one
@@ -328,13 +334,42 @@ const baseItemOf = ({
 }
 
 const itemOf = (args: Parameters<typeof baseItemOf>[0]): ConversationItem => {
-  const item = baseItemOf(args)
-  if (args.entry.type === 'unrecognized' || item._tag === 'Unsupported') return item
-  return { ...item, ...blockFacts(args.entry.body) }
+  const entry = systemRecordParts(args.entry)?.rest ?? args.entry
+  const item = baseItemOf({ ...args, entry })
+  if (entry.type === 'unrecognized' || item._tag === 'Unsupported') return item
+  return { ...item, ...blockFacts(entry.body) }
 }
 
 const unsupported = (id: string, harness: string, recordKind: string, reason: UnsupportedReason, raw: unknown, at?: string): ConversationItem =>
   ({ _tag: 'Unsupported', id, harness, recordKind, reason, inspect: inspectPreview(raw), ...(at === undefined ? {} : { at }) })
+
+/**
+ * An entry's system records apart from whatever else it carries. `rest` holds no native record, so
+ * neither a session prompt nor a tool list can follow visible content onto its item or disclosure.
+ * `sharedBodyIsRecord` drops the record's copy from the shared text; other blocks keep their meaning.
+ */
+const systemRecordParts = <E extends Exclude<Entry, { type: 'truncation' }>>(entry: E) => {
+  if (entry.type === 'unrecognized' || entry.type === 'reasoning') return undefined
+  const blocks = blockFacts(entry.body).blocks
+  if (blocks === undefined) return undefined
+  const harness = blocks.find(block => block.kind === 'source_record')?.source_type ?? 'st'
+  const at = entryTimestamp(entry)
+  const records = blocks.flatMap((block, index) => {
+    if (isHiddenBlock(block) || blockRole(block.kind) === 'bookkeeping') return []
+    const item = systemRecordItem(block, { id: entry.id, at, harness })
+    return item === undefined ? [] : [{ block, index, item }]
+  })
+  if (records.length === 0) return undefined
+  const kept = blocks.filter(block => !records.some(record => record.block === block))
+  const text = entry.type === 'content' ? entry.body.text ?? '' : ''
+  const sharedBodyIsRecord = records.some(({ block }) => bodyRepeatsRecord(block, text))
+  return {
+    records,
+    alone: kept.every(block => block.kind === 'source_record'),
+    sharedBodyIsRecord,
+    rest: { ...entry, body: { ...entry.body, ...(sharedBodyIsRecord ? { text: '' } : {}), blocks: kept.map(block => block.kind === 'source_record' ? { ...block, payload: {} } : block) } } as E,
+  }
+}
 
 interface BlockClassification {
   readonly markers: readonly ConversationItem[]
@@ -342,8 +377,28 @@ interface BlockClassification {
   readonly native: boolean
   readonly fallback?: boolean
 }
-/** Block visibility and vocabulary are authoritative whenever native blocks exist. */
+/** With the record's copy gone from a shared body, a text block has nothing left to say and takes no row. */
+const isEmptyProse = (item: ConversationItem | undefined) =>
+  item === undefined || (item._tag === 'Reasoning' && item.text.trim() === '')
+    || (item._tag === 'Text' && item.text.trim() === '' && item.attachments.length === 0)
+
+/** A record takes the entry's one row only when nothing else is there to read; beside content it gets its own hidden row. */
 const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassification => {
+  const parts = systemRecordParts(entry)
+  if (parts === undefined) return classifyBlocks(entry)
+  const rows = parts.records.map(({ block, index, item }) => ({ ...item, id: `${entry.id}#${block.id ?? index}` }))
+  const rest = classifyBlocks(parts.rest)
+  if (!parts.alone && !parts.sharedBodyIsRecord) return { ...rest, markers: [...rows, ...rest.markers] }
+  // Only content shares a body with its blocks, so only content reaches the fallback.
+  const own = parts.alone ? undefined : rest.native && !rest.fallback ? rest.primary
+    : parts.rest.type === 'content' ? itemOf({ entry: parts.rest, sessionActive: true }) : undefined
+  if (own !== undefined && !isEmptyProse(own)) return { markers: [...rows, ...rest.markers], primary: own, native: true, fallback: false }
+  // Its native facts stay off the row, as an F2 marker's do.
+  return { markers: [...rows.slice(1), ...rest.markers], primary: parts.records[0]!.item, native: true, fallback: false }
+}
+
+/** Block visibility and vocabulary are authoritative whenever native blocks exist. */
+const classifyBlocks = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassification => {
   if (entry.type === 'unrecognized' || entry.type === 'reasoning') return { markers: [], native: false }
   const facts = blockFacts(entry.body)
   const blocks = facts.blocks
@@ -361,7 +416,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     const role = blockRole(block.kind)
     const payload = recordValue(block.payload)
     const customType = recordValue(payload?.raw)?.customType
-    const recordKind = block.kind === 'unknown'
+    const recordKind = block.view?.type === 'omp_event' ? block.view.kind : block.kind === 'unknown'
       ? block.source_type === 'custom' && typeof customType === 'string' ? customType : block.source_type
       : block.kind
     const marker = (reason: UnsupportedReason) => markers.push(unsupported(`${entry.id}#${block.id ?? index}`, harness, recordKind, reason, block, at))
@@ -756,6 +811,23 @@ export class LiveTimeline {
     return shown
   }
 
+  /**
+   * Each mail message's body as this window shows it. A header owns the content its mailbox id pairs
+   * with, or, for ids that pair with nothing, the content right after it. A header alone shows no body.
+   */
+  private shownMailBodies(mailboxHeaders: ReadonlyMap<string, MessageEntry>): ReadonlyMap<string, string> {
+    const bodies = new Map<string, string>()
+    this.ordered.forEach((entry, at) => {
+      if (entry.type !== 'content') return
+      const key = mailboxPairKey(entry)
+      const previous = this.ordered[at - 1]
+      const header = key !== undefined ? mailboxHeaders.get(key)
+        : previous?.type === 'message' && !isTurnHeader(previous) && mailboxPairKeys(previous).length === 0 ? previous : undefined
+      if (header !== undefined && !bodies.has(header.body.message_id)) bodies.set(header.body.message_id, entry.body.text ?? '')
+    })
+    return bodies
+  }
+
   /** Register only a send that painted an outbox row; an already-shown Resend keeps its server id. */
   keepOwnSendId(messageIds: readonly string[], itemId: string): void {
     for (const messageId of messageIds) {
@@ -781,7 +853,6 @@ export class LiveTimeline {
     const changedFrom = this.itemsBefore[from] ?? this.items.length
     const items = this.items.slice(0, changedFrom)
     this.itemsBefore.length = from
-    const shown = this.shownMessageIds()
     const userMailContent = new Set<string>()
     const mailboxHeaders = new Map<string, MessageEntry>()
     for (const entry of this.ordered) {
@@ -796,6 +867,7 @@ export class LiveTimeline {
       const key = mailboxPairKey(entry)
       if (key !== undefined) userMailContent.add(key)
     }
+    const shownBodies = this.shownMailBodies(mailboxHeaders)
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
@@ -809,14 +881,17 @@ export class LiveTimeline {
       // Only native harness turns repeat shown mail as delivery copies; a mailbox
       // message's own content is person-authored text that may quote anything.
       if (
-        entry.type === 'content' && entry.body.blocks === undefined && (entry.degraded?.length ?? 0) === 0 &&
+        entry.type === 'content' && isPlainText(entry) &&
         !MAILBOX_CONTENT_ID.test(entry.id) &&
         (entry.role === 'user' || entry.role === 'system')
       ) {
-        const text = withoutShownDeliveries(entry.body.text ?? '', shown)
+        const text = withoutShownDeliveries(entry.body.text ?? '', shownBodies)
         if (text !== (entry.body.text ?? '')) {
-          if (text.length > 0)
-            items.push(itemOf({ entry: { ...entry, body: { ...entry.body, text } }, sessionActive: true }))
+          if (text.length > 0) {
+            const rest = { ...entry, body: { ...entry.body, text } }
+            const classified = blockItems(rest)
+            items.push(classified.native && !classified.fallback && classified.primary !== undefined ? classified.primary : itemOf({ entry: rest, sessionActive: true }))
+          }
           continue
         }
       }
