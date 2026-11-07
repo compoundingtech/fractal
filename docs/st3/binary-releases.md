@@ -252,6 +252,8 @@ prints the candidate notes without creating a tag or draft.
 Candidate version selection, draft creation, cleanup, publication, and edge/embed release
 jobs share one job-level `fractal-release-mutation` concurrency group, with cancellation
 disabled. Edge and embed are not exempt: they also create or edit GitHub releases.
+Within each main-push run, edge waits for both assembly and successful embed publication,
+so one run never queues two development publishers against the lock's single pending slot.
 Builds never hold this mutation lock. All write-permission release jobs are restricted to
 `refs/heads/main`; dispatch release operations with `--ref main`. Publication needs Contents
 write and Actions read only; its Actions access inspects the successful build and downloads
@@ -264,6 +266,12 @@ error**, never a silently dropped publication. If a build or mutation is cancell
 release operator must re-dispatch with all original inputs (`mode`, `tag`, `run`, `summary`,
 `sha`, `go_ref`, `allow_superseded`), after checking whether the release is already
 published. Do not interpret cancellation as GO or successful publication.
+
+**Fractal tag release** has its own ungrouped, non-mutating `always()` observer for both
+development publishers. A cancelled embed or edge publisher makes that observer fail with
+re-dispatch instructions. Check edge/embed state, then re-run the original main-push event:
+`gh run rerun RUN_ID --repo compoundingtech/fractal`. A fresh `workflow_dispatch` is not
+an equivalent recovery: it builds but deliberately skips the push-only publishers.
 
 Only after a newer candidate has been successfully created with its complete assets and
 notes does daily cleanup delete older semantic-version unpublished drafts marked as owned

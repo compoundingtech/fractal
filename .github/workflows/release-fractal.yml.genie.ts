@@ -325,10 +325,10 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
     "publishEdge": {
       "name": "release-publish-edge",
       "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
-      "needs": "assemble",
+      "needs": ["assemble", "publishEmbed"],
       "runs-on": "ubuntu-latest",
       "timeout-minutes": 15,
-      // Serialize release mutations; a superseded pending run is dropped, and the script never moves edge backwards.
+      // Wait for embed publication before entering the shared mutation lock; never queue two publishers from this run.
       "concurrency": {
         "group": "fractal-release-mutation",
         "cancel-in-progress": false
@@ -356,6 +356,22 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           "run": "scripts/release-fractal-edge --source \"$SOURCE_SHA\" --dist dist --run-url \"$RUN_URL\""
         }
       ]
+    },
+    observePublishers: {
+      name: 'report-cancelled-release-publishers',
+      needs: ['publishEmbed', 'publishEdge'],
+      if: "always() && contains(needs.*.result, 'cancelled')",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      permissions: { contents: 'read' },
+      env: {
+        CANCELLED_RUN: '${{ github.run_id }}',
+        REPOSITORY: '${{ github.repository }}',
+      },
+      steps: [{
+        name: 'Fail visibly and explain original-event re-dispatch',
+        run: 'echo "::error::A release publisher was cancelled; the shared mutation queue may replace pending jobs. Check edge/embed release state, then re-dispatch the original event with: gh run rerun $CANCELLED_RUN --repo $REPOSITORY. A new workflow_dispatch only builds and does not run push-only publishers."\nexit 1',
+      }],
     }
   }
-}, {"validate-source": "Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.", "publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing."}))))
+}, {"validate-source": "Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.", "publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release after embed publication in the shared mutation lock; builds nothing.", "observePublishers": "Fails visibly on cancelled publishers and explains re-dispatch of the original push event; performs no release mutations."}))))
