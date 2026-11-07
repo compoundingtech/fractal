@@ -769,18 +769,19 @@ describe('batched message measurements', () => {
     expect(message.textContent).not.toContain('Show full message')
   })
 
-  it('keeps localized completion times and machine instants when formatting multiple answer rows', async () => {
+  it('keeps localized episode times and machine instants, one per episode, none on its answers', async () => {
     const entries: readonly TranscriptTurn[] = [0, 1].map(index => ({
       ...turns[index]!,
       items: [{ _tag: 'Text', id: `answer-${index}`, role: 'assistant', text: `Answer ${index}`, attachments: [], streaming: false, at: new Date(now + index * 60_000).toISOString() }],
     }))
     await render(transcript(entries))
-    const times = [...container.querySelectorAll<HTMLTimeElement>('[data-testid="message-time"]')]
+    expect(container.querySelectorAll('[data-testid="message-time"]')).toHaveLength(0)
+    const times = [...container.querySelectorAll<HTMLTimeElement>('[data-testid="turn-time"]')]
     expect(times).toHaveLength(2)
     times.forEach((time, index) => {
-      const completed = new Date(now + index * 60_000)
-      expect(time.dateTime).toBe(completed.toISOString())
-      expect(time.textContent).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(completed))
+      const started = new Date(Date.parse(entries[index]!.prompt?.at ?? entries[index]!.items[0]!.at!))
+      expect(time.dateTime).toBe(started.toISOString())
+      expect(time.textContent).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(started))
     })
   })
 })

@@ -18,6 +18,7 @@ import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from '.
 import type { ComposerAvailability } from '../embrace-composer/send'
 import { TranscriptAttachmentImagesContext, TranscriptAttachments, type TranscriptAttachmentImages } from './TranscriptAttachments'
 import { HarnessNotice } from './HarnessNotice'
+import { MailMessage, type MailParticipants } from './MailMessage'
 import { UnsupportedRecord } from './UnsupportedRecord'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
@@ -43,6 +44,13 @@ export interface TranscriptTurn {
   /** Host-owned interaction state; the kit never infers a pending question from output text. */
   readonly activity?: LiveActivityState
   readonly senderCaptions?: Readonly<Record<string, string | undefined>>
+  /**
+   * The item that opened this episode when no person did: a wake or incoming mail. It is one of `items`
+   * and draws first, above the work log, as the episode's trigger.
+   */
+  readonly triggerId?: string
+  /** Host naming for each message item, by item id. */
+  readonly participants?: Readonly<Record<string, MailParticipants>>
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
@@ -99,24 +107,31 @@ export interface TranscriptProps {
   readonly active?: boolean
 }
 const SenderCaption = React.createContext<string | undefined>(undefined)
+const MailNames = React.createContext<MailParticipants | undefined>(undefined)
 const SeatHeader = React.createContext(true)
 /** True for a prose block that continues the same sender's run inside one turn. */
 const RunContinuation = React.createContext(false)
 /** Whole-run text for the block that heads a multi-block prose run, so its single Copy covers every block. */
 const RunCopyText = React.createContext<string | undefined>(undefined)
 const RetrySend = React.createContext<TranscriptProps['onRetrySend']>(undefined)
+/** False inside an episode: the episode's head carries its one timestamp, so rows carry none. */
+const RowTimes = React.createContext(true)
 const TurnFooterRenderer = React.createContext<TranscriptProps['renderTurnFooter']>(undefined)
 const ToolDetailRenderer = React.createContext<TranscriptProps['renderToolDetail']>(undefined)
 function TranscriptMessage() {
   const item = useAuiState(state => state.message.metadata.custom.item) as ConversationItem | undefined
   const summary = useAuiState(state => state.message.content.find(part => part.type === 'text')?.text ?? '')
   const caption = React.useContext(SenderCaption)
+  const mailNames = React.useContext(MailNames)
   const continuation = React.useContext(RunContinuation)
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
   if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <SeatProse item={{ ...item, role: 'assistant' }} senderLine={caption} continuation={continuation} />
-  if (item._tag === 'Message') return <SeatProse item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
+  // Mail names its participants; a message with neither (an imported handoff) keeps the seat's prose.
+  if (item._tag === 'Message') return item.text === undefined && item.from === undefined && item.to === undefined && item.author === undefined && mailNames === undefined
+    ? <SeatProse item={item} senderLine={caption ?? item.sender?.label} />
+    : <MailMessage item={item} participants={mailNames} />
   if (item._tag === 'Unsupported') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><UnsupportedRecord item={item} /></MessagePrimitive.Root>
-  if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" /></MessagePrimitive.Root>
+  if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" showTime={false} /></MessagePrimitive.Root>
   if (item._tag === 'UnknownEvent' && item.mixedContent === true) return <MixedContentMessage item={item} />
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
 }
@@ -175,12 +190,13 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
   const streaming = item._tag === 'Text' && item.streaming
   const completed = streaming ? NaN : Date.parse(item.at)
   const showSeatHeader = React.useContext(SeatHeader)
+  const rowTimes = React.useContext(RowTimes)
   const header = !continuation && (item._tag !== 'Text' || showSeatHeader) && (senderLine !== undefined || !streaming)
   const [hovered, setHovered] = React.useState(false)
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} data-run-continuation={continuation || undefined} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} {...stylex.props(styles.answer)}>
     {header && <div data-testid="message-header" {...stylex.props(styles.answerHeader)}>
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
-      {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
+      {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{rowTimes && Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
     {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
@@ -211,7 +227,7 @@ export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: W
 const strandedText = (item: ConversationItem): string | undefined => {
   switch (item._tag) {
     case 'Text': case 'Reasoning': return item.text
-    case 'Message': return item.title
+    case 'Message': return item.text === undefined ? item.title : `${item.title === undefined ? '' : `${item.title}\n`}${item.text}`
     case 'Notice': return item.detail === undefined ? item.text : `${item.text}\n${item.detail}`
     case 'Event': return `${item.title}\n${item.text}`
     case 'Status': return item.detail
@@ -234,7 +250,7 @@ const itemContent = (item: ConversationItem): string => {
   switch (item._tag) {
     case 'Text': return `${item.text}\u0000${item.attachments.map(attachment => attachment.id).join('\u0000')}`
     case 'Reasoning': return item.text
-    case 'Message': return item.title ?? ''
+    case 'Message': return `${item.title ?? ''}\u0000${item.text ?? ''}\u0000${item.attachments?.map(attachment => attachment.id).join('\u0000') ?? ''}`
     case 'Notice': return `${item.text}\u0000${item.detail ?? ''}`
     case 'Event': return `${item.title}\u0000${item.text}`
     case 'Status': return item.detail ?? ''
@@ -269,7 +285,21 @@ const workMembers = (turn: TranscriptTurn): readonly string[] => {
   workMemberIds.set(turn, ids)
   return ids
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
+/** When an episode began: its prompt or trigger, else its first entry. */
+const turnStart = (turn: TranscriptTurn): number => {
+  for (const item of [turn.prompt, ...turn.items]) {
+    const at = item === undefined || item.at === undefined ? NaN : Date.parse(item.at)
+    if (Number.isFinite(at)) return at
+  }
+  return NaN
+}
+const dayFormatter = new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 'numeric' })
+const dayKey = (time: number) => Number.isFinite(time) ? new Date(time).toDateString() : undefined
+/** A day separator before an episode that starts on another day than the one before it. */
+function DaySeparator({ time }: { readonly time: number }) {
+  return <div role="separator" data-testid="transcript-day" {...stylex.props(styles.day)}><time dateTime={new Date(time).toISOString().slice(0, 10)}>{dayFormatter.format(time)}</time></div>
+}
+const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef, newDay }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement>; newDay?: boolean }) {
   const renderFooter = React.useContext(TurnFooterRenderer)
 
   const renderToolDetail = React.useContext(ToolDetailRenderer)
@@ -278,7 +308,10 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     return <ToolDetailPreview call={call} onOpen={onOpenTool} semantic={item === undefined ? undefined : renderToolDetail?.(item, call)} />
   }, [turn.items, renderToolDetail, onOpenTool])
   const reasoning = workLogReasoning(turn.items)
-  const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning')
+  const trigger = turn.triggerId === undefined ? undefined : turn.items.find(item => item.id === turn.triggerId)
+  const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning' && item !== trigger)
+  const started = turnStart(turn)
+  const renderItem = (item: ConversationItem, continuation = false, runText?: string) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <MailNames.Provider key={item.id} value={turn.participants?.[item.id]}><SenderCaption.Provider value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continuation}><RunCopyText.Provider value={runText}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider></MailNames.Provider>
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.
   const continues = shown.map((item, index) => [item, shown[index - 1]].every(entry => entry?._tag === 'Text' && entry.role === 'assistant' && stranded?.has(entry.id) !== true) && turn.senderCaptions?.[item.id] === turn.senderCaptions?.[shown[index - 1]!.id])
   // The block heading a run carries the run's full text, blocks joined by a blank line, for its one Copy.
@@ -287,13 +320,21 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     const end = continues.indexOf(false, index + 1)
     return shown.slice(index, end === -1 ? undefined : end).map(entry => entry._tag === 'Text' ? entry.text : '').join('\n\n')
   })
-  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}>
-    {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
-    {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
+  // One timestamp per episode, at its head beside the prompt or trigger.
+  const head = turn.prompt !== undefined
+    ? (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)
+    : trigger === undefined ? undefined : renderItem(trigger)
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}><RowTimes.Provider value={false}>
+    {newDay === true && Number.isFinite(started) && <DaySeparator time={started} />}
+    <div data-testid="turn-head" {...stylex.props(styles.turnHead)}>
+      <div {...stylex.props(styles.turnLead)}>{head}</div>
+      {Number.isFinite(started) && <time data-testid="turn-time" dateTime={new Date(started).toISOString()} {...stylex.props(styles.turnTime)}>{messageTimeFormatter.format(started)}</time>}
+    </div>
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow hideTime onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
+    {shown.map((item, index) => renderItem(item, continues[index]!, runTexts[index]))}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
     {!turn.work.running && renderFooter?.(turn)}
-  </section>
+  </RowTimes.Provider></section>
 })
 /** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */
 export function LiveActivity({ state, startedAt, now }: { readonly state: LiveActivityState; readonly startedAt?: string; readonly now?: number }) {
@@ -347,7 +388,16 @@ function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedR
     })
   }, [turns, rowIds, start, pinnedPrompt, pinnedReasoning])
   const last = turns[turns.length - 1]
-  return mounted.map(turn => <PreparedTurn key={turn.id} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
+  // A day separator wherever an episode starts on another day than the episode before it.
+  const days = new Map<string, boolean>()
+  let previousDay: string | undefined
+  for (const turn of turns) {
+    const day = dayKey(turnStart(turn))
+    if (day === undefined) continue
+    days.set(turn.id, previousDay !== undefined && day !== previousDay)
+    previousDay = day
+  }
+  return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
 /**
  * The window of rendered source rows, kept outside the scroll body so its warning and recovery stay visible at the tail.
@@ -526,7 +576,12 @@ const styles = stylex.create({
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
   userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
-  answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fgSoft, flexShrink: 0 },
+  // The outcome is what the reader came for: full contrast, never dimmer than the prompt.
+  answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fg, flexShrink: 0 },
+  turnHead: { display: 'flex', alignItems: 'flex-start', gap: s.md, minWidth: 0 },
+  turnLead: { flex: '1 1 0', minWidth: 0 },
+  turnTime: { flexShrink: 0, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums' },
+  day: { display: 'flex', alignItems: 'center', gap: s.md, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, '::before': { content: '""', flex: '1 1 0', height: g.hairline, backgroundColor: border.border }, '::after': { content: '""', flex: '1 1 0', height: g.hairline, backgroundColor: border.border } },
   answerHeader: { display: 'flex', alignItems: 'center', gap: s.sm, height: t.metaLeading, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   sender: { margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
