@@ -205,6 +205,7 @@ export const Stale: Story = { args: { feed: 'stale' }, play: async ({ canvasElem
 
 /** Rejected rows do not become urgent badges; their evidence lives inside the tab panel. */
 export const RejectedRows: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Synthetic rejected attention diagnostics pin the counted notice and identifier disclosure independently of valid scenario attention rows.' } },
   render: () => (
     <main {...stylex.props(styles.canvas, liveLegacyTheme, assistantDarkTheme)}>
       <aside aria-label="Alerts sidebar" {...stylex.props(styles.sidebar)}>
