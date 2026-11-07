@@ -5,7 +5,7 @@ use super::*;
 const TABLE: &str = "local_client_message_selectors_v1";
 const MARKER: &str = "client_message_selectors_v1_cut";
 const BACKFILL_MARKER: &str = "client_message_selectors_v1_backfill";
-const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
+pub(super) const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
 const MALFORMED_MARKER: &str = "client_message_selectors_v1_malformed_desired";
 const TRIGGER_MARKER: &str = "client_message_selectors_v1_trigger_generation";
 /// The last mirror subject the stream re-seed has passed ([`seed_stream_headers`]).
@@ -607,6 +607,42 @@ fn reminder_winners(transaction: &Transaction<'_>,reminder: &str,recipient: Opti
     Ok(())
 }
 
+/// A closed mark (message_marks.rs) moves no index, so a page pinned to the published cut cannot
+/// hold it back, and while its header waits for the fold its reminder group has no open winner.
+/// Close the subject's live header in place, as a mark counts at every cut, and move its group's
+/// winner: that header and its group's top candidates, nothing else. A fold with saved work on the
+/// subject keeps it, and the page reads the mark until that fold finishes. Once a later version
+/// has folded past the published cut, that cut's next winner shares its row with the live cut,
+/// where the later version wins, so a reader pinned there sees no winner for the group until the
+/// cut publishes (#5532).
+pub(super) fn close_marked(transaction: &Transaction<'_>,subject: &str) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(()); }
+    if !selectors_ready(transaction)? || projection_blocks_selectors(transaction,Some(subject))? { return Ok(()); }
+    let saved: Option<String> = transaction.query_row("SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0)).optional()?;
+    if saved.map(|saved| serde_json::from_str::<FoldWork>(&saved)).transpose()?.is_some_and(|work| work.subject==subject) { return Ok(()); }
+    let Some((_,header)) = current_header(transaction,subject)? else { return Ok(()); };
+    if header.closed { return Ok(()); }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h316d1fc30c66 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET closed=1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",[subject])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hea48a278f076 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ r#"UPDATE local_client_message_selectors_v1 SET
+ global_current=(closed=0 AND (reminder IS NULL OR NOT EXISTS(
+  SELECT 1 FROM local_client_message_selectors_v1 rival WHERE rival.born_index>=0 AND rival.retired_index IS NULL AND rival.closed=0
+   AND rival.reminder=local_client_message_selectors_v1.reminder AND (rival.version,rival.subject)>(local_client_message_selectors_v1.version,local_client_message_selectors_v1.subject)))),
+ recipient_current=(closed=0 AND mailbox=1 AND (reminder IS NULL OR NOT EXISTS(
+  SELECT 1 FROM local_client_message_selectors_v1 rival WHERE rival.born_index>=0 AND rival.retired_index IS NULL AND rival.closed=0 AND rival.mailbox=1
+   AND rival.recipient=local_client_message_selectors_v1.recipient AND rival.reminder=local_client_message_selectors_v1.reminder AND (rival.version,rival.subject)>(local_client_message_selectors_v1.version,local_client_message_selectors_v1.subject))))
+WHERE born_index>=0 AND retired_index IS NULL AND subject IN (
+ SELECT ?1
+ UNION
+ SELECT (SELECT subject FROM local_client_message_selectors_v1 INDEXED BY client_selector_reminder_candidates
+  WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND reminder=?2 ORDER BY version DESC,subject DESC LIMIT 1)
+ UNION
+ SELECT (SELECT subject FROM local_client_message_selectors_v1 INDEXED BY client_selector_recipient_reminder_candidates
+  WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND mailbox=1 AND reminder=?2 AND recipient=?3 ORDER BY version DESC,subject DESC LIMIT 1))"#,
+        params![subject,header.reminder,header.recipient])?;
+    Ok(())
+}
+
 fn record_cut(transaction: &Transaction<'_>,cut: u64) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hf2b37067abbd owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value!=excluded.value",params![MARKER,cut.to_string()])?;
     transaction.execute(
@@ -1058,17 +1094,20 @@ pub(super) fn open(connection: &mut Connection) -> Result<()> {
 
 /// The runtime's sole managed outer-COMMIT selector callback. Append, apply,
 /// replay and repair helpers only capture durable pending work through triggers.
-pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudget> {
-    #[cfg(any(test, feature = "test-support"))]
-    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
-    // Startup/rebuild owns this queue until every header is available. Ordinary
-    // replay hooks must not publish an incomplete selector projection.
-    let ready: bool = transaction.query_row(
+// Startup/rebuild owns the queue until every header is available. Ordinary
+// replay hooks must not publish an incomplete selector projection.
+fn selectors_ready(transaction: &Transaction<'_>) -> Result<bool> {
+    Ok(transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)
          AND NOT EXISTS(SELECT 1 FROM meta WHERE key=?2)",
         params![MARKER, BACKFILL_MARKER], |row| row.get(0),
-    )?;
-    if !ready { return Ok(FoldBudget::default()); }
+    )?)
+}
+
+pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudget> {
+    #[cfg(any(test, feature = "test-support"))]
+    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
+    if !selectors_ready(transaction)? { return Ok(FoldBudget::default()); }
     let budget = flush_pending(transaction, true)?;
     confirm_stream_headers(transaction)?;
     #[cfg(any(test, feature = "test-support"))]
@@ -1253,7 +1292,10 @@ fn has_selector_cleanup(connection: &Connection) -> Result<bool> {
 fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) -> String {
     let flag=if person { "recipient_current" } else { "global_current" };
     let alive=if current { "retired_index IS NULL" } else { "born_index<=?1 AND (retired_index IS NULL OR retired_index>?1)" };
-    let eligible=if history { String::new() } else { format!("AND {flag}=1") };
+    // This member's closed mark (message_marks.rs) moves no index, so the cut cannot leave it out and
+    // a header may not have folded it yet. The page reads it live, as the message's status does.
+    let marked=|subject: &str|format!("EXISTS(SELECT 1 FROM local_message_marks WHERE message={subject} AND kind='message.closed')");
+    let eligible=if history { String::new() } else { format!("AND {flag}=1 AND NOT {}",marked("local_client_message_selectors_v1.subject")) };
     let recipient_scope=if person { "AND recipient=?2 AND mailbox=1" } else { "" };
     // A stream item's header has no graph claim; ?7 bounds it to the stream items the page's
     // first read could see, as ?1 bounds graph headers to their claims.
@@ -1286,7 +1328,8 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
             eligible_branch("client_selector_order","client_selector_global_eligible","client_selector_global_retired_eligible","")
         }
     };
-    format!("SELECT subject,created_index,current,closed FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) AND (?7 IS NULL OR ?7 IS NOT NULL) ORDER BY sent_key DESC,subject")
+    let marked=marked("page.subject");
+    format!("SELECT subject,created_index,current AND NOT {marked},closed OR {marked} FROM ({candidates}) page WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) AND (?7 IS NULL OR ?7 IS NOT NULL) ORDER BY sent_key DESC,subject")
 }
 
 fn selectors_not_ready() -> FractalError {

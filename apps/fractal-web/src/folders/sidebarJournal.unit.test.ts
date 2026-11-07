@@ -55,7 +55,7 @@ it('blocks sends and completion acknowledgements on failed writes', () => {
   const cause = new DOMException('quota', 'QuotaExceededError')
   const storage = { getItem: localStorage.getItem.bind(localStorage), removeItem: localStorage.removeItem.bind(localStorage), setItem: () => { throw cause } }
   const journal = new SidebarJournal(scope, storage)
-  expect(journal.run('PersistPending', state())).toEqual({ _tag: 'StorageFailed', operation: 'write', cause })
+  expect(journal.run('PersistPending', state())).toEqual({ _tag: 'StorageFailed', operation: 'write', cause, event: { _tag: 'StorageFailed', identity, phase: 'Pending' } })
   expect(journal.run('Send', { ...state(), status: 'Sending' })._tag).toBe('PersistenceRequired')
   expect(journal.run('PersistCompletion', { ...state(), status: 'AwaitingCompletionPersistence' })._tag).toBe('StorageFailed')
 })
@@ -81,7 +81,7 @@ it('isolates scoped records and reports read/removal failures without fallback s
   const storage = { getItem: () => { throw cause }, setItem: localStorage.setItem.bind(localStorage), removeItem: () => { throw cause } }
   const failed = new SidebarJournal(scope, storage)
   expect(failed.restore()).toEqual({ _tag: 'StorageFailed', operation: 'read', cause })
-  expect(failed.run('PersistRemoval', { ...state(), status: 'Observed' })).toEqual({ _tag: 'StorageFailed', operation: 'remove', cause })
+  expect(failed.run('PersistRemoval', { ...state(), status: 'Observed' })).toEqual({ _tag: 'StorageFailed', operation: 'remove', cause, event: { _tag: 'StorageFailed', identity, phase: 'Removal' } })
 })
 it('replays unknown delivery exactly in-process, but a later failed write revokes the send permit', () => {
   let fail = false
