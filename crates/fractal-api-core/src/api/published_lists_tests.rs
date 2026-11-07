@@ -337,6 +337,10 @@ fn published_work_keeps_persisted_legacy_assignments_and_available_seats_visible
 
 #[test]
 fn mixed_spelling_ready_rows_keep_queue_order_in_direct_and_published_work() {
+    for (legacy, canonical) in [
+        ("node/worker", "agent/node/worker"),
+        ("node.builder", "agent/node.builder"),
+    ] {
     let _clock = Clock::at(start_time());
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("graph.db");
@@ -352,8 +356,8 @@ fn mixed_spelling_ready_rows_keep_queue_order_in_direct_and_published_work() {
     let connection = rusqlite::Connection::open(&path).unwrap();
     smallclaims::store::projection_digest::register(&connection).unwrap();
     for (subject, assignee, created) in [
-        (&first_subject, "node/worker", "10"),
-        (&second_subject, "agent/node/worker", "20"),
+        (&first_subject, if legacy.contains('/') { legacy } else { canonical }, "10"),
+        (&second_subject, canonical, "20"),
     ] {
         connection.execute(
             /* sqlite-large-value: allow-for-now lv-hb7cf1dc01667 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, created_at_unix_ms=?3 WHERE subject=?1",
@@ -361,19 +365,29 @@ fn mixed_spelling_ready_rows_keep_queue_order_in_direct_and_published_work() {
         ).unwrap();
     }
     drop(connection);
+    store.move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
+        agent: canonical.into(),
+        run: second.id.clone(),
+        placement: "top".into(),
+        anchor: None,
+        reason: Some("reverse readiness order".into()),
+        actor: "person/operator".into(),
+        idempotency_key: "reverse-ready-order".into(),
+    }).unwrap();
     let (publication, _) = fold_work_checked(&store);
-    for actor in ["node/worker", "agent/node/worker"] {
+    for actor in [legacy, canonical] {
         let order = store.seat_run_order(actor).unwrap();
         let work = store.client_work_at_snapshot(Some(actor), false, publication.rows.time_unix_ms).unwrap();
         let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
-        let selected = crate::seat_queue::select(actor, &steps, &order);
-        assert_eq!(selected.ready, [&*first_subject, &*second_subject],
-            "both spellings have finite ready ranks, with the earlier run first");
+        let selected = crate::seat_queue::select(canonical, &steps, &order);
+        assert_eq!(selected.ready, [&*second_subject, &*first_subject],
+            "both spellings honor the explicit queue order, opposite readiness order");
         let direct = work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0;
         let (indexes, _) = publication.rows.actor_rows(actor);
         assert_eq!(indexes.iter().map(|&index| publication.rows.order[index as usize].as_str())
-            .collect::<Vec<_>>(), [&*first_subject, &*second_subject]);
+            .collect::<Vec<_>>(), [&*second_subject, &*first_subject]);
         assert_eq!(publication.rows.page_of(Some(&indexes), 0, usize::MAX).0, direct);
+    }
     }
 }
 

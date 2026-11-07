@@ -360,8 +360,9 @@ impl WorkRows {
     /// its ready work by its seat queue at this publication's own cut. Legacy slash-qualified
     /// agent IDs share the canonical actor's memo. Says whether this read built it.
     pub fn actor_rows(&self, actor: &str) -> (Arc<Vec<u32>>, bool) {
-        let viewer = fractal_schema::canonical_agent_actor(actor)
-            .unwrap_or(std::borrow::Cow::Borrowed(actor));
+        let actor = smallclaims::store::normalize_actor(actor, "agent");
+        let viewer = fractal_schema::canonical_agent_actor(&actor)
+            .unwrap_or(std::borrow::Cow::Borrowed(&actor));
         self.actors.get_or_build(&viewer, || self.actor_order(&viewer))
     }
 
