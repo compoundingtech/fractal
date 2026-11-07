@@ -20,7 +20,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::metrics::{Aggregation, Instrument, SdkMeterProvider, Stream};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::{Layer as _, SubscriberExt};
@@ -32,37 +32,6 @@ static TRACER_EXPORT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn tracer_export_enabled() -> bool {
     TRACER_EXPORT_ENABLED.load(Ordering::Relaxed)
-}
-
-/// Seconds-scale explicit bucket boundaries for the duration histograms. The SDK's default
-/// boundaries are millisecond-tuned (`[0, 5, 10, …, 10000]`), so sub-second reconcile passes
-/// and session spawns would collapse into the lowest buckets and be indistinguishable.
-const DURATION_BUCKET_BOUNDARIES: [f64; 12] = [
-    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-];
-
-/// View mapping each duration instrument onto seconds-scale explicit buckets (see
-/// [`DURATION_BUCKET_BOUNDARIES`]); every other instrument keeps its default aggregation.
-fn duration_view(instrument: &Instrument) -> Option<Stream> {
-    duration_instrument(instrument.name()).then(|| {
-        Stream::builder()
-            .with_aggregation(Aggregation::ExplicitBucketHistogram {
-                boundaries: DURATION_BUCKET_BOUNDARIES.into(),
-                record_min_max: true,
-            })
-            .build()
-            .expect("duration histogram view is valid")
-    })
-}
-
-fn duration_instrument(name: &str) -> bool {
-    matches!(
-        name,
-        "reconcile_pass_duration_seconds"
-            | "session_start_duration_seconds"
-            | "resource_observe_dispatch_seconds"
-            | "resource_observe_settle_seconds"
-    )
 }
 
 /// Level filtering for the stderr fmt layer, defaulting to INFO. `RUST_LOG` overrides it on that
@@ -158,7 +127,6 @@ impl Telemetry {
                 let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build();
                 let meter_provider = SdkMeterProvider::builder()
                     .with_reader(reader)
-                    .with_view(duration_view)
                     .with_resource(resource.clone())
                     .build();
                 opentelemetry::global::set_meter_provider(meter_provider.clone());
@@ -305,22 +273,4 @@ fn build_log_exporter() -> Result<LogExporter, opentelemetry_otlp::ExporterBuild
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpJson)
         .build()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duration_view_covers_every_duration_histogram() {
-        for name in [
-            "reconcile_pass_duration_seconds",
-            "session_start_duration_seconds",
-            "resource_observe_dispatch_seconds",
-            "resource_observe_settle_seconds",
-        ] {
-            assert!(duration_instrument(name), "{name}");
-        }
-        assert!(!duration_instrument("resource_observe_requests_total"));
-    }
 }

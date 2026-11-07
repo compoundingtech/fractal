@@ -20,11 +20,13 @@ pub enum Status { Intent, AwaitingPersistence, Sending, UnknownDelivery, Awaitin
 pub enum Refusal { InvalidPlan, StaleFence, Unauthorized, DestinationMissing, Conflict, Storage }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect { PersistPending, Send, ReadBase, PersistCompletion, PersistRemoval, Replan }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Persistence { Pending, Completion, Removal }
 pub enum Event {
     Plan { base: Base, plan: V2Plan, folder: Identity, membership: Identity },
     Persisted(Identity), CompletionPersisted(Identity), Ack(Identity), Unknown(Identity), Replay,
     /// Host proves the staged operations from authoritative state, not an action receipt.
-    Observed(Identity), Refused(Identity, Refusal), StorageFailed, Retry,
+    Observed(Identity), Refused(Identity, Refusal), StorageFailed { identity: Identity, phase: Persistence }, Retry,
     /// Replan memberships against this complete post-folder base; deleted destinations refuse.
     Fresh(Base, Result<Vec<ordered_membership::Operation>, Refusal>),
 }
@@ -130,7 +132,8 @@ impl Edits {
             Event::Retry if matches!(self.status, Status::Refused | Status::PartiallyApplied) => {
                 self.status = Status::Intent; self.refusal = None; self.dependent = None; vec![Effect::ReadBase, Effect::Replan]
             }
-            Event::StorageFailed if matches!(self.status, Status::AwaitingPersistence | Status::AwaitingCompletionPersistence) => self.refuse(Refusal::Storage),
+            Event::StorageFailed { identity, phase } if self.request.as_ref().is_some_and(|request| request.identity == identity)
+                && matches!((self.status, phase), (Status::AwaitingPersistence, Persistence::Pending) | (Status::AwaitingCompletionPersistence, Persistence::Completion)) => self.refuse(Refusal::Storage),
             Event::Replay if self.status == Status::UnknownDelivery => { self.status = Status::Sending; vec![Effect::Send] }
             Event::Persisted(id) if self.status == Status::AwaitingPersistence && self.request.as_ref().is_some_and(|request| request.identity == id) => { self.status = Status::Sending; vec![Effect::Send] }
             Event::CompletionPersisted(id) if self.status == Status::AwaitingCompletionPersistence && self.request.as_ref().is_some_and(|request| request.identity == id) => {
@@ -234,7 +237,7 @@ mod tests {
             stage(&mut state, false, true);
             for event in [Event::Ack(id(99)), Event::Unknown(id(99)), Event::Observed(id(99)), Event::Refused(id(99), Refusal::Conflict), Event::Persisted(id(99))] { assert!(state.reduce(event).is_empty()); }
             assert_eq!(state.status, Status::AwaitingPersistence);
-            state.reduce(Event::StorageFailed); assert_eq!(state.refusal, Some(Refusal::Storage));
+            state.reduce(Event::StorageFailed { identity: id(2), phase: Persistence::Pending }); assert_eq!(state.refusal, Some(Refusal::Storage));
             assert!(state.reduce(Event::Persisted(id(2))).is_empty()); assert!(state.reduce(Event::Replay).is_empty());
         }
     }
@@ -300,7 +303,7 @@ mod tests {
             state.reduce(Event::Persisted(id(1))); state.reduce(Event::Ack(id(1)));
             state.reduce(Event::Observed(id(1)));
             if storage_failed {
-                state.reduce(Event::StorageFailed);
+                state.reduce(Event::StorageFailed { identity: id(1), phase: Persistence::Completion });
                 assert_eq!(state.status, Status::PartiallyApplied); assert!(state.intent().is_some());
                 assert!(state.reduce(Event::CompletionPersisted(id(1))).is_empty());
             } else {
@@ -388,5 +391,28 @@ mod tests {
         }
         assert!(matches!(Edits::restore(br#"{"version":1,"state":{}}"#, &scope()), Err(RestoreError::InvalidRecord(_))));
         assert!(matches!(Edits::restore(b"not json", &scope()), Err(RestoreError::InvalidRecord(_))));
+    }
+    #[test]
+    fn late_pending_failure_cannot_refuse_observed_completion() {
+        let mut state = state(); stage(&mut state, false, true);
+        state.reduce(Event::Persisted(id(2))); state.reduce(Event::Ack(id(2))); state.reduce(Event::Observed(id(2)));
+        for (identity, phase) in [(id(2), Persistence::Pending), (id(99), Persistence::Completion), (id(2), Persistence::Removal)] {
+            assert!(state.reduce(Event::StorageFailed { identity, phase }).is_empty());
+            assert_eq!(state.status, Status::AwaitingCompletionPersistence); assert_eq!(state.refusal, None);
+        }
+        assert_eq!(state.reduce(Event::CompletionPersisted(id(2))), vec![Effect::PersistRemoval]);
+        assert!(state.reduce(Event::StorageFailed { identity: id(2), phase: Persistence::Removal }).is_empty());
+        assert_eq!(state.status, Status::Observed);
+    }
+    #[test]
+    fn late_folder_storage_failure_cannot_refuse_dependent_membership_barrier() {
+        let mut state = state(); stage(&mut state, true, true);
+        state.reduce(Event::Persisted(id(1))); state.reduce(Event::Observed(id(1))); state.reduce(Event::CompletionPersisted(id(1)));
+        state.reduce(Event::Fresh(base(2), Ok(members())));
+        for phase in [Persistence::Pending, Persistence::Completion, Persistence::Removal] {
+            assert!(state.reduce(Event::StorageFailed { identity: id(1), phase }).is_empty());
+            assert_eq!(state.status, Status::AwaitingPersistence); assert_eq!(state.refusal, None);
+        }
+        assert_eq!(state.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
     }
 }
