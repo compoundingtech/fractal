@@ -12,6 +12,7 @@ import type { AlertAction, AlertActionResult } from '../conversation/alerts/aler
 import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
 import { useAttention, useDataSource, useNow } from '../data/react.tsx'
 import type { Feed } from '../data/source.ts'
+import { LiveAskThreads, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
@@ -31,6 +32,8 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
       feed={useAttention()}
       now={useNow()}
       onOpen={onOpen}
+      renderThreads={alert => <LiveAskThreads alert={alert} onOpenThread={onOpen} />}
+      footer={<LiveRecentlyClosedThreads onOpenThread={onOpen} />}
       onAct={actions === undefined ? undefined : (alert, action) => actions.act({ alert, action })}
       onAnswer={prompts === undefined ? undefined : (alert, _answer, sent) => {
         const prompt = promptAnswers(alert)
@@ -46,13 +49,15 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row and expanded answer stays reachable.
  */
-export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
+export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer, renderThreads, footer }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly now: number
   /** Opens an agent conversation or a mission by ref. */
   readonly onOpen: (ref: string) => void
   readonly onAct?: Act
   readonly onAnswer?: Answer
+  readonly renderThreads?: (alert: Native.Attention) => React.ReactNode
+  readonly footer?: React.ReactNode
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const [expanded, setExpanded] = React.useState<string>()
@@ -126,17 +131,19 @@ export const AlertsList = ({ feed, now, onOpen, onAct, onAnswer }: {
                     onOpen={onOpen}
                     onAct={onAct}
                     onAnswer={onAnswer}
+                    threadPanel={expanded === row.id ? renderThreads?.(row.item) : undefined}
                   />
                 ))}
               </ul>
             )}
           </>
         )}
+      {footer}
     </div>
   )
 }
 
-const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer }: {
+const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer, threadPanel }: {
   readonly row: AlertsTabRow
   readonly expanded: boolean
   readonly onExpand: (open: boolean) => void
@@ -145,6 +152,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
   readonly onOpen: (ref: string) => void
   readonly onAct: Act | undefined
   readonly onAnswer: Answer | undefined
+  readonly threadPanel?: React.ReactNode
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
@@ -207,6 +215,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
       {expanded ? (
         <div ref={panel} id={panelId} role="region" tabIndex={-1} aria-label={`Answer ${row.title}`} {...stylex.props(styles.panel)}>
           <AgentAlerts alerts={[row.item]} onAct={onAct} onAnswer={onAnswer} />
+          {threadPanel}
         </div>
       ) : null}
     </li>

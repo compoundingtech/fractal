@@ -16,12 +16,12 @@ it('issues no thread reads or edits when the daemon has not advertised the featu
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl })
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)
-  const list = source.list(agent)
+  const list = source.list({ agent_id: agent })
   const stop = registry.mount(list)
   try {
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
     expect(registry.get(list)).toEqual({ _tag: 'Waiting' })
-    expect(registry.get(source.access)).toEqual({ read: false, edit: false })
+    expect(registry.get(source.access)).toMatchObject({ read: false, actions: new Set() })
     expect(String(fetchImpl.mock.calls[0]?.[0])).toContain('/capabilities')
   } finally {
     stop()
@@ -40,7 +40,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
       value: { ...base.value, capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
-        { id: 'control.messages', version: 1, state: 'granted' },
+        { id: 'thread.close', version: 0, state: 'granted' },
       ] },
     })
     if (url.pathname.endsWith('/threads')) return Response.json({ ...base, value: { items: [summary], next_cursor: 'older/+chunk' } })
@@ -48,7 +48,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
     if (url.pathname.endsWith('/actions')) return Response.json({
       ...base,
       value: {
-        kind: 'action-result', action_id: 'action/thread-close', operation_id: 'operation/one', status: 'completed',
+        kind: 'action-result', action_id: (body as { id: string }).id, operation_id: 'operation/one', status: 'completed',
         affected_ids: [id], metadata_revision: 'claim/closed', snapshot_id: base.snapshot.id,
       },
     })
@@ -57,7 +57,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl })
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)
-  const list = source.list(agent, 'older/+chunk')
+  const list = source.list({ agent_id: agent, cursor: 'older/+chunk' })
   const detail = source.detail(id)
   const timeline = source.timeline(id, 'timeline/older')
   const stops = [registry.mount(list), registry.mount(detail), registry.mount(timeline)]
@@ -81,6 +81,54 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
     })
   } finally {
     for (const stop of stops) stop()
+    registry.dispose()
+  }
+})
+
+it('starts with the exact ask episode and retries the same first message after an uncertain response', async () => {
+  const bodies: Array<Record<string, unknown>> = []
+  const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({
+      ...base,
+      value: { ...base.value, capabilities: [
+        ...base.value.capabilities,
+        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'thread.start', version: 0, state: 'granted' },
+      ] },
+    })
+    const body = JSON.parse(String(init?.body))
+    bodies.push(body)
+    if (bodies.length === 1) throw new TypeError('connection interrupted')
+    if (bodies.length === 3) return Response.json({
+      api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refused',
+      code: 'forbidden', message: 'Thread key is temporarily unavailable', retryable: false, details: {},
+    }, { status: 403 })
+    return Response.json({ ...base, value: {
+      kind: 'action-result', action_id: bodies.length === 2 ? 'action/unrelated' : body.id, operation_id: 'operation/start', status: 'completed',
+      affected_ids: [body.parameters.target_id, 'message/first'], snapshot_id: base.snapshot.id,
+    } })
+  }
+  const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const stop = registry.mount(source.access)
+  const input = { agent_id: agent, origin_ask: 'step-run/review', origin_ask_episode: 'claim/ask', title: 'PR #42', content: 'Can we run the worker test?' }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    expect((await source.start('ask/review', input))._tag).toBe('Refused')
+    expect((await source.start('ask/review', { ...input, content: 'Different message' }))._tag).toBe('Refused')
+    expect((await source.start('ask/review', input))._tag).toBe('Refused')
+    expect((await source.start('ask/review', input))._tag).toBe('Refused')
+    expect((await source.start('ask/review', input))._tag).toBe('Sent')
+    expect(bodies).toHaveLength(4)
+    for (const retry of bodies.slice(1)) expect(retry).toEqual(bodies[0])
+    expect(bodies[1]).toMatchObject({
+      type: 'thread.start',
+      parameters: { ...input, target_id: expect.stringMatching(/^thread\//) },
+    })
+    expect(bodies[1]?.parameters).not.toHaveProperty('in_reply_to')
+  } finally {
+    stop()
     registry.dispose()
   }
 })

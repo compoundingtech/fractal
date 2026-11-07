@@ -273,6 +273,7 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
     </React.Suspense>
   }
 }
+const emptyThreadTitles = Atom.make<ReadonlyMap<string, string>>(new Map())
 const TopicThreadPane = React.lazy(() => import('../threads/LiveThreads.tsx').then(module => ({ default: module.LiveThreadPane })))
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
@@ -606,6 +607,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     selectLatest.current(ref)
   }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
+  const threadTitles = useAtomValue(folderSource.threads?.titles ?? emptyThreadTitles)
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
   const urlPane: OpenRequest | undefined =
@@ -621,9 +623,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         .filter(ref => ref === current || names.has(ref))
         .map(ref => ({ id: ref, label: ref === current ? 'Thread' : names.get(ref)! })),
       { id: 'changes', label: 'Changes' },
-      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, byRef.get(pane.ref)?.title) })),
+      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, threadTitles.get(pane.ref) ?? byRef.get(pane.ref)?.title) })),
     ]
-  }, [agents, phoneAgents, current, visiblePanes, byRef])
+  }, [agents, phoneAgents, current, visiblePanes, byRef, threadTitles])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
   const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
@@ -717,7 +719,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                       const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
                       return (
                         <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {paneTabLabel(pane.ref, byRef.get(pane.ref)?.title)}
+                          {paneTabLabel(pane.ref, threadTitles.get(pane.ref) ?? byRef.get(pane.ref)?.title)}
                         </Aria.Button>
                       )
                     })}
@@ -846,7 +848,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
       })}
       {view._tag === 'Missions' ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
-          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
+          <MissionsPane onOpenThread={onOpenThread} {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
         </React.Suspense>
       ) : null}
       {view._tag === 'Usage' ? (

@@ -17,7 +17,7 @@ it('collapses the entire embedded conversation and keeps lifecycle state authori
   const root = createRoot(host)
   const change = vi.fn(async () => undefined)
   const render = (state: 'open' | 'closed') => act(async () => {
-    root.render(<ThreadPanel thread={{ id: 'thread/one', title: 'PR #42', title_revision: 'event/one', state }} messageCount={3} onChangeState={change}>
+    root.render(<ThreadPanel thread={{ title: 'PR #42', title_revision: 'event/one', state }} messageCount={3} onChangeState={change}>
       <textarea aria-label="Thread message" />
     </ThreadPanel>)
   })
@@ -59,7 +59,7 @@ it('keeps the title revision that the person began editing after a concurrent re
   const root = createRoot(host)
   const rename = vi.fn(async () => 'The title changed. Review the latest title and try again.')
   const render = (title: string, revision: string) => act(async () => {
-    root.render(<ThreadPanel thread={{ id: 'thread/one', title, title_revision: revision, state: 'open' }} embedded={false} onRename={rename}>
+    root.render(<ThreadPanel thread={{ title, title_revision: revision, state: 'open' }} embedded={false} onRename={rename}>
       Thread contents
     </ThreadPanel>)
   })

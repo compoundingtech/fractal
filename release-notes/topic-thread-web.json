@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Show Fractal threads in web agent and tab views",
+  "summary": "Show live Fractal threads in web Inbox, agent, mission, and tab views",
   "replay": {
     "status": "none",
     "detail": "No runtime replay change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The web UI shows thread controls only when its connected daemon advertises threads-v1 and grants the corresponding scopes. This change does not activate the capability."
+    "detail": "The web client uses the current daemon’s thread capability and authenticated collection connection for context discovery, updates, and scoped thread actions. Its thread surfaces stay hidden with an older daemon."
   },
   "downtime": {
     "status": "none",

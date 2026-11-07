@@ -9,6 +9,7 @@ import * as Aria from 'react-aria-components'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useMissionsDecode, useNow } from '../data/react.tsx'
+import { LiveMissionThreads } from '../threads/LiveThreads.tsx'
 import { DecodeNotice } from '../web/LiveRoster.tsx'
 import { hiddenByDefault, missionEta, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 
@@ -23,7 +24,7 @@ type Row = { readonly mission: Fractal.Mission; readonly presentation: MissionPr
 
 const startOfDay = (now: number) => { const day = new Date(now); day.setHours(0, 0, 0, 0); return day.getTime() }
 
-export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: string) => void }): React.ReactNode => {
+export const MissionsPane = ({ onOpenAgent, onOpenThread }: { readonly onOpenAgent?: (ref: string) => void; readonly onOpenThread?: ((ref: string) => void) | undefined }): React.ReactNode => {
   const source = useDataSource()
   const missions = useAtomValue(source.missions)
   const agents = useAtomValue(source.agents)
@@ -84,7 +85,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
                           </span>
                         </Aria.Button>
                         {presentation.last_progress && !expanded ? <div {...stylex.props(styles.progress)}>{presentation.last_progress}</div> : null}
-                        {expanded ? <MissionDetail mission={mission} presentation={presentation} onOpenAgent={onOpenAgent} /> : null}
+                        {expanded ? <MissionDetail mission={mission} presentation={presentation} onOpenAgent={onOpenAgent} onOpenThread={onOpenThread} /> : null}
                       </li>
                     )
                   })}
@@ -95,7 +96,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
   )
 }
 
-const MissionDetail = ({ mission, presentation, onOpenAgent }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation; readonly onOpenAgent?: (ref: string) => void }): React.ReactNode => {
+const MissionDetail = ({ mission, presentation, onOpenAgent, onOpenThread }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation; readonly onOpenAgent?: (ref: string) => void; readonly onOpenThread?: ((ref: string) => void) | undefined }): React.ReactNode => {
   const word = missionWord(presentation.word)
   return (
     <div {...stylex.props(styles.detail)} aria-label={`${mission.title} steps`}>
@@ -111,6 +112,7 @@ const MissionDetail = ({ mission, presentation, onOpenAgent }: { readonly missio
           {presentation.steps.map((step) => <StepRow key={step.id} step={step} onOpenAgent={onOpenAgent} />)}
         </ol>
       )}
+      <LiveMissionThreads missionId={mission.id} onOpenThread={onOpenThread} />
     </div>
   )
 }

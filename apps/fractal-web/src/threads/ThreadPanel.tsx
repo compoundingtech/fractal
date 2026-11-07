@@ -6,9 +6,8 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 
 /** Thread identity and lifecycle stay with the caller's authoritative observation. */
 export interface ThreadPanelSummary {
-  readonly id: string
   readonly title: string
-  readonly title_revision: string
+  readonly title_revision?: string
   readonly state: 'open' | 'closed'
 }
 
@@ -16,9 +15,11 @@ export interface ThreadPanelProps {
   readonly thread: ThreadPanelSummary
   /** Supplied only when the read projection knows the full count. */
   readonly messageCount?: number
+  readonly unread?: boolean
   readonly embedded?: boolean
   readonly initiallyExpanded?: boolean
   readonly onExpansionChange?: (expanded: boolean) => void
+  readonly onHideDraft?: () => void
   readonly onOpenInTab?: () => void
   readonly onRename?: (title: string, titleRevision: string) => Promise<string | undefined>
   readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<string | undefined>
@@ -28,7 +29,7 @@ export interface ThreadPanelProps {
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, embedded = true, initiallyExpanded = false, onExpansionChange, onOpenInTab, onRename, onChangeState, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, children,
 }: ThreadPanelProps): React.ReactNode {
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
   const contentId = React.useId()
@@ -49,24 +50,27 @@ export function ThreadPanel({
       setPending(false)
     }
   }
+  const titleRevision = thread.title_revision
   const metadata = <span {...stylex.props(styles.metadata)}>
     {messageCount === undefined ? null : `${messageCount} ${messageCount === 1 ? 'message' : 'messages'}`}
     {messageCount !== undefined && thread.state === 'closed' ? ' · ' : null}
-    {thread.state === 'closed' ? 'Closed' : null}
+    {thread.state === 'closed' ? 'Closed' : onHideDraft === undefined ? null : 'Draft'}
   </span>
   return <section aria-label={thread.title} {...stylex.props(styles.panel)}>
     {embedded ? <Button aria-expanded={open} aria-controls={open ? contentId : undefined} onPress={() => { setExpanded(!open); onExpansionChange?.(!open) }} {...stylex.props(styles.header)}>
       <span aria-hidden="true">{open ? '▾' : '▸'}</span>
       <span {...stylex.props(styles.title)}>{thread.title}</span>
       {metadata}
+      {unread ? <span aria-label="Unread" {...stylex.props(styles.unread)}>●</span> : null}
     </Button> : <h2 {...stylex.props(styles.header)}>{thread.title}{metadata}</h2>}
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
       <div {...stylex.props(styles.actions)}>
-        {onRename === undefined ? null : <Button isDisabled={pending} onPress={() => setRename({ title: thread.title, revision: thread.title_revision })}>Rename</Button>}
+        {onRename === undefined || titleRevision === undefined ? null : <Button isDisabled={pending} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</Button>}
         {onChangeState === undefined ? null : <Button isDisabled={pending} onPress={() => {
           void run(() => onChangeState(thread.state === 'open' ? 'closed' : 'open'))
         }}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</Button>}
+        {onHideDraft === undefined ? null : <Button onPress={onHideDraft}>Hide draft</Button>}
         {embedded && onOpenInTab !== undefined ? <Button onPress={onOpenInTab}>Open in tab</Button> : null}
       </div>
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
@@ -88,6 +92,7 @@ const styles = stylex.create({
   header: { display: 'flex', alignItems: 'baseline', gap: s.sm, width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize },
   title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metadata: { flexShrink: 0, color: c.fgMuted },
+  unread: { flexShrink: 0, color: c.primary },
   body: { display: 'flex', minWidth: 0, flexDirection: 'column', gap: s.sm, padding: s.sm },
   actions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.sm },
 })
