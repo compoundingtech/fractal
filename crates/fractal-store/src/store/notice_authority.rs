@@ -175,6 +175,7 @@ pub(super) fn refuse_second_holder(
 pub(super) fn requires_stateful(claim: &ClaimRecord) -> bool {
     notice::is_reserved_subject(&claim.subject) || notice::is_reserved_kind(&claim.kind)
         || claim.kind == fractal_schema::custom::REGISTERED
+        || claim.kind == fractal_schema::notice_owner_ack::KIND
 }
 
 fn invalid_admission(error: impl std::fmt::Display) -> FractalError {
@@ -185,11 +186,15 @@ fn pending_admission(reason: &str) -> Result<ReplicatedClaimAdmission, FractalEr
     Ok(ReplicatedClaimAdmission::PendingDependencies { message: format!("notices unavailable: {reason}") })
 }
 
-/// Current writer-bound authority only; no historical admission or fleet-wide revocation proof.
+/// Uses only the prepared writer-bound batch context; it never infers member
+/// authentication or causal order from an asserted actor or payload timestamp.
 pub(super) fn classify_replicated(
-    connection: &Connection, claim: &ClaimRecord,
+    connection: &Connection, batch: &ReplicaBatch, claim: &ClaimRecord,
 ) -> Result<ReplicatedClaimAdmission, FractalError> {
     if !requires_stateful(claim) { return Ok(ReplicatedClaimAdmission::Valid); }
+    if claim.kind == fractal_schema::notice_owner_ack::KIND {
+        return proof_admission(notice_acknowledgements::Chain::load(connection, Some((batch, claim))).map(|_| ()));
+    }
     let fields = custom::fields(claim);
     if claim.kind == fractal_schema::custom::REGISTERED {
         let reference = fields.get("document").and_then(Value::as_str)
@@ -263,16 +268,29 @@ pub(super) fn classify_replicated(
         Ok(()) => {}
         Err(error) if error.downcast_ref::<FractalError>()
             .is_some_and(|error| error.code == "notice-receipt-authority-unavailable") => {
-            return pending_admission("durable receipt owner authority is not configured");
+            let mut fields = fields.clone();
+            fields.remove("_registration");
+            fields.remove("_basis");
+            let receipt = serde_json::from_value(json!(fields)).map_err(invalid_admission)?;
+            return proof_admission(notice_acknowledgements::Chain::load(connection, None)
+                .and_then(|chain| chain.authorize(connection, claim, &receipt, Some(batch))));
         }
         Err(error) => return Err(invalid_admission(error)),
     }
     Ok(ReplicatedClaimAdmission::Valid)
 }
 
+fn proof_admission(result: Result<(), FractalError>) -> Result<ReplicatedClaimAdmission, FractalError> {
+    match result {
+        Ok(()) => Ok(ReplicatedClaimAdmission::Valid),
+        Err(error) if error.code == "notice-owner-proof-unavailable" => pending_admission(&error.message),
+        Err(error) => Err(invalid_admission(error)),
+    }
+}
+
 pub(super) fn validate(
     connection: &Connection, subject: &str, manifest: &Manifest, kind: &str,
-    actor: &str, fields: &BTreeMap<String, Value>, creation: Option<&ClaimRecord>,
+    actor: Option<&str>, fields: &BTreeMap<String, Value>, creation: Option<&ClaimRecord>,
 ) -> Result<()> {
     if !notice::is_reserved_subject(subject) && !notice::is_reserved_kind(kind) { return Ok(()); }
     let hash = fields.get("_registration").and_then(Value::as_str)
@@ -280,6 +298,7 @@ pub(super) fn validate(
     notice::validate_registration(manifest, hash)?;
     anyhow::ensure!(subject.starts_with(&manifest.subject_prefix), "notices unavailable: claim/prefix mismatch");
     if subject.starts_with("custom/attention/source/") {
+        let actor = actor.ok_or_else(|| unavailable("source requires an authenticated actor"))?;
         anyhow::ensure!(kind == manifest.creation_kind, "notices unavailable: producer input is immutable");
         if let Some(prior) = creation {
             anyhow::ensure!(prior.actor.as_deref() == Some(actor) && custom::fields(prior) == *fields,
@@ -315,7 +334,7 @@ pub(super) fn validate(
         .ok_or_else(|| unavailable("invalid source recipient"))?;
     let producer = source.actor.as_deref().ok_or_else(|| unavailable("missing source author"))?;
     fractal_schema::custom::validate_fields(&source_manifest.claims[&source.kind], &source_fields)?;
-    validate(connection, source_id, &source_manifest, &source.kind, producer, &source_fields, None)?;
+    validate(connection, source_id, &source_manifest, &source.kind, Some(producer), &source_fields, None)?;
     for (field, expected) in [("recipient", recipient), ("producer", producer)] {
         anyhow::ensure!(fields.get(field).and_then(Value::as_str) == Some(expected),
             "notices unavailable: forged {field}");
@@ -339,8 +358,12 @@ pub(super) fn validate(
                     "notices unavailable: immutable {field} changed");
             }
         }
-        anyhow::ensure!(actor == runtime, "notices unavailable: only the designated runtime may write snapshots");
+        anyhow::ensure!(actor == Some(runtime.as_str()), "notices unavailable: only the designated runtime may write snapshots");
     } else if subject.starts_with(notice::RECEIPT_PREFIX) {
+        if actor.is_some() {
+            return Err(FractalError::new("invalid-notice-owner-proof",
+                "notices unavailable: receipts require authenticated member authorship").into());
+        }
         let mut receipt_fields = fields.clone();
         receipt_fields.remove("_registration");
         receipt_fields.remove("_basis");
@@ -350,7 +373,7 @@ pub(super) fn validate(
         return Err(FractalError::new("notice-receipt-authority-unavailable",
             "notices unavailable: durable receipt owner authority is not configured").into());
     } else {
-        anyhow::ensure!(subject.starts_with("custom/attention/control/") && actor.starts_with("person/") && actor == recipient,
+        anyhow::ensure!(subject.starts_with("custom/attention/control/") && actor == Some(recipient),
             "notices unavailable: only the source recipient may write person controls");
     }
     Ok(())

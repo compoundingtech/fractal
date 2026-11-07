@@ -1,6 +1,6 @@
 //! Authenticated per-owner acknowledgement chain; no fleet-wide timestamp order is inferred.
 use super::*;
-use fractal_schema::notice_owner_ack::{Acknowledgement, Status, KIND};
+use fractal_schema::notice_owner_ack::{Acknowledgement, Status};
 use super::notice_owner_proof::{self, Position};
 
 fn unavailable(reason: impl std::fmt::Display) -> FractalError {
@@ -46,11 +46,12 @@ impl Chain {
         let blocked: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_records WHERE state IN ('unknown','invalid')
              AND (kind_hint='notice.owner-acknowledged' OR subject_hint GLOB 'notice-owner/*')
-             AND (?1 IS NULL OR claim_id IS NOT ?1))",
+             AND (?1 IS NULL OR claim_id IS NOT ?1)
+             AND (state='invalid' OR ?1 IS NULL OR kind_hint IS NOT 'notice.owner-acknowledged'))",
             [incoming.map(|(_, claim)| claim.id.as_str())], |row| row.get(0),
         ).map_err(internal)?;
         if blocked { return Err(unavailable("owner prerequisites are quarantined")); }
-        let mut claims = connection.prepare(&format!(
+        let mut claims = connection.prepare(/* sqlite-large-value: allow-for-now lv-h04e9d719f7b7 owner=fractal_store::store::notice_acknowledgements TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims WHERE kind='notice.owner-acknowledged'
              AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')"
         )).map_err(internal)?.query_map([], claim_from_row).map_err(internal)?
@@ -79,6 +80,9 @@ impl Chain {
                         children.iter().any(|child| child["name"] == "notice-runtime")) {
                     return Err(invalid("acknowledged runtime is not a designated agent declaration"));
                 }
+                if !custom::claims(connection, &runtime.subject).map_err(internal)?.iter().any(|row| row.id == runtime.id) {
+                    return Err(invalid("acknowledged runtime declaration was repaired away"));
+                }
             }
             successors.entry(acknowledgement.previous_ack.clone()).or_default().push(claim.id.clone());
             nodes.insert(claim.id.clone(), Node { claim, acknowledgement, binding, position });
@@ -97,12 +101,13 @@ impl Chain {
                     (Status::Ended, Status::Active) => {}
                     _ => return Err(invalid("owner handover requires the former owner's ended acknowledgement")),
                 }
-                if node.binding.incarnation == prior.binding.incarnation
-                    && (node.position.sequence, node.position.position) <= (prior.position.sequence, prior.position.position) {
-                    return Err(invalid("acknowledgements do not advance the owner's causal position"));
-                }
             } else if node.acknowledgement.status != Status::Active {
                 return Err(invalid("initial owner acknowledgement must be active"));
+            }
+            if ordered.iter().rev().find(|prior| prior.binding.incarnation == node.binding.incarnation)
+                .is_some_and(|prior| (node.position.sequence, node.position.position)
+                    <= (prior.position.sequence, prior.position.position)) {
+                return Err(invalid("acknowledgements do not advance the owner's causal position"));
             }
             previous = Some(next);
             ordered.push(node);
@@ -116,6 +121,10 @@ impl Chain {
     pub(super) fn authorize(&self, connection: &Connection, claim: &ClaimRecord,
         receipt: &fractal_schema::notice_receipt::Receipt, batch: Option<&ReplicaBatch>) -> Result<(), FractalError> {
         if claim.actor.is_some() { return Err(invalid("receipt must be member-authored, not actor-asserted")); }
+        if !self.nodes.iter().any(|node| node.acknowledgement.status == Status::Active
+            && node.acknowledgement.owner_binding == receipt.owner_binding) {
+            return Err(unavailable("the receipt owner's active acknowledgement is not admitted"));
+        }
         let binding = historical_binding(connection, &receipt.owner_binding)?;
         let position = notice_owner_proof::authenticate(connection, claim, batch, &binding.member_key)?;
         if position.writer != binding.member.trim_start_matches("host/") { return Err(invalid("wrong receipt owner writer")); }

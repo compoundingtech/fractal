@@ -392,6 +392,9 @@ pub(super) fn validate_fact(
         .get(kind)
         .ok_or_else(|| anyhow::anyhow!("claim kind is not registered for this subject"))?;
     schema::validate_fields(spec, f)?;
+    if subject.starts_with(fractal_schema::notice::RECEIPT_PREFIX) {
+        return notice_authority::validate(connection, subject, m, kind, actor, f, creation);
+    }
     let actor = actor
         .filter(|a| a.starts_with("agent/") || a.starts_with("person/"))
         .ok_or_else(|| anyhow::anyhow!("typed claim needs a concrete actor"))?;
@@ -400,7 +403,7 @@ pub(super) fn validate_fact(
         actor.starts_with("agent/") || actor.starts_with("person/"),
         "typed actor must be a person or agent"
     );
-    notice_authority::validate(connection, subject, m, kind, actor, f, creation)?;
+    notice_authority::validate(connection, subject, m, kind, Some(actor), f, creation)?;
     match spec.authority {
         Authority::Creator => {
             if let Some(c) = creation {

@@ -430,11 +430,11 @@ impl Runtime for FractalRuntime {
     fn classify_replicated_claim(
         &self,
         connection: &Connection,
-        _batch: &ReplicaBatch,
+        batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, FractalError> {
         match classify_replicated_claim_with_registry(claim, self.claim_registry())? {
-            ReplicatedClaimAdmission::Valid => notice_authority::classify_replicated(connection, claim),
+            ReplicatedClaimAdmission::Valid => notice_authority::classify_replicated(connection, batch, claim),
             other => Ok(other),
         }
     }

@@ -24,7 +24,7 @@ fn envelope(source: &Store, claim: &ClaimRecord) -> ReplicaEnvelope {
 }
 
 #[test]
-fn sealed_owner_position_uses_real_admitted_signature() {
+fn notice_sealed_owner_position_uses_real_admitted_signature() {
     let (source, target, owner, claim) = fixture();
     let envelope = envelope(&source, &claim);
     assert!(crate::fleet::verify_signature(owner.public(),
@@ -39,7 +39,7 @@ fn sealed_owner_position_uses_real_admitted_signature() {
 }
 
 #[test]
-fn another_admitted_member_cannot_author_the_owner_position() {
+fn notice_another_admitted_member_cannot_author_the_owner_position() {
     let (source, target, owner, claim) = fixture();
     let other = key();
     admit(&source, "other", &other, "sponsor", None);
@@ -52,23 +52,23 @@ fn another_admitted_member_cannot_author_the_owner_position() {
 }
 
 #[test]
-fn missing_signature_and_record_are_unavailable_without_unsigned_fallback() {
+fn notice_missing_signature_and_record_are_unavailable_without_unsigned_fallback() {
     for missing in ["signature", "record"] {
         let (_, target, owner, claim) = fixture();
         let sql = if missing == "signature" {
-            "DELETE FROM replica_envelope_signatures WHERE writer='owner' AND sequence=(
+            /* sqlite-large-value: allow-for-now lv-hc2527a19322e owner=fractal_store::store::notice_owner_proof_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures WHERE writer='owner' AND sequence=(
              SELECT replica_sequence FROM batches WHERE id=?1)"
         } else {
-            "DELETE FROM replica_records WHERE claim_id IN (SELECT id FROM claims WHERE batch_id=?1)"
+            /* sqlite-large-value: allow-for-now lv-h48f12e932f32 owner=fractal_store::store::notice_owner_proof_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id IN (SELECT id FROM claims WHERE batch_id=?1)"
         };
-        target.connection.write().execute(sql, [&claim.batch_id]).unwrap();
+        target.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hdce53630323e owner=fractal_store::store::notice_owner_proof_tests TODO=trace-statement-and-value-representation */ sql, [&claim.batch_id]).unwrap();
         assert_eq!(authenticate(&target.readers.get(), &claim, None, owner.public())
             .unwrap_err().code, "notice-owner-proof-unavailable", "{missing}");
     }
 }
 
 #[test]
-fn writer_sequence_fork_rejects_both_real_signed_envelopes() {
+fn notice_writer_sequence_fork_rejects_both_real_signed_envelopes() {
     let (source, target, owner, claim) = fixture();
     let original = envelope(&source, &claim);
     let fork = node("owner", Some(&owner), Some(&owner));
@@ -89,7 +89,7 @@ fn writer_sequence_fork_rejects_both_real_signed_envelopes() {
 }
 
 #[test]
-fn incoming_batch_proof_needs_no_already_admitted_claim_record() {
+fn notice_incoming_batch_proof_needs_no_already_admitted_claim_record() {
     let owner = key();
     let source = node("owner", Some(&owner), Some(&owner));
     admit(&source, "owner", &owner, "anchor", None);

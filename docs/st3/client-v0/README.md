@@ -71,8 +71,8 @@ Handover follows the discard-and-rebuild model, not a portable historical admiss
 certificate. A partition that has not observed revocation can keep accepting the
 old runtime's snapshots until it observes the change. Action revocation linearizes
 at the persisted owner's acknowledgement fence, not remote graph publication; a
-stale owner retains the residual exposure. Owner binding, acknowledgement and
-action routing are not provided by the internal models or lineage validation.
+stale owner retains the residual exposure. Internal owner binding and acknowledgement
+proof do not themselves provide native action routing or recipient authorization.
 
 The standalone `notice-owner` root explicitly names a `member` host subject, its
 immutable fleet admission claim in `incarnation`, and `always-on=true`. The name
@@ -81,6 +81,24 @@ incarnation, never an agent process or inferred uptime. Syntax alone is not an
 owner acknowledgement and cannot establish historical receipt authorization.
 `stop "notice-owner/NAME"` explicitly withdraws the desired role at the root; it
 does not substitute for the owner's authenticated acknowledgement fence.
+
+`notice.owner-acknowledged` is member-authored evidence, never an asserted person
+or agent actor. An active acknowledgement pins the owner declaration, runtime
+declaration and preceding acknowledgement; an ended acknowledgement closes that
+owner binding before an explicit successor can activate. A fork, missing
+predecessor, conflicting envelope or unavailable admitted-member proof fails closed;
+neither a canonical timestamp nor receive order elects an owner.
+
+Receipt authority uses the actual verified envelope signer and its member sequence
+and claim position. The bound owner's acknowledgement must precede the receipt at
+that authenticated position, with no intervening ended acknowledgement. Payload
+completion times and batch identifiers do not establish causal authority. Missing
+proof means delivery unknown. Durable receipts remain independent of disposable
+runtime snapshots; a changed desired designation alone is not historical receipt
+proof. A partition cannot infer a revocation acknowledgement it has not received.
+An unreachable owner therefore blocks handover; there is no automatic fallback.
+Native action routing and delivery side effects remain outside this store slice.
+
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.

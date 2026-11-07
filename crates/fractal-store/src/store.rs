@@ -30,6 +30,9 @@ mod notice_authority;
 pub mod notice_materialization;
 pub mod notice_receipts;
 pub mod notice_owner;
+pub mod notice_acknowledgements;
+mod notice_owner_proof;
+mod notice_owner_writes;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
