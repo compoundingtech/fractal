@@ -331,7 +331,7 @@ export const projectMemberships = (arrangement: Arrangement, memberships: readon
 
 /** One retained projection per host. Snapshot store_index is deliberately not a collection revision. */
 export class MembershipProjectionCache {
-  #held: { arrangement: Arrangement; complete: MembershipComplete; catalog: string; presentation: string; model: MembershipProjection } | undefined
+  #held: { id: string; revision: string; scope: MembershipComplete['scope']; frontier: MembershipComplete['frontier']; catalog: string; presentation: string; model: MembershipProjection } | undefined
   get(arrangement: Arrangement, complete: MembershipComplete, catalog: string, presentation: string): MembershipProjection {
     const held = this.#held
     const scope = complete.scope
@@ -343,15 +343,15 @@ export class MembershipProjectionCache {
       this.#held = undefined
       return projectMemberships(arrangement, complete.members)
     }
-    const previous = held?.complete
-    if (held && previous && held.arrangement.id === arrangement.id && held.arrangement.revision === arrangement.revision
+    if (held && held.id === arrangement.id && held.revision === arrangement.revision
       && held.catalog === catalog && held.presentation === presentation
-      && previous.scope.owner === scope.owner && previous.scope.container === scope.container && previous.scope.endpoint === scope.endpoint
-      && previous.scope.host === scope.host && previous.scope.projection === scope.projection
-      && previous.frontier.epoch === complete.frontier.epoch && previous.frontier.changed_index === complete.frontier.changed_index
-      && previous.frontier.live_count === complete.frontier.live_count) return held.model
+      && held.scope.owner === scope.owner && held.scope.container === scope.container && held.scope.endpoint === scope.endpoint
+      && held.scope.host === scope.host && held.scope.projection === scope.projection
+      && held.frontier.epoch === complete.frontier.epoch && held.frontier.changed_index === complete.frontier.changed_index
+      && held.frontier.live_count === complete.frontier.live_count) return held.model
     const model = projectMemberships(arrangement, complete.members)
-    this.#held = { arrangement, complete, catalog, presentation, model }
+    // Copy primitive key values; host inputs may be updated in place. Incomplete resolutions are never retained.
+    this.#held = model._tag === 'ProjectedV2' ? { id: arrangement.id, revision: arrangement.revision, scope: { ...scope }, frontier: { ...complete.frontier }, catalog, presentation, model } : undefined
     return model
   }
 }

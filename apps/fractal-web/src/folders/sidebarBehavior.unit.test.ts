@@ -321,6 +321,45 @@ describe('unwired web v2 scale/fault acceptance', () => {
     const edited = { ...complete, frontier: { ...complete.frontier, changed_index: 2 }, members: members.map(row => row.member === members.at(-1)!.member ? { ...row, position: { bucket: null, key: 'a0' } } : row) }
     expect(planMembershipMove(cache.get(scaleArrangement, edited, 'catalog/1', 'presentation/1'), intent)).toEqual({ _tag: 'RefusedV2', refusal: 'NoChange' })
   })
+  it('copies historical cache keys even when host inputs mutate in place', () => {
+    const cache = new MembershipProjectionCache()
+    const arrangement = { ...scaleArrangement }
+    const complete = { scope: { ...scaleScope }, frontier: { epoch: 'epoch/1', changed_index: 1, live_count: 1001 }, members: scaleRows(1001), snapshots: [scaleSnapshot(1)] }
+    let previous = cache.get(arrangement, complete, 'catalog/1', 'presentation/1')
+    for (const change of [
+      () => { arrangement.revision = 'claim/changed' },
+      () => { complete.frontier.epoch = 'epoch/2' },
+      () => { complete.frontier.changed_index++ },
+      () => { complete.frontier.live_count--; complete.members.pop() },
+      () => { complete.scope.host = 'host/other' },
+      () => { complete.scope.endpoint = 'endpoint/other' },
+      () => { complete.scope.projection = 'projection/other' },
+    ]) {
+      change()
+      const current = cache.get(arrangement, complete, 'catalog/1', 'presentation/1')
+      expect(current._tag).toBe('ProjectedV2')
+      expect(current).not.toBe(previous)
+      previous = current
+    }
+    complete.members[0] = { ...complete.members[0]!, position: { bucket: null, key: 'a0' } }
+    complete.frontier.changed_index++
+    const intent: MembershipIntent = { node: { kind: 'subject', subject: complete.members[0]!.member }, parent: null, before: null }
+    expect(planMembershipMove(cache.get(arrangement, complete, 'catalog/1', 'presentation/1'), intent)).toEqual({ _tag: 'RefusedV2', refusal: 'NoChange' })
+  })
+  it('does not retain NotReady while resolved parents complete at the same arrangement revision', () => {
+    const cache = new MembershipProjectionCache()
+    const parents = { ...scaleArrangement.resolved!.parents }
+    const parent = parents[scaleFolder]!
+    delete parents[scaleFolder]
+    const arrangement = { ...scaleArrangement, resolved: { ...scaleArrangement.resolved!, parents } }
+    const complete: MembershipComplete = { scope: scaleScope, frontier: { epoch: 'epoch/1', changed_index: 1, live_count: 1001 }, members: scaleRows(1001), snapshots: [scaleSnapshot(1)] }
+    expect(cache.get(arrangement, complete, 'catalog/1', 'presentation/1')).toEqual({ _tag: 'RefusedV2', refusal: 'NotReady' })
+    parents[scaleFolder] = parent
+    const model = cache.get(arrangement, complete, 'catalog/1', 'presentation/1')
+    expect(model._tag).toBe('ProjectedV2')
+    expect(planMembershipMove(model, scaleIntent(complete.members))._tag).toBe('PlannedV2')
+    expect(cache.get(arrangement, complete, 'catalog/1', 'presentation/1')).toBe(model)
+  })
   it.skip('Daemon integration fixture required: reject the 4,097th live-member edit through the real server limit (not a paging-D dependency)', () => {})
   it.skip('D #4739: local-socket initial-load p95 <=1s with sustained unrelated daemon writes', () => {})
   it.skip('PR21 host activation: browser overlay visible next animation frame; render p95 <=8ms; v2 <=2x v1', () => {})
