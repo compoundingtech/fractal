@@ -9,6 +9,13 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
+/// The visible item and its routing policy, taken from the same failure claim.
+#[derive(Clone, serde::Serialize)]
+pub(super) struct OperationalFault {
+    pub(super) item: AttentionItemView,
+    pub(super) explicit_reviewer_only: bool,
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
 
@@ -355,6 +362,7 @@ impl Store {
         &self,
         fault: &AttentionItemView,
         fallback: Option<&str>,
+        explicit_reviewer_only: bool,
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
         let owns = |agent: &str| -> Result<bool> {
@@ -365,12 +373,7 @@ impl Store {
         }
         // An explicitly owned API readiness fault keeps its recorded reviewer.
         // A stopped or retired declaration makes it undeliverable, not generic.
-        if fault.subject.starts_with("daemon/")
-            && self.claim_by_id(&fault.episode)?.is_some_and(|claim| {
-                claim.kind == "operational.failure"
-                    && claim.body["fields"]["condition"] == API_READINESS_SLO_MISSED
-            })
-        {
+        if explicit_reviewer_only {
             return Ok(None);
         }
         let mut step = fault.step.clone().or_else(|| {
@@ -1266,7 +1269,7 @@ impl Store {
         let mut items = self.operational_fault_families(person, as_of)?;
         let failures = self.operational_failures()?;
         for failure in &failures {
-            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?);
+            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?.map(|fault| fault.item));
         }
         Ok((items, failures))
     }
@@ -1294,7 +1297,7 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
         incarnations: &mut BTreeMap<String, Option<String>>,
-    ) -> Result<Option<AttentionItemView>> {
+    ) -> Result<Option<OperationalFault>> {
         if failure.requested_at_unix_ms > as_of {
             smallclaims::touched::note_due(failure.requested_at_unix_ms);
         }
@@ -1511,7 +1514,10 @@ impl Store {
                 attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
             ];
         }
-        Ok(Some(item))
+        let explicit_reviewer_only = source.starts_with("daemon/")
+            && claim.kind == "operational.failure"
+            && f["condition"] == API_READINESS_SLO_MISSED;
+        Ok(Some(OperationalFault { item, explicit_reviewer_only }))
     }
 
     fn current_exhausted_work_wake<const MINIMAL: bool>(
