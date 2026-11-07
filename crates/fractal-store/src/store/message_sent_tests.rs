@@ -178,3 +178,16 @@ fn each_check_of_the_other_store_is_one_indexed_lookup() {
     let in_graph_file = plan(&graph_connection, message_sent::SENT_IN_GRAPH_FILE);
     assert!(!scans(&in_graph_file), "{in_graph_file}");
 }
+
+#[test]
+fn a_stream_send_after_the_graph_has_closed_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    let shard = messages_shard::shard(&graph).unwrap();
+    let message = sent("message/sent-after-close", Some("sent-after-close"), "hello");
+    drop(graph);
+    // Unchecked, this write could copy a message the graph holds; the shard refuses it instead.
+    let error = shard.append_claim(&message).unwrap_err();
+    assert_eq!(error.code, "graph-closed");
+    assert!(shard.claims_for(&message.subject, Some("message.sent")).unwrap().is_empty());
+}

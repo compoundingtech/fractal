@@ -630,6 +630,7 @@ pub fn append_replicated_copy(shard: &GraphStore, input: &ClaimInput) -> Result<
 }
 
 /// The shard's runtime, holding the graph it opened beside, which a stream append checks first.
+/// No shard runs without its graph: `open` is the only place a runtime is made.
 #[derive(Clone, Debug, Default)]
 pub struct MessagesRuntime(std::sync::Weak<super::Store>);
 
@@ -762,17 +763,16 @@ impl Runtime for MessagesRuntime {
         validate_input(input)?;
         // A message the graph already holds, by key or subject, replays the graph's claim, so a
         // send retried down the stream path never writes it twice. The gate holds the graph's
-        // check and this write together (see `message_sent`). Once the graph has closed nothing
-        // sends through it, so there is nothing to check.
-        match self.0.upgrade() {
-            Some(graph) => super::message_sent::gated(&graph, input, || {
-                match super::message_sent::sent_to_graph(&graph, input)? {
-                    Some(claim) => Ok((claim, false)),
-                    None => append_item(store, input),
-                }
-            }),
+        // check and this write together (see `message_sent`). The shard opens only beside its
+        // graph (`open`), so a graph that no longer upgrades has closed, as at shutdown: the
+        // append is refused rather than written unchecked, as the fleet authority refuses.
+        let graph = self.0.upgrade().ok_or_else(|| {
+            FractalError::new("graph-closed", "the graph this shard checks a send against has closed")
+        })?;
+        super::message_sent::gated(&graph, input, || match super::message_sent::sent_to_graph(&graph, input)? {
+            Some(claim) => Ok((claim, false)),
             None => append_item(store, input),
-        }
+        })
     }
 
     fn apply_repair_tx(
