@@ -280,7 +280,7 @@ export const DecodeStaleSidebarHosts: Story = {
     const footer = host.querySelector('footer')!
     await expect(roster.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await expect(notice.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    await expect(within(notice).getByRole('status')).toHaveTextContent('this view is older than the daemon')
+    await expect(within(notice).getByRole('status')).toHaveTextContent('their data does not match the expected format')
   },
 }
 

@@ -3,6 +3,23 @@ use crate::{Adapter, Profile, http_router};
 use rmcp::ServiceExt;
 use std::{net::SocketAddr, path::Path};
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+fn is_call_telemetry_target(target: &str) -> bool {
+    let permitted = target == "fractal_chatgpt::call";
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    // Deployments must enable both targets in RUST_LOG before upgrading.
+    let permitted = permitted || target == "st_chatgpt::call";
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target
+    permitted
+}
+
+#[test]
+fn call_telemetry_target_allowlist() {
+    assert!(is_call_telemetry_target("fractal_chatgpt::call"));
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    assert!(is_call_telemetry_target("st_chatgpt::call"));
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target
+    assert!(!is_call_telemetry_target("reqwest::connect"));
+}
 
 pub async fn run(
     socket: &Path,
@@ -19,7 +36,7 @@ pub async fn run(
                 .with_ansi(false)
                 .with_writer(std::io::stderr)
                 .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
-                    metadata.target() == "st_chatgpt::call"
+                    is_call_telemetry_target(metadata.target())
                 }))
                 .with_filter(filter),
         )

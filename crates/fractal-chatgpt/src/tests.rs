@@ -5,10 +5,15 @@ use tower::ServiceExt;
 
 fn disconnected_adapter() -> Adapter {
     Adapter {
-        client: reqwest::Client::builder().unix_socket("/nonexistent/st-chatgpt-tests/st3-client.sock").build().unwrap(),
+        client: reqwest::Client::builder().unix_socket("/nonexistent/fractal-chatgpt-tests/fractal-client.sock").build().unwrap(),
         bearer: "test-only-not-a-daemon-credential".into(),
         profile: Profile::ChatGpt,
     }
+}
+
+#[test]
+fn server_identity_uses_fractal_chatgpt() {
+    assert_eq!(disconnected_adapter().get_info().server_info.name, "fractal-chatgpt");
 }
 
 #[test]
@@ -523,7 +528,7 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
         .with_writer(logs.clone()).finish();
     let _capture = tracing::subscriber::set_default(subscriber);
     let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("st3-client.sock");
+    let socket = dir.path().join("fractal-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let id = "request/12345678-1234-1234-1234-123456789abc";
     let body = json!({"request_id":id,"value":{"content":"RESPONSE_CONTENT_SENTINEL"}}).to_string();
@@ -548,6 +553,8 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
     assert_eq!(call(&adapter, ALERT_GET, &json!({})).await.unwrap_err()["code"], "invalid-arguments");
     let text = logs.text();
     assert_eq!(text.matches("ChatGPT tool call finished").count(), 4, "{text}");
+    assert_eq!(text.matches("fractal_chatgpt::call").count(), 4, "{text}");
+    assert!(!text.contains("st_chatgpt::call"), "{text}");
     for field in ["tool=\"fractal_alerts_list\"", "outcome=\"success\"", "code=\"ok\"",
         "outcome=\"error\"", "code=\"daemon-denied\"", "code=\"invalid-arguments\"",
         "tool=\"unknown\"", "duration_ms=", id, &format!("response_bytes={expected_bytes}")] {
@@ -565,7 +572,7 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
         .with_writer(logs.clone()).finish();
     let _capture = tracing::subscriber::set_default(subscriber);
     let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("st3-client.sock");
+    let socket = dir.path().join("fractal-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify = entered.clone();
@@ -630,7 +637,7 @@ fn chatgpt_discovery_matches_main_golden() {
 
 #[test]
 fn profiles_pin_server_identity_and_cross_profile_annotations() {
-    assert_eq!(Profile::ChatGpt.server_name(), "st-chatgpt");
+    assert_eq!(Profile::ChatGpt.server_name(), "fractal-chatgpt");
     assert_eq!(Profile::ChatGpt.assistant_principal(), "assistant/chatgpt");
     assert_eq!(Profile::Mcp.server_name(), "st");
     assert_eq!(Profile::Mcp.assistant_principal(), "assistant/mcp");
@@ -701,8 +708,8 @@ fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
             r#"{"code":"incomplete","daemon":{"code":"response-budget-exceeded"},"http_status":413}"#),
         (json!({"code":"daemon-denied","http_status":403,"daemon":{"code":"forbidden"}}), true,
             r#"{"code":"daemon-denied","daemon":{"code":"forbidden"},"http_status":403}"#),
-        (json!({"code":"unavailable","message":"The paired st daemon is unavailable."}), true,
-            r#"{"code":"unavailable","message":"The paired st daemon is unavailable."}"#),
+        (json!({"code":"unavailable","message":"The paired Fractal daemon is unavailable."}), true,
+            r#"{"code":"unavailable","message":"The paired Fractal daemon is unavailable."}"#),
         (json!({"code":"invalid-daemon-response"}), true, r#"{"code":"invalid-daemon-response"}"#),
         (json!({"code":"unknown-tool"}), true, r#"{"code":"unknown-tool"}"#),
     ] {

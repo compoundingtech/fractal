@@ -3,6 +3,7 @@ use clap::Parser;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
+#[command(name = "fractal-chatgpt")]
 struct Args {
     #[arg(long)]
     socket: PathBuf,
@@ -13,6 +14,7 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 }
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

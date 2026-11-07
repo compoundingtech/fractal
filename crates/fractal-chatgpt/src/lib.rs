@@ -21,7 +21,7 @@ impl Profile {
     // Keep profile selection spelled consistently with the original variants.
     #[allow(non_upper_case_globals)]
     pub const ChatGpt: Self = Self {
-        server_name: "st-chatgpt",
+        server_name: "fractal-chatgpt",
         assistant_principal: "assistant/chatgpt",
         tool_descriptions: &[],
         structured_output: false,
@@ -347,7 +347,7 @@ impl CallObservation {
 }
 impl Drop for CallObservation {
     fn drop(&mut self) {
-        tracing::info!(target: "st_chatgpt::call",
+        tracing::info!(target: "fractal_chatgpt::call",
             tool = self.tool, outcome = self.outcome, code = self.code,
             daemon_request_id = self.request_id.as_deref(),
             duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
@@ -399,7 +399,7 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         let query: Vec<_> = object.iter().map(|(k,v)| (k.as_str(),v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string()))).collect();
         adapter.client.get(url).query(&query)
     };
-    let response = request.bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired st daemon is unavailable."}))?;
+    let response = request.bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired Fractal daemon is unavailable."}))?;
     let status = response.status();
     // reqwest's JSON decoder already buffers the body. Reuse that exact buffer
     // for byte accounting, without reserializing content or trusting Content-Length.
