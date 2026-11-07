@@ -12,7 +12,7 @@ pub enum LiveEvent {
 #[derive(Debug)]
 pub enum Error {
     Storage(io::Error), Codec(serde_json::Error), Restore(fractal_sidebar::edits::RestoreError),
-    NoStateDirectory, ActorMismatch, ScopeMismatch, MissingRequest, InsecureJournal, EndpointCredentials,
+    NoStateDirectory, ActorMismatch, ScopeMismatch, MissingRequest, InsecureJournal, EndpointCredentials, InvalidEndpoint,
 }
 pub struct Store { path: PathBuf, scope: Scope, pub edits: Edits, blocked: bool }
 impl Store {
@@ -120,6 +120,14 @@ impl Store {
 }
 
 fn validate_endpoint(scope: &Scope) -> Result<(), Error> {
+    // reqwest reexports url::Url: use the transport's normalization, not an authority split.
+    if let Ok(url) = reqwest::Url::parse(&scope.endpoint)
+        && matches!(url.scheme(), "http" | "https") {
+        return if url.username().is_empty() && url.password().is_none() { Ok(()) } else { Err(Error::EndpointCredentials) };
+    }
+    if scope.endpoint.split_once(':').is_some_and(|(scheme, _)| scheme.trim().eq_ignore_ascii_case("http") || scheme.trim().eq_ignore_ascii_case("https")) {
+        return Err(Error::InvalidEndpoint);
+    }
     let authority = scope.endpoint.split_once("://").map_or(scope.endpoint.as_str(), |(_, rest)| rest)
         .trim_start_matches("//").split(['/', '?', '#']).next().unwrap_or_default();
     if authority.contains('@') { return Err(Error::EndpointCredentials); }
@@ -355,6 +363,21 @@ mod tests {
             store.scope = selected.clone();
             assert!(matches!(store.execute(vec![Effect::PersistPending], || selected.clone(), "person/test", |_| async { panic!("credential scope sent") }).await, Err(Error::EndpointCredentials)));
             assert!(!path.exists());
+        }
+    }
+    #[test]
+    fn sidebar_store_http_userinfo_is_checked_after_url_normalization() {
+        for endpoint in [
+            ["https:///user", "example@example.invalid"].join(":"),
+            ["https:", r"\\user@example.invalid"].concat(),
+            "HtTpS://user@example.invalid".into(),
+        ] {
+            let mut selected = scope(); selected.endpoint = endpoint;
+            assert!(matches!(Store::filename(&selected), Err(Error::EndpointCredentials)));
+        }
+        for endpoint in ["https://example.invalid/path", "HtTpS://example.invalid", "endpoint/test", "unix:/run/example.sock"] {
+            let mut selected = scope(); selected.endpoint = endpoint.into();
+            assert!(Store::filename(&selected).is_ok());
         }
     }
 }
