@@ -13,6 +13,40 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
+    let pid = std::process::id() + 1;
+    for (ancestor, expected) in [
+        (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
+        (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
+        (None, HarnessAncestry::Unavailable),
+    ] {
+        let result = walk_harness_ancestry(pid, |candidate| {
+            if candidate == pid {
+                Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, 123)) })
+            } else {
+                ancestor
+            }
+        }, |candidate| {
+            assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
+            Some(HarnessAncestry::Person)
+        });
+        assert_eq!(result, expected);
+    }
+}
+
+// A real serving-boundary probe for manual person-CLI integration checks.
+#[tokio::test]
+async fn person_cli_probe_server() {
+    let Ok(socket) = std::env::var("FRACTAL_PERSON_CLI_PROBE_SOCKET") else { return; };
+    let socket = PathBuf::from(socket);
+    let state = state(socket.parent().unwrap());
+    let app = Router::new().fallback(|| async { Json(json!({"person_admitted": true})) });
+    serve_unix_with_ancestor_ready(&socket, None, app, Some(state.store), harness_ancestor,
+        || println!("PERSON_CLI_PROBE_READY")).await.unwrap();
+}
+
 #[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let root = tempfile::tempdir().unwrap();

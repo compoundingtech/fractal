@@ -7211,71 +7211,90 @@ impl HarnessAncestry {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn harness_ancestor(pid: u32) -> HarnessAncestry {
-    linux_harness_ancestor(pid).unwrap_or(HarnessAncestry::Unavailable)
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct HarnessProcess {
+    uid: u32,
+    generation: Option<(u32, u64)>,
 }
 
-#[cfg(target_os = "linux")]
-fn linux_harness_ancestor(mut pid: u32) -> Option<HarnessAncestry> {
-    use std::collections::BTreeSet;
-    let mut seen = BTreeSet::new();
-    while pid > 1 && pid != std::process::id() {
-        if !seen.insert(pid) { return None; }
-        let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
-            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        });
-        match HarnessAncestry::of_environment(&lookup) {
-            HarnessAncestry::Person => {}
-            ancestry => return Some(ancestry),
-        }
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        pid = stat
-            .rsplit_once(") ")?
-            .1
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-    }
-    Some(HarnessAncestry::Person)
-}
-
-#[cfg(target_os = "macos")]
-fn harness_ancestor(mut pid: u32) -> HarnessAncestry {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn walk_harness_ancestry(
+    mut pid: u32,
+    mut inspect: impl FnMut(u32) -> Option<HarnessProcess>,
+    identity: impl Fn(u32) -> Option<HarnessAncestry>,
+) -> HarnessAncestry {
+    let Some(first) = inspect(pid) else { return HarnessAncestry::Unavailable; };
+    let uid = first.uid;
+    let mut first = Some(first);
     let mut observed = std::collections::BTreeMap::new();
     let mut binding = HarnessAncestry::Person;
     while pid > 1 && pid != std::process::id() {
-        let Ok((parent, birth)) = fractal_runtime::macos_process_identity(pid) else {
+        let Some(process) = first.take().or_else(|| inspect(pid)) else {
             return HarnessAncestry::Unavailable;
         };
-        if observed.insert(pid, birth).is_some() {
-            return HarnessAncestry::Unavailable;
-        }
-        let Some((_, environment)) = local_process_arguments(pid) else {
-            return HarnessAncestry::Unavailable;
-        };
-        let lookup = |name: &str| environment.iter().find_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        });
-        match HarnessAncestry::of_environment(&lookup) {
-            HarnessAncestry::Person => {}
-            ancestry => { binding = ancestry; break; }
+        // An observed ownership transition ends this caller's cooperative ancestry.
+        if process.uid != uid { break; }
+        let Some((parent, birth)) = process.generation else { return HarnessAncestry::Unavailable; };
+        if observed.insert(pid, birth).is_some() { return HarnessAncestry::Unavailable; }
+        match identity(pid) {
+            Some(HarnessAncestry::Person) => {}
+            Some(ancestry) => { binding = ancestry; break; }
+            None => return HarnessAncestry::Unavailable,
         }
         pid = parent;
     }
-    // Recheck every generation, including the connector, after reading the chain.
     if observed.into_iter().any(|(pid, birth)| {
-        !fractal_runtime::macos_process_identity(pid).is_ok_and(|(_, current)| current == birth)
+        !inspect(pid).is_some_and(|current| current.uid == uid && current.generation.is_some_and(|(_, token)| token == birth))
     }) {
         return HarnessAncestry::Unavailable;
     }
     binding
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace().nth(1)?.parse().ok()?;
+    let generation = (|| {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
+        if matches!(fields.next()?, "Z" | "X" | "x") { return None; }
+        let parent = fields.next()?.parse().ok()?;
+        let birth = fields.nth(17)?.parse().ok()?;
+        Some((parent, birth))
+    })();
+    Some(HarnessProcess { uid, generation })
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+    let (parent, birth, uid) = fractal_runtime::macos_process_identity(pid).ok()?;
+    Some(HarnessProcess { uid, generation: Some((parent, birth)) })
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
+    let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(HarnessAncestry::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
+        let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+        (key == name).then(|| value.to_owned())
+    })))
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
+    let (_, environment) = local_process_arguments(pid)?;
+    Some(HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        (key == name).then(|| value.to_owned())
+    })))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn harness_ancestor(pid: u32) -> HarnessAncestry {
+    walk_harness_ancestry(pid, local_harness_process, local_harness_identity)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

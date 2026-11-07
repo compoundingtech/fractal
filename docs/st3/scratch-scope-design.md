@@ -25,7 +25,9 @@ evidence, not an installed-build or runtime test receipt.
   and macOS harness requests to their agent. Invite creation and revocation require
   `concrete_person`. macOS uses `LOCAL_PEERPID`, `proc_pidinfo` ancestry and
   `KERN_PROCARGS2` environment masking, validating process birth before and after inspection.
-  Successful inspection without any identity variable is a person; failed inspection is not.
+  A positively observed effective-UID transition ends the walk as a person; unreadable
+  same-UID processes and unknown ownership are unverifiable. Completed same-UID inspection
+  without any identity variable is a person.
   On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
   Failure denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER` sessions and
   actor/requester body impersonation, not every public request. macOS has no pidfd:

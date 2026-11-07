@@ -481,7 +481,7 @@ pub fn process(pid: u32) -> Result<Process> {
 
 #[cfg(target_os = "macos")]
 pub fn process(pid: u32) -> Result<Process> {
-    let (parent, birth) = fractal_runtime::macos_process_identity(pid)?;
+    let (parent, birth, _) = fractal_runtime::macos_process_identity(pid)?;
     Ok(Process { pid, parent, birth })
 }
 
