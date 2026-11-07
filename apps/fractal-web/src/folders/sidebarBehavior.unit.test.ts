@@ -5,10 +5,10 @@ import vectors from '../../../../fixtures/clients/sidebar/behavior-v1.json'
 import { loadSidebarBehavior } from '../../../../scripts/sidebar-behavior-fixtures.mjs'
 import { arrangementSidebarDoc } from './client.ts'
 import { MembershipEditor, optimisticArrangement } from './edit.ts'
-import { canDrop, membershipWriteRequest, membershipWriteResult, operationsForMove, planMembershipMove, restageMove, sidebarProjection, sidebarTree, type MembershipIntent } from './sidebarAdapter.ts'
+import { canDrop, MembershipProjectionCache, membershipWriteRequest, membershipWriteResult, operationsForMove, planMembershipMove, projectMemberships, restageMove, sidebarProjection, sidebarTree, type MembershipIntent } from './sidebarAdapter.ts'
 import type { SidebarMove, SidebarNode } from './sidebarContract.ts'
 import v2Vectors from '../../../../fixtures/clients/sidebar/behavior-v2.json'
-import { executeMembershipRead, MembershipPaging, type MembershipReadPort } from './memberships.ts'
+import { executeMembershipRead, MembershipPaging, type MembershipComplete, type MembershipReadPort } from './memberships.ts'
 import { SidebarJournal, type SidebarJournalRequest } from './sidebarJournal.ts'
 
 loadSidebarBehavior(vectors)
@@ -157,7 +157,7 @@ const scaleIdentity = (name: string) => ({ actor: scaleScope.owner, action_id: `
 const scaleBase: SidebarJournalRequest['fence'] = { scope: scaleScope, revision: scaleArrangement.revision, ready: true, snapshot: scaleSnapshot(1) }
 const stageScale = (rows: readonly OrderedMembership[]) => {
   const intent = scaleIntent(rows)
-  const plan = planMembershipMove(scaleArrangement, rows, intent)
+  const plan = planMembershipMove(projectMemberships(scaleArrangement, rows), intent)
   expect(plan._tag).toBe('PlannedV2')
   if (plan._tag !== 'PlannedV2') throw new Error('scale plan refused')
   const editor = scaleEditor(intent)
@@ -245,7 +245,7 @@ describe('unwired web v2 scale/fault acceptance', () => {
   it('plans a minimal tied-key rekey at the live-member bound without truncation', () => {
     const rows = scaleRows(4096)
     const intent: MembershipIntent = { node: { kind: 'subject', subject: rows.at(-1)!.member }, parent: scaleFolder, before: { kind: 'subject', subject: rows.at(-2)!.member } }
-    const plan = planMembershipMove(scaleArrangement, rows, intent)
+    const plan = planMembershipMove(projectMemberships(scaleArrangement, rows), intent)
     expect(plan._tag).toBe('PlannedV2')
     if (plan._tag !== 'PlannedV2') throw new Error('bounded rekey refused')
     expect(plan.edit.memberships.map(row => row.member)).toEqual([rows.at(-1)!.member, rows.at(-2)!.member])
@@ -272,8 +272,8 @@ describe('unwired web v2 scale/fault acceptance', () => {
     const parents = Object.fromEntries(ids.map((id, i) => [id, ids[i - 1] ?? null]))
     const base = { ...scaleArrangement, body: { ...scaleArrangement.body, version: 2 as const, folders }, resolved: { ...scaleArrangement.resolved!, parents } }
     const rows = scaleRows(1001).map(row => ({ ...row, position: { bucket: ids.at(-1)!, key: 'a0' } }))
-    expect(planMembershipMove(base, rows, scaleIntent(rows))._tag).toBe('PlannedV2')
-    expect(planMembershipMove(base, rows, { node: { kind: 'folder', id: ids[0]! }, parent: ids.at(-1)!, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Cycle' })
+    expect(planMembershipMove(projectMemberships(base, rows), scaleIntent(rows))._tag).toBe('PlannedV2')
+    expect(planMembershipMove(projectMemberships(base, rows), { node: { kind: 'folder', id: ids[0]! }, parent: ids.at(-1)!, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Cycle' })
   })
   it('rejects a 1,025-operation atomic tied-key rekey and >1 MiB before dispatch', () => {
     const tied = scaleRows(2048)
@@ -285,30 +285,83 @@ describe('unwired web v2 scale/fault acceptance', () => {
     ]
     for (const test of cases) {
       const editor = scaleEditor(test.intent)
-      expect(planMembershipMove(scaleArrangement, test.rows, test.intent)).toEqual({ _tag: 'RefusedV2', refusal: test.refusal })
+      expect(planMembershipMove(projectMemberships(scaleArrangement, test.rows), test.intent)).toEqual({ _tag: 'RefusedV2', refusal: test.refusal })
       expect(editor.state.request).toBeNull()
       expect(editor.execute('Send')._tag).toBe('PersistenceRequired')
     }
   })
+  it('reuses immutable indexes across snapshot writes and invalidates each relevant revision and scope', () => {
+    const cache = new MembershipProjectionCache()
+    const members = scaleRows(1001)
+    const complete: MembershipComplete = { scope: scaleScope, frontier: { epoch: 'epoch/1', changed_index: 1, live_count: members.length }, members, snapshots: [scaleSnapshot(1)] }
+    const first = cache.get(scaleArrangement, complete, 'catalog/1', 'presentation/1')
+    const intent = scaleIntent(members)
+    const before = planMembershipMove(first, intent)
+    expect(cache.get({ ...scaleArrangement }, { ...complete, snapshots: [scaleSnapshot(9999)] }, 'catalog/1', 'presentation/1')).toBe(first)
+    expect(planMembershipMove(first, intent)).toEqual(before)
+    if (first._tag !== 'ProjectedV2') throw new Error('projection refused')
+    expect(first.nodes.size).toBe(members.length + Object.values(scaleArrangement.body.folders).filter(folder => folder.tombstone === null).length)
+    for (const changed of [
+      { arrangement: { ...scaleArrangement, revision: 'claim/changed' }, complete, catalog: 'catalog/1', presentation: 'presentation/1' },
+      { arrangement: scaleArrangement, complete, catalog: 'catalog/2', presentation: 'presentation/1' },
+      { arrangement: scaleArrangement, complete, catalog: 'catalog/1', presentation: 'presentation/2' },
+      ...[{ epoch: 'epoch/2' }, { changed_index: 2 }, { live_count: members.length - 1 }].map(frontier => ({ arrangement: scaleArrangement, complete: { ...complete, frontier: { ...complete.frontier, ...frontier } }, catalog: 'catalog/1', presentation: 'presentation/1' })),
+      ...[{ host: 'host/other' }, { endpoint: 'endpoint/other' }, { projection: 'projection/other' }].map(scope => ({ arrangement: scaleArrangement, complete: { ...complete, scope: { ...scaleScope, ...scope } }, catalog: 'catalog/1', presentation: 'presentation/1' })),
+    ]) {
+      const current = cache.get(scaleArrangement, complete, 'catalog/1', 'presentation/1')
+      expect(cache.get(changed.arrangement, changed.complete, changed.catalog, changed.presentation)).not.toBe(current)
+    }
+    for (const scope of [{ owner: 'person/other' }, { container: 'arrangement/other' }]) {
+      expect(cache.get(scaleArrangement, { ...complete, scope: { ...scaleScope, ...scope } }, 'catalog/1', 'presentation/1')).toEqual({ _tag: 'RefusedV2', refusal: 'InvalidResolution' })
+    }
+    expect(cache.get(scaleArrangement, complete, 'catalog/1', 'presentation/1')).not.toBe(first)
+    expect(planMembershipMove(first, intent)).toEqual(before)
+    expect(cache.get({ ...scaleArrangement, resolved: undefined }, complete, 'catalog/1', 'presentation/1')).toEqual({ _tag: 'RefusedV2', refusal: 'NotReady' })
+    expect(cache.get(scaleArrangement, complete, 'catalog/1', 'presentation/1')._tag).toBe('ProjectedV2')
+    const edited = { ...complete, frontier: { ...complete.frontier, changed_index: 2 }, members: members.map(row => row.member === members.at(-1)!.member ? { ...row, position: { bucket: null, key: 'a0' } } : row) }
+    expect(planMembershipMove(cache.get(scaleArrangement, edited, 'catalog/1', 'presentation/1'), intent)).toEqual({ _tag: 'RefusedV2', refusal: 'NoChange' })
+  })
   it.skip('Daemon integration fixture required: reject the 4,097th live-member edit through the real server limit (not a paging-D dependency)', () => {})
   it.skip('D #4739: local-socket initial-load p95 <=1s with sustained unrelated daemon writes', () => {})
   it.skip('PR21 host activation: browser overlay visible next animation frame; render p95 <=8ms; v2 <=2x v1', () => {})
-  it.skipIf(process.env.FRACTAL_SIDEBAR_PERF !== '1')('opt-in component p95 (not browser or local-socket evidence)', async () => {
-    const p95 = (values: number[]) => values.toSorted((a, b) => a - b)[Math.ceil(values.length * 0.95) - 1]!
+  it.skipIf(process.env.FRACTAL_SIDEBAR_PERF !== '1')('opt-in cached per-keystroke p95 and equivalent v1 component baseline', () => {
+    const percentile = (values: number[], fraction: number) => values.toSorted((a, b) => a - b)[Math.ceil(values.length * fraction) - 1]!
     for (const count of [1001, 4096]) {
       const rows = scaleRows(count)
-      const planning: number[] = []
-      const loading: number[] = []
+      const complete: MembershipComplete = { scope: scaleScope, frontier: { epoch: 'epoch/1', changed_index: 1, live_count: count }, members: rows, snapshots: [scaleSnapshot(1)] }
+      const cache = new MembershipProjectionCache()
+      const intent = scaleIntent(rows)
+      const v1: ClientArrangement = { ...scaleArrangement, body: { ...scaleArrangement.body, version: 1, placements: Object.fromEntries(rows.map(row => [row.member, { revision: row.revision, value: { folder: row.position.bucket, key: row.position.key } }])) } }
+      const doc = { ...arrangementSidebarDoc(v1), roster: rows.map(row => ({ id: row.member, subject: row.member, host: '', label: row.member })) }
+      const move: SidebarMove = { items: [rows.at(-1)!.member], target: { _tag: 'Unfiled' } }
+      const cold: number[] = [], warm: number[] = [], baseline: number[] = []
       for (let sample = 0; sample < 110; sample++) {
+        const coldStart = performance.now()
+        const projected = projectMemberships(scaleArrangement, rows)
+        const projectedAt = performance.now()
+        const editor = scaleEditor(intent)
         const start = performance.now()
-        const plan = planMembershipMove(scaleArrangement, rows, scaleIntent(rows))
-        const planned = performance.now()
-        expect(plan._tag).toBe('PlannedV2')
-        await pageScale(rows)
-        if (sample >= 10) { planning.push(planned - start); loading.push(performance.now() - planned) }
+        const model = cache.get(scaleArrangement, complete, 'catalog/1', 'presentation/1')
+        const plan = planMembershipMove(model, intent)
+        if (plan._tag !== 'PlannedV2') throw new Error('cached input refused')
+        editor.reduce({ _tag: 'Plan', base: scaleBase, ...plan.edit, folder: scaleIdentity('folder'), membership: scaleIdentity('member') })
+        const pendingAt = performance.now()
+        const v1Start = performance.now()
+        const projection = sidebarProjection(doc)
+        const verdict = restageMove(doc, move)
+        if (verdict._tag !== 'Operations') throw new Error('v1 input refused')
+        const pending = optimisticArrangement(v1, verdict.operations)
+        const v1End = performance.now()
+        expect(projected._tag).toBe('ProjectedV2')
+        expect(projection.folders.length).toBeGreaterThan(0)
+        expect(pending.body.version).toBe(1)
+        expect(editor.state.status).toBe('AwaitingPersistence')
+        if (sample >= 10) { cold.push(projectedAt - coldStart); warm.push(pendingAt - start); baseline.push(v1End - v1Start) }
       }
-      process.stdout.write(`sidebar-scale-measurement ${JSON.stringify({ runner: `${process.platform}/${process.arch} ${process.version}`, count, plannerP95Ms: p95(planning), scriptedPagingP95Ms: p95(loading), projectionRenderBaseline: 'blocked: v2 host unwired; not an activation pass' })}\n`)
-      expect(p95(planning)).toBeLessThanOrEqual(4)
+      const warmP95Ms = percentile(warm, 0.95), v1P95Ms = percentile(baseline, 0.95)
+      process.stdout.write(`sidebar-scale-measurement ${JSON.stringify({ runner: `${process.platform}/${process.arch} ${process.version}`, count, coldProjectionP50Ms: percentile(cold, 0.5), coldProjectionP95Ms: percentile(cold, 0.95), warmP95Ms, v1P95Ms, ratio: warmP95Ms / v1P95Ms, scope: 'projection+planning+pending state; not browser render or local socket' })}\n`)
+      expect(warmP95Ms).toBeLessThanOrEqual(4)
+      expect(warmP95Ms).toBeLessThanOrEqual(v1P95Ms * 2)
     }
   }, 60000)
 })
