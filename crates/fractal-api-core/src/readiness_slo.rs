@@ -154,7 +154,7 @@ impl Reading {
         );
         ensure!(
             self.end_ms.checked_sub(self.start_ms) == Some(MINUTES * MINUTE_MS)
-                && self.end_ms % MINUTE_MS == 0
+                && self.end_ms.is_multiple_of(MINUTE_MS)
                 && self.end_ms <= self.observed_at_ms
                 && self.observed_at_ms <= now
                 && now - self.end_ms <= MAX_AGE_MS,
