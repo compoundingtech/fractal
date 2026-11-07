@@ -33,20 +33,21 @@ const refusal = (code: string) => new ActionRefused({ status: 409, message: 'Opa
   message: `Unknown ${code}: opaque server detail`, retryable: false, details: {},
 } })
 
-const mount = async ({ items: startingItems = [initial()], editable = true, loadMutations }: { items?: Arrangement[]; editable?: boolean; loadMutations?: () => Promise<void> } = {}) => {
+const mount = async ({ items: startingItems = [initial()], editable = true, granted = true, loadMutations }: { items?: Arrangement[]; editable?: boolean; granted?: boolean; loadMutations?: () => Promise<void> } = {}) => {
   let items = startingItems
   let streamOptions: CollectionStreamOptions | undefined
   let closes = 0
   let snapshots = 0
   let fail: string | undefined
+  let listFails = false
   let beforeSubmit: (() => void) | undefined
   let gate: Promise<void> | undefined
   const requests: ActionOf<'arrangement.edit'>[] = []
   const mutationServices = loadMutations === undefined ? Effect.void : retryableImport(loadMutations, 'editing services')
   const envelope = <T,>(value: T): EnvelopeOf<T> => ({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot: testSnapshot, value })
   const gateway: SidebarGateway = {
-    discover: async () => envelope({ ...testCapabilities, capabilities: [...testCapabilities.capabilities, { id: 'control.arrangements', state: editable ? 'granted' : 'ungranted', version: 0 }] }),
-    arrangementsList: async () => envelope<ArrangementPage>({ kind: 'page', collection: 'arrangements', filters: { person: testSelection.owner }, items, page: { limit: 100, has_more: false, next_cursor: null, cursor_expires_at: null } }),
+    discover: async () => envelope({ ...testCapabilities, capabilities: [...testCapabilities.capabilities.filter((capability) => granted || capability.id !== 'arrangements'), ...(granted ? [] : [{ id: 'arrangements', state: 'ungranted' as const, version: 2 }]), { id: 'control.arrangements', state: editable ? 'granted' : 'ungranted', version: 0 }] }),
+    arrangementsList: async () => listFails ? Promise.reject(new Error('arrangements read failed')) : envelope<ArrangementPage>({ kind: 'page', collection: 'arrangements', filters: { person: testSelection.owner }, items, page: { limit: 100, has_more: false, next_cursor: null, cursor_expires_at: null } }),
     collectionStream: async (options) => {
       streamOptions = options
       const noop = () => undefined
@@ -80,21 +81,25 @@ const mount = async ({ items: startingItems = [initial()], editable = true, load
   const root = createRoot(container)
   const render = () => flushSync(() => root.render(<RegistryContext.Provider value={registry}><Harness /></RegistryContext.Provider>))
   render()
-  await vi.waitFor(() => expect(streamOptions).toBeDefined())
-  streamOptions?.onFrame({ kind: 'snapshot', items: [], id: 'arrangements-inventory', collection: 'arrangements', has_more: false, order: [], snapshot: testSnapshot })
-  await vi.waitFor(() => expect(registry.get(source).phase).toBe('synced'))
+  if (granted) {
+    await vi.waitFor(() => expect(streamOptions).toBeDefined())
+    streamOptions?.onFrame({ kind: 'snapshot', items: [], id: 'arrangements-inventory', collection: 'arrangements', has_more: false, order: [], snapshot: testSnapshot })
+  }
+  await vi.waitFor(() => expect(registry.get(source).phase).toBe(granted ? 'synced' : 'unavailable'))
   await React.act(async () => undefined)
   return {
     registry, source, requests, container,
     binding: () => binding!,
     fail: (code?: string) => { fail = code },
+    failList: (value: boolean) => { listFails = value },
+    stream: () => streamOptions!,
     beforeSubmit: (run?: () => void) => { beforeSubmit = run },
     gate: (value?: Promise<void>) => { gate = value },
     items: () => items,
     replace: (next: Arrangement[]) => { items = next },
     updateRoster: (next: readonly SidebarSeat[]) => { roster = next; render() },
     query: (next: string) => { query = next; render() },
-    close: () => { flushSync(() => root.unmount()); registry.dispose(); container.remove(); expect(closes).toBe(1) },
+    close: () => { flushSync(() => root.unmount()); registry.dispose(); container.remove(); expect(closes).toBe(granted ? 1 : 0) },
   }
 }
 
@@ -419,12 +424,81 @@ it('Renamed reserved Sidebar preserves identity; retired reserved Sidebar shows 
   } finally { retired.close() }
 })
 
+it('A connection without the arrangements grant says so once, offers no retry, and refuses edits only when attempted', async () => {
+  const h = await mount({ editable: false, granted: false })
+  try {
+    expect(h.binding().unavailable).toBe('Folders unavailable on this connection')
+    expect(h.binding().onRetryUnavailable).toBeUndefined()
+    expect(h.container.textContent).not.toContain('Reconnect')
+    expect(h.container.textContent).not.toContain('Folder editing')
+    flushSync(() => h.binding().onDeleteFolder({ id: a }))
+    expect(h.requests).toEqual([])
+    expect(h.container.textContent).toContain('Folder editing is unavailable')
+  } finally { h.close() }
+})
+
+/** Installed before the timed refusal is scheduled; the harness's own waits need real timers, so only these two fake. */
+const fakeTimeouts = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+it('A refused drop says why, then clears on its own like the editing-unavailable notice', async () => {
+  const h = await mount()
+  fakeTimeouts()
+  try {
+    await React.act(async () => h.binding().onEditRefused?.('Folders cannot move into Unfiled.'))
+    expect(h.container.textContent).toBe('Folders cannot move into Unfiled.')
+    await React.act(async () => { vi.advanceTimersByTime(5999) })
+    expect(h.container.textContent).toBe('Folders cannot move into Unfiled.')
+    await React.act(async () => { vi.advanceTimersByTime(1) })
+    expect(h.container.textContent).toBe('')
+  } finally { vi.useRealTimers(); h.close() }
+})
+
+it('The editing-unavailable refusal clears after its timeout and the roster keeps no notice', async () => {
+  const h = await mount({ editable: false })
+  fakeTimeouts()
+  try {
+    await React.act(async () => h.binding().onDeleteFolder({ id: a }))
+    expect(h.container.textContent).toBe('Folder editing is unavailable')
+    await React.act(async () => { vi.advanceTimersByTime(6000) })
+    expect(h.container.textContent).toBe('')
+  } finally { vi.useRealTimers(); h.close() }
+})
+
+it('A failed layout read offers Retry, and Retry reads again', async () => {
+  const h = await mount()
+  try {
+    h.failList(true)
+    h.stream().onFrame({ kind: 'changes', items: [], id: 'arrangements-inventory', collection: 'arrangements', has_more: false, order: [], snapshot: testSnapshot } as never)
+    await vi.waitFor(() => expect(h.binding().unavailable).toBe('Folder layout is unavailable'))
+    expect(h.registry.get(h.source).unavailableReason).toBe('failed')
+    const retry = h.binding().onRetryUnavailable
+    expect(retry).toBeTypeOf('function')
+    h.failList(false)
+    await React.act(async () => retry?.())
+    await vi.waitFor(() => expect(h.binding().unavailable).toBeUndefined())
+    expect(h.binding().onRetryUnavailable).toBeUndefined()
+  } finally { h.close() }
+})
+
+it('An interrupted layout stream says it is reconnecting and offers no Retry, since the client reconnects itself', async () => {
+  const h = await mount()
+  try {
+    await React.act(async () => h.stream().onEnd(new Error('socket closed')))
+    expect(h.registry.get(h.source).unavailableReason).toBe('interrupted')
+    expect(h.binding().unavailable).toBe('Reconnecting to folder layout…')
+    expect(h.binding().onRetryUnavailable).toBeUndefined()
+  } finally { h.close() }
+})
+
 it('Read-only sidebar refuses drops and writes with fixed unavailable copy', async () => {
   const h = await mount({ editable: false })
   try {
-    expect(h.binding().canDrop(['alpha.example'], { _tag: 'Into', folder: b })).toEqual({ refused: 'Folder editing is unavailable for this connection.' })
+    // Reading works, so nothing is wrong until an edit is attempted.
+    expect(h.binding().unavailable).toBeUndefined()
+    expect(h.container.textContent).toBe('')
+    expect(h.binding().canDrop(['alpha.example'], { _tag: 'Into', folder: b })).toEqual({ refused: 'Folder editing is unavailable' })
     flushSync(() => h.binding().onDeleteFolder({ id: a }))
     expect(h.requests).toEqual([])
-    expect(h.container.textContent).toBe('Folder editing is unavailable for this connection.')
+    expect(h.container.textContent).toBe('Folder editing is unavailable')
   } finally { h.close() }
 })

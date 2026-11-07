@@ -37,12 +37,11 @@ function ColumnStory({ scheme, readingColumn }: { scheme: Scheme; readingColumn:
 
 /** Scenario slice variants chosen through Storybook controls (`scenarioArgTypes`). */
 type ColumnArgs = React.ComponentProps<typeof ColumnStory> & { conversation?: string }
-const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
+const meta = { id: 'fractal-ui-transcript-composer', title: 'Surfaces/Composer/In transcript', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
 type Story = StoryObj<ColumnArgs>
 const scenarioColumn = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'], world: 'fleet-mid-refactor' } }, args: { conversation: 'default' }, argTypes: { conversation: { control: false } } } satisfies Story
 export const ScenarioConversation: Story = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']) }
-export const ScenarioConversationLight: Story = { ...ScenarioConversation, args: { scheme: 'light' } }
 
 const bounds = (element: Element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: rect.width } }
 async function columns(canvasElement: HTMLElement) {
@@ -63,7 +62,6 @@ export const ReadingColumn: Story = { ...scenarioColumn, tags: ['critical', 'bot
   await expect(composer.width).toBeLessThanOrEqual(lane + 0.5)
   await expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
 } }
-export const ReadingColumnLight: Story = { ...ReadingColumn, tags: ['critical', '!both-widths'], args: { ...scenarioColumn.args, scheme: 'light' } }
 /** Without the opt-in, the composer keeps filling its host. */
 export const HostWidth: Story = { ...scenarioColumn, tags: ['critical', 'both-widths'], args: { ...scenarioColumn.args, readingColumn: false }, play: async ({ canvasElement }) => {
   const { composer, dock } = await columns(canvasElement)

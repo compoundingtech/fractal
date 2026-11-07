@@ -1,8 +1,67 @@
+import { readFileSync } from 'node:fs'
 import { TimelineEntry, Timestamp } from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from './fromTimeline.ts'
 import { transcriptTurnsForItems } from '../web/conversationTranscript.ts'
+
+describe('native delivery echoes (fixtures/clients/transcripts/omp-delivery-echo)', () => {
+  const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`../../../../fixtures/clients/transcripts/${name}`, import.meta.url), 'utf8'))
+  const transcript = (entries: unknown) => {
+    const timeline = new LiveTimeline()
+    timeline.apply({ replace: true, hasMore: false, entries: Schema.decodeUnknownSync(Schema.Array(TimelineEntry))(entries) })
+    return timeline.project().items
+  }
+  const raw = () => fixture('omp-delivery-echo.json') as Array<{ id: string; body: { text?: string } }>
+  const bodies = (items: ReturnType<typeof transcript>) => items.flatMap(item => item._tag === 'Text' ? [item.text] : [])
+
+  it('reads exactly the expected bodies: an echo of a shown body once, an unshown delivery or watch excerpt kept', () => {
+    const expected = fixture('omp-delivery-echo.expected.json') as ReadonlyArray<{ body: { value: string | { body: string } } }>
+    expect(bodies(transcript(raw()))).toEqual(expected.map(({ body: { value } }) => typeof value === 'string' ? value : value.body))
+  })
+  it('keeps the excerpt that exists only in a watch delivery, and drops the wake that repeats its mail', () => {
+    const items = transcript(raw())
+    const ids = items.map(item => item.id)
+    expect(ids).toContain('timeline-entry/session-echo/native-15-content')
+    expect(bodies(items).filter(text => text.includes('Please keep the old reader for one release.'))).toHaveLength(1)
+    expect(ids).not.toContain('timeline-entry/session-echo/native-16-content')
+  })
+  it('keeps a delivery once the mail it names leaves the window', () => {
+    const entries = raw().filter(entry => !entry.id.includes('aaaaaaaaaaaaaaaa'))
+    expect(transcript(entries).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('keeps a shown header with no body on screen rather than hiding the only copy', () => {
+    const entries = raw().filter(entry => entry.id !== 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content')
+    expect(transcript(entries).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('applies the same body rule to a channel delivery with blocks', () => {
+    const channel = (id: string, preview: string) => `<channel source="plugin:st3-channel:st3" from="agent/example/harbor" messageId="${id}">[st3-delivery:${id}]\n[PING from st3] ${id} from agent/example/harbor: Key audit\n\n${preview}\n</channel>`
+    const native = (id: string, text: string) => ({ ...raw().find(entry => entry.id === 'timeline-entry/session-echo/native-10-content')!, id, body: { media_type: 'text/plain', text, blocks: [{ id: `${id}/text`, kind: 'text', source_type: 'content', payload: { body_ref: true } }] } })
+    const ids = transcript([...raw().filter(entry => !entry.id.endsWith('native-10-content')),
+      native('timeline-entry/session-echo/claude-repeat', channel('message/aa01', 'Keys rotated & checked. Two readers remain.')),
+      native('timeline-entry/session-echo/claude-excerpt', channel('message/aa01', 'Keys rotated & checked. An excerpt only the delivery carries. Two readers remain.')),
+    ]).map(item => item.id)
+    expect(ids).not.toContain('timeline-entry/session-echo/claude-repeat')
+    expect(ids).toContain('timeline-entry/session-echo/claude-excerpt')
+  })
+  it('removes the silent-delivery notes with the echo they annotate', () => {
+    const entries = raw().map(entry => entry.id !== 'timeline-entry/session-echo/native-10-content' ? entry : {
+      ...entry, body: { ...entry.body, text: `(2 older silent held; st conversations ls)\n(silent: held without waking you until this turn)\n${entry.body.text}` },
+    })
+    expect(transcript(entries).map(item => item.id)).not.toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('keeps a delivery with non-text blocks and the harness text beside a removed echo', () => {
+    const entries = raw().map(entry => entry.id !== 'timeline-entry/session-echo/native-10-content' ? entry : {
+      ...entry, body: { ...entry.body, text: `${entry.body.text}\nThe harness's own line` },
+    })
+    const residual = transcript(entries).find(item => item.id === 'timeline-entry/session-echo/native-10-content')
+    expect(residual).toMatchObject({ _tag: 'Text', text: "The harness's own line" })
+    const withImage = raw().map(entry => entry.id !== 'timeline-entry/session-echo/native-10-content' ? entry : {
+      ...entry, body: { ...entry.body, blocks: [...(entry.body as { blocks: unknown[] }).blocks, { id: 'native-10/image', kind: 'image', source_type: 'content', payload: {} }] },
+    })
+    expect(transcript(withImage).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+})
 
 describe('addressable OMP child threads', () => {
   it.each(['content', 'tool_call', 'tool_result'] as const)('joins %s task summaries by child conversation and follows revisions and replacement', carrier => {
@@ -573,7 +632,7 @@ in my own words`
       replace: false, hasMore: false,
       entries: [entry('timeline-entry/native-5', 5, 'content', {
         media_type: 'text/plain',
-        text: `<smalltalk-message graph="message/abc">hello</smalltalk-message>
+        text: `<smalltalk-message graph="message/abc">${quote.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</smalltalk-message>
 The person reads replies in st, not in the agent's session.`,
       }, 'user', turnAt)],
     })
@@ -881,7 +940,7 @@ The person reads replies in st, not in the agent's session.`,
         entry('timeline-entry/shown/content', 2, 'content', { media_type: 'text/plain', text: 'hello' }),
         entry('timeline-entry/native-3', 3, 'content', {
           media_type: 'text/plain',
-          text: `<smalltalk-message graph="message/abc">orphaned copy</smalltalk-message>
+          text: `<smalltalk-message graph="message/abc">hello</smalltalk-message>
 but this line is the harness's own`,
         }),
       ],

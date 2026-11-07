@@ -1,29 +1,28 @@
-import fc from 'fast-check'
-import { describe, expect, it } from 'vitest'
-import { isAgentTerminalPane, paneIdentity, paneKey, parsePane, subjectHref, subjectOfLocation, subjectOfRef, subjectPath, subjectRef, type Subject } from './subject.ts'
+import { it } from '@effect/vitest'
+import { Schema } from 'effect'
+import { describe, expect } from 'vitest'
+import { isAgentTerminalPane, paneIdentity, paneKey, parsePane, subjectHref, subjectOfLocation, subjectOfRef, subjectPath, subjectRef } from './subject.ts'
 
-const slug = fc.stringMatching(/^[a-z0-9][a-z0-9 -]{0,8}(\/[a-z0-9-]{1,6})?$/)
-const subject: fc.Arbitrary<Subject> = fc.oneof(
-  slug.map(value => ({ _tag: 'Conversation' as const, agent: `agent/${value}` })),
-  slug.map(value => ({ _tag: 'Terminal' as const, agent: `agent/${value}` })),
-  fc.constant({ _tag: 'Inbox' as const }),
-  slug.map(id => ({ _tag: 'Alert' as const, id })),
-  fc.constant({ _tag: 'Missions' as const }),
-  slug.map(value => ({ _tag: 'Mission' as const, ref: `mission/${value}` })),
-  fc.constant({ _tag: 'Usage' as const }),
-  slug.map(group => ({ _tag: 'Usage' as const, group })),
-  slug.map(value => ({ _tag: 'Document' as const, ref: `doc/${value}` })),
-  slug.map(value => ({ _tag: 'Declaration' as const, ref: `agent/${value}` })),
-  slug.map(value => ({ _tag: 'Resource' as const, ref: `resource/github/${value}` })),
-)
+const slug = (prefix = '') => Schema.String.check(Schema.isPattern(new RegExp(`^${prefix}[a-z0-9][a-z0-9 -]{0,8}(/[a-z0-9-]{1,6})?$`)))
+/** The subjects a route or a ref can name: each field is what its `subjectOfRef` prefix reads back. */
+const Addressable = Schema.TaggedUnion({
+  Conversation: { agent: slug('agent/') },
+  Terminal: { agent: slug('agent/') },
+  Inbox: {},
+  Alert: { id: slug() },
+  Missions: {},
+  Mission: { ref: slug('mission/') },
+  Usage: { group: Schema.optionalKey(slug()) },
+  Document: { ref: slug('doc/') },
+  Declaration: { ref: slug('agent/') },
+  Resource: { ref: slug('resource/github/') },
+})
 
 describe('subject addresses', () => {
-  it('round trips through the pane key, the route and the ref', () => {
-    fc.assert(fc.property(subject, value => {
-      expect(parsePane(paneKey(value))).toEqual(value)
-      expect(subjectOfLocation(subjectPath(value))).toEqual(value)
-      expect(subjectOfRef(subjectRef(value))).toEqual(value)
-    }))
+  it.prop('round trips through the pane key, the route and the ref', { value: Addressable }, ({ value }) => {
+    expect(parsePane(paneKey(value))).toEqual(value)
+    expect(subjectOfLocation(subjectPath(value))).toEqual(value)
+    expect(subjectOfRef(subjectRef(value))).toEqual(value)
   })
 
   it('keeps pane keys it cannot render verbatim, through the route and the ref', () => {

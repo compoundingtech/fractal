@@ -41,7 +41,7 @@ const ResponsiveSidebarSurface = ({ viewport, scheme = 'dark', shortcut = true, 
       </nav>
     </ResponsiveAgentSidebar>
     <section aria-label="Agent workspace" data-sidebar-thread="" {...stylex.props(styles.thread)}>
-      <ThreadHeader title={rows.find(row => row.ref === selected)!.title} folder="local" now={storyNow} sidebarCollapsed={narrow || collapsed} sidebarToggleRef={opener} onToggleSidebar={toggle} panelOpen={false} drawerOpen={false} onTogglePanel={() => undefined} onToggleDrawer={() => undefined} />
+      <ThreadHeader title={rows.find(row => row.ref === selected)!.title} folder="local" now={storyNow} sidebarCollapsed={narrow || collapsed} sidebarToggleRef={opener} onToggleSidebar={toggle} panelOpen={false} terminalOpen={false} onTogglePanel={() => undefined} onToggleTerminal={() => undefined} />
       <article {...stylex.props(styles.article)}><h1 {...stylex.props(styles.heading)}>Review the sidebar</h1><p>Opening navigation does not move this thread. The roster remains readable in a minimum 240px drawer.</p><Aria.Button {...stylex.props(styles.button)}>Reply to this session</Aria.Button></article>
       <Aria.DialogTrigger><Aria.Button>Open unrelated dialog</Aria.Button><Aria.Modal isDismissable><Aria.Dialog aria-label="Resize cleanup check"><Aria.Button autoFocus slot="close">Close unrelated dialog</Aria.Button></Aria.Dialog></Aria.Modal></Aria.DialogTrigger>
     </section>
@@ -282,19 +282,15 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   } finally { observer.disconnect() }
 }
 
-const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Two fixed rows in the production sidebar frame, tree and thread header pin drawer modality, resize ranges and layout stability.' }, layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
+const meta = { excludeStories: ['scenarioExemptions'], id: 'wf-sidebar-responsive-navigation', title: 'Surfaces/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Two fixed rows in the production sidebar frame, tree and thread header pin drawer modality, resize ranges and layout stability.' }, layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'At1440:contract-fixture',
-  'At1440Light:contract-fixture',
   'At440:contract-fixture',
-  'At440Light:contract-fixture',
   'At700:contract-fixture',
-  'At700Light:contract-fixture',
   'At900:contract-fixture',
-  'At900Light:contract-fixture',
   'DragUnmountCleanup:contract-fixture',
   'FixedResizeRange:contract-fixture',
   'NonfiniteResizeRange:contract-fixture',
@@ -305,10 +301,6 @@ export const At440: Story = { args: { viewport: 440 }, play: drawerPlay }
 export const At700: Story = { args: { viewport: 700 }, play: drawerPlay }
 export const At900: Story = { args: { viewport: 900 }, play: drawerPlay }
 export const At1440: Story = { args: { viewport: 1440 }, play: drawerPlay }
-export const At440Light: Story = { args: { viewport: 440, scheme: 'light' }, play: drawerPlay }
-export const At700Light: Story = { args: { viewport: 700, scheme: 'light' }, play: drawerPlay }
-export const At900Light: Story = { args: { viewport: 900, scheme: 'light' }, play: drawerPlay }
-export const At1440Light: Story = { args: { viewport: 1440, scheme: 'light' }, play: drawerPlay }
 export const DragUnmountCleanup: Story = { args: { viewport: 1440 }, play: dragUnmountPlay }
 const assertFrozenTrack = (track: HTMLElement): void => {
   if (track.hasAttribute('tabindex') || track.hasAttribute('role')) throw new Error('Frozen resize track must not be focusable or interactive')

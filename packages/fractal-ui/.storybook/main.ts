@@ -13,6 +13,9 @@ const config: StorybookConfig = {
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
+  // Depth stories stay in the index, and so in the play gate, one sidebar filter click away.
+  tags: { gate: { defaultFilterSelection: 'exclude' } },
+  features: { sidebarOnboardingChecklist: false },
   // Storybook 10.6.1: time the original a11y afterEach, including lazy axe import/reporting.
   previewAnnotations: async (entries = []) => {
     const original = fileURLToPath(import.meta.resolve('@storybook/addon-a11y/preview'))

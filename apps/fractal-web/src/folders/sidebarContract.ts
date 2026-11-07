@@ -2,6 +2,7 @@
 // TODO(kit): replace this structural copy with the kit import when AgentFolders lands.
 import type * as React from 'react'
 import type { StyleXStyles } from '@stylexjs/stylex'
+import type { SystemStateKind } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 
 export type SidebarAgent = {
   readonly _tag: 'Agent'; readonly id: string; readonly subject: string; readonly label: string
@@ -10,6 +11,8 @@ export type SidebarAgent = {
   /** Native children belong to this seat, not the arrangement roster. */
   readonly parent?: string
   readonly childId?: string
+  /** A further current mission of the parent seat: its row opens the mission and stays keyboard reachable. Never moves. */
+  readonly missionId?: string
 }
 export type SidebarFolder = { readonly _tag: 'Folder'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarGroup = { readonly _tag: 'Group'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
@@ -38,13 +41,21 @@ export type AgentFoldersProps = {
   readonly onToggleCollapsed: (intent: { readonly id: string; readonly collapsed: boolean }) => void
   readonly rowStatus?: ReadonlyMap<string, SidebarRowStatus>
   readonly treeStatus?: React.ReactNode
-  readonly unavailable?: React.ReactNode
+  /** One quiet line under the roster about the layout itself. */
+  readonly unavailable?: string
+  readonly unavailableKind?: SystemStateKind
+  /** Present only when trying again can change the outcome. */
+  readonly onRetryUnavailable?: () => void
+  /** A drop `canDrop` refused, with its sentence; refusals surface only on an attempted edit. */
+  readonly onEditRefused?: (sentence: string) => void
   readonly selectedId?: string
   /** Search changes request a selected-row reveal without treating clock ticks as navigation. */
   readonly revealKey?: string
   /** Native RAC item name; the host supplies displayed title and observed status. */
   readonly accessibleNames?: ReadonlyMap<string, string>
   readonly onSelect?: (id: string) => void
+  /** Activating a mission child row. */
+  readonly onOpenMission?: (mission: string) => void
   readonly renderAgent?: (agent: SidebarAgent, touchDisclosure?: React.ReactNode) => React.ReactNode
   /** Opt-in exact sizes for the supplied agent renderer; folders and status messages remain content-sized. */
   readonly agentRowHeight?: (agent: SidebarAgent) => { readonly compact: number; readonly touch?: number } | undefined

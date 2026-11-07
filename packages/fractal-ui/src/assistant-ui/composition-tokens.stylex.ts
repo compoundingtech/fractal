@@ -101,7 +101,7 @@ export const typeVars = stylex.defineVars({
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
 export const radiusVars = stylex.defineVars({
-  sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
+  xs: '2px', sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
   keyboard: '4px',
   full: '9999px', none: '0',
 })
@@ -133,7 +133,7 @@ export const geometryVars = stylex.defineVars({
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  gutter40: '40px', icon: '16px', status: '14px', statusSm: '12px', statusPip: '6px', stop: '12px', glyphRing: '11px',
   sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
   /** Work rows: disclosure slot · glyph slot · title · one right-aligned metadata column (status word, duration). */
@@ -151,6 +151,8 @@ export const geometryVars = stylex.defineVars({
   /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
   attachmentMax: { default: '180px', '@media (min-width: 600px)': '240px' },
   detailsValueMin: '120px',
+  /** The widest a line of supporting prose runs inside a wider card. */
+  readingMeasure: '68ch',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',

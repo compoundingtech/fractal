@@ -642,7 +642,13 @@ export const Streaming: Story = { tags: ['critical'], args: { state: 'streaming'
   await expect(canvas.getByTestId('transcript-header')).not.toHaveTextContent('Running')
   await expect(canvasElement.querySelectorAll('[data-streaming-tail="true"]')).toHaveLength(1)
   await expect(canvasElement.querySelector('[aria-label="Copy answer"]')).toBeNull()
-  await expect(canvas.getByRole('button', { name: /Working/ })).toBeDisabled()
+  // A running work log still folds from its header, and stays folded as tools arrive.
+  const working = canvas.getByRole('button', { name: /Working/ })
+  await expect(working).toHaveAttribute('aria-expanded', 'true')
+  await userEvent.click(working)
+  await expect(working).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(working)
+  await expect(working).toHaveAttribute('aria-expanded', 'true')
 } }
 export const StreamingLight: Story = { ...Streaming, args: { state: 'streaming', scheme: 'light' } }
 export const Failed: Story = { tags: ['critical'], args: { state: 'failed' }, play: async ({ canvasElement }) => {
@@ -1457,7 +1463,7 @@ export const MixedContent: Story = {
     await expect(canvas.queryByTestId('mixed-content-body')).toBeNull()
     await expect(canvasElement.textContent).not.toContain('Synthetic visible message body.')
     await expect(canvasElement.textContent).not.toContain('synthetic-internal-kind')
-    const control = canvas.getByText('event · Synthetic ordinary notice control.')
+    const control = canvas.getByText('Synthetic ordinary notice control.')
     await expect(control).toBeVisible()
     await expect(control.closest('[data-testid="transcript-message"]')?.querySelector('button')).toBeNull()
     show.focus()

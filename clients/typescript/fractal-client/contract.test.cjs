@@ -288,7 +288,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
-            case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
+            case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
             case 'arrangements.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
             case 'arrangements.memberships': return ['example', 'arrangement-id', 'person/example', {}, options];
@@ -305,6 +305,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'terminal.screen': return ['terminal/example', options];
             case 'harness-inventory.get': return ['agent/example', {}, options];
             default:
+                if (id.startsWith('github-plugin.')) return ['acme', 'garden', 7, options];
                 if (id.startsWith('assistant.')) return [{}, { payload: { projection: id.slice('assistant.'.length), parameters: {}, max_response_bytes: 4096 } }, options];
                 if (id.endsWith('.get')) return ['resource/example', options];
                 if (id.startsWith('launch-')) return ['launch/example', {}, options];

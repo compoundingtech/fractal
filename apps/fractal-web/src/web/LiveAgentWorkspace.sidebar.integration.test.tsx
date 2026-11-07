@@ -99,6 +99,17 @@ it('connects the responsive drawer toggle to its dialog while retaining narrow a
   expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
 })
 
+it('draws one panel icon on the sidebar control in the thread header and the sidebar header', async () => {
+  registry.set(agents, observed({ value: [agent] }))
+  await mount(800)
+  const panelDivider = 'svg path[d="M6 3v10"]'
+  const opener = within(host).getByRole('button', { name: 'Expand sidebar' })
+  expect(opener.querySelector(panelDivider)).not.toBeNull()
+  await act(async () => opener.click())
+  const close = within(within(host).getByRole('dialog', { name: 'Agents' })).getByRole('button', { name: 'Close agents' })
+  expect(close.querySelector(panelDivider)).not.toBeNull()
+})
+
 it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
   (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
 ('retains $family freshness and distinguishes missing mission info at $width $scheme', async ({ family, width, scheme }) => {
@@ -177,7 +188,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
     }
   })
   expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
-  expect(row().querySelector('[data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission]')).toBeNull()
   const warning = row().querySelector('[data-mission-unavailable]')!
   expect(warning.textContent).toContain('Mission info unavailable')
   expect(warning.querySelector('svg')).not.toBeNull()
@@ -185,7 +196,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
   expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
   await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
   expect(row().getAttribute('aria-label')).toBe('Worker, Working')
-  expect(row().querySelector('[data-mission-unavailable], [data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission-unavailable], [data-mission]')).toBeNull()
   expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
 })
 
@@ -315,17 +326,18 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
   const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('Idle;')
+  // A live mark says the state alone; the qualifier appears only once the observation is not live.
+  expect(status()).toBe('Idle')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   expect(registry.get(agents)).toBe(retained)
   expect(freshness()).toBe('stale')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · Idle')
-  expect(status()).toContain('Last verified · Idle;')
+  expect(status()).toContain('Last verified · Idle; stale observation')
   expect(status()).toContain('stale observation')
   await act(async () => registry.set(connection, { _tag: 'Live' }))
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('live observation')
+  expect(status()).toBe('Idle')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
@@ -385,7 +397,7 @@ it('reveals a slightly future activity timestamp when only the leaf clock catche
   }
 })
 
-it('reveals a future status boundary in ClockedThreadHeader without rendering the header projection', async () => {
+it('keeps a calm agent\'s status, and its clock, out of ClockedThreadHeader without rendering the header projection', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
   const at = '1970-01-01T00:00:05.500Z'
@@ -398,9 +410,11 @@ it('reveals a future status boundary in ClockedThreadHeader without rendering th
     const header = host.querySelector('section[aria-label="Agent workspace"] header')!
     expect(header).not.toBeNull()
     const count = projectedRows.mock.calls.length
+    // Suspended is calm: no mark beside the title, so no status clock there either, before or after its boundary.
+    expect(header.querySelector('[data-status]')).toBeNull()
     expect(header.querySelector('time')).toBeNull()
     await act(async () => registry.set(now, 6000))
-    expect(header.querySelector('time')?.textContent).toBe('0s')
+    expect(header.querySelector('time')).toBeNull()
     expect(projectedRows).toHaveBeenCalledTimes(count)
   } finally {
     projectedRows.mockRestore()
@@ -627,7 +641,7 @@ describe('shipped live sidebar Show filter', () => {
     })
     expect(names()).toHaveLength(1)
     expect(names()[0]).toContain('Asker')
-    const trigger = [...sidebar().querySelectorAll('button')].find(button => button.textContent?.startsWith('Show'))
+    const trigger = [...sidebar().querySelectorAll('button')].find(button => button.textContent?.startsWith('Filter'))
     expect(trigger?.textContent).toContain(', 2 active')
     await act(async () => root.unmount())
     root = createRoot(host)

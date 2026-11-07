@@ -116,7 +116,7 @@ interface AccountSpec {
   readonly usage7d?: { readonly usd: number; readonly tokens: number }
 }
 
-const accountOf = (spec: AccountSpec): QuotaAccount => ({
+export const accountOf = (spec: AccountSpec): QuotaAccount => ({
   provider: spec.provider,
   accountId: spec.accountId ?? `${spec.harness}/${spec.name}`,
   accountLabel: spec.label,

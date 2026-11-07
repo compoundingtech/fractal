@@ -71,7 +71,7 @@ const typeVarsTheme = stylex.createTheme(typeVars, {
 })
 
 const radiusVarsTheme = stylex.createTheme(radiusVars, {
-  sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
+  xs: '2px', sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
   keyboard: '4px',
   full: '9999px', none: '0',
 })

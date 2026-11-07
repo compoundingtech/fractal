@@ -170,9 +170,6 @@ const nativeOverlayId = 'fractal-ui-sidebar-milestone-agent-row--native-overlays
 const usageIds = ['fractal-app-usagepane--all-states', 'fractal-app-usagepane--populated']
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
-  'fractal-ui-composer--footer-width-budget-narrow-light',
-  'fractal-ui-composer--footer-width-budget-medium-light',
-  'fractal-ui-composer--footer-width-budget-wide-light',
 ]
 const baseIds = [
   'fractal-ui-transcript--no-green-all-states',
@@ -183,9 +180,6 @@ const baseIds = [
 test('the strict case set measures the filter once, keeps functional corners, and omits only the scheme aliases', () => {
   assert.deepEqual([...FULL_CASE_OVERRIDES], [
     ['fractal-ui-transcript--no-green-all-states-light', []],
-    ['fractal-ui-composer--footer-width-budget-narrow-light', []],
-    ['fractal-ui-composer--footer-width-budget-medium-light', []],
-    ['fractal-ui-composer--footer-width-budget-wide-light', []],
     ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
     [nativeOverlayId, [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]],
     [freezeId, [['dark', 1100], ['light', 1100]]],
@@ -354,7 +348,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
     assert.equal(receipt.expectedCases, 59)
-    assert.equal(receipt.omitted.cases, 65)
+    assert.equal(receipt.omitted.cases, 53)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
     assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)

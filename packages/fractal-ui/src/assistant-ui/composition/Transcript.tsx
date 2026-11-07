@@ -12,7 +12,7 @@ import { SyncLine } from '../sync-presentation/SyncLine'
 import { syncLine } from '../sync-presentation/sync-line'
 import type { SyncStatus } from '../sync-presentation/sync-status'
 import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
-import { HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
+import { completeStreamingTail, HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
 import { ThinkingRun } from './ThinkingEntry'
 import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import type { ComposerAvailability } from '../embrace-composer/send'
@@ -21,7 +21,7 @@ import { HarnessNotice } from './HarnessNotice'
 import { UnsupportedRecord } from './UnsupportedRecord'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m, statusVars as statusTone } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
 import { Tooltip } from './Controls'
 import { useCopyFeedback, type CopyAction } from './useCopyFeedback'
@@ -118,7 +118,12 @@ function TranscriptMessage() {
   if (item._tag === 'Unsupported') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><UnsupportedRecord item={item} /></MessagePrimitive.Root>
   if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" /></MessagePrimitive.Root>
   if (item._tag === 'UnknownEvent' && item.mixedContent === true) return <MixedContentMessage item={item} />
+  if (item._tag === 'Text' || item._tag === 'Event') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic, styles.semanticProse)}><SemanticProse item={item} /></MessagePrimitive.Root>
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
+}
+/** Mail delivered to the seat and harness messages are written as Markdown; an event's title is a label. */
+function SemanticProse({ item }: { readonly item: Extract<ConversationItem, { _tag: 'Text' | 'Event' }> }) {
+  return <>{item._tag === 'Event' && <span {...stylex.props(styles.semanticText)}>{item.title}</span>}<Markdown text={item.text} tone="muted" /></>
 }
 const messageComponents = { Message: TranscriptMessage }
 /** Keep mixed bodies out of the collapsed DOM, using the same raw disclosure as tool inspection. */
@@ -136,15 +141,17 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   const [expanded, setExpanded] = React.useState(false)
   const active = React.useContext(TranscriptActiveContext)
   const [overflows, setOverflows] = React.useState(false)
-  const text = React.useRef<HTMLSpanElement>(null)
+  const text = React.useRef<HTMLDivElement>(null)
   const textId = React.useId()
   const long = item.text.length > 600 || item.text.split('\n').length > 8
+  // The cut can land inside a construct; close it so the collapsed prompt keeps its formatting.
+  const collapsed = React.useMemo(() => item.text.length > 600 ? completeStreamingTail(item.text.slice(0, 600)) : item.text, [item.text])
   React.useLayoutEffect(() => {
     const element = text.current
     if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded, active])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={expanded ? item.text : collapsed} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
 }
 /**
  * The callback must resolve only after the host has successfully copied the answer. Only a fulfilled copy sets
@@ -226,6 +233,7 @@ const strandedText = (item: ConversationItem): string | undefined => {
 function StrandedItem({ item }: { readonly item: ConversationItem }) {
   if (item._tag === 'Unsupported') return <UnsupportedRecord item={item} />
   if (item._tag === 'Event' && item.notice !== undefined) return <HarnessNotice item={{ ...item, notice: item.notice }} weight="row" />
+  if ((item._tag === 'Text' && item.role === 'system') || item._tag === 'Event') return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic, styles.semanticProse)}><SemanticProse item={item} /></div>
   const text = strandedText(item)
   return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{text === undefined || text.trim() === '' ? 'Couldn\u2019t display this entry' : text}</span></div>
 }
@@ -302,7 +310,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
     return Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
   }, now)
   const waiting = state._tag === 'WaitingForAnswer'
-  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><LiveRing spinning={!waiting} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
+  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}>{waiting ? <span aria-hidden="true" data-live-waiting-dot {...stylex.props(styles.waitingDot)} /> : <LiveRing />}<span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
@@ -495,7 +503,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   return <TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} running={committed.at(-1)?.work.running === true && committed.at(-1)?.activity?._tag !== 'WaitingForAnswer'} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       renderHeader={(startIndex, revealRow, materializing) => {
         if (rows.length <= transcriptInitialSourceRowCount) return null
         const bound = sourceWindow(sourceRows, startIndex)
@@ -523,14 +531,15 @@ const styles = stylex.create({
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
-  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
-  userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
+  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
+  userClamp: { maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fgSoft, flexShrink: 0 },
   answerHeader: { display: 'flex', alignItems: 'center', gap: s.sm, height: t.metaLeading, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   sender: { margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   semanticText: { minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  semanticProse: { flexDirection: 'column', gap: s.xs2, overflowWrap: 'anywhere' },
   mixed: { minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   mixedSummary: { display: 'flex', alignItems: 'center', gap: s.xs },
   mixedTrigger: { minHeight: g.toolRow, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: g.focusOffset } },
@@ -541,7 +550,9 @@ const styles = stylex.create({
   progress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm }, track: { height: g.progressSm, backgroundColor: surface.rowActive, overflow: 'hidden' }, fill: (width: string) => ({ width, height: '100%', backgroundColor: accent.primary }),
   liveActivity: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.uiSize },
   liveLabel: { color: ink.fgSoft },
-  preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBlockStart: s.xs2, marginInlineStart: g.textColumn, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingBlock: s.md, paddingInline: s.lg, gap: s.xs },
+  // The amber dot says this needs you; a still ring read as a stalled run. It sits in the ring's box, so the label never moves.
+  waitingDot: { flexShrink: 0, boxSizing: 'border-box', width: g.statusPip, height: g.statusPip, marginInline: `calc((${g.status} - ${g.statusPip}) / 2)`, display: 'block', backgroundColor: statusTone.attention, borderRadius: r.full },
+  preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginInlineStart: g.textColumn, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingBlock: s.md, paddingInline: s.lg, gap: s.xs },
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
   command: { boxSizing: 'border-box', marginBlockEnd: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.codeBg, color: ink.fg },
   errorReason: { margin: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.metaSize },

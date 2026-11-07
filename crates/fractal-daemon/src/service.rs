@@ -1702,7 +1702,7 @@ mod tests {
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
         quota_source: None,
-        host_envelope_file: None,
+        usage_hub: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,

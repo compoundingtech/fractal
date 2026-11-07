@@ -137,13 +137,14 @@ export interface AgentSubagent {
   readonly lease_expires_at: string
 }
 
-/** Retained native work identity; the title is optional and never synthesized from a goal. */
+/** Retained native work identity; the title is optional and never synthesized from the separately reported goal. */
 export interface AgentWork {
   readonly id: string
   readonly missionId: string
   readonly runId: string
   readonly path: string
   readonly title?: string
+  readonly goal?: string
   readonly state: string
 }
 
@@ -200,6 +201,8 @@ export interface Fleet {
 export interface RosterDecode {
   readonly undecodable: readonly Undecodable[]
   readonly decodeStale: boolean
+  /** The latest window said more rows exist than it carried. */
+  readonly hasMore?: boolean
 }
 
 /** A roster whose latest frame decoded completely. */

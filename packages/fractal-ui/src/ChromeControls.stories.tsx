@@ -25,7 +25,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
   return <NarrowLayoutContext.Provider value={phone}><main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <aside aria-label="Agents" {...stylex.props(styles.sidebar)}>
       <header {...stylex.props(styles.band)}>
-        <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(value => !value)} />
+        <ChromeControl icon="panel-left" label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(value => !value)} />
         <strong>Fractal</strong>
         <span {...stylex.props(styles.push)} />
         <ChromeControl icon="bell" label="Needs me only" pressed={needsMe} onPress={() => setNeedsMe(value => !value)} />
@@ -39,7 +39,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
       </footer>
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} drawerOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleDrawer={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
+      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} terminalOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleTerminal={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
         <div {...stylex.props(styles.actions)}>
           <ChromeControl icon="person" label="Actions for fractal-web" />
           <DialogTrigger>
@@ -58,7 +58,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Chrome controls',
+  id: 'fractal-ui-chrome-controls', title: 'Components/Chrome controls',
   component: ChromeControlsStory,
   parameters: { scenario: { _tag: 'primitive', reason: "Exercises icon-button chrome, disabled reasons and menus independently of domain state." }, layout: 'fullscreen' },
   args: { scheme: 'dark', onResources: fn() },
@@ -69,20 +69,18 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'DisabledMenu:primitive',
-  'DisabledMenuLight:primitive',
   'DisabledReason:primitive',
-  'DisabledReasonLight:primitive',
   'PhoneTapQuiet:primitive',
   'ProgrammaticFocusQuiet:primitive',
   'QuietIcons:primitive',
   'QuietIconsFlow:primitive',
-  'QuietIconsLight:primitive',
+  'TooltipReleasedWithPointer:primitive',
   'WindowBlurQuiet:primitive',
 ]
 type Story = StoryObj<typeof meta>
 
 const header = (canvasElement: HTMLElement) => within(canvasElement).getByTestId('thread-header')
-const headerNames = ['Actions for fractal-web', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel']
+const headerNames = ['Actions for fractal-web', 'Resources', 'Conversation menu', 'Show terminal', 'Toggle right panel']
 
 /** Every chrome control is a 28px icon button named by its accessible name; open toggles and set filters keep the fill. */
 export const QuietIcons: Story = { play: async ({ canvasElement }) => {
@@ -94,12 +92,11 @@ export const QuietIcons: Story = { play: async ({ canvasElement }) => {
     await expect(button.getBoundingClientRect().height).toBe(28)
   }
   await expect(within(header(canvasElement)).getByRole('button', { name: 'Toggle right panel' })).toHaveAttribute('aria-pressed', 'true')
-  await expect(within(header(canvasElement)).getByRole('button', { name: 'Toggle terminal drawer' })).toHaveAttribute('aria-pressed', 'false')
+  await expect(within(header(canvasElement)).getByRole('button', { name: 'Show terminal' })).not.toHaveAttribute('aria-pressed')
   const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
   await expect(sidebar.getByRole('button', { name: 'Filter agents · 1 active' })).not.toHaveAttribute('aria-pressed')
   await expect(sidebar.getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Collapse agents', 'Needs me only', 'Filter agents · 1 active', 'Sort agents · Manual', 'Toggle color scheme', 'Missions', 'Usage'])
 } }
-export const QuietIconsLight: Story = { ...QuietIcons, args: { scheme: 'light' } }
 
 /** Hover names Resources in the kit tooltip; Tab from Agent lands on Resources with the focus ring and the same tooltip; Enter opens its dialog; ArrowDown opens the conversation menu; a toggle press keeps its fill. */
 export const QuietIconsFlow: Story = { play: async ({ args, canvasElement }) => {
@@ -133,9 +130,10 @@ export const QuietIconsFlow: Story = { play: async ({ args, canvasElement }) => 
   await expect(conversation).toHaveAttribute('aria-expanded', 'true')
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
-  const terminal = scope.getByRole('button', { name: 'Toggle terminal drawer' })
+  const terminal = scope.getByRole('button', { name: 'Show terminal' })
   await userEvent.click(terminal)
-  await expect(terminal).toHaveAttribute('aria-pressed', 'true')
+  await expect(terminal).toHaveAccessibleName('Show conversation')
+  await expect(terminal).not.toHaveAttribute('aria-pressed')
 } }
 
 const resourcesReason = 'Read access to agent resources has not been granted.'
@@ -166,7 +164,6 @@ export const DisabledReason: Story = { args: { resourcesDisabledReason: resource
   await userEvent.tab()
   await expect(scope.getByRole('button', { name: 'Conversation menu' })).toHaveFocus()
 } }
-export const DisabledReasonLight: Story = { ...DisabledReason, args: { ...DisabledReason.args, scheme: 'light' } }
 
 const conversationReason = 'Conversation settings load once this agent is reachable.'
 
@@ -195,7 +192,6 @@ export const DisabledMenu: Story = { args: { conversationDisabledReason: convers
   }
   await expect(conversation).toHaveAttribute('aria-expanded', 'false')
 } }
-export const DisabledMenuLight: Story = { ...DisabledMenu, args: { ...DisabledMenu.args, scheme: 'light' } }
 
 /** Polls past the tooltip's open delay: no tooltip may appear at any point in the window. */
 const staysWithoutTooltip = async (ms: number) => {
@@ -232,6 +228,54 @@ export const ProgrammaticFocusQuiet: Story = { tags: ['critical'], play: async (
   await waitFor(() => expect(resources).not.toHaveAttribute('data-focus-visible'))
   await expect(getComputedStyle(resources).outlineStyle).toBe('none')
   await staysWithoutTooltip(600)
+} }
+
+/**
+ * Keyboard navigation closing a hovered control's tooltip must not bring it back as an unpositioned surface at the
+ * top-left corner once the pointer leaves, and a control a modal covers opens no tooltip however the pointer moves.
+ */
+export const TooltipReleasedWithPointer: Story = { play: async ({ canvasElement }) => {
+  const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
+  const sort = sidebar.getByRole('button', { name: 'Sort agents · Manual' })
+  const needsMe = sidebar.getByRole('button', { name: 'Needs me only' })
+  const filter = sidebar.getByRole('button', { name: 'Filter agents · 1 active' })
+  const resources = within(header(canvasElement)).getByRole('button', { name: 'Resources' })
+  const tooltips = () => within(document.body).queryAllByRole('tooltip', { hidden: true }).map(tooltip => tooltip.textContent)
+
+  // The page's very first hover opens no tooltip.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(sort)
+  await tooltipFor(sort, 'Sort agents · Manual')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await tooltipFor(filter, 'Filter agents · 1 active')
+  await userEvent.unhover(sort)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).not.toContain('Sort agents · Manual')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
+
+  // The pointer is what moves next, which ends keyboard modality.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(sort)
+  await tooltipFor(sort, 'Sort agents · Manual')
+  resources.focus()
+  await userEvent.keyboard('{Enter}')
+  const dialog = await within(document.body).findByRole('dialog', { name: 'Agent resources' })
+  await waitFor(() => expect(tooltips()).toEqual([]))
+  await userEvent.unhover(sort)
+  await userEvent.hover(sort)
+  const until = performance.now() + 600
+  while (performance.now() < until) {
+    await expect(tooltips()).toEqual([])
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(dialog).not.toBeInTheDocument())
+  await userEvent.unhover(sort)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).toEqual([])
 } }
 
 /** Losing window focus clears desktop tooltip intent; restoring focus alone must not reopen it. */

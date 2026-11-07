@@ -26,6 +26,7 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false
   // Scenario readers shift committed instants to the current clock.
   const [now] = React.useState(Date.now)
   const [opened, setOpened] = React.useState('')
+  const [selected, setSelected] = React.useState<string>()
   const feed = React.useMemo((): Feed<readonly Native.Attention[]> => {
     if (slice.loading || state === 'waiting') return waiting
     if (state === 'ungranted') return unavailable({ reason: 'ungranted', detail: 'Read access to attention has not been granted.' })
@@ -42,8 +43,8 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false
         <aside aria-label="Alerts sidebar" data-sidebar-host {...stylex.props(styles.sidebar, bounded && styles.bounded)}>
           {/* Bounded, the list sits where the workspace puts it: in a `minHeight: 0` column panel that clips its overflow. */}
           {bounded
-            ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} /></div>
-            : <AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} />}
+            ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} {...(selected === undefined ? {} : { selected })} onSelect={setSelected} /></div>
+            : <AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} {...(selected === undefined ? {} : { selected })} onSelect={setSelected} />}
         </aside>
         {!slice.loading && (state === 'served' || state === 'stale') && slice.state.messages.length > 0 && <section aria-label="Scenario fixture context" {...stylex.props(styles.fixtureContext)}>
           <h2>Scenario fixture context</h2>
@@ -57,7 +58,7 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false
 }
 
 const rows = (canvasElement: HTMLElement) => [...canvasElement.querySelectorAll<HTMLElement>('[data-alert-id]')]
-const rowButton = (row: HTMLElement) => row.querySelector<HTMLElement>('button[aria-expanded]')!
+const rowButton = (row: HTMLElement) => row.querySelector<HTMLElement>('button[data-alert-open]')!
 
 /** Opens a row's menu (right click, Shift+F10 or the ContextMenu key) and reads its items, then closes it. */
 const menuItems = async (row: HTMLElement, open: 'right-click' | 'shift-f10' | 'context-menu-key'): Promise<readonly string[]> => {
@@ -107,18 +108,12 @@ const servedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await expect(canvas.getByTestId('alerts-opened').textContent).not.toBe('')
   await expect(canvas.getByTestId('alerts-opened').textContent).not.toMatch(/^agent\//)
 
-  // Enter expands in place and moves focus into the answer; Escape collapses and returns focus to the row.
+  // Enter opens the alert in the main area, and the row says it is the one shown.
   const button = rowButton(holder)
   button.focus()
   await userEvent.keyboard('{Enter}')
-  await expect(button).toHaveAttribute('aria-expanded', 'true')
-  const region = within(holder).getByRole('region', { name: /^Answer / })
-  await waitFor(() => expect(region.contains(document.activeElement)).toBe(true))
-  await expect(within(region).getByTestId('conversation-alerts')).toBeVisible()
-  await userEvent.keyboard('{Escape}')
-  await expect(button).toHaveAttribute('aria-expanded', 'false')
-  await expect(within(holder).queryByRole('region')).toBeNull()
-  await expect(button).toHaveFocus()
+  await expect(button).toHaveAttribute('aria-current', 'true')
+  await expect(button).not.toHaveAttribute('aria-expanded')
 }
 
 /** Whether an element's top and bottom edges both lie inside the scroll region's visible box. */
@@ -129,7 +124,7 @@ const shownIn = (region: HTMLElement, element: HTMLElement) => {
 }
 
 // The same four cards in a sidebar shorter than they are: the list scrolls inside the panel instead of growing it
-// or being clipped, so the last row and every edge of its expanded answer are reachable.
+// or being clipped, so the last row is reachable.
 const boundedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByRole('list', { name: 'Alerts' })
@@ -144,39 +139,23 @@ const boundedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElem
   const button = rowButton(last)
   await expect(shownIn(region, button)).toBe(false)
 
-  // Focus scrolls the last row into the region; Enter expands its answer in place, still inside the region.
+  // Focus scrolls the last row into the region; Enter opens it, and it stays in view.
   button.focus()
   await waitFor(() => expect(shownIn(region, button)).toBe(true))
   await expect(region.scrollTop).toBeGreaterThan(0)
   await userEvent.keyboard('{Enter}')
-  await expect(button).toHaveAttribute('aria-expanded', 'true')
-  const answer = within(last).getByRole('region', { name: /^Answer / })
-  await waitFor(() => expect(answer.contains(document.activeElement)).toBe(true))
+  await expect(button).toHaveAttribute('aria-current', 'true')
   await expect(sidebar.getBoundingClientRect().height).toBe(BOUNDED_HEIGHT)
-  await expect(region.scrollHeight).toBeGreaterThan(region.clientHeight)
-
-  // Both edges of the expanded answer scroll into the region: its end at the bottom, then its start.
-  region.scrollTop = region.scrollHeight
-  await waitFor(() => expect(answer.getBoundingClientRect().bottom).toBeLessThanOrEqual(region.getBoundingClientRect().bottom + 1))
-  await expect(answer.getBoundingClientRect().bottom).toBeGreaterThan(region.getBoundingClientRect().top)
-  region.scrollTop += answer.getBoundingClientRect().top - region.getBoundingClientRect().top
-  await waitFor(() => expect(answer.getBoundingClientRect().top).toBeGreaterThanOrEqual(region.getBoundingClientRect().top - 1))
-  await expect(answer.getBoundingClientRect().top).toBeLessThan(region.getBoundingClientRect().bottom)
-  await expect(within(answer).getByTestId('conversation-alerts')).toBeVisible()
-
-  // Escape collapses back to the row, which stays in view.
-  await userEvent.keyboard('{Escape}')
-  await expect(button).toHaveFocus()
   await expect(shownIn(region, button)).toBe(true)
 }
 
 const meta = {
-  title: 'Fractal/App/Sidebar/Alerts tab',
+  id: 'fractal-app-sidebar-alerts-tab', title: 'Surfaces/Sidebar/Alerts tab',
   component: AlertsTabStory,
   parameters: {
     layout: 'fullscreen',
     scenario: { _tag: 'slices', slices: ['attention'], world: 'fleet-mid-refactor' },
-    docs: { description: { component: 'Every open alert as an SR-2 row: glyph (? harness question, ◆ needs you, ! fault), title, wait age; line 2 shows only served facts (raised by, the step it holds, a self-resolve countdown when deadline and default answer are both served). Enter expands the alert\'s own answers in place and focuses them; Escape collapses. The ⋯ menu (also right click, Shift+F10, ContextMenu) offers Answer and, only when served, Open conversation and Open mission. The list scrolls itself inside a bounded sidebar. When an answered alert leaves the feed while focus was in its row, focus moves to the next row, else the previous one, else the empty state. Waiting, refused and stale feeds say so; an empty feed says nothing needs you. Served mailbox messages from the same slice appear separately as explicitly labeled fixture context, never as Alerts rows. Waiting and Ungranted hold the source feed boundary constant regardless of the selected attention data; their slice invariants document that contract while retaining the observed slice read.' } },
+    docs: { description: { component: 'Every open alert as an SR-2 row: glyph (? harness question, ◆ needs you, ! fault), title, wait age; line 2 shows only served facts (raised by, the step it holds, a self-resolve countdown when deadline and default answer are both served). Enter opens the alert in the main area and the row carries aria-current. The ⋯ menu (also right click, Shift+F10, ContextMenu) offers Answer and, only when served, Open conversation and Open mission. The list scrolls itself inside a bounded sidebar. When an answered alert leaves the feed while focus was in its row, focus moves to the next row, else the previous one, else the empty state. Waiting, refused and stale feeds say so; an empty feed says nothing needs you. Served mailbox messages from the same slice appear separately as explicitly labeled fixture context, never as Alerts rows. Waiting and Ungranted hold the source feed boundary constant regardless of the selected attention data; their slice invariants document that contract while retaining the observed slice read.' } },
   },
   args: { scheme: 'dark', feed: 'served', attention: 'sidebar-tabs' },
   argTypes: { ...scenarioArgTypes(['attention']), scheme: { options: ['dark', 'light'], control: 'radio' }, feed: { options: ['served', 'waiting', 'ungranted', 'stale'], control: 'radio' } },
@@ -184,7 +163,7 @@ const meta = {
 export default meta
 
 type Story = StoryObj<Args>
-export const Served: Story = { tags: ['critical', 'both-widths'], name: 'Served · rows, menu and expand', play: servedPlay }
+export const Served: Story = { tags: ['critical', 'both-widths'], name: 'Served · rows, menu and open', play: servedPlay }
 /** A sidebar shorter than the feed: the list is its own bounded scroll region inside a `minHeight: 0` panel. */
 export const BoundedScroll: Story = { tags: ['critical', 'both-widths'], args: { bounded: true }, name: 'Bounded · scrolls in a short sidebar', play: boundedPlay }
 

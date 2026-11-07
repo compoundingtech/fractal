@@ -2379,6 +2379,102 @@ impl Client {
         };
         self.get(&format!("/v1/client/usage{query}")).await
     }
+    pub async fn usage_hub_quota(
+        &self,
+    ) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {
+        self.get("/v1/client/usage/quota").await
+    }
+    pub async fn github_plugin_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/issues/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_conversation(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/conversation",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/checks",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/files",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/comments/{comment_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/runs/{run_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
     pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {
         self.get("/v1/client/clients").await
     }

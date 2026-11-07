@@ -2,8 +2,9 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it } from 'vitest'
 
 import { createPersistence } from '../../state/persistence.ts'
-import { matchesShow, parseSidebarQuery, printSidebarQuery } from './filter.ts'
-import { machineMemory, machinesToRemember, selectedShowKeys, showCounts, showMachines, withRememberedMachines, withShowKeys, type ShowRow } from './show.ts'
+import { askingToken, matchesShow, parseSidebarQuery, printSidebarQuery } from './filter.ts'
+import { activeFilterCount, machineMemory, machinesToRemember, selectedFilterKeys, selectedShowKeys, showCounts, showEndedKey, showMachines, showRetiredKey, statusKey, withFilterKeys, withRememberedMachines, withShowKeys, type ShowRow } from './show.ts'
+import { defaultFilters, type SidebarFilters } from './state.ts'
 
 const toggle = (query: string, keys: readonly string[]) =>
   printSidebarQuery(withShowKeys({ parsedQuery: parseSidebarQuery(query), keys: new Set(keys) }))
@@ -104,6 +105,48 @@ describe('Show menu model', () => {
     expect(counts('')).toEqual({ asking: 2, machines: { 'host-a': 2, 'host-b': 1, 'host-c': 0 } })
     expect(counts('is:asking')).toEqual({ asking: 2, machines: { 'host-a': 1, 'host-b': 1, 'host-c': 0 } })
     expect(counts('machine:host-a')).toEqual({ asking: 1, machines: { 'host-a': 2, 'host-b': 1, 'host-c': 0 } })
+  })
+})
+
+describe('Filter menu settings', () => {
+  const none = { ...defaultFilters }
+  const rows: readonly ShowRow[] = [
+    { host: 'host-a', asking: true, others: true, status: 'working' },
+    { host: 'host-a', asking: false, others: true, status: 'ended', ended: true },
+    { host: 'host-b', asking: false, others: true, status: 'idle', ended: true },
+    { host: 'host-b', asking: false, others: true, status: 'retired', retired: true },
+    { host: 'host-b', asking: true, others: false, status: 'working' },
+  ]
+  const counts = (filters: Partial<SidebarFilters>, query = '') => {
+    const result = showCounts({ rows, parsedQuery: parseSidebarQuery(query), machines: ['host-a', 'host-b'], filters: { ...none, ...filters }, statuses: ['working', 'idle', 'ended', 'retired'] })
+    return { asking: result.asking, machines: Object.fromEntries(result.machines), statuses: Object.fromEntries(result.statuses), ended: result.ended, retired: result.retired }
+  }
+
+  it('facets status and finished counts against every other filter', () => {
+    expect(counts({})).toEqual({ asking: 1, machines: { 'host-a': 2, 'host-b': 2 }, statuses: { working: 1, idle: 1, ended: 1, retired: 1 }, ended: 2, retired: 1 })
+    // A status does not narrow its own group, and narrows every other one. Done agents count as ended.
+    expect(counts({ statuses: ['idle'] })).toEqual({ asking: 0, machines: { 'host-a': 0, 'host-b': 1 }, statuses: { working: 1, idle: 1, ended: 1, retired: 1 }, ended: 1, retired: 0 })
+    // Hiding ended removes done agents from other entries, while its own entry keeps saying how many it hides.
+    expect(counts({ hideEnded: true })).toEqual({ asking: 1, machines: { 'host-a': 1, 'host-b': 1 }, statuses: { working: 1, idle: 0, ended: 0, retired: 1 }, ended: 2, retired: 1 })
+    expect(counts({}, 'machine:host-b')).toMatchObject({ asking: 0, statuses: { working: 0, idle: 1 }, ended: 1, retired: 1 })
+  })
+
+  it('checks finished agents that are showing, and round-trips a selection through the shared grammar', () => {
+    const filters: SidebarFilters = { ...none, query: 'machine:host-a,host-b machine:host repo:api text', hideRetired: true, statuses: ['idle'] }
+    const keys = selectedFilterKeys(filters, parseSidebarQuery(filters.query))
+    expect([...keys].toSorted()).toEqual(['machine:host', 'machine:host-a', 'machine:host-b', showEndedKey, statusKey('idle')].toSorted())
+    // No machine change keeps the typed AND/OR groups; only the menu's own settings move.
+    const next = withFilterKeys({ filters, keys: new Set([...keys, statusKey('working'), showRetiredKey, askingToken]) })
+    expect(next).toEqual({ ...filters, query: 'is:asking machine:host-a,host-b machine:host repo:api text', hideRetired: false, statuses: ['idle', 'working'] })
+    expect(parseSidebarQuery(next.query)).toEqual(parseSidebarQuery(printSidebarQuery(parseSidebarQuery(next.query))))
+    const hidden = withFilterKeys({ filters, keys: new Set() })
+    expect(hidden).toEqual({ ...filters, query: 'repo:api text', hideEnded: true, hideRetired: true, statuses: [] })
+  })
+
+  it('counts everything Reset would clear, typed facets included, and not free text or sort', () => {
+    const count = (filters: Partial<SidebarFilters>) => activeFilterCount({ ...none, ...filters }, parseSidebarQuery(filters.query ?? ''))
+    expect(count({ query: 'free text', sort: 'name' })).toBe(0)
+    expect(count({ query: 'is:asking machine:a,b repo:x', hideEnded: true, hideRetired: true, statuses: ['idle'] })).toBe(7)
   })
 })
 

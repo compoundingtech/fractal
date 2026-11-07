@@ -3,7 +3,8 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { mergeProps, useFocusRing, useTab, useTabList } from 'react-aria'
 import { Item, useTabListState, type TabListState } from 'react-stately'
-import { accentVars as accent, borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { Icon, type IconName } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 /** Shared status glyphs: working ●, idle ○, ended ×, fault !, pending ~. */
@@ -13,11 +14,15 @@ export type SidebarTabGlyph = '●' | '○' | '×' | '!' | '~'
 export interface SidebarTab {
   readonly id: string
   readonly label: string
-  /** Items asking an open question (?). The strongest marker: it wins over needs-you and status. */
+  /** Leads the label. */
+  readonly icon?: IconName
+  /** The tab's items when none needs the person: a neutral pill, the first thing to drop when space is tight. */
+  readonly count?: number
+  /** Items asking an open question: the strongest marker, over needs-you and status. */
   readonly questionCount?: number
-  /** Items that need the person (◆). Wins over status. */
+  /** Items that need the person. Wins over status. */
   readonly needsYouCount?: number
-  /** Shown only without a question or needs-you, e.g. Fleet's ! for an unreachable machine with work; `label` is spoken after the tab label. */
+  /** Shown only without a question or needs-you, e.g. Fleet's fault for an unreachable machine with work; `label` is spoken after the tab label. */
   readonly status?: { readonly glyph: SidebarTabGlyph; readonly label: string }
 }
 
@@ -33,19 +38,23 @@ export interface SidebarTabsProps {
 }
 
 interface Marker {
-  readonly kind: 'question' | 'needs-you' | 'status'
-  readonly glyph: string
-  /** Shown after the glyph when above 1; status has none. */
+  readonly kind: 'question' | 'needs-you' | 'status' | 'count'
+  /** Status has no count, so its icon says it. */
+  readonly icon?: IconName
+  /** Painted after the icon while counts fit; status has none. */
   readonly count: number
   readonly words: string
 }
 
-/** The tab's strongest marker: an open question beats needs-you, which beats the status glyph. */
+const statusIcons: Record<SidebarTabGlyph, IconName> = { '●': 'dot', '○': 'dot', '×': 'x', '!': 'alert', '~': 'clock' }
+
+/** The tab's strongest marker: an open question beats needs-you, which beats status, which beats a neutral count. */
 function markerOf(tab: SidebarTab): Marker | null {
   const questions = tab.questionCount ?? 0, needsYou = tab.needsYouCount ?? 0
-  if (questions > 0) return { kind: 'question', glyph: '?', count: questions, words: `${questions} ${questions === 1 ? 'open question' : 'open questions'}` }
-  if (needsYou > 0) return { kind: 'needs-you', glyph: '◆', count: needsYou, words: `${needsYou} ${needsYou === 1 ? 'needs you' : 'need you'}` }
-  if (tab.status !== undefined) return { kind: 'status', glyph: tab.status.glyph, count: 0, words: tab.status.label }
+  if (questions > 0) return { kind: 'question', count: questions, words: `${questions} ${questions === 1 ? 'open question' : 'open questions'}` }
+  if (needsYou > 0) return { kind: 'needs-you', count: needsYou, words: `${needsYou} ${needsYou === 1 ? 'needs you' : 'need you'}` }
+  if (tab.status !== undefined) return { kind: 'status', icon: statusIcons[tab.status.glyph], count: 0, words: tab.status.label }
+  if ((tab.count ?? 0) > 0) return { kind: 'count', count: tab.count!, words: String(tab.count) }
   return null
 }
 
@@ -58,25 +67,37 @@ export function sidebarTabName(tab: SidebarTab): string {
 /** Sub-pixel slack: rects are fractional, and a row that fits by rounding must not flip counts in and out. */
 const fitSlack = 0.5
 
-function TabFace({ tab, showCount }: { readonly tab: SidebarTab; readonly showCount: boolean }) {
+function TabFace({ tab, showCount, showIcon = true }: { readonly tab: SidebarTab; readonly showCount: boolean; readonly showIcon?: boolean }) {
   const marker = markerOf(tab)
-  // "◆3 Agents", "? Missions", "! Fleet", "Agents": one space between marker and label. The glyph and count are painted by CSS from
-  // data attributes, not DOM text, so the tab's only visible text is its label, which its name ("Agents, 3 need you") contains.
+  // Icon, label, then a pill. Needing the person is a filled pill and a neutral count an unfilled one, so colour is never the only cue.
+  // When counts drop a filled pill stays as a dot and a neutral one goes. The count is painted, not DOM text, so the tab's only
+  // visible text is its label, which its name ("Agents, 3 need you") contains.
+  const pill = marker !== null && (showCount || marker.kind !== 'count')
   return <span {...stylex.props(styles.face)}>
-    {marker === null ? null : <><span aria-hidden="true" data-sidebar-tab-marker={marker.kind} data-sidebar-tab-glyph={marker.glyph} data-sidebar-tab-count={showCount && marker.count > 1 ? marker.count : undefined} {...stylex.props(styles.marker, marker.kind === 'question' ? styles.question : marker.kind === 'needs-you' ? styles.needsYou : marker.glyph === '!' ? styles.fault : styles.status)} />{' '}</>}
+    {tab.icon === undefined || !showIcon ? null : <span aria-hidden="true" data-sidebar-tab-icon={tab.icon} {...stylex.props(styles.icon)}><Icon name={tab.icon} size={12} /></span>}
     <span data-sidebar-tab-label>{tab.label}</span>
+    {pill ? <span aria-hidden="true" data-sidebar-tab-marker={marker.kind} data-sidebar-tab-count={showCount && marker.count > 0 ? (marker.count > 99 ? '99+' : marker.count) : undefined} {...stylex.props(styles.pill, marker.icon !== undefined ? styles.iconOnly : !(showCount && marker.count > 0) && styles.dot, marker.kind === 'question' || marker.kind === 'needs-you' ? styles.attention : marker.kind === 'status' ? (tab.status?.glyph === '!' ? styles.fault : styles.neutral) : styles.neutral)}>{marker.icon === undefined ? null : <Icon name={marker.icon} size={12} />}</span> : null}
   </span>
+}
+
+/** The sidebar tab count alone, for other tab rows: 16px, a true circle around one digit, amber only when it needs the person. Painted; the tab's name carries the words. */
+export function CountPill({ count, needsYou = false }: { readonly count: number; readonly needsYou?: boolean }) {
+  return <span aria-hidden="true" data-sidebar-tab-marker={needsYou ? 'needs-you' : 'count'} data-sidebar-tab-count={count > 99 ? '99+' : count} {...stylex.props(styles.pill, needsYou ? styles.attention : styles.neutral)} />
 }
 
 /**
  * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row and labels
- * never truncate; when the row cannot hold every count, all counts drop together and the markers stay.
+ * never truncate. Tab icons only repeat the label, so they give way first; only when even the iconless row cannot hold every
+ * count do all counts drop together, attention staying as a dot.
  */
 export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabbableContent = false, children }: SidebarTabsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const [countsFit, setCountsFit] = React.useState(true)
+  const [iconsFit, setIconsFit] = React.useState(true)
   const bar = React.useRef<HTMLDivElement>(null)
   const replica = React.useRef<HTMLDivElement>(null)
+  const iconlessReplica = React.useRef<HTMLDivElement>(null)
+  const countlessReplica = React.useRef<HTMLDivElement>(null)
   const prefix = React.useId()
   const list = React.useRef<HTMLDivElement>(null)
   const state = useTabListState({
@@ -88,13 +109,21 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
   const { tabListProps } = useTabList({ 'aria-label': 'Sidebar' }, state, list)
   const { focusProps, isFocusVisible } = useFocusRing()
   React.useLayoutEffect(() => {
-    const host = bar.current, row = replica.current
-    if (host === null || row === null) return
-    const fit = () => setCountsFit(row.getBoundingClientRect().width <= host.getBoundingClientRect().width + fitSlack)
+    const host = bar.current, row = replica.current, iconless = iconlessReplica.current, countless = countlessReplica.current
+    if (host === null || row === null || iconless === null || countless === null) return
+    const fit = () => {
+      const width = host.getBoundingClientRect().width + fitSlack
+      const whole = row.getBoundingClientRect().width <= width
+      const counts = whole || iconless.getBoundingClientRect().width <= width
+      setCountsFit(counts)
+      setIconsFit(whole || (!counts && countless.getBoundingClientRect().width <= width))
+    }
     fit()
     const observer = new ResizeObserver(fit)
     observer.observe(host)
     observer.observe(row)
+    observer.observe(iconless)
+    observer.observe(countless)
     return () => observer.disconnect()
   }, [])
   return <div ref={bar} data-sidebar-tabs data-sidebar-tab-counts={countsFit ? 'shown' : 'dropped'} {...stylex.props(styles.root)}>
@@ -102,9 +131,17 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
     <div ref={replica} aria-hidden inert data-sidebar-tabs-measure {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
       {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount /></span>)}
     </div>
+    {/* The next step down: counts kept, icons gone. */}
+    <div ref={iconlessReplica} aria-hidden inert data-sidebar-tabs-measure-iconless {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
+      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount showIcon={false} /></span>)}
+    </div>
+    {/* Then no counts, icons back. If even this overflows the icons go too, because labels never truncate. */}
+    <div ref={countlessReplica} aria-hidden inert data-sidebar-tabs-measure-countless {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
+      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={false} /></span>)}
+    </div>
     <div {...stylex.props(styles.root)}>
       <div {...tabListProps} ref={list} {...stylex.props(styles.bar, narrow && styles.touch)}>
-        {tabs.map(tab => <SidebarTabButton key={tab.id} tab={tab} state={state} prefix={prefix} narrow={narrow} showCount={countsFit} />)}
+        {tabs.map(tab => <SidebarTabButton key={tab.id} tab={tab} state={state} prefix={prefix} narrow={narrow} showCount={countsFit} showIcon={iconsFit} />)}
       </div>
       {/* Static host knowledge avoids a visibility walk on every roster render and subtree mutation. */}
       {tabs.map(tab => tab.id === selectedId
@@ -114,29 +151,34 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
   </div>
 }
 
-function SidebarTabButton({ tab, state, prefix, narrow, showCount }: { readonly tab: SidebarTab; readonly state: TabListState<SidebarTab>; readonly prefix: string; readonly narrow: boolean; readonly showCount: boolean }) {
+function SidebarTabButton({ tab, state, prefix, narrow, showCount, showIcon }: { readonly tab: SidebarTab; readonly state: TabListState<SidebarTab>; readonly prefix: string; readonly narrow: boolean; readonly showCount: boolean; readonly showIcon: boolean }) {
   const ref = React.useRef<HTMLDivElement>(null)
   const { tabProps, isSelected } = useTab({ key: tab.id }, state, ref)
   const { focusProps, isFocusVisible } = useFocusRing()
-  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={`${prefix}-tab-${tab.id}`} aria-controls={`${prefix}-panel-${tab.id}`} aria-label={sidebarTabName(tab)} data-sidebar-tab={tab.id} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={showCount} /></div>
+  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={`${prefix}-tab-${tab.id}`} aria-controls={`${prefix}-panel-${tab.id}`} aria-label={sidebarTabName(tab)} data-sidebar-tab={tab.id} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={showCount} showIcon={showIcon} /></div>
 }
 
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   root: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(0, 1fr)', alignItems: 'center', gap: 0, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'center', gap: 0, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   // Same box as the bar but sized by its content and taking no layout space, so measuring never changes what is measured.
   measure: { position: 'absolute', top: 0, insetInlineStart: 0, width: 'max-content', visibility: 'hidden', pointerEvents: 'none' },
-  // Equal tracks keep tab positions stable when counts change; labels never shrink.
-  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlSm, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
+  // Tracks start from content and share the rest, so three tabs with counts fit a 256px sidebar; labels never shrink.
+  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', paddingInline: s.xs2, height: g.controlSm, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
   touch: { height: g.touchTarget },
   touchTab: { height: g.touchTarget, minWidth: g.touchTarget, boxSizing: 'border-box' },
-  face: { whiteSpace: 'nowrap' },
-  // An absent count attribute paints as empty, so a dropped count leaves the glyph alone.
-  marker: { fontWeight: t.weightSemibold, fontVariantNumeric: 'tabular-nums', '::before': { content: 'attr(data-sidebar-tab-glyph) attr(data-sidebar-tab-count)' } },
-  question: { color: accent.primary },
-  needsYou: { color: tone.attention },
-  status: { color: ink.fgMuted },
-  fault: { color: tone.dangerFg },
+  face: { display: 'inline-flex', alignItems: 'center', gap: s.xs2, whiteSpace: 'nowrap' },
+  icon: { display: 'inline-flex', flexShrink: 0 },
+  // An absent count attribute paints as empty, so a dropped count leaves the attention icon alone.
+  // A compact badge: never stretched by the row, a true circle around one digit, growing sideways for more. The line box is the
+  // inner height, so a digit sits optically centred. An absent count attribute paints as empty.
+  pill: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', alignSelf: 'center', flexShrink: 0, marginInlineStart: s.xs2, boxSizing: 'border-box', height: g.icon, minWidth: g.icon, paddingInline: s.xs2, borderWidth: g.hairline, borderStyle: 'solid', borderRadius: r.full, fontSize: t.denseSize, lineHeight: `calc(${g.icon} - 2 * ${g.hairline})`, fontWeight: t.weightMedium, fontVariantNumeric: 'tabular-nums', '::after': { content: 'attr(data-sidebar-tab-count)' } },
+  // Counts dropped: the filled pill stays as a dot; status keeps its icon at badge size.
+  dot: { height: s.md, minWidth: s.md, paddingInline: 0 },
+  iconOnly: { paddingInline: 0 },
+  neutral: { color: ink.fgMuted, borderColor: border.border, backgroundColor: surface.controlFill },
+  attention: { color: surface.canvas, borderColor: tone.attention, backgroundColor: tone.attention },
+  fault: { color: tone.dangerFg, borderColor: tone.dangerFg },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0, outline: 'none', ':is([data-focus-visible])': focusRing },
 })

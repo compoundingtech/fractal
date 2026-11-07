@@ -3,14 +3,13 @@ import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { Button } from 'react-aria-components'
 
-import { tokens } from '../ui-compat/tokens.stylex.ts'
-
 import { TerminalLineView } from './DomTerminal.tsx'
 import { terminalMetrics } from './terminalMetrics.stylex.ts'
 import type { HistoryState } from './history.ts'
 import type { TerminalHistoryPort } from './historySource.ts'
 import type { TerminalPalette } from './palette.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
+import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 0 },
@@ -20,20 +19,20 @@ const styles = stylex.create({
     gap: 8,
     padding: '6px 0',
     fontSize: 12,
-    color: tokens['--ds-gray-900'],
+    color: textVars.fg,
   },
   button: {
     padding: '3px 8px',
     borderRadius: 4,
     borderWidth: 1,
     borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-500'],
-    color: tokens['--ds-gray-1000'],
-    backgroundColor: tokens['--ds-background-100'],
+    borderColor: borderVars.borderStrong,
+    color: textVars.fg,
+    backgroundColor: surfaceVars.canvas,
     cursor: 'pointer',
-    outline: { default: 'none', ':focus-visible': `2px solid ${tokens['--ds-focus-color']}` },
+    outline: { default: 'none', ':focus-visible': `2px solid ${interactionVars.focusRing}` },
   },
-  note: { margin: '6px 0', fontSize: 12, color: tokens['--ds-gray-900'] },
+  note: { margin: '6px 0', fontSize: 12, color: textVars.fg },
   rows: {
     fontVariantLigatures: 'none',
     fontKerning: 'none',

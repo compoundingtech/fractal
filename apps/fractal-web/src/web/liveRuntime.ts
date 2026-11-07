@@ -1,11 +1,13 @@
 import { Effect, Layer } from 'effect'
+import * as Atom from 'effect/reactivity/Atom'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
+import type { DataSource } from '../data/source.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
 import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
-export const createPageRuntime = (replay?: Replay) => {
+export const createPageRuntime = (replay?: Replay, answerPorts?: Pick<DataSource, 'alertActions' | 'prompts'>) => {
   // Dogfood records 100% of pages: budget roots and their SDK detail cannot disappear at 10%.
   const telemetry = makeTelemetry({
     otlpTracesUrl: import.meta.env.VITE_OTLP_TRACES_URL?.trim() || undefined,
@@ -43,6 +45,8 @@ export const createPageRuntime = (replay?: Replay) => {
   return {
     live: replay === undefined ? live : {
       ...live,
+      // Example data's stubbed answers need no grant: nothing leaves the page.
+      source: answerPorts === undefined ? live.source : { ...live.source, ...answerPorts, grants: Atom.map(live.source.grants, (grants) => ({ ...grants, actions: 'granted' as const })) },
       dispose: () => live.dispose().finally(() => replay.close()),
     },
     telemetry,
@@ -50,11 +54,10 @@ export const createPageRuntime = (replay?: Replay) => {
 }
 type PageRuntime = ReturnType<typeof createPageRuntime>
 const retained = import.meta.hot?.data.pageRuntime as PageRuntime | undefined
-const runtime = retained ?? createPageRuntime(
-  import.meta.env.DEV && new URLSearchParams(window.location.search).has('scenario')
-    // Static imports would pull the dev-only kit/world graph into the production entry.
-    ? (await import('./replayRuntime.ts')).createDevReplay(window.location.search)
-    : undefined,
-)
+// Static imports would pull the dev-only kit/world graph into the production entry.
+const replayModule = retained === undefined && import.meta.env.DEV && new URLSearchParams(window.location.search).has('scenario')
+  ? await import('./replayRuntime.ts')
+  : undefined
+const runtime = retained ?? createPageRuntime(replayModule?.createDevReplay(window.location.search), replayModule?.replayAnswerPorts(window.location.search))
 if (import.meta.hot !== undefined) import.meta.hot.data.pageRuntime = runtime
 export const { live, telemetry } = runtime

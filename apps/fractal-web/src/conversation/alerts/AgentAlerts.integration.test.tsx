@@ -9,7 +9,7 @@ vi.mock('@stylexjs/stylex', () => import('../../testStylex.ts'))
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
 import { AgentAlerts } from './AgentAlerts.tsx'
-import { Option } from 'effect'
+import { DateTime, Option } from 'effect'
 
 const seat = 'agent/example/atlas'
 
@@ -23,7 +23,7 @@ const prompting = (episode: string, answers: readonly string[], callId: string):
     detail: 'Claude asks you a question',
     priority: 'high',
     state: 'open',
-    requested_at: '2026-10-13T10:00:00Z',
+    requested_at: DateTime.makeUnsafe('2026-10-13T10:00:00Z'),
     person_id: 'person/avery',
     source_id: seat,
     conversation_id: seat,
@@ -55,6 +55,8 @@ afterEach(async () => {
 
 const button = (label: string) => [...host.querySelectorAll('button')].find((candidate) => candidate.textContent === label)
 const press = (label: string) => act(async () => button(label)!.click())
+const choose = (label: string) => act(async () => [...host.querySelectorAll('label')].find((each) => each.textContent?.includes(label))!.querySelector('input')!.click())
+const chosen = () => host.querySelector('input:checked')
 
 describe('AgentAlerts, pressed', () => {
   it('sends the chosen positions with the episode they were chosen for, and forgets them for a new prompt', async () => {
@@ -68,24 +70,22 @@ describe('AgentAlerts, pressed', () => {
 
     await show(prompting('episode-1', ['answer', 'deny'], 'q1'), [asking('q1', ['Red', 'Blue'])])
     expect(button('Send')!.disabled).toBe(true)
-    await press('Blue')
-    expect(button('✓ Blue')).toBeDefined()
+    await choose('Blue')
+    expect(chosen()).not.toBeNull()
     await press('Send')
     expect(answered).toEqual([{ episode: 'episode-1', answer: 'answer', sent: '{"0":[1]}' }])
-    expect(host.textContent).toContain('Answered.')
+    expect(host.textContent).toContain('You answered Blue')
 
     // The same alert now asks a new question: nothing chosen for the old one carries over.
     await show(prompting('episode-2', ['answer', 'deny'], 'q2'), [asking('q2', ['Left', 'Right', 'Up'])])
-    expect(button('✓ Blue')).toBeUndefined()
-    expect(host.querySelector('[aria-pressed="true"]')).toBeNull()
+    expect(chosen()).toBeNull()
     expect(button('Send')!.disabled).toBe(true)
-    expect(host.textContent).not.toContain('Answered.')
-    await press('Up')
+    await choose('Up')
     await press('Send')
     expect(answered[1]).toEqual({ episode: 'episode-2', answer: 'answer', sent: '{"0":[2]}' })
   })
 
-  it('allows the one waiting call it shows, by pressing Allow', async () => {
+  it('allows the one waiting call it shows, by choosing Allow and sending', async () => {
     const answered: string[] = []
     const alert = { ...prompting('episode-3', ['allow', 'deny'], 'c1'), detail: 'Claude asks to use Bash',
       presentation: { prompt: { calls: Option.some([{ call_id: 'c1', tool: 'Bash', input: '{"command":"make"}', input_complete: true }]), allow: true, answers: ['allow', 'deny'] } } } as unknown as Native.Attention
@@ -93,7 +93,9 @@ describe('AgentAlerts, pressed', () => {
       <AgentAlerts alerts={[alert]}
         onAnswer={async (_alert, answer, sent) => { answered.push(`${answer}:${sent}`); return { _tag: 'Sent' } }} />,
     ))
-    await press('Allow')
+    await choose('Allow')
+    expect(answered).toEqual([])
+    await press('Send')
     expect(answered).toEqual(['allow:allow'])
   })
 })
