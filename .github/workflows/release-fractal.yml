@@ -3,11 +3,22 @@
 
 name: Fractal tag release
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('Fractal candidate {0} {1}', inputs.sha, inputs.request_id) || format('Fractal tag release {0}', github.ref_name) }}
+
 on:
   push:
     branches: [main]
     tags: ['**', '!edge', '!embed-*', '!evidence/**']
-  workflow_dispatch: null
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact first-parent main source SHA for an isolated candidate build
+        required: false
+        type: string
+      request_id:
+        description: Caller correlation ID for this candidate build
+        required: false
+        type: string
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
@@ -45,10 +56,52 @@ permissions:
   actions: read
 
 concurrency:
-  group: "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
+  group: "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('candidate-{0}', inputs.sha)) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-source:
+    name: Validate the requested release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted dispatch ref, never the unvalidated candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require main dispatch and a full first-parent main SHA
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.sha }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$DISPATCH_REF" != refs/heads/main ]]; then
+            echo "::error::Release builds must be dispatched from main."
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_SHA" ]]; then
+            if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The candidate source must be a full lowercase 40-character SHA."
+              exit 1
+            fi
+            # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
+            if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
+              echo "::error::The candidate source must belong to origin/main first-parent history."
+              exit 1
+            fi
+          fi
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   pick-runner:
     name: pick-runner
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
@@ -358,6 +411,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   installer:
     name: 'installer (${{ matrix.runner }})'
+    needs: validate-source
     strategy:
       fail-fast: false
       matrix:
@@ -368,6 +422,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Test release names, install entry points and isolated app transactions
         run: |
           scripts/install-test
@@ -391,12 +446,14 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   embed:
     name: release-web-embed
+    needs: validate-source
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/cache@v4
         with:
           path: '${{ runner.temp }}/pnpm-store'
@@ -456,6 +513,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: release-web-embed
@@ -469,8 +527,8 @@ jobs:
           CACHE_REASON: Publishes the verified immutable web archive; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   build:
-    needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
+    needs: [pick-runner, validate-source]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
     name: 'release-build (${{ matrix.target }})'
     strategy:
       fail-fast: false
@@ -490,6 +548,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
           toolchain: 1.97.0
@@ -609,6 +668,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -616,7 +676,7 @@ jobs:
           path: dist
       - name: Verify both targets and record exact sources
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.sha || github.sha }}
         run: |
           set -euo pipefail
           cd dist
@@ -624,6 +684,8 @@ jobs:
           sha256sum --check SHA256SUMS
           python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
           cp ../docs/st3/binary-releases.md RELEASE-NOTES.md
+          # Markdown backticks are literal, not command substitution.
+          # shellcheck disable=SC2016
           printf '\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\n' "$SOURCE_SHA" >> RELEASE-NOTES.md
 
       - uses: actions/upload-artifact@v4
@@ -659,6 +721,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 1
       - name: Fetch the whole history without evidence tags
         env:

@@ -2,7 +2,7 @@ import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
-// Prepares an untagged daily draft candidate only when main changed, reusing verified main archives.
+// Prepares an untagged daily draft from verified main archives, or builds an exact first-parent main SHA.
 // Stable publication creates the tag after an explicit dispatch with the exact candidate tag, SHA and product GO.
 // Tags made at publication with this workflow's token do not start a second build.
 export default githubWorkflow(auditCaches({
@@ -35,7 +35,7 @@ export default githubWorkflow(auditCaches({
           type: 'string',
         },
         sha: {
-          description: 'Exact candidate source SHA approved for publication',
+          description: 'Candidate: exact first-parent main source SHA; publish: exact candidate SHA approved for publication',
           required: false,
           type: 'string',
         },
@@ -53,26 +53,30 @@ export default githubWorkflow(auditCaches({
     },
   },
   permissions: { contents: 'read' },
-  concurrency: { group: 'fractal-daily-release', 'cancel-in-progress': false },
+  concurrency: {
+    group: "${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && format('fractal-daily-release-{0}', inputs.sha) || 'fractal-daily-release' }}",
+    'cancel-in-progress': false,
+  },
   jobs: {
     release: {
       name: 'daily-release-candidate',
       if: "inputs.mode != 'publish'",
       'runs-on': 'ubuntu-latest',
-      'timeout-minutes': 20,
-      permissions: { contents: 'write', actions: 'read' },
+      'timeout-minutes': 180,
+      permissions: { contents: 'write', actions: 'write' },
       env: {
         GH_TOKEN: '${{ github.token }}',
         GH_REPO: '${{ github.repository }}',
         TAG: '${{ inputs.tag }}',
         RUN: '${{ inputs.run }}',
         SUMMARY: '${{ inputs.summary }}',
+        SOURCE_SHA: '${{ inputs.sha }}',
       },
       steps: [
         ...fullHistoryCheckoutSteps(),
         {
-          name: 'Prepare a draft candidate from the verified archives of main',
-          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY"',
+          name: 'Prepare a draft candidate from verified main archives or an isolated exact-SHA build',
+          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY" --sha "$SOURCE_SHA"',
         },
       ],
     },
@@ -118,4 +122,4 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, {"release": "Prepares untagged draft candidates from verified main release artifacts with an optional operator summary; builds nothing.", "publish": "Creates the tag and publishes an exact draft candidate only with explicit product GO and, for an older candidate, an override naming its tag; builds nothing.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."}))
+}, {"release": "Prepares untagged draft candidates from verified main release artifacts or dispatches and waits for an isolated exact first-parent main SHA build, with an optional operator summary.", "publish": "Creates the tag and publishes an exact draft candidate only with explicit product GO and, for an older candidate, an override naming its tag; builds nothing.", "advance": "Verifies the explicitly published archives and proposes the baseline maintenance PR; builds nothing."}))

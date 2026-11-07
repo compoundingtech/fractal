@@ -1,8 +1,8 @@
 # Fractal binary releases
 
-Every pushed Git tag runs **Fractal tag release**. Both native builds must pass before a
-draft candidate is prepared. A daily schedule also prepares a draft when `main` changed since the
-last release (see [Daily releases](#daily-releases)); stable publication requires an explicit
+**Fractal tag release** verifies both native builds on main, tag pushes and explicit candidate
+build dispatches. The daily schedule and on-demand candidate path prepare drafts only from
+successful builds (see [Daily releases](#daily-releases)); stable publication requires an explicit
 product release GO. A rolling `edge` pre-release follows every green
 `main` commit (see [Edge releases](#edge-releases)). Each release contains:
 
@@ -174,10 +174,10 @@ time. Each native job also uploads its own archive and checksum as `release-<tar
 `release-x86_64-unknown-linux-gnu`; once a main commit's run has succeeded,
 `gh run download RUN_ID --repo compoundingtech/fractal --name release-x86_64-unknown-linux-gnu`
 fetches that commit's Linux archive without building it (find RUN_ID with
-`gh run list --workflow release-fractal.yml --branch main --commit SHA`). Tag pushes use the same jobs, then verify that the tag still
-points at the built commit and upload a draft candidate with its exact source SHA as the target.
-Neither a tag push nor the daily schedule publishes a stable release. Existing releases are not
-overwritten; never move a candidate or published tag.
+`gh run list --workflow release-fractal.yml --branch main --commit SHA`). Tag pushes use
+the same build jobs but do not prepare drafts or publish stable releases. The daily and
+on-demand candidate paths prepare untagged drafts only after successful builds.
+Existing releases are not overwritten; never move a published tag.
 
 Native builds restore Cargo dependencies and Zig's cache on both platforms; the pinned PTY
 runtime uses the same cached Cargo target directory. Generated `target`, `.zig-cache`, and `dist`
@@ -227,17 +227,31 @@ with `mode=candidate` (the default). It takes the newest `main` commit whose rel
 succeeded, re-checks the checksums and sources of its `fractal-release` artifact, selects the
 next patch version, and uploads those same bytes as a **draft** targeting the exact full
 source SHA, without creating a Git tag. The tag is created only when publishing.
-Nothing is rebuilt, and the workflow token's publication tag does not start a second build.
-Dispatch with `tag` or `run` to select a candidate version or successful main build explicitly.
+The scheduled path rebuilds nothing. Dispatch with `tag` or `run` to select a candidate
+version or successful main push build explicitly. To build a chosen SHA independently
+of busy main-push concurrency, dispatch:
+
+```sh
+gh workflow run release-daily.yml --repo compoundingtech/fractal --ref main \
+  -f mode=candidate -f sha=FULL_40_CHARACTER_SOURCE_SHA \
+  -f summary='Operator-impact summary for this candidate'
+```
+
+The full lowercase SHA must belong to main's first-parent history. This path dispatches
+a separate **Fractal tag release** build on that exact source, waits for success, then
+creates the same draft from its verified archives. Both the candidate orchestration and
+its build use SHA-keyed concurrency groups with cancellation disabled; newer main pushes
+cannot cancel them. The build rechecks source eligibility before executing source scripts.
+`--dry-run --sha` never dispatches a build and requires an already successful `--run`.
 The optional `summary` input (`scripts/release-fractal-daily --summary "$SUMMARY"`) adds
 the operator's summary to the draft notes; it defaults to empty. Publication preserves
 that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
 prints the candidate notes without creating a tag or draft.
 
 Only after a newer candidate has been successfully created with its complete assets and
-notes does daily cleanup delete older semantic-version unpublished drafts. Published
-releases and prereleases are left untouched; a failed candidate creation does not remove
-older drafts.
+notes does daily cleanup delete older semantic-version unpublished drafts marked as owned
+by this daily workflow, rechecking that each remains unpublished. Published releases,
+prereleases and unmarked drafts are untouched; failed creation never removes older drafts.
 
 Publication waits for an explicit product release GO on that **exact full source SHA**.
 After the Fractal Product Lead records the GO in a PR, comment, or message, the
@@ -261,8 +275,13 @@ Compounding Manager attestation of the Product Lead's exact-SHA GO, not an autom
 check of the referenced message's contents. No human-only environment review is required.
 The publisher refuses a non-draft or prerelease, a SHA that differs from the draft target,
 an existing immutable tag, or `RELEASE.json`, incomplete notes, or invalid
-checksums/archive sources. It creates the selected tag at the exact approved source SHA
-if absent, then publishes the existing bytes and notes and proposes compatibility baselines.
+checksums/archive sources. `CANDIDATE.json` identifies the build run and exact source.
+Publication requires that run to have succeeded in **Fractal tag release**, then downloads
+its original `fractal-release` artifact and checks source, checksums and equality with the
+candidate archives. Missing/expired build artifacts or an unsuccessful/mismatched run fail
+closed. Publish within the artifact's seven-day retention, or build a fresh candidate.
+It creates the selected tag at the exact approved source SHA if absent, publishes the
+existing bytes and notes, and proposes compatibility baselines.
 Candidate runs never advance baselines. Consumers must pin only published release tags,
 not draft candidate version names. Drafts are private and are not available through
 published-release download URLs; stable latest discovery excludes drafts and prereleases.
@@ -273,7 +292,7 @@ The downloader prefers `fractal-release` and also accepts `smalltalk-release` fr
 successful runs until those 7-day artifacts expire
 (`arn:lmig:smalltalk:2026-10-26-release-artifact-name`, sunset 2026-11-01).
 
-Daily, manual dispatch, and tag publication use the same source-pinned **Upgrade impact**
+Daily and on-demand candidates use the same source-pinned **Upgrade impact**
 section before the change list, and attach `UPGRADE-IMPACT.json`. It describes replay,
 database changes, checkpoint rules/fleet coordination, client and harness compatibility,
 service interruption, manual steps, and recovery. Missing classifications stop publication;
@@ -286,10 +305,8 @@ version and source revision with `(release)`, and JSON exposes the same machine
 version. A tag build uses its semantic tag version; untagged main builds use the
 Cargo package version and exact revision. Daily publication reuses those tested
 bytes, so its later tag is a label rather than an embedded version. Use
-`BUILD.json`/`RELEASE.json` for exact source identity. Tag the tested commit (with this workflow in its tree); pushing a tag does not
-wait for unrelated CI runs. Tags made with another workflow's default `GITHUB_TOKEN` do not
-trigger another push workflow, and GitHub does not emit tag push events for a push of more than
-three tags: push release tags individually from a person or app credential.
+`BUILD.json`/`RELEASE.json` for exact source identity. Publication creates the tag at the
+tested source; the workflow token's tag does not trigger a second push workflow.
 
 The runner and trigger choices follow GitHub's [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 and [push event rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push).

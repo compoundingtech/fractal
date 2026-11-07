@@ -10,12 +10,13 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 
 // Preserve release triggers and source verification; tag builds cannot draft or publish releases.
 // Every commit on main also builds and verifies both archives and keeps short-lived artifacts,
-// so release breakage fails on main instead of at tag time (daily candidates reuse those artifacts).
+// so release breakage fails on main instead of at tag time. Daily candidates dispatch isolated exact-source builds.
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
 // the tag trigger below. Only the daily workflow prepares untagged stable candidates and publishes with explicit product GO.
 export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Fractal tag release",
+  "run-name": "${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('Fractal candidate {0} {1}', inputs.sha, inputs.request_id) || format('Fractal tag release {0}', github.ref_name) }}",
   "on": {
     "push": {
       "branches": [
@@ -29,7 +30,12 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "!evidence/**"
       ]
     },
-    "workflow_dispatch": null,
+    "workflow_dispatch": {
+      inputs: {
+        sha: { description: 'Exact first-parent main source SHA for an isolated candidate build', required: false, type: 'string' },
+        request_id: { description: 'Caller correlation ID for this candidate build', required: false, type: 'string' },
+      },
+    },
     "pull_request": {
       types: readyPullRequestTypes,
       "paths": [
@@ -69,13 +75,49 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     "actions": "read"
   },
   "concurrency": {
-    "group": "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
+    "group": "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('candidate-{0}', inputs.sha)) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
+    "validate-source": {
+      name: 'Validate the requested release source',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      steps: [
+        {
+          name: 'Check out the trusted dispatch ref, never the unvalidated candidate',
+          if: "github.event_name == 'workflow_dispatch'",
+          uses: 'actions/checkout@v4',
+          with: { ref: '${{ github.sha }}', 'persist-credentials': false, 'fetch-depth': 0 },
+        },
+        {
+          name: 'Require main dispatch and a full first-parent main SHA',
+          if: "github.event_name == 'workflow_dispatch'",
+          shell: 'bash',
+          env: { REQUESTED_SHA: '${{ inputs.sha }}', DISPATCH_REF: '${{ github.ref }}' },
+          run: `set -euo pipefail
+if [[ "$DISPATCH_REF" != refs/heads/main ]]; then
+  echo "::error::Release builds must be dispatched from main."
+  exit 1
+fi
+if [[ -n "$REQUESTED_SHA" ]]; then
+  if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::The candidate source must be a full lowercase 40-character SHA."
+    exit 1
+  fi
+  # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
+  if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
+    echo "::error::The candidate source must belong to origin/main first-parent history."
+    exit 1
+  fi
+fi`,
+        },
+      ],
+    },
     "pick-runner": priorityRunnerJob,
     "installer": {
       "name": "installer (${{ matrix.runner }})",
+      "needs": "validate-source",
       "strategy": {
         "fail-fast": false,
         "matrix": {
@@ -89,9 +131,11 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       "timeout-minutes": 5,
       "steps": [
         {
+          // Exercise the workflow's current publication automation, including tests absent from historical candidates.
           "uses": "actions/checkout@v4",
           "with": {
-            "persist-credentials": false
+            "persist-credentials": false,
+            "ref": "${{ github.sha }}"
           }
         },
         {
@@ -106,10 +150,11 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     },
     embed: {
       name: 'release-web-embed',
+      needs: 'validate-source',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' } },
         { uses: 'actions/cache@v4', with: { path: '${{ runner.temp }}/pnpm-store', key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}" } },
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         megarepoApplyStep,
@@ -126,7 +171,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       env: { GH_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}', SOURCE_SHA: '${{ github.sha }}' },
       steps: [
         // The publish script, at the commit this run releases.
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' } },
         { uses: 'actions/download-artifact@v4', with: { name: 'release-web-embed', path: 'dist' } },
         {
           name: 'Publish once under a source-addressed release, never the rolling edge tag',
@@ -137,8 +182,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       ],
     },
     "build": {
-      "needs": ["pick-runner"],
-      "if": "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
+      "needs": ["pick-runner", "validate-source"],
+      "if": "${{ !cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
       "name": "release-build (${{ matrix.target }})",
       "strategy": {
         "fail-fast": false,
@@ -166,7 +211,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "persist-credentials": false
+            "persist-credentials": false,
+            "ref": "${{ inputs.sha || github.sha }}"
           }
         },
         {
@@ -199,6 +245,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
             "use-cache": false
           }
         },
+        // Snapshot preparation and release-build-stamp.py both derive their source revision from checked-out HEAD.
         buildSnapshotPrepare,
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
@@ -241,7 +288,8 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "persist-credentials": false
+            "persist-credentials": false,
+            "ref": "${{ inputs.sha || github.sha }}"
           }
         },
         {
@@ -255,9 +303,9 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "name": "Verify both targets and record exact sources",
           "env": {
-            "SOURCE_SHA": "${{ github.sha }}"
+            "SOURCE_SHA": "${{ inputs.sha || github.sha }}"
           },
-          "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
+          "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\n# Markdown backticks are literal, not command substitution.\n# shellcheck disable=SC2016\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
         },
         {
           "uses": "actions/upload-artifact@v4",
@@ -291,7 +339,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       },
       "steps": [
-        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' }),
         {
           "uses": "actions/download-artifact@v4",
           "with": {
@@ -306,4 +354,4 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       ]
     }
   }
-}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing."}))))
+}, {"validate-source": "Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.", "publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing."}))))

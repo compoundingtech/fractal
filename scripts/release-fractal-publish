@@ -52,6 +52,28 @@ def publish(tag, sha, go_ref, allow_superseded=''):
                 raise ValueError(f'incomplete candidate: missing {required}')
         run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
         run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=dist)
+        proof = json.loads((dist / 'CANDIDATE.json').read_text())
+        if proof['source'] != sha or type(proof['build_run']) is not int or proof['build_run'] <= 0:
+            raise ValueError('candidate build proof does not identify this exact source')
+        build_run = str(proof['build_run'])
+        built = json.loads(run('gh', 'run', 'view', build_run, '--json',
+                               'status,conclusion,workflowName,event,headBranch,headSha,displayTitle'))
+        exact_source = (built['headSha'] == sha if built['event'] == 'push'
+                        else built['displayTitle'].startswith(f'Fractal candidate {sha} '))
+        if (built['status'] != 'completed' or built['conclusion'] != 'success'
+                or built['workflowName'] != 'Fractal tag release' or built['headBranch'] != 'main'
+                or built['event'] not in ('push', 'workflow_dispatch') or not exact_source):
+            raise ValueError('candidate build run did not succeed at the exact approved SHA')
+        # Do not trust an edited draft proof alone: compare it to the successful run artifact.
+        build_dist = dist / 'build-proof'
+        build_dist.mkdir()
+        run('gh', 'run', 'download', build_run, '--name', 'fractal-release', '--dir', str(build_dist))
+        if json.loads((build_dist / 'RELEASE.json').read_text())['source'] != sha:
+            raise ValueError('successful build artifact source differs from approved SHA')
+        if (build_dist / 'SHA256SUMS').read_bytes() != (dist / 'SHA256SUMS').read_bytes():
+            raise ValueError('candidate archives differ from the successful build run')
+        run('sha256sum', '--check', 'SHA256SUMS', cwd=build_dist)
+        run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=build_dist)
         actor = os.environ.get('GITHUB_ACTOR', 'local operator')
         run_url = (f'{os.environ.get("GITHUB_SERVER_URL", "https://github.com")}/{repository}'
                    f'/actions/runs/{os.environ["GITHUB_RUN_ID"]}'

@@ -27,7 +27,7 @@ on:
         required: false
         type: string
       sha:
-        description: Exact candidate source SHA approved for publication
+        description: 'Candidate: exact first-parent main source SHA; publish: exact candidate SHA approved for publication'
         required: false
         type: string
       go_ref:
@@ -43,7 +43,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fractal-daily-release
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && format('fractal-daily-release-{0}', inputs.sha) || 'fractal-daily-release' }}
   cancel-in-progress: false
 
 jobs:
@@ -51,16 +51,17 @@ jobs:
     name: daily-release-candidate
     if: inputs.mode != 'publish'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 180
     permissions:
       contents: write
-      actions: read
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
       RUN: ${{ inputs.run }}
       SUMMARY: ${{ inputs.summary }}
+      SOURCE_SHA: ${{ inputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,13 +92,13 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
-      - name: Prepare a draft candidate from the verified archives of main
-        run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY"'
+      - name: Prepare a draft candidate from verified main archives or an isolated exact-SHA build
+        run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY" --sha "$SOURCE_SHA"'
       - name: Report job cache coverage
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Prepares untagged draft candidates from verified main release artifacts with an optional operator summary; builds nothing.
+          CACHE_REASON: Prepares untagged draft candidates from verified main release artifacts or dispatches and waits for an isolated exact first-parent main SHA build, with an optional operator summary.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   publish:
     name: publish-approved-release

@@ -46,6 +46,9 @@ elif args[:2] == ['release', 'create']:
     assert '--draft' in args and '--verify-tag' not in args, args
     body_path = pathlib.Path(args[args.index('--notes-file') + 1])
     assets = args[args.index('--notes-file') + 2:]
+    proof_path = next(pathlib.Path(asset) for asset in assets if pathlib.Path(asset).name == 'CANDIDATE.json')
+    proof = json.loads(proof_path.read_text())
+    assert proof['source'] == os.environ['FAKE_SHA'] and type(proof['build_run']) is int, proof
     pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
         'body': body_path.read_text(),
         'assets': {pathlib.Path(asset).name: pathlib.Path(asset).read_text()
@@ -270,6 +273,46 @@ spec = spec_from_file_location(loader.name, loader.path, loader=loader)
 module = module_from_spec(spec)
 spec.loader.exec_module(module)
 assert module.run('printf', 'ok\n') == 'ok'
+
+# Explicit source eligibility is full-SHA first-parent membership, not merely ancestry.
+source = 'a' * 40
+with mock.patch.object(module, 'run', side_effect=['', source + '\n' + 'b' * 40]):
+    module.require_main_first_parent(source, repo)
+for invalid in ('abc', 'c' * 40):
+    with mock.patch.object(module, 'run', return_value=source):
+        try:
+            module.require_main_first_parent(invalid, repo)
+        except module.CommandFailed:
+            pass
+        else:
+            raise AssertionError('invalid or side-branch source must fail')
+
+# An isolated build is correlated by a unique request, waited to success, never borrowed.
+title = f'Fractal candidate {source} request'
+for conclusion in ('success', 'failure'):
+    calls = []
+    def build_run(*args, **kwargs):
+        calls.append(args)
+        if args[:3] == ('gh', 'run', 'list'):
+            return json.dumps([{'databaseId': 8, 'displayTitle': 'unrelated'},
+                               {'databaseId': 9, 'displayTitle': title}])
+        if args[:3] == ('gh', 'run', 'view'):
+            return json.dumps({'status': 'completed', 'conclusion': conclusion, 'displayTitle': title})
+        return ''
+    with mock.patch.object(module, 'run', side_effect=build_run), \
+            mock.patch.object(module.uuid, 'uuid4', return_value=mock.Mock(hex='request')):
+        if conclusion == 'success':
+            assert module.build_exact_candidate(source) == (9, source)
+        else:
+            try:
+                module.build_exact_candidate(source)
+            except module.CommandFailed:
+                pass
+            else:
+                raise AssertionError('failed exact build must never become a candidate')
+    assert calls[0] == ('gh', 'workflow', 'run', 'release-fractal.yml', '--ref', 'main',
+                        '-f', f'sha={source}', '-f', 'request_id=request')
+    assert ('gh', 'run', 'watch', '9', '--exit-status', '--interval', '15') in calls
 
 # Draft tags participate in numbering without being created in Git.
 with mock.patch.object(module, 'run', return_value='v0.3.17'):
