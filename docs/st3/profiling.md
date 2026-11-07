@@ -1150,6 +1150,16 @@ fall into `(unlabeled THREAD)` rows, which record no disk reads:
 | `operations.doctor_report` | The doctor report built on the background thread. A doctor request keeps its route label. |
 | `startup.warmup` | The roster warm-up fold, now with or without task metrics. |
 
+The background jobs that take the writer after bind are labeled the same way, with or without
+task metrics. Each page is its own operation, so its writer hold is the page's and not
+`(unlabeled tokio-rt-worker)`. The writer-hold row of `GET /v1/client/request-latency` names them
+by the same labels:
+
+| Label | What it writes |
+| --- | --- |
+| `maintenance.claim_ranges` | One page of the claim range fold: at startup, then after each store event. With task metrics on, the daemon's fold loop is one operation of this label and its pages are part of it. |
+| `maintenance.operation_claim_digests` | One page of the operation claim digest backfill, until it is ready. |
+
 Mailbox streams count why each full read happens as notes on `task mailbox-update`:
 `mailbox full read: no previous snapshot` (the stream's first read, or the one after a repair),
 `mailbox full read: resync` and `mailbox full read: held refill`. `task mailbox-fence` counts

@@ -50,6 +50,8 @@ mod full_inventory_tests;
 #[cfg(test)]
 mod startup_profile_label_tests;
 #[cfg(test)]
+mod background_writer_label_tests;
+#[cfg(test)]
 mod exchange_budget_tests;
 #[cfg(test)]
 mod projection_busy_tests;
