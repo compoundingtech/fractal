@@ -1,3 +1,5 @@
+import * as BrowserKeyValueStore from '@effect/platform-browser/BrowserKeyValueStore'
+import * as BrowserStream from '@effect/platform-browser/BrowserStream'
 import { Context, Effect, Layer, Stream } from 'effect'
 import * as KeyValueStore from 'effect/persistence/KeyValueStore'
 
@@ -20,21 +22,20 @@ export class CellEnvironment extends Context.Service<CellEnvironment, {
   readonly retired: (key: string) => string | undefined
 }>()('fractal-web/state/CellEnvironment') {}
 
-const storageStore = (storage: () => Storage) =>
-  Effect.service(KeyValueStore.KeyValueStore).pipe(Effect.provide(KeyValueStore.layerStorage(storage)))
+const service = (layer: Layer.Layer<KeyValueStore.KeyValueStore>) => Effect.service(KeyValueStore.KeyValueStore).pipe(Effect.provide(layer))
 
 /** Browser storage. Storage events never fire in the writing window, so `changes` is foreign writes only. */
 export const layerBrowser: Layer.Layer<CellEnvironment> = Layer.effect(CellEnvironment, Effect.gen(function* () {
-  const local = yield* storageStore(() => window.localStorage)
-  const session = yield* storageStore(() => window.sessionStorage)
+  const local = yield* service(BrowserKeyValueStore.layerLocalStorage)
+  const session = yield* service(BrowserKeyValueStore.layerSessionStorage)
   return {
     local,
     session,
-    changes: Stream.fromEventListener<StorageEvent>(window, 'storage').pipe(
+    changes: BrowserStream.fromEventListenerWindow('storage').pipe(
       Stream.filter((event) => event.storageArea === window.localStorage),
       Stream.map((event) => ({ key: event.key, newValue: event.newValue })),
     ),
-    pageHide: Stream.fromEventListener(window, 'pagehide'),
+    pageHide: BrowserStream.fromEventListenerWindow('pagehide'),
     retired: (key) => {
       try { return window.localStorage.getItem(key) ?? undefined } catch { return undefined }
     },
@@ -43,8 +44,8 @@ export const layerBrowser: Layer.Layer<CellEnvironment> = Layer.effect(CellEnvir
 
 /** One window that remembers nothing past its lifetime: embeds, stories and storage-less browsers. */
 export const layerMemory: Layer.Layer<CellEnvironment> = Layer.effect(CellEnvironment, Effect.gen(function* () {
-  const local = yield* Effect.service(KeyValueStore.KeyValueStore).pipe(Effect.provide(KeyValueStore.layerMemory))
-  const session = yield* Effect.service(KeyValueStore.KeyValueStore).pipe(Effect.provide(KeyValueStore.layerMemory))
+  const local = yield* service(KeyValueStore.layerMemory)
+  const session = yield* service(KeyValueStore.layerMemory)
   return { local, session, changes: Stream.never, pageHide: Stream.never, retired: () => undefined }
 }))
 
